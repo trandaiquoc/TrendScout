@@ -19,6 +19,7 @@ TERMINAL = frozenset({"COMPLETED", "PARTIAL", "FAILED", "ABORTED"})
 SHARDS = 16
 CHUNK_SIZE = 40
 MAX_DOC_BYTES = 700_000
+MAX_RUN_WRITES = 1000
 
 
 def now():
@@ -84,10 +85,13 @@ class HostRunLock:
 
 
 class RunService:
-    def __init__(self, storage, lock: HostRunLock, adapter_factory=WikimediaAdapter):
+    def __init__(self, storage, lock: HostRunLock, adapter_factory=WikimediaAdapter, *, mode="live"):
+        if mode not in {"live", "synthetic", "replay"}:
+            raise ValueError("Invalid run mode")
         self.storage = storage
         self.lock = lock
         self.adapter_factory = adapter_factory
+        self.mode = mode
         self.tasks = set()
 
     async def recover(self):
@@ -115,7 +119,7 @@ class RunService:
             run_id = uuid4().hex
             # Write marker first so a crash during creation never leaves an untracked run.
             self.lock.write({"active_run_id": run_id})
-            await self.storage.create_run(run_id, {"run_id": run_id, "status": "QUEUED", "mode": "live", "created_at": now(), "source": "wikimedia_pageviews_top_per_country"})
+            await self.storage.create_run(run_id, {"run_id": run_id, "status": "QUEUED", "mode": self.mode, "created_at": now(), "source": "wikimedia_pageviews_top_per_country"})
             task = asyncio.create_task(self._execute(run_id))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
@@ -157,6 +161,10 @@ class RunService:
             current = {r.keyword_id: r for d in days if d.snapshot.observation_date == collected.analysis_date for r in d.keywords}
             if len(scores) != len(current):
                 raise ValueError("Keyword and score counts do not reconcile")
+            # Allow ten writes for run state and failure handling; abort before bulk writes.
+            planned = len(days) + sum((len(day.keywords) + CHUNK_SIZE - 1) // CHUNK_SIZE for day in days) + SHARDS + 10
+            if planned > MAX_RUN_WRITES:
+                raise ValueError("Estimated document writes exceed run safety budget")
             await self.storage.update_run(run_id, {"status": "PERSISTING"})
             for day, cleaned in zip(days, cleaning):
                 snapshot = day.snapshot

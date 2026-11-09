@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import httpx
 from google.cloud.firestore_v1._helpers import encode_dict
@@ -75,7 +76,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = FakeStorage()
         self.path = str(Path(self.tmp.name) / "lock")
-        self.app = create_app(storage=self.store, adapter_factory=StubAdapter, lock_path=self.path, operator_token=TOKEN)
+        self.app = create_app(storage=self.store, adapter_factory=StubAdapter, lock_path=self.path, operator_token=TOKEN, run_mode="synthetic")
         self.lifespan = self.app.router.lifespan_context(self.app)
         await self.lifespan.__aenter__()
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://test")
@@ -92,6 +93,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(created.status_code, 202)
         run_id = created.json()["run_id"]
         run = await wait_run(self.client, run_id)
+        self.assertEqual(run["mode"], "synthetic")
         self.assertEqual(run["status"], "PARTIAL")
         self.assertEqual(run["keyword_count"], 2)
         self.assertEqual(len(await self.store.list_records(run_id, "snapshots")), 8)
@@ -195,6 +197,15 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         run = await wait_run(self.client, response.json()["run_id"])
         self.assertEqual(run["status"], "FAILED")
         self.assertEqual(run["coverage"][0]["error"], "ReadTimeout")
+
+    async def test_write_budget_stops_before_bulk_persistence(self):
+        with patch("app.orchestration.runs.MAX_RUN_WRITES", 10):
+            response = await self.client.post("/api/runs", headers={"Authorization": f"Bearer {TOKEN}"})
+            run_id = response.json()["run_id"]
+            run = await wait_run(self.client, run_id)
+        self.assertEqual(run["status"], "FAILED")
+        self.assertIn("safety budget", run["error"])
+        self.assertEqual(await self.store.list_records(run_id, "observations"), [])
 
 
 class CleaningRegressionTests(unittest.TestCase):
