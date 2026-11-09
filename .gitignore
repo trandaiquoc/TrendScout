@@ -158,3 +158,15 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Local configuration and Google credentials
+.env.*
+!.env.example
+**/application_default_credentials.json
+**/*service-account*.json
+**/*service_account*.json
+**/*firebase-adminsdk*.json
+**/credentials.json
+**/*credential*.json
+**/*serviceAccount*.json
+**/*-key.json
