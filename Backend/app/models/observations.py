@@ -27,6 +27,7 @@ class DatasetSnapshot:
     request_count: int = 0
     rejected_count: int | None = None
     error: str | None = None
+    rejected_records: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)

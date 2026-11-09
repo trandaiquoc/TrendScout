@@ -94,3 +94,24 @@ Mặc định retry tối đa 2 lần với timeout 15 giây, tuân thủ `Retry
 Mỗi observation có phương thức `to_canonical()` gồm `source`, `country_scope`, `access`, `project`, `article_original`, `canonical_keyword`, `views_ceil`, `rank`, `observation_date`, `fetched_at`, `source_url`, `quality_flags` và `raw_record`. Ngày và thời điểm ở dạng ISO; `fetched_at` UTC. `canonical_keyword` hiện chỉ thay dấu gạch dưới bằng khoảng trắng, chưa cleaning hay trích keyword hoàn chỉnh. Khóa định danh là `(project, article_original)`; chưa deduplicate. Giữ `raw_record` cho mọi bản ghi hợp lệ. URL chỉ được tạo cho domain Wikimedia đã biết, nếu chưa xác minh trả `null` và flag. Các flag `TOP_LIST_ONLY`, `VIEWS_APPROXIMATE` nhắc giới hạn nguồn.
 
 `observation_status` phân biệt `OBSERVED`, `NOT_IN_TOP` (chỉ khi snapshot thành công đầy đủ), `DAY_UNAVAILABLE` và `FETCH_ERROR`; không biến bản ghi vắng mặt hoặc ngày lỗi thành lượt xem 0. Giá trị `views_ceil` xấp xỉ, dữ liệu từ top Wikimedia không chứng minh xu hướng mua sắm hoặc social. Ngày dữ liệu là ngày từ response, không phải timestamp của từng page view. Mỗi adapter duy trì lock riêng; hiện chưa có điều phối giới hạn request giữa nhiều process, API công khai, lưu run, cleaning hay scoring.
+
+## Bước 5 — Cleaning và chống trùng
+
+`app/processing/wikimedia_cleaning.py` xử lý từng `DatasetSnapshot` và danh sách `PageObservation` do adapter cung cấp:
+
+1. Đối chiếu `item_count = số observation adapter trả + số adapter từ chối`; không khớp thì báo lỗi, không tự sửa số liệu. Ngày không lấy được có các số `None`.
+2. Kiểm tra source, scope, project, article, ngày thuộc snapshot, thời điểm fetch có timezone, rank, lượt xem và raw record. `views_ceil=0` hợp lệ; `None` bị đánh dấu `MISSING_VIEWS`.
+3. Chuẩn hóa Unicode NFC, giải mã phần trăm UTF-8 một lần nếu có, thay `_` và chuẩn hóa khoảng trắng. `+` không bị biến thành khoảng trắng; giá trị gốc luôn được giữ. Chuỗi mã hóa sai UTF-8 bị từ chối có lý do. Tài liệu [MediaWiki page title](https://www.mediawiki.org/wiki/Manual:Page_title/en) mô tả title nguồn khác với URL và dấu gạch dưới tương đương khoảng trắng (đối chiếu 09/11/2026).
+4. Loại đúng `Main_Page`, dấu `-` và các prefix trong danh sách `TECHNICAL_NAMESPACES`, bao gồm `Special`, `File`, `User`, `Talk`, `Wikipedia`, `MediaWiki`, `Template`, `Category`, `Portal` và một số alias `Special` theo ngôn ngữ. Một title có dấu `:` nhưng prefix không thuộc danh sách vẫn được giữ. Danh sách là rule tĩnh, chưa đầy đủ namespace/alias của mọi project; cần kiểm tra để tránh sót và loại nhầm. [MediaWiki](https://www.mediawiki.org/wiki/Help:Namespaces) cho biết namespace có thể được bản địa hóa.
+5. Deduplicate theo `(project, article_original, observation_date)` trong snapshot; giữ bản ghi hợp lệ đầu tiên, trả riêng các bản trùng. Không gộp cùng tên khác project hoặc khác ngày. Đây là so sánh title nguồn nguyên bản; không coi hai title sau normalize giống nhau là cùng trang.
+
+Kết quả gồm các observation hợp lệ và danh sách bản ghi bị loại kèm lý do, bản trùng, bản thô bị adapter từ chối (nếu adapter cung cấp), cùng `CleaningReport`: `raw_count`, `accepted_count`, `rejected_count`, `duplicate_count`, `rejection_reasons` và `quality_flags`. `rejected_count` bao gồm bản bị adapter từ chối; công thức đối chiếu là `raw_count = accepted_count + rejected_count + duplicate_count`. Nếu một snapshot cũ chỉ có số adapter từ chối mà không có bản thô, report gắn cờ thiếu chi tiết. Không áp rule lĩnh vực, không tính trend score và không tự ghi Firestore.
+
+Để chạy kiểm thử và báo cáo live chỉ đọc:
+
+```bash
+python -m unittest discover -s tests -v
+python -m scripts.wikimedia_cleaning_smoke
+```
+
+Lượt smoke gọi lại API thật, do Bước 4 không lưu response; dữ liệu và ngày khả dụng có thể thay đổi. Source `404` được báo riêng, không coi là một snapshot rỗng hay views bằng 0. Lệnh in ví dụ được giữ/bị loại nhưng không lưu dữ liệu; khi cần audit lâu dài phải thiết kế lưu run ở bước sau.

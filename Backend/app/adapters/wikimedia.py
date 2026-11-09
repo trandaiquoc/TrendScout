@@ -57,7 +57,7 @@ def _retry_delay(value: str | None, attempt: int, now: datetime) -> float:
     return float(2 ** attempt)
 
 
-def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageObservation], int, int]:
+def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageObservation], int, int, tuple[object, ...]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list) or len(payload["items"]) != 1:
         raise ValueError("invalid items schema")
     item = payload["items"][0]
@@ -70,14 +70,17 @@ def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageO
         raise ValueError("missing or invalid articles")
     observations = []
     rejected = 0
+    rejected_records = []
     for row in articles:
         if not isinstance(row, dict):
             rejected += 1
+            rejected_records.append(row)
             continue
         article, project, views, rank = (row.get(k) for k in ("article", "project", "views_ceil", "rank"))
         if (not isinstance(article, str) or not article or not isinstance(project, str) or not _PROJECT.fullmatch(project)
                 or type(views) is not int or views < 0 or type(rank) is not int or rank < 1):
             rejected += 1
+            rejected_records.append(dict(row))
             continue
         known_domain = project.rsplit(".", 1)[-1] in _WIKIMEDIA_DOMAINS
         flags = ("TOP_LIST_ONLY", "VIEWS_APPROXIMATE") + (() if known_domain else ("UNVERIFIED_PROJECT_URL",))
@@ -88,7 +91,7 @@ def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageO
             fetched_at=fetched_at, source_url=f"https://{project}.org/wiki/{quote(article, safe='')}" if known_domain else None,
             raw_record=dict(row), quality_flags=flags,
         ))
-    return observations, len(articles), rejected
+    return observations, len(articles), rejected, tuple(rejected_records)
 
 
 class WikimediaAdapter:
@@ -120,6 +123,7 @@ class WikimediaAdapter:
         result = []
         count = None
         rejected = None
+        rejected_records = ()
         status = FetchStatus.FETCH_ERROR
         while attempts <= self.max_retries:
             attempts += 1
@@ -139,7 +143,7 @@ class WikimediaAdapter:
             if status_code == 200:
                 try:
                     fetched = datetime.now(timezone.utc)
-                    result, count, rejected = _parse(response.json(), day, fetched)
+                    result, count, rejected, rejected_records = _parse(response.json(), day, fetched)
                     status = (FetchStatus.PARTIAL if result else FetchStatus.FETCH_ERROR) if rejected else FetchStatus.SUCCESS
                     error = f"{rejected} invalid article records" if rejected else None
                 except (ValueError, TypeError) as exc:
@@ -161,7 +165,7 @@ class WikimediaAdapter:
         snapshot = DatasetSnapshot(source=SOURCE, country_scope="US", access="all-access", observation_date=day,
                                    fetched_at=fetched_at, fetch_status=status, http_status=status_code,
                                    item_count=count, request_url=url, request_count=attempts,
-                                   rejected_count=rejected, error=error)
+                                   rejected_count=rejected, error=error, rejected_records=rejected_records)
         return snapshot, result
 
     async def collect(self, start_date: date | None = None, *, max_lookback: int = 7, history_days: int = 7) -> CollectionResult:

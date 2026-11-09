@@ -57,6 +57,7 @@ class WikimediaTests(unittest.IsolatedAsyncioTestCase):
                                  {"article": "Bad", "project": "en.wikipedia", "rank": 2}])
         snap, rows = await self.run_day(lambda req: httpx.Response(200, json=data))
         self.assertEqual((snap.fetch_status, snap.item_count, snap.rejected_count, len(rows)), (FetchStatus.PARTIAL, 2, 1, 1))
+        self.assertEqual(snap.rejected_records, (data["items"][0]["articles"][1],))
         self.assertEqual(observation_status(snap, rows, "en.wikipedia", "Bad"), ObservationStatus.FETCH_ERROR)
         self.assertEqual(observation_status(snap, rows, "en.wikipedia", "Good"), ObservationStatus.OBSERVED)
         self.assertEqual(rows[0].views_ceil, 0)
