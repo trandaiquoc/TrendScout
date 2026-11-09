@@ -1,0 +1,6 @@
+{
+  "buildCommand": "python3 scripts/prepare_vercel.py",
+  "functions": {
+    "app/main.py": {"includeFiles": "app/dashboard_assets.py"}
+  }
+}

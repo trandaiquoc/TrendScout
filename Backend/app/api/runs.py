@@ -18,6 +18,19 @@ def service(request):
     return result
 
 
+def read_storage(request):
+    if not request.app.state.read_only:
+        return service(request).storage
+    factory = request.app.state.read_storage_factory
+    if factory is None:
+        from app.storage.vercel_identity import storage_for_request
+        factory = storage_for_request
+    try:
+        return factory(request.headers.get("x-vercel-oidc-token"))
+    except ValueError:
+        raise HTTPException(503, "Read-only storage identity is not configured") from None
+
+
 def check_run_id(value):
     if len(value) != 32 or any(c not in "0123456789abcdef" for c in value):
         raise HTTPException(404, "Run not found")
@@ -54,7 +67,7 @@ async def create_run(request: Request, authorization: str | None = Header(defaul
 
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str, request: Request):
-    return await get_run_or_404(service(request).storage, run_id)
+    return await get_run_or_404(read_storage(request), run_id)
 
 
 @router.get("/runs/{run_id}/keywords")
@@ -62,7 +75,7 @@ async def list_keywords(run_id: str, request: Request, q: str = Query(default=""
                         category: str = Query(default="all", pattern="^(all|fashion|home_goods|unclassified)$"),
                         sort: str = Query(default="score", pattern="^(score|views|keyword)$"),
                         limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=10000)):
-    storage = service(request).storage
+    storage = read_storage(request)
     run = await get_run_or_404(storage, run_id)
     ensure_results_available(run)
     shards = await storage.list_records(run_id, "keyword_results")
@@ -86,7 +99,7 @@ async def list_keywords(run_id: str, request: Request, q: str = Query(default=""
 async def get_keyword(run_id: str, keyword_id: str, request: Request):
     if len(keyword_id) != 64 or any(c not in "0123456789abcdef" for c in keyword_id):
         raise HTTPException(404, "Keyword not found")
-    storage = service(request).storage
+    storage = read_storage(request)
     run = await get_run_or_404(storage, run_id)
     ensure_results_available(run)
     shard = await storage.get_record(run_id, "keyword_results", f"shard-{int(keyword_id[0], 16):02d}")

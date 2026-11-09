@@ -125,3 +125,9 @@ $('#prev').addEventListener('click', () => { state.offset = Math.max(0, state.of
 $('#next').addEventListener('click', () => { if (state.next != null) { state.offset = state.next; loadKeywords(); } });
 window.addEventListener('pagehide', () => { clearTimeout(state.poll); clearTimeout(searchTimer); });
 api('/api/health').then(() => { $('#connection-dot').classList.add('good'); $('#connection-text').textContent = 'Backend đã kết nối'; }).catch(() => { $('#connection-dot').classList.add('error'); $('#connection-text').textContent = 'Backend chưa kết nối'; notice('Không kết nối được backend. Khởi động server để tiếp tục.', true); });
+api('/api/config').then(config => {
+  if (config.read_only) {
+    $('#open-fetch').hidden = true;
+    $('#connection-text').textContent = 'Demo chỉ đọc';
+  }
+}).catch(() => {});

@@ -1,0 +1,5 @@
+[tool.vercel]
+entrypoint = "app.main:app"
+
+[tool.vercel.fastapi.static]
+cdn = false
