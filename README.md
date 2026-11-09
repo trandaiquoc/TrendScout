@@ -4,22 +4,23 @@ Demo khám phá tín hiệu quan tâm qua Wikimedia Pageviews US/all-access. Bac
 
 ## Chạy trên Ubuntu
 
-Cần Python 3.12, `python3.12-venv`, ADC và một Firestore database đã được cấu hình. Từ repository:
+Cần Python 3.12, gói `python3.12-venv` tương ứng và ADC đã đăng nhập. Việc cài gói hệ thống hoặc đăng nhập ADC được thực hiện riêng; script không tự thay đổi Firebase.
+
+Cài đặt một lần tại root:
 
 ```bash
-cd Backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
-# Tự đặt token tối thiểu 24 ký tự, nhập kín trong terminal; không gửi token vào chat.
-read -rs -p "Operator token: " TREND_SCOUT_OPERATOR_TOKEN; printf '\n'
-export TREND_SCOUT_OPERATOR_TOKEN
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+./setup.sh
 ```
 
-Mở `http://127.0.0.1:8000/dashboard/`. Chọn **Fetch & Analyze** và nhập lại token để tạo run; không có fetch tự động khi mở trang. Token chỉ giữ tạm trong bộ nhớ trình duyệt. Giữ lại run ID để nhập vào **Mở run** sau khi restart. Xem [Backend README](Backend/README.md) để thử API bằng curl và biết cấu trúc Firestore; [Frontend README](Frontend/README.md) giải thích giao diện.
+Script tạo `Backend/.venv`, cài dependency và, nếu chưa có cấu hình token, tạo file `.env` local với quyền `600`. Mở `.env` bằng trình soạn thảo trên máy để lấy `TREND_SCOUT_OPERATOR_TOKEN` khi cần chạy phân tích; không gửi token hoặc file này vào chat hay Git. Nếu `.env` đã tồn tại, script không ghi đè. Cũng có thể đặt `GOOGLE_CLOUD_PROJECT` và `TREND_SCOUT_OPERATOR_TOKEN` qua environment; các biến environment được ưu tiên. Token phải có ít nhất 24 ký tự. File `.env` chỉ hỗ trợ giá trị literal `KEY=value` (có thể đặt trong dấu nháy); không thực thi lệnh hoặc nội suy biến shell.
+
+Khởi động toàn bộ backend và dashboard từ root:
+
+```bash
+./start.sh
+```
+
+Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/). Nhấn `Ctrl+C` tại terminal đang chạy để dừng. Script mặc định cấu hình project `trendscout-192e4` qua environment và sử dụng ADC hiện có; không tự fetch Wikimedia hay tạo run. Nếu chưa có ADC, cấu hình riêng bằng `gcloud auth application-default login`. Khi chủ động chọn **Fetch & Analyze**, nhập token trong dashboard; giữ run ID để mở lại sau restart.
 
 Trước run live, kiểm tra Firebase Console → Firestore → Usage và Project quotas, xác nhận project `trendscout-192e4`, database `(default)` và quota còn lại. Firebase công bố free tier 50.000 reads, 20.000 writes, 20.000 deletes/ngày và 1 GiB storage; số liệu và quota có thể thay đổi. Không tự bật billing. Xem [Firestore quotas](https://firebase.google.com/docs/firestore/quotas) và [theo dõi usage](https://docs.cloud.google.com/firestore/native/docs/monitor-usage).
 

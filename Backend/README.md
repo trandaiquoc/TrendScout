@@ -1,6 +1,8 @@
 # TrendScout backend — Bước 3
 
-Backend Python 3.12 + FastAPI, với repository Firestore và fake repository phục vụ kiểm thử. Chưa triển khai fetch Wikimedia, cleaning, scoring, API run hay frontend. Khởi động backend không tự kết nối Firestore.
+Để cài đặt và khởi động toàn bộ hệ thống từ root, ưu tiên `./setup.sh` (một lần) và `./start.sh`; xem [README chính](../README.md). Các lệnh dưới đây là cách thiết lập/chạy thủ công.
+
+Backend Python 3.12 + FastAPI có pipeline Wikimedia, Firestore repository, API run và dashboard cùng origin. Khởi động server không tự fetch Wikimedia hoặc tạo run.
 
 ## Thiết lập trên Ubuntu
 

@@ -1,5 +1,7 @@
 # TrendScout Dashboard
 
+Từ root, có thể dùng `./setup.sh` một lần rồi `./start.sh` để chạy cả backend và dashboard; xem [README chính](../README.md). Các lệnh dưới đây là cách chạy thủ công.
+
 Giao diện HTML/CSS/JavaScript thuần, được FastAPI phục vụ cùng origin tại `/dashboard/`. Không cần cài npm hoặc build frontend; trình duyệt không gọi trực tiếp Wikimedia hay Firestore.
 
 ## Chạy trên Ubuntu
