@@ -1,0 +1,18 @@
+{
+  "fixture_version":"synthetic-wikimedia-v1",
+  "source":"wikimedia_pageviews_top_per_country",
+  "country_scope":"US",
+  "access":"all-access",
+  "observation_date":"2026-01-08",
+  "algorithm_version":"wikimedia-trend-v0.1",
+  "classification_version":"title-rules-v0.1",
+  "cleaning":{"raw_count":13,"accepted_count":6,"rejected_count":6,"duplicate_count":1,"rejection_reasons":{"ADAPTER_INVALID":2,"TECHNICAL_MAIN_PAGE":1,"TECHNICAL_NAMESPACE":1,"TECHNICAL_LOCALIZED_MAIN_PAGE":2}},
+  "entities":[
+    {"project":"en.wikipedia","article_original":"Fashion_Week","keyword_id":"7a8bfb80b067ca4d544bd3c8d5539d82354d7d14879abb3fd8c4868c01307c10","canonical_keyword":"Fashion Week","categories":["fashion"],"current_views_ceil":800,"baseline":100,"ratio":8,"score":100,"status":"EMERGING","evidence_url":"https://en.wikipedia.org/wiki/Fashion_Week"},
+    {"project":"en.wikipedia","article_original":"Washing_machine","keyword_id":"b2a8f9994efc2b99574864e6f440c26e612111193b2d8ed1b6227e3e4edb4ff9","canonical_keyword":"Washing machine","categories":["home_goods"],"current_views_ceil":100,"baseline":100,"ratio":1,"score":21,"status":"STABLE","evidence_url":"https://en.wikipedia.org/wiki/Washing_machine"},
+    {"project":"en.wikipedia","article_original":"General_election","keyword_id":"d3d15ae6d12b82f88eff4ab165f56632c14d660eaa8d3d02480a438ce2317b9a","canonical_keyword":"General election","categories":["other"],"current_views_ceil":50,"baseline":100,"ratio":0.5,"score":18,"status":"FALLING","evidence_url":"https://en.wikipedia.org/wiki/General_election"},
+    {"project":"en.wikipedia","article_original":"Quantum_cats","keyword_id":"be385b6cd1cd5547b73e26a69dcbfd23171f160413b96e63449bfc79307d8768","canonical_keyword":"Quantum cats","categories":["unclassified"],"current_views_ceil":0,"baseline":null,"ratio":null,"score":null,"status":"INSUFFICIENT_DATA","evidence_url":"https://en.wikipedia.org/wiki/Quantum_cats"},
+    {"project":"fr.wikipedia","article_original":"Fashion_Week","keyword_id":"4257681b55d27604769eb8ba6db9ac2ad00f7a8fe97643bf71104823b4981288","canonical_keyword":"Fashion Week","categories":["fashion"],"current_views_ceil":100,"baseline":100,"ratio":1,"score":21,"status":"STABLE","evidence_url":"https://fr.wikipedia.org/wiki/Fashion_Week"},
+    {"project":"en.wikipedia","article_original":"Cafe%CC%81_Story","keyword_id":"be829b2c53e5e61606200962b46308f340ce54231a54eac69158540780f6892b","canonical_keyword":"Café Story","categories":["unclassified"],"current_views_ceil":10,"baseline":null,"ratio":null,"score":null,"status":"INSUFFICIENT_DATA","evidence_url":"https://en.wikipedia.org/wiki/Cafe%25CC%2581_Story"}
+  ]
+}

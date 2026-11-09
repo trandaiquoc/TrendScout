@@ -1,0 +1,45 @@
+{
+  "fixture_version": "synthetic-wikimedia-v1",
+  "mode": "SYNTHETIC",
+  "analysis_date": "2026-01-08",
+  "fetched_at": "2026-01-09T00:00:00+00:00",
+  "scope": {"country": "US", "access": "all-access"},
+  "days": {
+    "2026-01-08": {"http": 200, "articles": [
+      {"project":"en.wikipedia","article":"Fashion_Week","views_ceil":800,"rank":1},
+      {"project":"en.wikipedia","article":"Washing_machine","views_ceil":100,"rank":2},
+      {"project":"en.wikipedia","article":"General_election","views_ceil":50,"rank":3},
+      {"project":"en.wikipedia","article":"Quantum_cats","views_ceil":0,"rank":4},
+      {"project":"fr.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":5},
+      {"project":"en.wikipedia","article":"Cafe%CC%81_Story","views_ceil":10,"rank":6},
+      {"project":"en.wikipedia","article":"Main_Page","views_ceil":20,"rank":7},
+      {"project":"en.wikipedia","article":"Special:Search","views_ceil":20,"rank":8},
+      {"project":"ja.wikipedia","article":"メインページ","views_ceil":20,"rank":9},
+      {"project":"fr.wikipedia","article":"Wikipédia:Accueil_principal","views_ceil":20,"rank":10},
+      {"project":"en.wikipedia","article":"Fashion_Week","views_ceil":800,"rank":11},
+      {"project":"en.wikipedia","article":"Null_count","views_ceil":null,"rank":12},
+      {"project":"en.wikipedia","article":"Bad_count","views_ceil":"42","rank":13}
+    ]},
+    "2026-01-07": {"http":200,"articles":[
+      {"project":"en.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":1},
+      {"project":"en.wikipedia","article":"Washing_machine","views_ceil":100,"rank":2},
+      {"project":"en.wikipedia","article":"General_election","views_ceil":100,"rank":3},
+      {"project":"fr.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":4}
+    ]},
+    "2026-01-06": {"http":200,"articles":[
+      {"project":"en.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":1},
+      {"project":"en.wikipedia","article":"Washing_machine","views_ceil":100,"rank":2},
+      {"project":"en.wikipedia","article":"General_election","views_ceil":100,"rank":3},
+      {"project":"fr.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":4}
+    ]},
+    "2026-01-05": {"http":200,"articles":[
+      {"project":"en.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":1},
+      {"project":"en.wikipedia","article":"Washing_machine","views_ceil":100,"rank":2},
+      {"project":"en.wikipedia","article":"General_election","views_ceil":100,"rank":3},
+      {"project":"fr.wikipedia","article":"Fashion_Week","views_ceil":100,"rank":4}
+    ]},
+    "2026-01-04": {"http":404},
+    "2026-01-03": {"http":429},
+    "2026-01-02": {"http":200,"articles":[]}
+  }
+}
