@@ -18,6 +18,11 @@ TECHNICAL_NAMESPACES = frozenset({
     "module", "module talk", "draft", "draft talk", "project", "project talk",
 })
 
+LOCALIZED_MAIN_PAGES = frozenset({
+    ("ja.wikipedia", "メインページ"),
+    ("fr.wikipedia", "wikipédia:accueil principal"),
+})
+
 
 @dataclass(frozen=True)
 class RejectedRecord:
@@ -101,6 +106,8 @@ def clean_snapshot(snapshot: DatasetSnapshot, rows: list[PageObservation]) -> Cl
                 reason = "INVALID_TITLE_ENCODING"
         if reason is None and not title:
             reason = "EMPTY_TITLE"
+        if reason is None and (row.project, title.casefold()) in LOCALIZED_MAIN_PAGES:
+            reason = "TECHNICAL_LOCALIZED_MAIN_PAGE"
         if reason is None and title.casefold() in {"main page", "-"}:
             reason = "TECHNICAL_MAIN_PAGE" if title != "-" else "TECHNICAL_PLACEHOLDER"
         if reason is None and ":" in title:

@@ -72,3 +72,8 @@ class FirestoreStorage:
     async def get_record(self, run_id: str, kind: RecordKind, record_id: str) -> Record | None:
         snapshot = await self._call(self._record(run_id, kind, record_id).get)
         return snapshot.to_dict() if snapshot.exists else None
+
+    async def list_records(self, run_id: str, kind: RecordKind) -> list[Record]:
+        validate_kind(kind)
+        collection = self._run(run_id).collection(kind)
+        return await self._call(lambda: [doc.to_dict() for doc in collection.stream()])

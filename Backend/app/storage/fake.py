@@ -42,3 +42,8 @@ class FakeStorage:
         validate_id(record_id)
         validate_kind(kind)
         return deepcopy(self._records.get((run_id, kind, record_id)))
+
+    async def list_records(self, run_id: str, kind: RecordKind) -> list[Record]:
+        validate_id(run_id)
+        validate_kind(kind)
+        return [deepcopy(value) for (run, category, _), value in sorted(self._records.items()) if run == run_id and category == kind]

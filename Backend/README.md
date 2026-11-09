@@ -156,3 +156,45 @@ python -m scripts.wikimedia_trend_smoke
 ```
 
 Smoke gọi lại API thật, tính sau cleaning và classification; so sánh top 10 score với top 10 lượt xem trong nhóm có thể tính score, đồng thời in top volume toàn bộ gồm cả mục thiếu baseline. Xếp hạng score theo score giảm, ratio giảm, views giảm, rồi project/title; volume theo views giảm, project/title. Không lưu Firestore hay cung cấp API kết quả. Namespace bản địa hóa có thể còn lọt qua cleaning và ảnh hưởng score/mẫu số; cần kiểm tra trước khi diễn giải kết quả.
+
+## Bước 8 — API run thủ công
+
+API điều phối adapter → cleaning → keyword → scoring → storage. Chạy trên **một máy Ubuntu**; các process trên cùng máy phải dùng chung `TREND_SCOUT_LOCK_PATH`. Khóa `flock` và cooldown ngăn các run đồng thời trên cùng host; đây không phải khóa phân tán và chưa hỗ trợ chạy trên nhiều host/container. Không dùng cấu hình này để triển khai nhiều instance.
+
+Cấu hình trước khi khởi động (ADC đã đăng nhập bằng `gcloud auth application-default login`):
+
+```bash
+export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
+# Tạo token ngẫu nhiên trong shell; không ghi vào repository hoặc gửi qua chat.
+export TREND_SCOUT_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Giữ token trong shell của người vận hành, tối thiểu 24 ký tự. Nếu thiếu token, POST bị vô hiệu hóa; GET không yêu cầu token. Mặc định server bind localhost; nếu cho phép truy cập qua mạng cần bổ sung TLS, kiểm soát mạng và quản lý token trước. `TREND_SCOUT_RUN_COOLDOWN_SECONDS` mặc định 60; `TREND_SCOUT_LOCK_PATH` mặc định `~/.cache/trendscout/manual-run.lock`. Không xóa file khóa khi server đang hoạt động; mọi process phải cùng một đường dẫn. Nếu worker bị gián đoạn, lần khởi động tiếp theo đánh dấu run dang dở `ABORTED` khi lấy được khóa và kết nối storage.
+
+Ở terminal có token trong môi trường:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/api/runs \
+  -H "Authorization: Bearer $TREND_SCOUT_OPERATOR_TOKEN"
+# Ví dụ response: {"run_id":"...", "status":"QUEUED"}
+export TREND_SCOUT_RUN_ID="<run_id từ response>"
+curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID"
+curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords?category=all&sort=score&limit=10&offset=0"
+curl -sS -G "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords" --data-urlencode 'q=fashion' --data-urlencode 'category=unclassified'
+curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords/<keyword_id>"
+```
+
+POST chỉ chạy thủ công; đang chạy trả 409, cooldown trả 429, sai token trả 401. Trạng thái gồm `QUEUED`, `FETCHING`, `NORMALIZING`, `ANALYZING`, `PERSISTING`, `COMPLETED`, `PARTIAL`, `FAILED`, `ABORTED`. `COMPLETED` chỉ được ghi sau khi các document cần thiết được lưu; `PARTIAL` có thể là lịch sử nguồn thiếu hoặc lỗi giữa lúc lưu. Nếu chưa lưu đủ keyword, API kết quả trả 409. Nếu Firestore không thể ghi cả trạng thái lỗi, marker trên host cho phép đánh dấu `ABORTED` khi phục hồi; không có cam kết phục hồi khi file khóa bị xóa hoặc host mất dữ liệu.
+
+Danh sách hỗ trợ `q` tìm trong kết quả đã lưu, `category=all|fashion|home_goods|unclassified`, `sort=score|views|keyword`, `limit` 1–100 và `offset`. Response gồm `items`, `total`, `offset`, `limit`, `next_offset`, `empty_reason`; nhóm không có kết quả trả `NO_MATCHES_IN_ANALYZED_DATA`. Truy vấn chỉ đọc Firestore; không fetch Wikimedia. Hiện mỗi lần tìm đọc tối đa 16 shard và lọc/sắp xếp trong bộ nhớ: phù hợp demo, không phù hợp dữ liệu lớn hoặc truy vấn tần suất cao. `offset` không nên dùng với dữ liệu thay đổi; run kết thúc hiện có tập kết quả cố định.
+
+Firestore `(default)` lưu tại `analysis_runs/{run_id}` với các subcollection:
+
+- `snapshots/{YYYY-MM-DD}`: metadata fetch, HTTP status, lỗi và báo cáo cleaning.
+- `observations/{YYYY-MM-DD}-{chunk}`: tối đa 40 observation đã cleaning và provenance mỗi document, gồm dữ liệu lịch sử cho baseline.
+- `keyword_results/shard-{00..15}`: danh sách kết quả ngày phân tích, classification, score components, baseline và evidence, chia theo ký tự đầu của SHA-256 keyword ID.
+
+IDs ổn định trong mỗi run; ghi lại cùng ID thay thế nội dung. Giới hạn mỗi document theo kích thước JSON 700 KB trước khi gửi, lỗi được báo thay vì âm thầm thiếu. Không triển khai xóa run; xóa document cha bằng Firestore không xóa subcollection. Một run thực tế gần 8.000 observation dự kiến ~226 lần ghi snapshot/bucket cộng cập nhật trạng thái, nhưng usage và quota thực tế phải kiểm tra trước khi chạy. Theo [Firestore quotas](https://firebase.google.com/docs/firestore/quotas), free tier có 20.000 write và 50.000 read/ngày; giới hạn và mức sử dụng thực tế có thể thay đổi. Cloud Monitoring trên project Spark hiện trả 403 yêu cầu billing, do đó không thể suy ra quota còn lại từ lần kiểm tra này; kiểm tra Usage trong Firebase Console trước run live. Không bật billing chỉ để kiểm tra.
+
+Chạy test offline `python -m unittest discover -s tests -v`. Fake repository không kiểm chứng lưu bền Firestore; cần run live và đọc lại sau restart để nghiệm thu end-to-end. Không có job nền tự động hay frontend trong bước này.
