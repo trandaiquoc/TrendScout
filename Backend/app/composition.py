@@ -7,6 +7,9 @@ from app.sources.wikimedia.adapter import METADATA, WikimediaAdapter
 from app.sources.registry import SourceRegistry
 from app.analysis.keywords import extract_keywords
 from app.analysis.trend import DayData, score_trends
+from app.algorithms.registry import AlgorithmRegistry
+from app.algorithms.runner import AlgorithmRunner
+from app.algorithms.strategies import WikimediaLegacy, GrowthRatio, MedianBaseline
 from app.processing.wikimedia_cleaning import clean_snapshot
 from app.storage.firestore import FirestoreStorage
 
@@ -16,6 +19,13 @@ def source_registry():
     registry = SourceRegistry()
     registry.register(METADATA, lambda: WikimediaAdapter())
     return registry
+
+
+def algorithm_engine():
+    registry = AlgorithmRegistry()
+    for strategy in (WikimediaLegacy(score_trends), GrowthRatio(), MedianBaseline()):
+        registry.register(strategy)
+    return AlgorithmRunner(registry)
 
 
 def build_run_service(*, storage, adapter_factory, lock_path, mode, lock_factory, service_factory):
@@ -31,7 +41,7 @@ def build_run_service(*, storage, adapter_factory, lock_path, mode, lock_factory
     return service_factory(
         storage, lock, adapter_factory=adapter_factory or source_registry().factory(METADATA.source_id), mode=mode,
         clean_snapshot=clean_snapshot, extract_keywords=extract_keywords,
-        score_trends=score_trends, day_data_factory=DayData,
+        score_trends=algorithm_engine().legacy_results, day_data_factory=DayData,
     )
 
 
