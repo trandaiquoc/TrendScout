@@ -53,7 +53,7 @@ Dependency đi từ composition tới concrete implementations; `RunService` kh�
 | `Backend/app/orchestration/runs.py` | Nhận source/storage và các hàm xử lý qua constructor. |
 | `Backend/app/main.py`, `Backend/app/api/runs.py` | Gọi composition root, inject read-only factory; giữ routes/middleware. |
 | `Backend/tests/test_composition.py` | 6 test fake source/storage, failure, cancellation, boundary và read-only. |
-| `Documents/BAO_CAO_BUOC_3_GIAI_DOAN_2.md` | Báo cáo này. |
+| `Documents/Reports/BAO_CAO_BUOC_3_GIAI_DOAN_2.md` | Báo cáo này. |
 
 Các file adapter, Firestore, API, pipeline, dashboard, `setup.sh`, `start.sh`, Vercel config và golden fixtures cũ đều được giữ. `analysis/trend.py` vẫn phụ thuộc Wikimedia source constant; `RunService` vẫn chứa logic run, schema, quota và lock local; router còn chứa filtering. Đây là coupling còn lại dành cho các bước sau, không tuyên bố Clean Architecture hoàn chỉnh.
 

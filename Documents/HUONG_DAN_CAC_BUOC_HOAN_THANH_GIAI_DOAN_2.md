@@ -1,6 +1,8 @@
 # Hướng dẫn phát triển TrendScout Giai đoạn 2 — Từ Demo đến MVP
 
-**Trạng thái:** đề xuất để lần lượt thực hiện và nghiệm thu; chưa phê duyệt kiến trúc thương mại hoặc bắt đầu triển khai. **Cập nhật:** 09/11/2026. **Đối tượng:** chủ sản phẩm/BA, dev và người vận hành. Tài liệu này bổ sung, không thay thế [hướng dẫn demo](HUONG_DAN_CAC_BUOC_HOAN_THANH_DEMO.md), [thiết kế demo](TREND_KEYWORD_DEMO_BUSINESS_SYSTEM_DESIGN.md), [requirement BA/dev](REQUIREMENTS_TECH_BA_DEV.md), [thiết kế tổng thể](TrendScout_Phan_Tich_Nghiep_Vu_Thiet_Ke_Tong_The.docx) và [nghiệm thu demo](BAO_CAO_NGHIEM_THU_DEMO.md). Requirement BA/dev còn mô tả hệ thống tham chiếu cũ: không coi đó là code hiện tại.
+**Trạng thái:** đề xuất để lần lượt thực hiện và nghiệm thu; chưa phê duyệt kiến trúc thương mại hoặc bắt đầu triển khai. **Cập nhật:** 09/11/2026. **Đối tượng:** chủ sản phẩm/BA, dev và người vận hành. Tài liệu này bổ sung, không thay thế [hướng dẫn demo](HUONG_DAN_CAC_BUOC_HOAN_THANH_DEMO.md), [thiết kế demo](TREND_KEYWORD_DEMO_BUSINESS_SYSTEM_DESIGN.md), [requirement BA/dev](REQUIREMENTS_TECH_BA_DEV.md), [thiết kế tổng thể](TrendScout_Phan_Tich_Nghiep_Vu_Thiet_Ke_Tong_The.docx) và [nghiệm thu demo](Reports/BAO_CAO_NGHIEM_THU_DEMO.md). Requirement BA/dev còn mô tả hệ thống tham chiếu cũ: không coi đó là code hiện tại.
+
+**Quy ước báo cáo:** từ Bước 5, lưu báo cáo tại `Documents/Reports/BAO_CAO_BUOC_<N>_GIAI_DOAN_2.md`.
 
 **Cách dùng:** thực hiện từng bước ở mục 9 theo phụ thuộc; kiểm tra diff và báo cáo trước khi chuyển bước. Các prompt là nhiệm vụ riêng, không tự gom thành một lần refactor. Mọi bước đều tuân thủ AGENTS.md và quy tắc chung mục 8; không tự deploy, bật billing, tạo key, sửa dữ liệu thật hoặc gọi nguồn live nếu chưa được cho phép riêng. Chi phí, quota và điều khoản bên ngoài phải kiểm tra lại tại lúc thực hiện.
 
@@ -17,7 +19,7 @@ Mục tiêu là tiến từ demo một nguồn sang **MVP có thể kiểm thử
 | Thành phần | Bằng chứng / giới hạn |
 |---|---|
 | Backend | FastAPI Python 3.12; adapter Wikimedia → cleaning → keyword/classification → scoring v0.1 → Firestore; API health, manual run, run/detail/list keyword. |
-| Demo | [Báo cáo Bước 10](BAO_CAO_NGHIEM_THU_DEMO.md) ghi một run live Firestore: 7.737 observation, 968 keyword, 226 document nội dung và khoảng 232 writes gồm trạng thái. Khoảng 9.412.755 byte JSON là nội dung, không phải tổng Firestore storage. |
+| Demo | [Báo cáo Bước 10](Reports/BAO_CAO_NGHIEM_THU_DEMO.md) ghi một run live Firestore: 7.737 observation, 968 keyword, 226 document nội dung và khoảng 232 writes gồm trạng thái. Khoảng 9.412.755 byte JSON là nội dung, không phải tổng Firestore storage. |
 | Dashboard | HTML/CSS/JS cùng origin; lọc, tìm, phân trang, chi tiết; nhập run ID. Có kiểm thử trình duyệt live theo báo cáo. Không suy ra đã có danh sách toàn bộ run. |
 | Vận hành | `./start.sh` local; manual run dùng `HostRunLock` một host và recovery lúc startup; không phải distributed lock. Firestore Admin phía server chịu IAM, không dựa vào client Security Rules. |
 | Vercel | Code chuẩn bị read-only: Basic auth, OIDC/WIF theo request, POST bị chặn và không recovery/job; test offline. Chưa có bằng chứng build/deploy Vercel, OIDC/WIF hoặc IAM read-only live. Không coi đã xác minh. |
