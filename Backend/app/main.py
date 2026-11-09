@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
@@ -37,6 +38,9 @@ def create_app(*, storage=None, adapter_factory=None, lock_path=None, operator_t
     application = FastAPI(title=Settings.from_environment().app_name, lifespan=lifespan)
     application.include_router(health_router, prefix="/api")
     application.include_router(runs_router, prefix="/api")
+    frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
+    if frontend.is_dir():
+        application.mount("/dashboard", StaticFiles(directory=frontend, html=True), name="dashboard")
 
     @application.exception_handler(StorageError)
     async def storage_error(_request: Request, _exc: StorageError):

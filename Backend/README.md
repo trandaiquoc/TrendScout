@@ -198,3 +198,7 @@ Firestore `(default)` lưu tại `analysis_runs/{run_id}` với các subcollecti
 IDs ổn định trong mỗi run; ghi lại cùng ID thay thế nội dung. Giới hạn mỗi document theo kích thước JSON 700 KB trước khi gửi, lỗi được báo thay vì âm thầm thiếu. Không triển khai xóa run; xóa document cha bằng Firestore không xóa subcollection. Một run thực tế gần 8.000 observation dự kiến ~226 lần ghi snapshot/bucket cộng cập nhật trạng thái, nhưng usage và quota thực tế phải kiểm tra trước khi chạy. Theo [Firestore quotas](https://firebase.google.com/docs/firestore/quotas), free tier có 20.000 write và 50.000 read/ngày; giới hạn và mức sử dụng thực tế có thể thay đổi. Cloud Monitoring trên project Spark hiện trả 403 yêu cầu billing, do đó không thể suy ra quota còn lại từ lần kiểm tra này; kiểm tra Usage trong Firebase Console trước run live. Không bật billing chỉ để kiểm tra.
 
 Chạy test offline `python -m unittest discover -s tests -v`. Fake repository không kiểm chứng lưu bền Firestore; cần run live và đọc lại sau restart để nghiệm thu end-to-end. Không có job nền tự động hay frontend trong bước này.
+
+## Dashboard local
+
+FastAPI phục vụ giao diện tại `http://127.0.0.1:8000/dashboard/` cùng origin với API; không cần mở CORS. Thao tác, cấu hình operator token và các giới hạn kiểm thử được mô tả trong [Frontend README](../Frontend/README.md). Dashboard không tự tạo run khi mở hoặc reload.

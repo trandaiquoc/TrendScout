@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a1020"><title>TrendScout — Khám phá tín hiệu</title>
+  <link rel="stylesheet" href="/dashboard/styles.css"><script type="module" src="/dashboard/app.js"></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="/dashboard/" aria-label="TrendScout trang tổng quan"><span class="brand-icon">✳</span><span>trend<span>scout</span><small>INSIGHT WORKSPACE</small></span></a>
+    <div class="nav-label">WORKSPACE</div><a class="nav-link active" href="#overview"><span>◈</span> Tổng quan <span class="nav-arrow">→</span></a>
+    <a class="nav-link" href="#results"><span>▤</span> Khám phá từ khóa</a>
+    <div class="side-bottom"><div class="side-dot"></div><div><strong>Wikimedia Pageviews</strong><small>Nguồn dữ liệu · US / all access</small></div></div>
+  </aside>
+  <main id="overview">
+    <header class="topbar"><div class="breadcrumbs">WORKSPACE <span>/</span> <strong>TỔNG QUAN</strong></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-text">Đang kiểm tra backend</span></div></header>
+    <div class="content">
+      <div class="eyebrow"><span class="eyebrow-dot"></span> TREND INTELLIGENCE <span class="eyebrow-line"></span> US MARKET</div>
+      <div class="hero"><div><h1>Tín hiệu hôm nay<span>.</span></h1><p>Khám phá các chủ đề đang được quan tâm qua dữ liệu Wikimedia.</p></div><button id="open-fetch" class="primary" type="button"><span>✦</span> Fetch &amp; Analyze <span>↗</span></button></div>
+      <div class="intro-note"><span>ⓘ</span> Điểm xu hướng là chỉ số thử nghiệm dựa trên lượt xem trang, không phải xu hướng mua sắm hay mạng xã hội.</div>
+      <section class="overview-grid" aria-label="Tổng quan lần phân tích">
+        <article class="metric"><div class="metric-top">TRẠNG THÁI <span>◷</span></div><div id="run-status" class="metric-value">Chưa có run</div><div id="run-note" class="metric-foot">Chờ chọn hoặc tạo lần phân tích</div></article>
+        <article class="metric"><div class="metric-top">NGÀY DỮ LIỆU <span>▦</span></div><div id="data-date" class="metric-value">—</div><div class="metric-foot">Ngày quan sát từ nguồn</div></article>
+        <article class="metric"><div class="metric-top">ĐÃ PHÂN TÍCH <span>⌁</span></div><div id="keyword-count" class="metric-value">—</div><div class="metric-foot">Keyword trong ngày dữ liệu</div></article>
+        <article class="metric"><div class="metric-top">ĐỦ DỮ LIỆU <span>↗</span></div><div id="scored-count" class="metric-value">—</div><div class="metric-foot">Keyword có thể tính điểm</div></article>
+      </section>
+      <section class="run-strip"><div class="run-info"><span class="source-icon">W</span><div><strong>Wikimedia Pageviews</strong><small id="source-meta">US · All access · Chưa có dữ liệu</small></div></div><div class="run-open"><label class="sr-only" for="run-id">Run ID đã có</label><input id="run-id" autocomplete="off" spellcheck="false" placeholder="Nhập run ID đã có"><button id="load-run" class="secondary" type="button">Mở run <span>→</span></button></div></section>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section id="results" class="results-panel">
+        <div class="section-head"><div><div class="overline">EXPLORE THE SIGNALS</div><h2>Khám phá từ khóa <span class="count" id="results-count">—</span></h2><p>Các chủ đề xuất hiện trong dữ liệu đã phân tích.</p></div><div class="section-mark">✳</div></div>
+        <div class="toolbar"><div class="tabs" role="group" aria-label="Lọc theo chủ đề"><button class="tab active" data-category="all" aria-pressed="true">Tất cả</button><button class="tab" data-category="fashion" aria-pressed="false">Thời trang</button><button class="tab" data-category="home_goods" aria-pressed="false">Đồ gia dụng</button><button class="tab" data-category="unclassified" aria-pressed="false">Chưa phân loại</button></div><div class="tools"><label class="search"><span>⌕</span><span class="sr-only">Tìm kiếm keyword</span><input id="search" type="search" placeholder="Tìm kiếm keyword..." maxlength="100"></label><label class="sr-only" for="sort">Sắp xếp</label><select id="sort"><option value="score">Điểm cao nhất</option><option value="views">Lượt xem cao nhất</option><option value="keyword">Tên keyword</option></select></div></div>
+        <div class="table-wrap"><table><thead><tr><th>KEYWORD / PROJECT</th><th>SCORE</th><th>TRẠNG THÁI</th><th>VIEWS ≈</th><th>BASELINE ≈</th><th>RATIO</th><th>NGÀY</th><th>CẢNH BÁO</th><th><span class="sr-only">Chi tiết</span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty"><div class="empty-icon">⌁</div><strong>Chưa có dữ liệu phân tích</strong><p>Mở một run đã có hoặc tạo run mới để bắt đầu.</p></div></div>
+        <div class="table-footer"><span id="pagination-info">Chưa có kết quả</span><div class="pagination"><button id="prev" type="button" disabled aria-label="Trang trước">←</button><button id="next" type="button" disabled aria-label="Trang sau">→</button></div></div>
+      </section>
+      <footer><span><b>✳</b> TrendScout <span> / </span> Tín hiệu, có ngữ cảnh.</span><span>WIKIMEDIA DATA · DEMO ANALYTICS</span></footer>
+    </div>
+  </main>
+</div>
+<dialog id="fetch-dialog"><form id="fetch-form"><div class="dialog-head"><div><div class="overline">MANUAL RUN</div><h2>Fetch &amp; Analyze</h2></div><button class="close" type="button" data-close="fetch-dialog" aria-label="Đóng">×</button></div><p>Chỉ người vận hành được phép bắt đầu phân tích. Token chỉ được giữ tạm trong bộ nhớ của trang.</p><label for="operator-token">Operator token</label><input id="operator-token" type="password" autocomplete="off" required minlength="24" placeholder="Nhập token vận hành"><div id="fetch-error" class="form-error" role="alert"></div><div class="dialog-actions"><button class="secondary" type="button" data-close="fetch-dialog">Hủy</button><button class="primary" type="submit">Bắt đầu phân tích ↗</button></div></form></dialog>
+<dialog id="detail-dialog"><div class="dialog-head"><div><div class="overline">KEYWORD DETAILS</div><h2 id="detail-title">Chi tiết keyword</h2><p id="detail-subtitle"></p></div><button class="close" type="button" data-close="detail-dialog" aria-label="Đóng">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
+</body>
+</html>
