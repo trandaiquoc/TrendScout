@@ -173,3 +173,30 @@ cython_debug/
 
 # Vercel build artifact
 Backend/app/dashboard_assets.py
+
+# Local editor, OS and deployment metadata
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+*.code-workspace
+.DS_Store
+*.swp
+*.swo
+node_modules/
+.vercel/
+
+# Local secrets and private key material (do not store secrets in the repo)
+.secrets/
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Explicit local-only TrendScout runtime data; shared fixtures remain trackable
+/Backend/data/local/
+/Backend/data/cache/
+/Backend/data/snapshots-local/
+/Backend/*.sqlite
+/Backend/*.sqlite3
+/Backend/*.db
