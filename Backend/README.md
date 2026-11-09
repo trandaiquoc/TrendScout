@@ -115,3 +115,27 @@ python -m scripts.wikimedia_cleaning_smoke
 ```
 
 Lượt smoke gọi lại API thật, do Bước 4 không lưu response; dữ liệu và ngày khả dụng có thể thay đổi. Source `404` được báo riêng, không coi là một snapshot rỗng hay views bằng 0. Lệnh in ví dụ được giữ/bị loại nhưng không lưu dữ liệu; khi cần audit lâu dài phải thiết kế lưu run ở bước sau.
+
+## Bước 6 — Keyword và phân loại chủ đề
+
+`app/analysis/keywords.py` nhận các observation **đã được cleaning chấp nhận** và tạo một `KeywordResult` cho mỗi observation. Không thực hiện scoring, phân loại sản phẩm hay lọc đầu vào. `canonical_keyword` và `display_keyword` giữ title đầy đủ; `search_keyword` chuẩn hóa NFC, casefold và khoảng trắng để hỗ trợ tìm kiếm, không dùng làm khóa gộp.
+
+`keyword_id` là SHA-256 của tuple `(source, project, article_original)` để nhận diện thực thể nguồn qua nhiều ngày. `observation_id` bổ sung country, access và ngày, do đó không gộp mất observation lịch sử. Kết quả giữ project, title gốc, source, ngày, country, access, fetched_at, views_ceil, rank, source_url, raw_record và quality flags. `to_record()` tạo mapping với ngày ISO và evidence rõ ràng, phù hợp với interface lưu document hiện có; Bước 6 chưa ghi vào Firestore.
+
+Phân loại `title-rules-v0.1` là heuristic thử nghiệm, dựa trên các cụm cụ thể được khai báo trong mã:
+
+- `fashion`: ví dụ `fashion week`, `haute couture`, `clothing manufacturer`.
+- `home_goods`: ví dụ `washing machine`, `vacuum cleaner`, `kitchen appliance`.
+- `other`: chỉ khi có bằng chứng cụ thể về bầu cử, phim/truyền hình hoặc thể thao theo rule; không mặc định mọi mục không khớp là `other`.
+- `unclassified`: không đủ bằng chứng từ title.
+
+Một title có thể có cả `fashion` và `home_goods`; `other` và `unclassified` là nhóm fallback. Các title có định danh tác phẩm `(film)`, `(song)`, `(album)` hoặc tương đương không được gán nhãn sản phẩm chỉ do trùng cụm từ. Mỗi evidence ghi `category`, `rule_id` và đoạn khớp; kết quả gắn `TITLE_RULES_UNVERIFIED`. Rule chỉ đọc title, chủ yếu bằng tiếng Anh, có thể sai hoặc bỏ sót và chưa được đánh giá trên tập dữ liệu gán nhãn. Không diễn giải nhãn là khẳng định chắc chắn hay tín hiệu trend.
+
+`filter_keywords(results, category)` hỗ trợ `all`, `fashion`, `home_goods`, `other`, `unclassified`; `all` giữ toàn bộ kết quả. Nhóm rỗng trả `NO_MATCHES_IN_ANALYZED_DATA`, chỉ phản ánh tập đã phân tích; caller phải báo riêng nếu nguồn không có dữ liệu. Không có dashboard hoặc API tìm kiếm ở bước này.
+
+```bash
+python -m unittest discover -s tests -v
+python -m scripts.wikimedia_keywords_smoke
+```
+
+Script smoke gọi lại Wikimedia, làm sạch rồi phân loại; in số observation và số entity riêng cùng ví dụ, không ghi Firestore. Một entity có thể có nhiều observation theo ngày; số nhóm có thể chồng lấn khi có nhiều nhãn. Nếu nguồn trả thiếu ngày hoặc lỗi, số liệu chỉ phản ánh các snapshot lấy được.
