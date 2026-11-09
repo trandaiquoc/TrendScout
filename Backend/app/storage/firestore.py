@@ -10,7 +10,7 @@ from firebase_admin import firestore
 from google.api_core.exceptions import AlreadyExists, GoogleAPICallError, NotFound
 from google.auth.exceptions import GoogleAuthError
 
-from app.storage.base import Record, RecordAlreadyExists, RecordKind, RecordNotFound, StorageError
+from app.ports.storage import Record, RecordAlreadyExists, RecordKind, RecordNotFound, StorageError
 from app.storage.common import validate_fields, validate_id, validate_kind
 
 

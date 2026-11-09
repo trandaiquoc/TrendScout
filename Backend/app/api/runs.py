@@ -6,7 +6,7 @@ import unicodedata
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from app.orchestration.runs import RunBusy, RunCooldown
-from app.storage.base import StorageError
+from app.ports.storage import StorageError
 
 router = APIRouter()
 

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from app.adapters.base import CollectionSource
 from app.models.observations import FetchStatus
-from app.storage.base import AnalysisStorage
+from app.ports.storage import AnalysisStorage
 
 TERMINAL = frozenset({"COMPLETED", "PARTIAL", "FAILED", "ABORTED"})
 SHARDS = 16

@@ -16,7 +16,7 @@ from app.api.runs import router as runs_router
 from app.orchestration.runs import HostRunLock, RunService
 from app.composition import build_run_service, read_only_storage
 from app.settings import Settings
-from app.storage.base import StorageError
+from app.ports.storage import StorageError
 
 
 def create_app(*, storage=None, adapter_factory=None, lock_path=None, operator_token=None, run_mode="live", read_only=None, read_storage_factory=None):

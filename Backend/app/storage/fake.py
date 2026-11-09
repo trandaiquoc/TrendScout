@@ -3,7 +3,7 @@
 from copy import deepcopy
 from typing import Any, Mapping
 
-from app.storage.base import Record, RecordAlreadyExists, RecordKind, RecordNotFound
+from app.ports.storage import Record, RecordAlreadyExists, RecordKind, RecordNotFound
 from app.storage.common import validate_fields, validate_id, validate_kind
 
 
