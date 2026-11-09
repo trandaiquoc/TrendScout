@@ -139,3 +139,20 @@ python -m scripts.wikimedia_keywords_smoke
 ```
 
 Script smoke gọi lại Wikimedia, làm sạch rồi phân loại; in số observation và số entity riêng cùng ví dụ, không ghi Firestore. Một entity có thể có nhiều observation theo ngày; số nhóm có thể chồng lấn khi có nhiều nhãn. Nếu nguồn trả thiếu ngày hoặc lỗi, số liệu chỉ phản ánh các snapshot lấy được.
+
+## Bước 7 — Scoring Wikimedia v0.1
+
+`app/analysis/trend.py` tính heuristic cho các keyword đã qua cleaning trong ngày phân tích. Input là `DayData` cho từng snapshot: snapshot gốc, keyword sau cleaning và các row adapter trước cleaning. Scorer nhóm theo `(source, country_scope, access, project, article_original)` và chỉ dùng profile Wikimedia; không trộn nguồn, project hay phạm vi.
+
+- Baseline là median của tối đa 7 ngày lịch trước đó mà trang có mặt và có `views_ceil` hợp lệ; cần ít nhất 3 ngày quan sát. Giá trị 0 hợp lệ là một quan sát, nhưng current hoặc median bằng 0 không được chia và trả `INSUFFICIENT_DATA`.
+- Các ngày thiếu được giữ cùng lý do: `DAY_UNAVAILABLE`, `FETCH_ERROR`, `SNAPSHOT_MISSING`, `NOT_IN_TOP`, `PARTIAL_SNAPSHOT`, `REJECTED_BY_CLEANING`, `INVALID_VALUE`, `DUPLICATE_OBSERVATION`. Chúng không biến thành 0. Snapshot partial có thể cung cấp observation hợp lệ nhưng được gắn cờ; mục vắng trong snapshot partial không được kết luận là `NOT_IN_TOP`.
+- `max_views_ceil` là giá trị lớn nhất hợp lệ không âm trong **toàn bộ keyword sau cleaning của cùng source, country, access và ngày phân tích**, bao gồm cả keyword thiếu baseline, không lọc theo category; được ghi trong `score_components`. Với current > 0 và baseline > 0: `G = clip(log2(current / baseline) / 3, 0, 1)`, `V = log1p(current) / log1p(max_views_ceil)`, `score = round(100 * (0.7 * G + 0.3 * V))` giới hạn 0–100. `round` dùng quy tắc Python ties-to-even.
+- `EMERGING` nếu ratio >= 1.5 và score >= 50; `FALLING` nếu ratio < 0.75; các trường hợp hợp lệ còn lại là `STABLE`. Nếu không đủ dữ liệu hợp lệ, score/ratio là `None` và status `INSUFFICIENT_DATA`.
+- Kết quả lưu các ngày quan sát và giá trị baseline, ngày thiếu cùng lý do, score components, version `wikimedia-trend-v0.1`, source scope, link và quality flags. `CENSORED_TOP_LIST`, `VIEWS_APPROXIMATE`, `INCOMPLETE_BASELINE_COVERAGE` phản ánh giới hạn nguồn. Median có điều kiện theo các ngày lọt top nên có thể lệch. Chấm điểm không phải xác suất hay bằng chứng trend social hoặc nhu cầu mua hàng.
+
+```bash
+python -m unittest discover -s tests -v
+python -m scripts.wikimedia_trend_smoke
+```
+
+Smoke gọi lại API thật, tính sau cleaning và classification; so sánh top 10 score với top 10 lượt xem trong nhóm có thể tính score, đồng thời in top volume toàn bộ gồm cả mục thiếu baseline. Xếp hạng score theo score giảm, ratio giảm, views giảm, rồi project/title; volume theo views giảm, project/title. Không lưu Firestore hay cung cấp API kết quả. Namespace bản địa hóa có thể còn lọt qua cleaning và ảnh hưởng score/mẫu số; cần kiểm tra trước khi diễn giải kết quả.
