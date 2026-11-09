@@ -1,6 +1,7 @@
 """Local-host manual run coordinator and durable Firestore persistence."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -9,11 +10,9 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from app.adapters.wikimedia import WikimediaAdapter
-from app.analysis.keywords import extract_keywords
-from app.analysis.trend import DayData, score_trends
+from app.adapters.base import CollectionSource
 from app.models.observations import FetchStatus
-from app.processing.wikimedia_cleaning import clean_snapshot
+from app.storage.base import AnalysisStorage
 
 TERMINAL = frozenset({"COMPLETED", "PARTIAL", "FAILED", "ABORTED"})
 SHARDS = 16
@@ -85,12 +84,18 @@ class HostRunLock:
 
 
 class RunService:
-    def __init__(self, storage, lock: HostRunLock, adapter_factory=WikimediaAdapter, *, mode="live"):
+    def __init__(self, storage: AnalysisStorage, lock: HostRunLock,
+                 adapter_factory: Callable[[], CollectionSource], *, mode="live",
+                 clean_snapshot, extract_keywords, score_trends, day_data_factory):
         if mode not in {"live", "synthetic", "replay"}:
             raise ValueError("Invalid run mode")
         self.storage = storage
         self.lock = lock
         self.adapter_factory = adapter_factory
+        self.clean_snapshot = clean_snapshot
+        self.extract_keywords = extract_keywords
+        self.score_trends = score_trends
+        self.day_data_factory = day_data_factory
         self.mode = mode
         self.tasks = set()
 
@@ -151,13 +156,13 @@ class RunService:
             await self.storage.update_run(run_id, {"status": "NORMALIZING", "data_date": collected.analysis_date.isoformat(), "request_count": collected.request_count})
             days, cleaning, total = [], [], 0
             for snapshot, rows in collected.days:
-                clean = clean_snapshot(snapshot, rows)
-                keywords = extract_keywords(clean.accepted)
-                days.append(DayData(snapshot, tuple(keywords), tuple(rows)))
+                clean = self.clean_snapshot(snapshot, rows)
+                keywords = self.extract_keywords(clean.accepted)
+                days.append(self.day_data_factory(snapshot, tuple(keywords), tuple(rows)))
                 cleaning.append(clean)
                 total += len(keywords)
             await self.storage.update_run(run_id, {"status": "ANALYZING", "observation_count": total})
-            scores = score_trends(collected.analysis_date, days)
+            scores = self.score_trends(collected.analysis_date, days)
             current = {r.keyword_id: r for d in days if d.snapshot.observation_date == collected.analysis_date for r in d.keywords}
             if len(scores) != len(current):
                 raise ValueError("Keyword and score counts do not reconcile")

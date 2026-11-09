@@ -14,9 +14,9 @@ from fastapi.staticfiles import StaticFiles
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
 from app.orchestration.runs import HostRunLock, RunService
+from app.composition import build_run_service, read_only_storage
 from app.settings import Settings
 from app.storage.base import StorageError
-from app.storage.firestore import FirestoreStorage
 
 
 def create_app(*, storage=None, adapter_factory=None, lock_path=None, operator_token=None, run_mode="live", read_only=None, read_storage_factory=None):
@@ -27,14 +27,11 @@ def create_app(*, storage=None, adapter_factory=None, lock_path=None, operator_t
         if read_only:
             yield
             return
-        chosen_storage = storage
-        if chosen_storage is None and os.environ.get("GOOGLE_CLOUD_PROJECT"):
-            chosen_storage = FirestoreStorage.from_environment()
-        app.state.run_service = None
-        if chosen_storage is not None:
-            path = lock_path or os.environ.get("TREND_SCOUT_LOCK_PATH", str(Path.home() / ".cache/trendscout/manual-run.lock"))
-            lock = HostRunLock(path, cooldown_seconds=int(os.environ.get("TREND_SCOUT_RUN_COOLDOWN_SECONDS", "60")))
-            app.state.run_service = RunService(chosen_storage, lock, mode=run_mode, **({"adapter_factory": adapter_factory} if adapter_factory else {}))
+        app.state.run_service = build_run_service(
+            storage=storage, adapter_factory=adapter_factory, lock_path=lock_path,
+            mode=run_mode, lock_factory=HostRunLock, service_factory=RunService,
+        )
+        if app.state.run_service is not None:
             await app.state.run_service.recover()
         app.state.operator_token = operator_token if operator_token is not None else os.environ.get("TREND_SCOUT_OPERATOR_TOKEN")
         try:
@@ -47,7 +44,7 @@ def create_app(*, storage=None, adapter_factory=None, lock_path=None, operator_t
                           docs_url=None if read_only else "/docs", redoc_url=None if read_only else "/redoc",
                           openapi_url=None if read_only else "/openapi.json")
     application.state.read_only = read_only
-    application.state.read_storage_factory = read_storage_factory
+    application.state.read_storage_factory = read_storage_factory if read_storage_factory is not None else read_only_storage
 
     @application.middleware("http")
     async def protect_read_only(request: Request, call_next):

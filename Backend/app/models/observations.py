@@ -68,3 +68,14 @@ class ObservationStatus(StrEnum):
     NOT_IN_TOP = "NOT_IN_TOP"
     DAY_UNAVAILABLE = "DAY_UNAVAILABLE"
     FETCH_ERROR = "FETCH_ERROR"
+
+
+@dataclass(frozen=True)
+class CollectionResult:
+    """Collection coverage, including unsuccessful snapshots and provenance."""
+    analysis_date: date | None
+    days: tuple[tuple[DatasetSnapshot, list[PageObservation]], ...]
+
+    @property
+    def request_count(self) -> int:
+        return sum(snapshot.request_count for snapshot, _ in self.days)

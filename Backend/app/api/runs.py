@@ -22,9 +22,6 @@ def read_storage(request):
     if not request.app.state.read_only:
         return service(request).storage
     factory = request.app.state.read_storage_factory
-    if factory is None:
-        from app.storage.vercel_identity import storage_for_request
-        factory = storage_for_request
     try:
         return factory(request.headers.get("x-vercel-oidc-token"))
     except ValueError:

@@ -4,30 +4,19 @@ import asyncio
 import os
 import re
 import math
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
 import httpx
 
-from app.models.observations import DatasetSnapshot, FetchStatus, ObservationStatus, PageObservation
+from app.models.observations import CollectionResult, DatasetSnapshot, FetchStatus, ObservationStatus, PageObservation
 
 SOURCE = "wikimedia_pageviews_top_per_country"
 BASE_URL = "https://wikimedia.org/api/rest_v1/metrics/pageviews/top-per-country/US/all-access"
 DEFAULT_USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
 _PROJECT = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\Z")
 _WIKIMEDIA_DOMAINS = frozenset({"wikipedia", "wikimedia", "wiktionary", "wikiquote", "wikibooks", "wikinews", "wikisource", "wikiversity", "wikivoyage", "wikidata", "mediawiki", "wikifunctions"})
-
-
-@dataclass(frozen=True)
-class CollectionResult:
-    analysis_date: date | None
-    days: tuple[tuple[DatasetSnapshot, list[PageObservation]], ...]
-
-    @property
-    def request_count(self) -> int:
-        return sum(snapshot.request_count for snapshot, _ in self.days)
 
 
 def observation_status(snapshot: DatasetSnapshot, observations: list[PageObservation], project: str, article: str) -> ObservationStatus:
