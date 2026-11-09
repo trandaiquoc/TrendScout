@@ -3,11 +3,19 @@
 import os
 from pathlib import Path
 
-from app.adapters.wikimedia import WikimediaAdapter
+from app.sources.wikimedia.adapter import METADATA, WikimediaAdapter
+from app.sources.registry import SourceRegistry
 from app.analysis.keywords import extract_keywords
 from app.analysis.trend import DayData, score_trends
 from app.processing.wikimedia_cleaning import clean_snapshot
 from app.storage.firestore import FirestoreStorage
+
+
+def source_registry():
+    """Register factories only; neither creation nor import fetches a source."""
+    registry = SourceRegistry()
+    registry.register(METADATA, lambda: WikimediaAdapter())
+    return registry
 
 
 def build_run_service(*, storage, adapter_factory, lock_path, mode, lock_factory, service_factory):
@@ -21,7 +29,7 @@ def build_run_service(*, storage, adapter_factory, lock_path, mode, lock_factory
     )
     lock = lock_factory(path, cooldown_seconds=int(os.environ.get("TREND_SCOUT_RUN_COOLDOWN_SECONDS", "60")))
     return service_factory(
-        storage, lock, adapter_factory=adapter_factory or WikimediaAdapter, mode=mode,
+        storage, lock, adapter_factory=adapter_factory or source_registry().factory(METADATA.source_id), mode=mode,
         clean_snapshot=clean_snapshot, extract_keywords=extract_keywords,
         score_trends=score_trends, day_data_factory=DayData,
     )
