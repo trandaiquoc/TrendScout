@@ -6,6 +6,7 @@ import json
 
 from app.jobs.contracts import State, Conflict, LeaseLost, InvalidTransition
 from app.datasets.manifest import validate_manifest
+from app.datasets.evidence import validate_source_evidence
 
 
 def digest(data):
@@ -129,7 +130,12 @@ class FakeDatasetStore:
                     valid=valid and end == analysis and type(identity.get('window')) is int and (end-start).days == identity['window']
                 except (ValueError, TypeError, KeyError): valid=False
                 if d['manifest'].get('source_id') == 'wikimedia_pageviews_top_per_country':
-                    entries=[row for shard in d['shards'].values() for row in shard.get('items', [])]
+                    keys=('analysis_date','window_start','window_end','source_version','processing_version','cleaning_version','classification_version','algorithm_version')
+                    config=identity.get('dataset_config')
+                    valid=valid and isinstance(config,dict) and all(k in config and config[k] == d['manifest'].get(k) for k in keys)
+                    valid=valid and d['manifest'].get('config_version') == identity.get('config_version')
+                    valid=valid and validate_source_evidence(d['manifest'],d['shards'],report)
+                    entries=d['shards'].get('scores-v1',{}).get('items', [])
                     valid=valid and all(isinstance(row,dict) and row.get('source') == d['manifest']['source_id'] and row.get('country_scope') == d['manifest']['country'] and row.get('access') == d['manifest']['access'] and row.get('observation_date') == d['manifest']['analysis_date'] and row.get('algorithm_version') == d['manifest']['algorithm_version'] and not (row.get('status') == 'INSUFFICIENT_DATA' and row.get('score') is not None) for row in entries)
                 if not valid:
                     d['state']='REJECTED'; return False

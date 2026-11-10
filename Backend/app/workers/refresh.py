@@ -26,40 +26,47 @@ class RefreshWorker:
                 stored.refresh_budget=deepcopy(self.budget)
             elif (stored.refresh_budget.max_reads, stored.refresh_budget.max_writes) != (self.budget.max_reads, self.budget.max_writes):
                 raise ValueError("job budget cannot be changed")
+        def charge(*, reads=0, writes=0):
+            with self.jobs._mutex:
+                self.jobs._jobs[job_id].refresh_budget.charge(reads=reads,writes=writes)
+        charge(reads=1,writes=1)  # estimated job claim
         job=self.jobs.claim(job_id,owner)
         self.checkpoint_hook("after_claim")
+        charge(reads=1,writes=1)  # estimated resource claim
         token=self.datasets.claim_resource(resource,job_id,owner,job.fencing,job.revision)
         if fresh_on_retry:
             dataset_id = f"{dataset_id}-f{token}"
         def checkpoint(requests=0, name="checkpoint"):
             nonlocal job
             self.checkpoint_hook(name)
+            charge(reads=2,writes=1)  # job read and checkpoint CAS
             latest=self.jobs.get(job_id)
             job=self.jobs.checkpoint(job_id,owner,job.fencing,latest.revision,requests=requests)
             if job.state == State.CANCELLING:
-                job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.CANCELLED)
+                job=transition(job_id,owner,job.fencing,job.revision,State.CANCELLED)
                 raise Cancelled()
+            charge(reads=2,writes=2)  # job and resource heartbeat
             job=self.datasets.heartbeat_resource(resource,job_id,owner,job.fencing,job.revision,token)
-        def charge(*, reads=0, writes=0):
-            with self.jobs._mutex:
-                self.jobs._jobs[job_id].refresh_budget.charge(reads=reads,writes=writes)
+        def transition(*args,**kwargs):
+            charge(reads=1,writes=1)  # estimated job transition
+            return self.jobs.transition(*args,**kwargs)
         try:
             pipeline=getattr(self.fetch,'__self__',None)
             bind=getattr(pipeline,'set_request_guard',None)
             if callable(bind): bind(lambda: checkpoint(1, "before_source_request"))
             checkpoint(0 if callable(bind) else 1, "before_fetch")
-            job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.FETCHING)
+            job=transition(job_id,owner,job.fencing,job.revision,State.FETCHING)
             raw=self.fetch()
             checkpoint(name="after_fetch")
-            job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.NORMALIZING)
+            job=transition(job_id,owner,job.fencing,job.revision,State.NORMALIZING)
             checkpoint(name="before_clean")
             cleaned=self.clean(raw)
             checkpoint(name="after_clean")
-            job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.ANALYZING)
+            job=transition(job_id,owner,job.fencing,job.revision,State.ANALYZING)
             checkpoint(name="before_analysis")
             output=self.analyze(cleaned)
             checkpoint(name="after_analysis")
-            job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.PERSISTING)
+            job=transition(job_id,owner,job.fencing,job.revision,State.PERSISTING)
             checkpoint(name="before_draft")
             if not isinstance(output.get('manifest_input'),dict): raise ValueError('strict manifest inputs required')
             strict_metadata=dict(output['manifest_input'],occurrence_id=job.identity['occurrence_id'])
@@ -82,7 +89,7 @@ class RefreshWorker:
             charge(writes=1)
             self.datasets.seal(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,manifest)
             checkpoint(name="after_seal")
-            job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.VALIDATING)
+            job=transition(job_id,owner,job.fencing,job.revision,State.VALIDATING)
             checkpoint(name="before_verify")
             charge(reads=len(output["shards"]), writes=1)
             if not self.datasets.verify(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,quality_ok=None):
@@ -102,13 +109,14 @@ class RefreshWorker:
             # The fake coordinator controls retry counts and backoff; no sleeping here.
             # Retry-After is honored only if its existing configured delay is long enough.
             if (delay is not None and current.retries_used < current.policy.retry_budget and current.attempts < current.policy.max_attempts):
+                charge(reads=2,writes=2)  # estimated retry state and resource release
                 self.datasets.retry_wait(resource,job_id,owner,job.fencing,current.revision,token,error.code.value,delay)
             else:
-                self.jobs.transition(job_id,owner,job.fencing,current.revision,State.FAILED,reason_code=error.code.value)
+                transition(job_id,owner,job.fencing,current.revision,State.FAILED,reason_code=error.code.value)
             raise
         except Exception:
             # Never expose external error text; stale owner cannot mutate failure state.
             current=self.jobs.get(job_id)
             if current.state not in (State.COMPLETED,State.CANCELLED):
-                self.jobs.transition(job_id,owner,job.fencing,current.revision,State.FAILED,reason_code='REFRESH_FAILED')
+                transition(job_id,owner,job.fencing,current.revision,State.FAILED,reason_code='REFRESH_FAILED')
             raise

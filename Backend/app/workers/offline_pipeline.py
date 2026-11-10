@@ -1,5 +1,7 @@
 """Explicit offline composition using the existing Wikimedia analysis components."""
 import asyncio
+from dataclasses import asdict
+import json
 from datetime import date, datetime, timedelta, timezone
 import httpx
 
@@ -83,13 +85,20 @@ class OfflineWikimediaPipeline:
         dates=[snap.observation_date for snap in snapshots]
         projects=sorted({row.project for day in days for row in day.keywords})
         if not projects: raise ValueError('missing project evidence')
-        manifest_input={'source_id':source,'country':snapshots[0].country_scope,'access':snapshots[0].access,
+        manifest_input={'config_version':'v1','source_id':source,'country':snapshots[0].country_scope,'access':snapshots[0].access,
                         'project':','.join(projects),'analysis_date':self.analysis_date.isoformat(),
                         'window_start':(self.analysis_date-timedelta(days=7)).isoformat(),'window_end':self.analysis_date.isoformat(),
                         'source_version':'wikimedia-top-per-country-v1','processing_version':PIPELINE_VERSION,
                         'cleaning_version':PIPELINE_VERSION,'classification_version':'title-rules-v0.1',
                         'algorithm_version':'wikimedia-trend-v0.1',
                         'provenance':snapshots[0].request_url,'quality_report_ref':'quality-v1'}
-        report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':len(items),
+        def encode(value):
+            return json.loads(json.dumps(asdict(value),ensure_ascii=False,default=str))
+        snapshot_rows=[encode(day.snapshot) for day in days]
+        raw_rows=[{'date':day.snapshot.observation_date.isoformat(),'rows':[encode(row) for row in day.source_rows]} for day in days]
+        shards={'scores-v1':{'items':items}, 'snapshots-v1':{'items':snapshot_rows},
+                'raw-observations-v1':{'items':raw_rows}}
+        report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':sum(len(x['items']) for x in shards.values()),
+                'keyword_count':len(items),
                 'source_id':source,'processing_version':PIPELINE_VERSION,'snapshots':self.reports}
-        return {'manifest_input':manifest_input,'quality_report':report,'shards':{'scores-v1':{'items':items}}}
+        return {'manifest_input':manifest_input,'quality_report':report,'shards':shards}

@@ -31,12 +31,20 @@ def transport():
     return httpx.MockTransport(handler)
 
 
+def wikimedia_identity(occurrence):
+    value=dict(payload(occurrence),source='wikimedia_pageviews_top_per_country')
+    value['dataset_config']={'analysis_date':'2026-01-08','window_start':'2026-01-01','window_end':'2026-01-08',
+        'source_version':'wikimedia-top-per-country-v1','processing_version':'cleaning-pipeline-v0.1',
+        'cleaning_version':'cleaning-pipeline-v0.1','classification_version':'title-rules-v0.1','algorithm_version':'wikimedia-trend-v0.1'}
+    return value
+
+
 class OfflineIntegrationTests(TestCase):
     def test_scheduled_real_pipeline_golden_results(self):
         clock=Clock(); shared=FakeTransactionalStore(); jobs=FakeCoordinator(clock,shared)
         policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,3,Estimate(writes=4),Estimate(writes=10))
         schedule=Schedule('golden','v1',clock.now,enabled=True)
-        def make_payload(occ): return dict(payload(occ['occurrence_id']),source='wikimedia_pageviews_top_per_country')
+        def make_payload(occ): return wikimedia_identity(occ['occurrence_id'])
         job=dispatch_job(FakeScheduler(schedule),clock.now,active_jobs=0,budget_ok=True,coordinator=jobs,payload_factory=make_payload,policy=policy)
         again=dispatch_job(FakeScheduler(schedule),clock.now,active_jobs=0,budget_ok=True,coordinator=FakeCoordinator(clock,shared),payload_factory=make_payload,policy=policy)
         self.assertEqual(job.job_id,again.job_id)
@@ -57,6 +65,14 @@ class OfflineIntegrationTests(TestCase):
         for expected in EXPECTED['entities']: assert_expected(actual[expected['keyword_id']],expected)
         self.assertTrue(any(row['score'] is None for row in items))
         self.assertEqual(persisted['state'],'ACTIVE')
+        snapshots=persisted['shards']['snapshots-v1']['items']
+        raw=persisted['shards']['raw-observations-v1']['items']
+        self.assertEqual(len(snapshots),len(raw))
+        unavailable=next(x for x in snapshots if x['fetch_status']=='DAY_UNAVAILABLE')
+        self.assertIsNone(unavailable['item_count'])
+        current=next(x for x in raw if x['date']==SOURCE['analysis_date'])
+        self.assertTrue(any(r['article_original']=='Main_Page' for r in current['rows']))
+        self.assertTrue(any(r['views_ceil']==0 for r in current['rows']))
 
     def test_network_transport_is_rejected(self):
         with self.assertRaises(ValueError): OfflineWikimediaPipeline(httpx.AsyncHTTPTransport(),date(2026,1,8),[date(2026,1,8)])
@@ -151,7 +167,7 @@ class OfflineIntegrationTests(TestCase):
             with self.subTest(failure=failure):
                 clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs); calls=[]
                 policy=Policy(3,4,2,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
-                job=jobs.create(failure,dict(payload(failure),source='wikimedia_pageviews_top_per_country'),policy)
+                job=jobs.create(failure,wikimedia_identity(failure),policy)
                 def handler(req):
                     calls.append(1)
                     if len(calls)==1:
@@ -165,3 +181,79 @@ class OfflineIntegrationTests(TestCase):
                 result=worker.run(job.job_id,'w2','stream','dataset',expected_active=None,expected_revision=0,fresh_on_retry=True)
                 self.assertEqual(result,'PUBLISHED')
                 self.assertEqual((len(calls),repo.active('stream')),(2,('dataset-f2',1)))
+
+    def test_persisted_evidence_tampering_rejects_even_if_hashes_updated(self):
+        from app.datasets.fake import digest
+        for kind in ('missing_raw','raw_count','snapshot_date','snapshot_status','provenance','forged_quality','config_version','algorithm_version'):
+            with self.subTest(kind=kind):
+                clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs)
+                policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,3,Estimate(),Estimate())
+                job=jobs.create(kind,wikimedia_identity(kind),policy)
+                pipeline=OfflineWikimediaPipeline(transport(),date.fromisoformat(SOURCE['analysis_date']),[date.fromisoformat(d) for d in sorted(SOURCE['days'],reverse=True)])
+                def mutate(point):
+                    if point!='before_verify': return
+                    d=repo.datasets['dataset']; m=d['manifest']; report=d['quality_report']; snap=d['shards']['snapshots-v1']['items'][0]
+                    if kind=='missing_raw': del d['shards']['raw-observations-v1']
+                    if kind=='raw_count': d['shards']['raw-observations-v1']['items'][0]['rows'].pop()
+                    if kind=='snapshot_date': snap['observation_date']='2026-01-07'
+                    if kind=='snapshot_status': snap['fetch_status']='DAY_UNAVAILABLE'
+                    if kind=='provenance': snap['request_url']='https://invalid.example/path'
+                    if kind in ('config_version','algorithm_version'):
+                        m[kind]='bad-version'; d['metadata'][kind]='bad-version'
+                    if kind=='forged_quality':
+                        report['snapshots'][0]['accepted_count']+=1
+                        report['snapshots'][0]['rejected_count']-=1
+                        # An attacker also changes copies and digest: replay must still disagree.
+                        m['quality_report']=report.copy(); m['quality_report_digest']=digest(report)
+                    for key,shard in d['shards'].items():
+                        m['shards'][key]['sha256']=digest(shard)
+                worker=RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze,checkpoint_hook=mutate)
+                with self.assertRaises(ValueError): worker.run(job.job_id,'worker','stream','dataset',expected_active=None,expected_revision=0)
+                self.assertEqual(repo.active('stream'),(None,0))
+
+    def test_429_then_success_after_retry_after(self):
+        from app.workers.safety import RetryPolicy, RefreshError
+        clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs); calls=[]
+        policy=Policy(3,4,2,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
+        job=jobs.create('rate-e2e',wikimedia_identity('rate-e2e'),policy)
+        def handler(req):
+            calls.append(1)
+            if len(calls)==1: return httpx.Response(429,headers={'Retry-After':'12'})
+            return httpx.Response(200,json={'items':[{**SOURCE['scope'],'year':'2026','month':'01','day':'08','articles':SOURCE['days']['2026-01-08']['articles']}]})
+        pipeline=OfflineWikimediaPipeline(httpx.MockTransport(handler),date(2026,1,8),[date(2026,1,8)],clock=clock)
+        worker=RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze,retry_policy=RetryPolicy(3,2,30))
+        with self.assertRaises(RefreshError): worker.run(job.job_id,'a','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True)
+        clock.advance(11)
+        with self.assertRaises(Conflict): jobs.claim(job.job_id,'b')
+        clock.advance(1)
+        self.assertEqual(worker.run(job.job_id,'b','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True),'PUBLISHED')
+        self.assertEqual((len(calls),repo.active('stream')),(2,('d-f2',1)))
+
+    def test_invalid_source_payload_is_permanent_and_preserves_active(self):
+        from app.workers.safety import RetryPolicy, RefreshError, ErrorCode
+        clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs)
+        policy=Policy(3,4,2,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
+        j=jobs.create('invalid',wikimedia_identity('invalid'),policy)
+        pipeline=OfflineWikimediaPipeline(httpx.MockTransport(lambda req:httpx.Response(200,json={'invalid':True})),date(2026,1,8),[date(2026,1,8)],clock=clock)
+        worker=RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze,retry_policy=RetryPolicy(3,2,30))
+        with self.assertRaises(RefreshError) as caught: worker.run(j.job_id,'w','stream','d',expected_active=None,expected_revision=0)
+        self.assertEqual(caught.exception.code,ErrorCode.INVALID_SOURCE_DATA)
+        self.assertEqual(jobs.get(j.job_id).state,'FAILED')
+        self.assertEqual(repo.active('stream'),(None,0))
+
+    def test_retry_exhausted_preserves_previous_active(self):
+        from app.workers.safety import RetryPolicy, RefreshError
+        clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs)
+        policy=Policy(2,4,1,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
+        baseline=jobs.create('baseline',payload('baseline'),policy)
+        base=RefreshWorker(jobs,repo,lambda:[1],lambda x:x,lambda x:{'shards':{'s':{'items':x}},'quality_ok':True})
+        self.assertEqual(base.run(baseline.job_id,'old','stream','active',expected_active=None,expected_revision=0),'PUBLISHED')
+        clock.advance(31)
+        job=jobs.create('fail',wikimedia_identity('fail'),policy)
+        pipeline=OfflineWikimediaPipeline(httpx.MockTransport(lambda req:httpx.Response(500)),date(2026,1,8),[date(2026,1,8)],clock=clock)
+        worker=RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze,retry_policy=RetryPolicy(2,2,10))
+        with self.assertRaises(RefreshError): worker.run(job.job_id,'a','stream','new',expected_active='active',expected_revision=1,fresh_on_retry=True)
+        clock.advance(2)
+        with self.assertRaises(RefreshError): worker.run(job.job_id,'b','stream','new',expected_active='active',expected_revision=1,fresh_on_retry=True)
+        self.assertEqual(jobs.get(job.job_id).state,'FAILED')
+        self.assertEqual(repo.active('stream'),('active',1))
