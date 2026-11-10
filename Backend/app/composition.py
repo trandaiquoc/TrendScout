@@ -10,6 +10,7 @@ from app.analysis.trend import DayData, score_trends
 from app.algorithms.registry import AlgorithmRegistry
 from app.algorithms.runner import AlgorithmRunner
 from app.algorithms.strategies import WikimediaLegacy, GrowthRatio, MedianBaseline
+from app.algorithms.statistical import RobustZMad, EWMA
 from app.processing.wikimedia_cleaning import clean_snapshot
 from app.storage.firestore import FirestoreStorage
 
@@ -23,7 +24,7 @@ def source_registry():
 
 def algorithm_engine():
     registry = AlgorithmRegistry()
-    for strategy in (WikimediaLegacy(score_trends), GrowthRatio(), MedianBaseline()):
+    for strategy in (WikimediaLegacy(score_trends), GrowthRatio(), MedianBaseline(), RobustZMad(), EWMA()):
         registry.register(strategy)
     return AlgorithmRunner(registry)
 

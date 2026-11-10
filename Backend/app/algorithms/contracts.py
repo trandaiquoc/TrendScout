@@ -35,6 +35,7 @@ class AlgorithmInput:
     minimum_samples: int = 3
     evidence_url: str | None = None
     legacy_result: object | None = None
+    current_snapshot_status: str = 'UNKNOWN'
 
 
 @dataclass(frozen=True)

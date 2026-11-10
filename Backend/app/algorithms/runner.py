@@ -24,10 +24,16 @@ class AlgorithmRunner:
                         count = item.legacy_result.observed_baseline_days
                         flags = item.legacy_result.quality_flags
                         history = tuple((str(day), status) for day, status in item.legacy_result.missing_baseline_dates)
+                    evidence = (('coverage', history), ('evidence_url', item.evidence_url))
+                    minimum = item.minimum_samples
+                    config_version = 'algorithm-input-v0.1'
+                    if callable(getattr(type(strategy), 'skip_details', None)):
+                        evidence, flags, minimum, config_version = strategy.skip_details(item, reason)
                     results.append(AlgorithmResult(item.keyword_id, meta.algorithm_id, meta.version,
                         'SKIPPED', None, meta.metric, meta.unit, item.current_value, None,
-                        item.window_days, count, (('coverage', history), ('evidence_url', item.evidence_url)), flags, reason,
-                        'Input does not satisfy algorithm requirements', minimum_samples=item.minimum_samples))
+                        item.window_days, count, evidence, flags, reason,
+                        'Input does not satisfy algorithm requirements', minimum_samples=minimum,
+                        config_version=config_version))
                 else:
                     results.append(strategy.execute(item))
             except Exception:
