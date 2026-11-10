@@ -85,6 +85,8 @@ class Job:
     retry_after: datetime | None = None
     reason_code: str | None = None
     completion_evidence: CompletionEvidence | None = None
+    refresh_budget: object | None = None
+    identity: dict = field(default_factory=dict)
     audit: list = field(default_factory=list)
 
 

@@ -14,10 +14,17 @@ class RefreshWorker:
         self.checkpoint_hook=checkpoint_hook or (lambda name: None)
         self.budget = budget
         self.retry_policy = retry_policy
-        if budget is not None and not isinstance(budget, OfflineBudget): raise ValueError("invalid budget")
+        if not isinstance(budget, OfflineBudget): raise ValueError("offline refresh budget required")
         if retry_policy is not None and not isinstance(retry_policy, RetryPolicy): raise ValueError("invalid retry policy")
 
     def run(self, job_id, owner, resource, dataset_id, *, expected_active, expected_revision, fresh_on_retry=False):
+        with self.jobs._mutex:
+            stored=self.jobs._jobs[job_id]
+            if stored.refresh_budget is None:
+                from copy import deepcopy
+                stored.refresh_budget=deepcopy(self.budget)
+            elif (stored.refresh_budget.max_reads, stored.refresh_budget.max_writes) != (self.budget.max_reads, self.budget.max_writes):
+                raise ValueError("job budget cannot be changed")
         job=self.jobs.claim(job_id,owner)
         self.checkpoint_hook("after_claim")
         token=self.datasets.claim_resource(resource,job_id,owner,job.fencing,job.revision)
@@ -33,7 +40,8 @@ class RefreshWorker:
                 raise Cancelled()
             job=self.datasets.heartbeat_resource(resource,job_id,owner,job.fencing,job.revision,token)
         def charge(*, reads=0, writes=0):
-            if self.budget is not None: self.budget.charge(reads=reads,writes=writes)
+            with self.jobs._mutex:
+                self.jobs._jobs[job_id].refresh_budget.charge(reads=reads,writes=writes)
         try:
             checkpoint(1, "before_fetch")
             job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.FETCHING)
@@ -81,9 +89,8 @@ class RefreshWorker:
             delay = self.retry_policy.delay(error,current.attempts,self.jobs._now(),current.policy.deadline) if self.retry_policy else None
             # The fake coordinator controls retry counts and backoff; no sleeping here.
             # Retry-After is honored only if its existing configured delay is long enough.
-            if (delay is not None and current.policy.backoff_seconds >= delay.total_seconds()
-                and current.retries_used < current.policy.retry_budget and current.attempts < current.policy.max_attempts):
-                self.datasets.retry_wait(resource,job_id,owner,job.fencing,current.revision,token,error.code.value)
+            if (delay is not None and current.retries_used < current.policy.retry_budget and current.attempts < current.policy.max_attempts):
+                self.datasets.retry_wait(resource,job_id,owner,job.fencing,current.revision,token,error.code.value,delay)
             else:
                 self.jobs.transition(job_id,owner,job.fencing,current.revision,State.FAILED,reason_code=error.code.value)
             raise

@@ -9,7 +9,12 @@ from app.jobs.contracts import State, Conflict, LeaseLost
 from app.jobs.fake import FakeCoordinator
 from app.datasets.fake import FakeDatasetStore, digest
 from app.scheduling.recurrence import Schedule, FakeScheduler
-from app.workers.refresh import RefreshWorker
+from app.workers.refresh import RefreshWorker as _RefreshWorker
+from app.workers.safety import OfflineBudget
+
+def RefreshWorker(*args, **kwargs):
+    kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
+    return _RefreshWorker(*args, **kwargs)
 from test_job_coordinator import Clock, payload
 from app.jobs.contracts import Policy
 from app.storage_analysis.planning import Estimate

@@ -8,12 +8,17 @@ from app.jobs.fake import FakeCoordinator
 from app.jobs.contracts import Policy, State
 from app.storage_analysis.planning import Estimate
 from app.workers.safety import OfflineBudget, RefreshError, ErrorCode, RetryPolicy
-from app.workers.refresh import RefreshWorker
+from app.workers.refresh import RefreshWorker as _RefreshWorker
+from app.workers.safety import OfflineBudget
+
+def RefreshWorker(*args, **kwargs):
+    kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
+    return _RefreshWorker(*args, **kwargs)
 from test_job_coordinator import Clock, payload
 
 
 def manifest(job_id):
-    fields=dict(occurrence_id='o1',source_id='wikimedia',country='US',access='all-access',project='all',analysis_date='2026-01-08',window_start='2026-01-01',window_end='2026-01-08',source_version='v1',processing_version='v1',cleaning_version='v1',classification_version='v1',algorithm_version='v1',provenance='synthetic://fixture',quality_report_ref='report-v1')
+    fields=dict(occurrence_id='once',source_id='wikimedia',country='US',access='all-access',project='all',analysis_date='2026-01-08',window_start='2026-01-01',window_end='2026-01-08',source_version='v1',processing_version='v1',cleaning_version='v1',classification_version='v1',algorithm_version='v1',provenance='synthetic://fixture',quality_report_ref='report-v1')
     shards={'full':{'items':[1]},'empty':{'items':[]}}
     m=dict(fields,manifest_version='offline-manifest-v1',dataset_id='dataset',job_id=job_id,resource_id='stream',required_partitions=['full','empty'],shards={k:{'sha256':digest(v),'count':len(v['items'])} for k,v in shards.items()},expected_count=1,quality_report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':1})
     return fields,shards,m
@@ -40,6 +45,19 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(self.repo.verify('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=False))
         self.repo.datasets['dataset']['shards']['full']['items'].append(2)
         with self.assertRaises(Exception): self.repo.publish('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,None,0)
+        self.assertEqual(self.repo.active('stream'),(None,0))
+
+    def test_strict_manifest_occurrence_must_match_job_identity(self):
+        j=self.jobs.claim(self.jobs.create('identity',payload('actual'),self.policy).job_id,'worker')
+        token=self.repo.claim_resource('stream',j.job_id,j.owner,j.fencing,j.revision)
+        meta,shards,m=manifest(j.job_id)
+        for state in (State.FETCHING,State.NORMALIZING,State.ANALYZING,State.PERSISTING):
+            j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,state)
+        self.repo.draft('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,meta)
+        for key,value in shards.items(): self.repo.put_shard('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,key,value)
+        self.repo.seal('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m)
+        j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,State.VALIDATING)
+        self.assertFalse(self.repo.verify('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=True))
         self.assertEqual(self.repo.active('stream'),(None,0))
 
     def test_budget_stops_at_each_write_boundary(self):
@@ -105,6 +123,7 @@ class PersistedFakeRecoveryTests(unittest.TestCase):
             restored=pickle.loads(file.read_bytes())
             store2=FakeTransactionalStore(); store2.jobs=restored['jobs']; store2.keys=restored['keys']; store2.occurrences=restored['occurrences']
             c2=FakeCoordinator(clock,store2); repo2=FakeDatasetStore(c2)
+            self.assertEqual(c2.get(job.job_id).refresh_budget.writes, 2)
             repo2.resources=restored['resources']; repo2.datasets=restored['datasets']; repo2.publications=restored['publications']
             clock.advance(31)
             self.assertEqual(RefreshWorker(c2,repo2,lambda:[1],lambda x:x,fn).run(job.job_id,'b','stream','draft',expected_active=None,expected_revision=0,fresh_on_retry=True),'PUBLISHED')
@@ -140,3 +159,21 @@ class CrashMatrixTests(unittest.TestCase):
                     result=RefreshWorker(jobs,repo,lambda:[1],lambda x:x,output).run(job.job_id,'b','stream','draft',expected_active=None,expected_revision=0,fresh_on_retry=True)
                     self.assertEqual(result,'PUBLISHED')
                     self.assertEqual(repo.active('stream')[1],1)
+
+class RequiredBudgetTests(unittest.TestCase):
+    def test_budget_is_required_and_shared_across_workers(self):
+        from app.workers.refresh import RefreshWorker as RealWorker
+        with self.assertRaises(ValueError): RealWorker(None,None,None,None,None)
+        clock=Clock(); c=FakeCoordinator(clock); repo=FakeDatasetStore(c)
+        policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,3,Estimate(),Estimate())
+        job=c.create('b',payload('b'),policy)
+        def crash(name):
+            if name=='after_draft': raise SystemExit()
+        first=RealWorker(c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2),checkpoint_hook=crash)
+        with self.assertRaises(SystemExit): first.run(job.job_id,'a','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True)
+        self.assertEqual(c.get(job.job_id).refresh_budget.writes,1)
+        clock.advance(31)
+        second=RealWorker(c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2))
+        with self.assertRaises(RefreshError): second.run(job.job_id,'b','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True)
+        self.assertEqual(c.get(job.job_id).refresh_budget.writes,2)
+        self.assertEqual(repo.active('stream'),(None,0))

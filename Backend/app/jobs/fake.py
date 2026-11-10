@@ -96,6 +96,7 @@ class FakeCoordinator:
             if not check_budget(policy.estimate, policy.budget)['allowed']: raise BudgetExceeded('estimate exceeds budget')
             job_id = hashlib.sha256(idempotency_key.encode()).hexdigest()
             job = Job(job_id, idempotency_key, digest, payload['config_version'], State.QUEUED, 0, now, now, policy)
+            job.identity=deepcopy(payload)
             self._record(job, now, 'CREATED')
             self._jobs[job_id] = job
             self._keys[idempotency_key] = job_id

@@ -10,7 +10,12 @@ from app.scheduling.recurrence import Schedule, FakeScheduler
 from app.scheduling.dispatch import dispatch_job
 from app.storage_analysis.planning import Estimate
 from app.workers.offline_pipeline import OfflineWikimediaPipeline
-from app.workers.refresh import RefreshWorker
+from app.workers.refresh import RefreshWorker as _RefreshWorker
+from app.workers.safety import OfflineBudget
+
+def RefreshWorker(*args, **kwargs):
+    kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
+    return _RefreshWorker(*args, **kwargs)
 from test_golden_contract import SOURCE, EXPECTED, assert_expected
 from test_job_coordinator import Clock, payload
 
@@ -100,3 +105,25 @@ class OfflineIntegrationTests(TestCase):
                 with self.assertRaises(ValueError): worker.run(job.job_id,'worker','stream','data',expected_active=None,expected_revision=0)
                 self.assertEqual(repo.active('stream'),(None,0))
                 self.assertEqual(jobs.get(job.job_id).state,'FAILED')
+
+    def test_http_429_retry_after_enforced_with_fake_clock(self):
+        from app.workers.safety import RetryPolicy, RefreshError
+        clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs)
+        policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
+        job=jobs.create('rate',payload('rate'),policy)
+        source=OfflineWikimediaPipeline(httpx.MockTransport(lambda req:httpx.Response(429,headers={'Retry-After':'12'})),date(2026,1,8),[date(2026,1,8)],clock=clock)
+        worker=RefreshWorker(jobs,repo,source.fetch,source.clean,source.analyze,retry_policy=RetryPolicy(3,2,30))
+        with self.assertRaises(RefreshError): worker.run(job.job_id,'w','stream','d',expected_active=None,expected_revision=0)
+        self.assertEqual(jobs.get(job.job_id).retry_after,clock.now+timedelta(seconds=12))
+        clock.advance(11)
+        with self.assertRaises(Conflict): jobs.claim(job.job_id,'w2')
+        clock.advance(1)
+        self.assertEqual(jobs.claim(job.job_id,'w2').attempts,2)
+
+    def test_retry_after_http_date_uses_fixed_clock(self):
+        from email.utils import format_datetime
+        from app.workers.safety import RefreshError
+        clock=Clock(); header=format_datetime(clock.now+timedelta(seconds=17),usegmt=True)
+        source=OfflineWikimediaPipeline(httpx.MockTransport(lambda req:httpx.Response(429,headers={'Retry-After':header})),date(2026,1,8),[date(2026,1,8)],clock=clock)
+        with self.assertRaises(RefreshError) as caught: source.fetch()
+        self.assertEqual(caught.exception.retry_after,17)

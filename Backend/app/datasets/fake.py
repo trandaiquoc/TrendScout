@@ -39,11 +39,15 @@ class FakeDatasetStore:
             raise LeaseLost('resource lease lost')
         return job, lease
 
-    def retry_wait(self, resource, job_id, owner, job_token, revision, token, reason):
+    def retry_wait(self, resource, job_id, owner, job_token, revision, token, reason, delay=None):
         """Release the fake resource and enqueue a bounded retry atomically."""
         with self.lock:
             job, lease = self._owned(resource, job_id, owner, job_token, revision, token)
             updated = self.c.transition(job_id, owner, job_token, revision, State.RETRY_WAIT, reason_code=reason)
+            if delay is not None:
+                if not isinstance(delay, timedelta) or delay.total_seconds() < 0: raise ValueError('invalid retry delay')
+                job.retry_after=self.c._now()+delay
+                updated=deepcopy(job)
             lease['owner']=None; lease['expires_at']=self.c._now()
             return updated
 
@@ -90,6 +94,11 @@ class FakeDatasetStore:
             if d['manifest'].get('manifest_version') == 'offline-manifest-v1':
                 valid=validate_manifest(d['manifest'],dataset_id=dataset_id,job_id=job_id,resource_id=resource,
                                         metadata=d['metadata'],shards=d['shards'],hash_fn=digest)
+                identity=self.c._jobs[job_id].identity
+                scope=identity.get('scope', {})
+                valid=valid and d['manifest'].get('occurrence_id') == identity.get('occurrence_id')
+                valid=valid and d['manifest'].get('source_id') == identity.get('source')
+                valid=valid and isinstance(scope,dict) and all(d['manifest'].get(k) == v for k,v in scope.items() if k in ('country','access','project'))
                 if not valid:
                     d['state']='REJECTED'; return False
                 d['verified_counts']={'shards':len(actual),'items':sum(len(v['items']) for v in d['shards'].values())}
