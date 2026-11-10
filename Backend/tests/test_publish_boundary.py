@@ -1,8 +1,9 @@
 """Regression: unverified legacy manifests cannot become active."""
+from refresh_fixtures import fixture_policy as Policy
 import unittest
 from datetime import timedelta
 from app.datasets.fake import FakeDatasetStore, digest
-from app.jobs.contracts import Policy, State, Conflict
+from app.jobs.contracts import State, Conflict
 from app.jobs.fake import FakeCoordinator
 from app.storage_analysis.planning import Estimate
 from test_job_coordinator import Clock, payload

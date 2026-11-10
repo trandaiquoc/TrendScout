@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Protocol
 
 from app.storage_analysis.planning import Estimate
+from app.workers.safety import OfflineBudget
 
 
 class State(str, Enum):
@@ -54,6 +55,7 @@ class Policy:
     backoff_seconds: int
     estimate: Estimate
     budget: Estimate
+    operation_budget: OfflineBudget | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class Job:
     reason_code: str | None = None
     completion_evidence: CompletionEvidence | None = None
     refresh_budget: object | None = None
+    recovery_reserved: bool = False
     identity: dict = field(default_factory=dict)
     audit: list = field(default_factory=list)
 
@@ -93,7 +96,9 @@ class Job:
 class JobCoordinator(Protocol):
     def create(self, idempotency_key: str, payload: dict, policy: Policy) -> Job: ...
     def get(self, job_id: str) -> Job | None: ...
+    def get_owned(self, job_id: str, owner: str, token: int) -> Job: ...
     def claim(self, job_id: str, owner: str) -> Job: ...
+    def abort_stale(self, job_id: str) -> Job: ...
     def heartbeat(self, job_id: str, owner: str, token: int, revision: int) -> Job: ...
     def transition(self, job_id: str, owner: str, token: int, revision: int, target: State, *, evidence: CompletionEvidence | None = None, reason_code: str | None = None) -> Job: ...
     def request_cancel(self, job_id: str, revision: int) -> Job: ...

@@ -33,6 +33,7 @@ def build_offline_manifest(*, dataset_id, job_id, resource_id, identity, metadat
     """Bind source/quality inputs to the coordinator's independently stored identity."""
     base=dict(metadata)
     base.update(dataset_id=dataset_id,job_id=job_id,resource_id=resource_id,occurrence_id=identity['occurrence_id'])
+    base.update({key: identity[key] for key in ('schedule_id','schedule_version') if key in identity})
     base.update(manifest_version='offline-manifest-v1',required_partitions=sorted(shards),
                 shards={key:{'sha256':hash_fn(value),'count':len(value['items'])} for key,value in shards.items()},
                 expected_count=sum(len(value['items']) for value in shards.values()),

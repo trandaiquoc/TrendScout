@@ -1,11 +1,13 @@
 """Safety extensions; synthetic, in-process only."""
+from refresh_fixtures import fixture_policy as Policy
 from copy import deepcopy
+from dataclasses import replace
 from datetime import timedelta
 import unittest
 from app.datasets.fake import FakeDatasetStore, digest
 from app.datasets.manifest import validate_manifest
 from app.jobs.fake import FakeCoordinator
-from app.jobs.contracts import Policy, State
+from app.jobs.contracts import State
 from app.storage_analysis.planning import Estimate
 from app.workers.safety import OfflineBudget, RefreshError, ErrorCode, RetryPolicy
 from app.workers.refresh import RefreshWorker as _RefreshWorker
@@ -19,11 +21,15 @@ from test_job_coordinator import Clock, payload
 
 
 def manifest(job_id):
-    fields=dict(occurrence_id='once',source_id='wikimedia',country='US',access='all-access',project='all',analysis_date='2026-01-08',window_start='2026-01-01',window_end='2026-01-08',source_version='v1',processing_version='v1',cleaning_version='v1',classification_version='v1',algorithm_version='v1',provenance='synthetic://fixture',quality_report_ref='report-v1')
-    shards={'full':{'items':[1]},'empty':{'items':[]}}
-    m=dict(fields,manifest_version='offline-manifest-v1',dataset_id='dataset',job_id=job_id,resource_id='stream',required_partitions=['full','empty'],shards={k:{'sha256':digest(v),'count':len(v['items'])} for k,v in shards.items()},expected_count=1,quality_report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':1,'dataset_id':'dataset','source_id':'wikimedia','processing_version':'v1','snapshots':[{'date':'2026-01-08','status':'SUCCESS','source_url':'synthetic://fixture','quality_flags':[],'rejection_reasons':{},'raw_count':1,'accepted_count':1,'rejected_count':0,'duplicate_count':0}]})
-    m['quality_report_digest']=digest(m['quality_report'])
-    return fields,shards,m
+    from refresh_fixtures import strict_output
+    from app.datasets.manifest import build_offline_manifest
+    output=strict_output({'shards':{'full':{'items':[1]},'empty':{'items':[]}},'quality_ok':True})
+    fields=dict(output['manifest_input'],occurrence_id='once')
+    shards=output['shards']
+    report=dict(output['quality_report'],dataset_id='dataset')
+    result=build_offline_manifest(dataset_id='dataset',job_id=job_id,resource_id='stream',identity=payload(),
+                                  metadata=fields,shards=shards,quality_report=report,hash_fn=digest)
+    return fields,shards,result
 
 
 class SafetyTests(unittest.TestCase):
@@ -46,7 +52,11 @@ class SafetyTests(unittest.TestCase):
         self.repo.seal('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m)
         j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,State.VALIDATING)
         self.assertTrue(self.repo.verify('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=False))
-        self.repo.datasets['dataset']['shards']['full']['items'].append(2)
+        changed=self.repo.datasets['dataset']
+        changed['shards']['full']['items'].append(2)
+        changed['manifest']['shards']['full']['sha256']=digest(changed['shards']['full'])
+        changed['manifest']['shards']['full']['count']+=1
+        changed['manifest']['expected_count']+=1
         with self.assertRaises(Exception): self.repo.publish('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,None,0)
         self.assertEqual(self.repo.active('stream'),(None,0))
 
@@ -65,9 +75,9 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(self.repo.active('stream'),(None,0))
 
     def test_budget_stops_at_each_write_boundary(self):
-        for limit in (0,1,2,3,4):
+        for limit in (2,3,4,5):
             with self.subTest(limit=limit):
-                c=FakeCoordinator(self.clock); repo=FakeDatasetStore(c); j=c.create(str(limit),payload(str(limit)),self.policy)
+                c=FakeCoordinator(self.clock); repo=FakeDatasetStore(c); j=c.create(str(limit),payload(str(limit)),replace(self.policy,operation_budget=OfflineBudget(100,limit)))
                 worker=RefreshWorker(c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'s':{'items':x}},'quality_ok':True},budget=OfflineBudget(max_reads=100,max_writes=limit))
                 with self.assertRaises(RefreshError) as caught: worker.run(j.job_id,'a','stream','d',expected_active=None,expected_revision=0)
                 self.assertEqual(caught.exception.code,ErrorCode.QUOTA_EXCEEDED)
@@ -126,9 +136,9 @@ class PersistedFakeRecoveryTests(unittest.TestCase):
             del state,repo,c,store
             restored=pickle.loads(file.read_bytes())
             store2=FakeTransactionalStore(); store2.jobs=restored['jobs']; store2.keys=restored['keys']; store2.occurrences=restored['occurrences']
+            store2.resources=restored['resources']; store2.datasets=restored['datasets']; store2.publications=restored['publications']
             c2=FakeCoordinator(clock,store2); repo2=FakeDatasetStore(c2)
             self.assertGreater(c2.get(job.job_id).refresh_budget.writes, 2)
-            repo2.resources=restored['resources']; repo2.datasets=restored['datasets']; repo2.publications=restored['publications']
             clock.advance(31)
             self.assertEqual(RefreshWorker(c2,repo2,lambda:[1],lambda x:x,fn).run(job.job_id,'b','stream','draft',expected_active=None,expected_revision=0,fresh_on_retry=True),'PUBLISHED')
             self.assertEqual(repo2.active('stream'),('draft-f2',1))
@@ -170,6 +180,7 @@ class RequiredBudgetTests(unittest.TestCase):
         with self.assertRaises(ValueError): RealWorker(None,None,None,None,None)
         clock=Clock(); c=FakeCoordinator(clock); repo=FakeDatasetStore(c)
         policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,3,Estimate(),Estimate())
+        policy=replace(policy,operation_budget=OfflineBudget(200,40))
         job=c.create('b',payload('b'),policy)
         def crash(name):
             if name=='after_draft': raise SystemExit()

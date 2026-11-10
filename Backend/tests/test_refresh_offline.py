@@ -1,4 +1,5 @@
 """Offline-only scheduler and fenced publication tests."""
+from refresh_fixtures import fixture_policy as Policy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
@@ -19,7 +20,6 @@ def RefreshWorker(*args, **kwargs):
     from refresh_fixtures import strict_worker
     return strict_worker(_RefreshWorker, *args, **kwargs)
 from test_job_coordinator import Clock, payload
-from app.jobs.contracts import Policy
 from app.storage_analysis.planning import Estimate
 
 
@@ -62,7 +62,8 @@ class PublicationTests(unittest.TestCase):
         metadata=dict(output['manifest_input'],occurrence_id=j.identity['occurrence_id'])
         report=dict(output['quality_report'],dataset_id=name)
         self.repo.draft(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,metadata)
-        self.repo.put_shard(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,'s1',{'items':[1]})
+        for key,shard in output['shards'].items():
+            self.repo.put_shard(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,key,shard)
         self.repo.put_quality_report(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,report)
         manifest=build_offline_manifest(dataset_id=name,job_id=j.job_id,resource_id='stream',identity=j.identity,metadata=metadata,shards=output['shards'],quality_report=report,hash_fn=digest)
         self.repo.seal(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,manifest)
@@ -95,7 +96,7 @@ class PublicationTests(unittest.TestCase):
         j,_=self.ready(j,token,'data')
         with self.assertRaises(Conflict): self.repo.publish('data','stream',j.job_id,j.owner,j.fencing,j.revision,token,None,1)
         self.assertEqual(self.repo.active('stream'),(None,0))
-        b=self.job('B'); barrier=Barrier(2)
+        b=self.c.claim(self.c.create('B-other',dict(payload('B-other'),resource_id='other'),self.policy).job_id,'B'); barrier=Barrier(2)
         def claim(_):
             barrier.wait()
             try: return self.repo.claim_resource('other',b.job_id,b.owner,b.fencing,b.revision)

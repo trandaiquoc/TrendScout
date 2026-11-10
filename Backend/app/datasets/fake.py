@@ -18,13 +18,14 @@ class FakeDatasetStore:
     def __init__(self, coordinator):
         self.c = coordinator
         self.lock = coordinator._mutex
-        self.resources = {}
-        self.datasets = {}
-        self.publications = {}
+        self.resources = coordinator._store.resources
+        self.datasets = coordinator._store.datasets
+        self.publications = coordinator._store.publications
 
     def claim_resource(self, resource, job_id, owner, job_token, revision):
         with self.lock:
-            now=self.c._now(); job=self.c._jobs[job_id]; self.c._owned(job,owner,job_token,revision,now)
+            now=self.c._now(); job=self.c._jobs[job_id]; self.c._owned(job,owner,job_token,revision,now); self.c._charge(job,reads=1,writes=1)
+            if job.identity.get('resource_id') != resource: raise Conflict('resource identity mismatch')
             if job.state not in (State.QUEUED,State.FETCHING,State.NORMALIZING,State.ANALYZING,State.PERSISTING,State.VALIDATING): raise InvalidTransition('job cannot claim')
             old=self.resources.get(resource)
             if old and old['owner'] is not None and old['expires_at'] > now: raise Conflict('resource leased')
@@ -44,9 +45,10 @@ class FakeDatasetStore:
         """Release the fake resource and enqueue a bounded retry atomically."""
         with self.lock:
             job, lease = self._owned(resource, job_id, owner, job_token, revision, token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1,kind="retry")
+            if delay is not None and (not isinstance(delay, timedelta) or delay.total_seconds() < 0): raise ValueError('invalid retry delay')
             updated = self.c.transition(job_id, owner, job_token, revision, State.RETRY_WAIT, reason_code=reason)
             if delay is not None:
-                if not isinstance(delay, timedelta) or delay.total_seconds() < 0: raise ValueError('invalid retry delay')
                 job.retry_after=self.c._now()+delay
                 updated=deepcopy(job)
             lease['owner']=None; lease['expires_at']=self.c._now()
@@ -56,6 +58,7 @@ class FakeDatasetStore:
         """Renew job and resource together in the fake transaction boundary."""
         with self.lock:
             job, lease = self._owned(resource, job_id, owner, job_token, revision, token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1,kind="heartbeat")
             updated = self.c.heartbeat(job_id, owner, job_token, revision)
             lease['expires_at'] = updated.expires_at
             return updated
@@ -63,6 +66,7 @@ class FakeDatasetStore:
     def draft(self, dataset_id, resource, job_id, owner, job_token, revision, token, metadata):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1)
             if dataset_id in self.datasets:
                 d=self.datasets[dataset_id]
                 if (d['job_id'],d['token'],d['metadata']) != (job_id,token,metadata): raise Conflict('draft identity conflict')
@@ -73,6 +77,7 @@ class FakeDatasetStore:
     def put_shard(self, dataset_id, resource, job_id, owner, job_token, revision, token, shard_id, data):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1)
             d=self.datasets[dataset_id]
             if (d['resource'],d['job_id'],d['owner'],d['token'],d['state']) != (resource,job_id,owner,token,'DRAFT'): raise Conflict('immutable or foreign draft')
             if shard_id in d['shards'] and d['shards'][shard_id] != data: raise Conflict('immutable shard')
@@ -81,6 +86,7 @@ class FakeDatasetStore:
     def put_quality_report(self, dataset_id, resource, job_id, owner, job_token, revision, token, report):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1)
             d=self.datasets[dataset_id]
             if (d['resource'],d['job_id'],d['owner'],d['token'],d['state']) != (resource,job_id,owner,token,'DRAFT'): raise Conflict('immutable or foreign report')
             if d['quality_report'] is not None and d['quality_report'] != report: raise Conflict('immutable report')
@@ -89,6 +95,7 @@ class FakeDatasetStore:
     def seal(self, dataset_id, resource, job_id, owner, job_token, revision, token, expected):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
+            self.c._charge(self.c._jobs[job_id],reads=1,writes=1)
             d=self.datasets[dataset_id]
             if (d['resource'],d['job_id'],d['owner'],d['token'],d['state']) != (resource,job_id,owner,token,'DRAFT'): raise Conflict('cannot seal')
             if not isinstance(expected,dict) or expected.get('manifest_version') != 'offline-manifest-v1': raise ValueError('strict manifest required')
@@ -97,6 +104,7 @@ class FakeDatasetStore:
     def verify(self, dataset_id, resource, job_id, owner, job_token, revision, token, *, quality_ok):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
+            self.c._charge(self.c._jobs[job_id],reads=2+len(self.datasets[dataset_id]["shards"]),writes=1)
             d=self.datasets[dataset_id]
             if (d['resource'],d['job_id'],d['owner'],d['token'],d['state']) != (resource,job_id,owner,token,'VALIDATING'): raise Conflict('wrong draft')
             actual={key:digest(value) for key,value in d['shards'].items()}
@@ -129,17 +137,22 @@ class FakeDatasetStore:
                     start=date.fromisoformat(d['manifest']['window_start']); end=date.fromisoformat(d['manifest']['window_end']); analysis=date.fromisoformat(d['manifest']['analysis_date'])
                     valid=valid and end == analysis and type(identity.get('window')) is int and (end-start).days == identity['window']
                 except (ValueError, TypeError, KeyError): valid=False
+                keys=('analysis_date','window_start','window_end','source_version','processing_version','cleaning_version','classification_version','algorithm_version','provenance')
+                config=identity.get('dataset_config')
+                valid=valid and isinstance(config,dict) and all(k in config and config[k] == d['manifest'].get(k) for k in keys)
+                valid=valid and d['manifest'].get('config_version') == identity.get('config_version')
+                valid=valid and all((k in d['manifest']) == (k in identity) and d['manifest'].get(k)==identity.get(k)
+                                    and (k not in d['metadata'] or (k in identity and d['metadata'][k]==identity[k]))
+                                    for k in ('schedule_id','schedule_version'))
+                valid=valid and d['manifest'].get('source_id') == 'wikimedia_pageviews_top_per_country'
                 if d['manifest'].get('source_id') == 'wikimedia_pageviews_top_per_country':
-                    keys=('analysis_date','window_start','window_end','source_version','processing_version','cleaning_version','classification_version','algorithm_version')
-                    config=identity.get('dataset_config')
-                    valid=valid and isinstance(config,dict) and all(k in config and config[k] == d['manifest'].get(k) for k in keys)
-                    valid=valid and d['manifest'].get('config_version') == identity.get('config_version')
                     valid=valid and validate_source_evidence(d['manifest'],d['shards'],report)
                     entries=d['shards'].get('scores-v1',{}).get('items', [])
                     valid=valid and all(isinstance(row,dict) and row.get('source') == d['manifest']['source_id'] and row.get('country_scope') == d['manifest']['country'] and row.get('access') == d['manifest']['access'] and row.get('observation_date') == d['manifest']['analysis_date'] and row.get('algorithm_version') == d['manifest']['algorithm_version'] and not (row.get('status') == 'INSUFFICIENT_DATA' and row.get('score') is not None) for row in entries)
                 if not valid:
                     d['state']='REJECTED'; return False
                 d['verified_counts']={'shards':len(actual),'items':sum(len(v['items']) for v in d['shards'].values())}
+                d['verified_identity']=digest(identity)
                 d['verified']=digest({'manifest':d['manifest'],'metadata':d['metadata'],'counts':d['verified_counts'],'quality_report':d['quality_report']})
                 d['verified_at']=self.c._now(); d['verification_version']='offline-verifier-v1'
                 d['state']='READY'; return True
@@ -154,23 +167,47 @@ class FakeDatasetStore:
             r=self.resources.get(resource)
             return (r['active'],r['pointer_revision']) if r else (None,0)
 
+    def replay_publication(self, resource, job_id, owner, dataset_id, fresh_on_retry, expected_active, expected_revision):
+        """Read a committed receipt; never change the active pointer."""
+        with self.lock:
+            job=self.c._jobs[job_id]
+            matches=[]
+            for (stored_resource, stored_dataset), receipt in self.publications.items():
+                published_job, published_owner, token, previous, previous_revision = receipt
+                proposed=f'{dataset_id}-f{token}' if fresh_on_retry else dataset_id
+                if (stored_resource,stored_dataset,published_job,published_owner,previous,previous_revision)==(resource,proposed,job_id,owner,expected_active,expected_revision):
+                    matches.append((stored_dataset,token))
+            if job.state != State.COMPLETED or len(matches) != 1: raise Conflict('publication receipt mismatch')
+            self.c._charge(job,reads=1)
+            stored_dataset,token=matches[0]
+            return self.publish(stored_dataset,resource,job_id,owner,job.fencing,job.revision,token,expected_active,expected_revision)
+
     def publish(self, dataset_id, resource, job_id, owner, job_token, revision, token, expected_active, expected_revision):
         with self.lock:
             # A retry after a committed response lost can observe its own publication, never roll back a newer pointer.
             prior=self.publications.get((resource,dataset_id))
             if prior is not None:
-                if prior != (job_id,owner,token): raise Conflict('publication identity mismatch')
+                if prior != (job_id,owner,token,expected_active,expected_revision): raise Conflict('publication identity mismatch')
+                self.c._charge(self.c._jobs[job_id],reads=1)
                 return 'ALREADY_PUBLISHED'
             job, lease=self._owned(resource,job_id,owner,job_token,revision,token)
             d=self.datasets[dataset_id]
+            # Publication rechecks every persisted shard, not just the pointer,
+            # job and manifest. Account for those reads before any mutation.
+            self.c._charge(job,reads=3+len(d['shards']),writes=3)
             if job.state != State.VALIDATING or d['state'] != 'READY' or (d['resource'],d['job_id'],d['owner'],d['token']) != (resource,job_id,owner,token): raise Conflict('not ready')
+            if d.get('verified_identity') != digest(job.identity): raise Conflict('job identity changed')
             if d['verified'] != digest({'manifest':d['manifest'],'metadata':d['metadata'],'counts':d['verified_counts'],'quality_report':d['quality_report']}): raise Conflict('manifest changed')
             if not isinstance(d.get('manifest'),dict) or d['manifest'].get('manifest_version') != 'offline-manifest-v1': raise Conflict('strict manifest required')
             if not validate_manifest(d['manifest'],dataset_id=dataset_id,job_id=job_id,resource_id=resource,metadata=d['metadata'],shards=d['shards'],hash_fn=digest): raise Conflict('persisted content changed')
             if (lease['active'],lease['pointer_revision']) != (expected_active,expected_revision): raise Conflict('pointer CAS')
+            # Prepare all fallible work before mutating shared publication state.
+            # The common lock is the fake atomic boundary; this is not disk durability.
+            updated_job=deepcopy(job)
+            updated_job.state=State.COMPLETED; updated_job.reason_code=None
+            self.c._record(updated_job,self.c._now(),'PUBLISHED')
             if expected_active is not None: self.datasets[expected_active]['state']='SUPERSEDED'
             lease['active']=dataset_id; lease['pointer_revision']+=1
-            d['state']='ACTIVE'; job.state=State.COMPLETED; job.reason_code=None
-            self.c._record(job,self.c._now(),'PUBLISHED')
-            self.publications[resource,dataset_id]=(job_id,owner,token)
+            d['state']='ACTIVE'; self.c._jobs[job_id]=updated_job
+            self.publications[resource,dataset_id]=(job_id,owner,token,expected_active,expected_revision)
             return 'PUBLISHED'

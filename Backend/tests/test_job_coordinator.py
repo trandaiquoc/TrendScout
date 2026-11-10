@@ -1,11 +1,12 @@
 """Fake-only coordination tests; no claim of distributed Firestore safety."""
+from refresh_fixtures import fixture_policy as Policy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import Barrier
 import unittest
 
-from app.jobs.contracts import (State, Policy, CompletionEvidence, Conflict, LeaseLost,
+from app.jobs.contracts import (State, CompletionEvidence, Conflict, LeaseLost,
     InvalidTransition, BudgetExceeded, DeadlineExceeded, legacy_state)
 from app.jobs.fake import FakeCoordinator, FakeTransactionalStore
 from app.storage_analysis.planning import Estimate
@@ -18,8 +19,8 @@ class Clock:
 
 
 def payload(occurrence='once'):
-    return dict(job_type='analysis',source='wikimedia',scope={'country':'US'},window=7,
-                config_version='v1',occurrence_id=occurrence,tenant_scope='public')
+    return dict(job_type='analysis',source='wikimedia_pageviews_top_per_country',scope={'country':'US','access':'all-access','project':'all'},resource_id='stream',window=7,
+                config_version='v1',occurrence_id=occurrence,tenant_scope='public',dataset_config={'analysis_date':'2026-01-08','window_start':'2026-01-01','window_end':'2026-01-08','source_version':'wikimedia-top-per-country-v1','processing_version':'cleaning-pipeline-v0.1','cleaning_version':'cleaning-pipeline-v0.1','classification_version':'title-rules-v0.1','algorithm_version':'wikimedia-trend-v0.1','provenance':'https://wikimedia.org/api/rest_v1/metrics/pageviews/top-per-country/US/all-access/2026/01/08'})
 
 
 class CoordinationTests(unittest.TestCase):
@@ -69,10 +70,9 @@ class CoordinationTests(unittest.TestCase):
         with self.assertRaises(Conflict): self.change(old,State.FETCHING)
         self.assertTrue(self.coordinator.check_publish(j.job_id,j.owner,j.fencing,j.revision))
         with self.assertRaises(InvalidTransition): self.change(j,State.COMPLETED,evidence=CompletionEvidence(5,4,True,'manifest'))
-        j=self.change(j,State.COMPLETED,evidence=CompletionEvidence(5,5,True,'manifest'))
-        self.assertEqual(j.completion_evidence.persisted_documents,5)
-        with self.assertRaises(InvalidTransition): self.change(j,State.FETCHING)
-        self.assertIsNone(self.coordinator.release(j.job_id,j.owner,j.fencing,j.revision).owner)
+        with self.assertRaises(InvalidTransition): self.change(j,State.COMPLETED,evidence=CompletionEvidence(5,5,True,'manifest'))
+        self.assertEqual(self.coordinator.get(j.job_id).state,State.VALIDATING)
+        with self.assertRaises(InvalidTransition): self.coordinator.release(j.job_id,j.owner,j.fencing,j.revision)
 
     def test_cancel_checkpoint_and_heartbeat(self):
         j=self.coordinator.claim(self.job.job_id,'A')

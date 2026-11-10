@@ -27,20 +27,29 @@ class RefreshError(ValueError):
 
 @dataclass
 class OfflineBudget:
-    """Conservative per-attempt estimate; separate from cloud usage or job-wide quota."""
+    """Job-scoped estimated operation budget, not cloud billing telemetry."""
     max_reads: int
     max_writes: int
     reads: int=0
     writes: int=0
+    metadata_operations: int=0
+    heartbeats: int=0
+    source_requests: int=0
+    retry_operations: int=0
 
     def __post_init__(self):
-        if any(type(x) is not int or x < 0 for x in (self.max_reads,self.max_writes,self.reads,self.writes)):
+        if any(type(x) is not int or x < 0 for x in (self.max_reads,self.max_writes,self.reads,self.writes,self.metadata_operations,self.heartbeats,self.source_requests,self.retry_operations)):
             raise ValueError('nonnegative integer budget required')
 
-    def charge(self, *, reads=0, writes=0):
+    def charge(self, *, reads=0, writes=0, kind=None):
         if type(reads) is not int or type(writes) is not int or reads < 0 or writes < 0: raise ValueError('invalid charge')
+        if kind not in (None, 'metadata', 'heartbeat', 'retry', 'source'): raise ValueError('invalid budget category')
         if self.reads+reads > self.max_reads or self.writes+writes > self.max_writes: raise RefreshError(ErrorCode.QUOTA_EXCEEDED)
         self.reads+=reads; self.writes+=writes
+        if kind == 'metadata': self.metadata_operations+=1
+        elif kind == 'heartbeat': self.heartbeats+=1
+        elif kind == 'retry': self.retry_operations+=1
+        if kind == 'source': self.source_requests+=1
 
 
 @dataclass(frozen=True)
