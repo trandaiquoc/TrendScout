@@ -1,0 +1,46 @@
+# Giai đoạn 2 — Bước 18: AI classification, NER và semantic candidates
+
+**Kết luận: `OFFLINE_ACCEPTED — CLASSIFICATION_REVIEW_PENDING_APPROVAL`; `BLOCKED_FOR_LIVE`.** Toàn bộ là sidecar/fake chỉ gọi tường minh trong test; AI disabled mặc định, không nối RunService, API, dashboard, Firestore hoặc ranking. Không gọi AI/Wikimedia/cloud, không đọc API key, chi phí AI live bằng 0. `REAL_WORLD_ACCURACY_NOT_EVALUATED`: không có nhãn reviewer thật hoặc đánh giá độ chính xác production.
+
+## Thiết kế và hợp đồng
+
+`app/enrichment/offline.py` nhận keyword sau cleaning/extraction/classification cũ, language detector Bước 8, evidence và policy do test tin cậy cấp. Khi đủ điều kiện, service gọi trực tiếp Engine/registry/fake provider Bước 16; không có engine thứ hai. `Task.CLASSIFICATION` dùng `classification-v1` / `classification-request-v1`, `Task.NER` dùng `ner-v1` / `ner-request-v1`; translation và synthetic cũ giữ schema, tất cả SUCCESS qua validator. Schema xác thực task, binding entity/input/request, language, taxonomy `topics-v1.0`, model version, field/type, giới hạn tám candidates, enum, duplicate keys/items, JSON/Unicode, refusal/truncation và evidence ID trong request. Classification chỉ nhận category trong allowlist trusted và taxonomy, subcategory phải đúng parent và trong allowlist; không ghép `unclassified` với nhãn tích cực. Không tự chuyển `home_goods` trong kết quả rule cũ thành `home_living`.
+
+Proposal giữ riêng rule categories/version, proposed labels, entity type, confidence, commercial relevance `not_assessed`, evidence và review status. Không có trường cho AI tự `APPROVED`; extra field bị từ chối. Confidence do model báo chỉ là metadata, `CALIBRATION_NOT_EVALUATED`, không phải xác suất đã hiệu chuẩn. Multi-label được hỗ trợ trong giới hạn, mỗi nhãn có evidence; `other`/`unclassified` và reason mơ hồ bị gắn cảnh báo. Rule, keyword/entity ID, title, provenance, views, missing/censored, score và ranking không bị thay.
+
+## Evidence, NER và review
+
+`Evidence.from_row` gắn ID/fingerprint với keyword, observation, source, project, country/access, date, URL, title và version. Verifier độc lập so sánh evidence với row hiện tại và kiểm tra span bằng Python Unicode code-point offsets `[start,end)` trong title nguyên bản. Evidence bịa, sai entity/scope/ngày, offset hoặc span bị reject; không tạo label usable. Text khớp **không chứng minh inference đúng**: mọi proposal vẫn `REVIEW_REQUIRED`; test có ví dụ gán technology cho span `fashion week` với confidence 0,99, vẫn chỉ là candidate cần review. Không sử dụng keyword text làm bằng chứng mua hàng hoặc commercial relevance.
+
+NER chỉ trả candidates có ID ổn định, exact mention span, type, language, evidence, model/schema/prompt và trạng thái review. Không tạo Wikidata ID, canonical identity, quan hệ nhạy cảm hay tự merge. `review.py` chỉ là fake trusted authority/store: proposal phải được trusted caller đăng ký, reviewer token thuộc đúng tenant, timestamp có timezone, reason và quyết định versioned. Decision gắn fingerprint toàn proposal, taxonomy và evidence. Đối chiếu với row/evidence/rule hiện tại khi quyết định hoặc đọc; dữ liệu thay đổi làm approval cũ không hợp lệ. Quyết định mới nhất thay quyết định trước. Đây không phải authentication, RBAC, human review thật hay storage production.
+
+`semantic.py` tính cosine chỉ trên vector synthetic có dimension/model/version, tenant/source/country/access/date tương thích và trusted context; thiếu, sai chiều/model/scope, non-finite, zero hoặc title quá ngắn được skip. Output là candidate cần review với similarity, không là same-entity determination hoặc trend score; không có vector database/model download. Near-duplicate lexical Bước 8 được giữ riêng và không merge.
+
+## Ngôn ngữ, quyền và an toàn
+
+Language detector hiện chỉ có heuristic en/vi, không có confidence số; unknown/mixed bị skip. Translation sidecar Bước 17 là optional input: binding entity/observation/fingerprint/schema/version được kiểm tra; candidate `REVIEW_REQUIRED` hoặc unavailable không được dùng làm evidence, service có thể dùng title gốc khi detector hỗ trợ. Không gọi translation tự động. Service chỉ chọn unclassified hoặc record được reviewer yêu cầu, policy và task phải bật rõ; source permission/license, PII review, data category, tenant, provider/model, deadline và budget phải hợp lệ. Blocklist email/phone/key/URL/instruction bổ sung chỉ là heuristic; permission/PII boolean và registration evidence là trusted fake boundary, không chứng minh an toàn dữ liệu thật. Chỉ title và binding cần thiết gửi fake provider; không raw snapshots. Provider bị giới hạn đúng `FakeProvider`, không có tools/network/Firestore.
+
+Accounting/retry/idempotency tái dùng Engine Bước 16, reserve trước mỗi call, retry bounded 429/500 có acknowledgement, không refund timeout/usage không rõ. Operation ID xác định từ task, source/observation, input/evidence, taxonomy/rule/policy/permission và provider/model; thay service hoặc tùy tiện đổi request ID không tạo account mới. Fake state và đồng thời chỉ trong process; cần cơ chế durable/distributed trước live. Cache classification/NER/semantic **DISABLED**, kể cả khi synthetic cache bật; idempotent replay vẫn qua guard và evidence verification. Audit engine chỉ ghi mã/trạng thái, hash IDs và usage ước tính/báo cáo; không raw title/prompt/output/secret.
+
+## Kiểm thử và ma trận
+
+Các test `Backend/tests/test_enrichment_offline.py` dùng fixture Wikimedia synthetic qua adapter mock → cleaning v0.1 → extraction/rule classifier → detector → service → fake Engine/schema → independent evidence verification → sidecar. Không có human labels thật.
+
+| Failure matrix | Test / bằng chứng |
+|---|---|
+| 1–3: unclassified, rule giữ nguyên, multi-label | `test_golden_unclassified_classification_and_ner_no_core_change`, `test_rule_classified_remains_unchanged_multi_label` |
+| 4–13: taxonomy/hierarchy, evidence ID/entity/offset/span, confidence và mơ hồ | `test_invalid_taxonomy_duplicate_hierarchy_and_binding`, `test_schema_adversarial_matrix_through_engine`, `test_invalid_evidence_wrong_entity_offsets_span_and_confidence`, `test_irrelevant_but_matching_evidence_is_not_a_verified_fact` |
+| 14–16: NER exact span, sai span, identity/scope | `test_golden_unclassified_classification_and_ner_no_core_change`, `test_ner_invalid_spans_and_entity_not_merged`, `test_scope_evidence_other_project_date_rejected_and_same_title_not_merged` |
+| 17–19: vector chiều/model/scope, high similarity chỉ candidate | `test_semantic_candidate_scope_and_vector_guards`, `test_semantic_cross_tenant_and_short_title_fail_closed` |
+| 20–22: unknown/mixed, translation unavailable/review/binding sai | `test_language_translation_and_safe_disabled_behavior`, `test_translation_review_unavailable_or_changed_binding_never_becomes_evidence` |
+| 23–30: disabled/permission/PII/injection, budget/timeout/retry/schema | `test_policy_and_sensitive_no_call`, `test_untrusted_admin_instruction_cannot_approve_or_change_rules`, `test_timeout_retry_invalid_json_budget_and_replay`, `test_schema_adversarial_matrix_through_engine`; old AI/translation tests tiếp tục pass |
+| 31–35: tenant/cache, reviewer authority, reject/stale approval | `test_review_proposals_with_same_operation_do_not_cross_tenant`, `test_fake_review_authority_tenant_and_stale`, `test_ai_cannot_mint_approval_and_review_fingerprint_immutable`, `test_approval_stale_when_current_source_changes` |
+| 36–38: golden/score null, không live | `test_golden_unclassified_classification_and_ner_no_core_change`, Golden hai seed và seccomp dưới đây |
+
+Evaluation Framework Bước 11 trả `NOT_COMPARABLE` cho classification thay vì coi đó là trend ranking (`test_existing_evaluation_rejects_enrichment_as_trend_ranking`). Ví dụ hai record synthetic trong `test_synthetic_evaluation_counts_are_not_real_accuracy`: 1 proposal, 1 skip, coverage/skip rate đều 50%; đây không phải accuracy. Trường hợp false positive giả định ở trên chứng minh evidence khớp vẫn có thể dẫn đến đề xuất sai; chưa có bộ nhãn thật nên không công bố precision/false-positive rate thực.
+
+Kiểm thử cuối: **328/328 pass**, không có test skip; bao gồm 23 test enrichment mới và toàn bộ 305 test cũ. Golden **7/7** với từng seed 1 và 983; `pip check`, `bash -n setup.sh start.sh` và `node --check Frontend/public/app.js` pass. Các lệnh chạy qua seccomp launcher chặn `socket`, `connect`, `io_uring_setup` và đóng fd kế thừa; Python/native socket và child process được kiểm tra bị EPERM. Đây là biện pháp test offline, không phải network control production. Không đổi Golden Expected, legacy API/Firestore schema, cleaning, classifier/scoring v0.1, translation, worker hoặc retention.
+
+## PENDING_APPROVAL, giới hạn và rollback
+
+Cần chủ dự án duyệt provider/model, taxonomy/other policy, nguồn và license, dữ liệu được chia sẻ, PII, budget/cost, secret management, reviewer/RBAC và tiêu chí human review. Cần labeled dataset độc lập, calibration, đo false positives và provider live test riêng; equality span và cosine không chứng minh nghĩa, danh tính hoặc chất lượng model. Fake reviewer/store, state, rate, budget, vector và đồng hồ không chứng minh persistence, fencing hay multi-host isolation. Không deploy, không bật billing/IAM/scheduler. Rollback offline bằng không gọi sidecar và giữ policy disabled; core không có migration. **`BLOCKED_FOR_LIVE` giữ nguyên.**
