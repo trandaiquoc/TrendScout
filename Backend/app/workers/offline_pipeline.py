@@ -10,6 +10,7 @@ from app.models.observations import FetchStatus
 from app.processing.wikimedia_cleaning import clean_snapshot
 from app.sources.registry import SourceRegistry
 from app.sources.wikimedia.adapter import METADATA, WikimediaAdapter
+from app.workers.safety import ErrorCode, RefreshError
 
 
 class OfflineWikimediaPipeline:
@@ -30,8 +31,12 @@ class OfflineWikimediaPipeline:
                 source=registry.create(METADATA.source_id)
                 return [await source.fetch_day(day) for day in self.dates]
         snapshots=asyncio.run(collect())
-        if snapshots[0][0].fetch_status not in (FetchStatus.SUCCESS, FetchStatus.PARTIAL):
-            raise ValueError('analysis day unavailable')
+        current=snapshots[0][0]
+        if current.fetch_status not in (FetchStatus.SUCCESS, FetchStatus.PARTIAL):
+            if current.http_status == 429: raise RefreshError(ErrorCode.RATE_LIMITED)
+            if current.http_status is not None and current.http_status >= 500: raise RefreshError(ErrorCode.RETRYABLE_SOURCE_ERROR)
+            if current.http_status == 404: raise RefreshError(ErrorCode.PERMANENT_SOURCE_ERROR)
+            raise RefreshError(ErrorCode.INVALID_SOURCE_DATA)
         return snapshots
 
     def clean(self, snapshots):

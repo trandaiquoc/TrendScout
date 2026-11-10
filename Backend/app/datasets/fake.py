@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from app.jobs.contracts import State, Conflict, LeaseLost, InvalidTransition
+from app.datasets.manifest import validate_manifest
 
 
 def digest(data):
@@ -37,6 +38,14 @@ class FakeDatasetStore:
         if lease['job_id'] != job_id or lease['owner'] != owner or lease['token'] != resource_token or lease['expires_at'] <= now:
             raise LeaseLost('resource lease lost')
         return job, lease
+
+    def retry_wait(self, resource, job_id, owner, job_token, revision, token, reason):
+        """Release the fake resource and enqueue a bounded retry atomically."""
+        with self.lock:
+            job, lease = self._owned(resource, job_id, owner, job_token, revision, token)
+            updated = self.c.transition(job_id, owner, job_token, revision, State.RETRY_WAIT, reason_code=reason)
+            lease['owner']=None; lease['expires_at']=self.c._now()
+            return updated
 
     def heartbeat_resource(self, resource, job_id, owner, job_token, revision, token):
         """Renew job and resource together in the fake transaction boundary."""
@@ -78,7 +87,15 @@ class FakeDatasetStore:
             d=self.datasets[dataset_id]
             if (d['resource'],d['job_id'],d['owner'],d['token'],d['state']) != (resource,job_id,owner,token,'VALIDATING'): raise Conflict('wrong draft')
             actual={key:digest(value) for key,value in d['shards'].items()}
-            # Derive a minimal quality gate from persisted content, not just a caller flag.
+            if d['manifest'].get('manifest_version') == 'offline-manifest-v1':
+                valid=validate_manifest(d['manifest'],dataset_id=dataset_id,job_id=job_id,resource_id=resource,
+                                        metadata=d['metadata'],shards=d['shards'],hash_fn=digest)
+                if not valid:
+                    d['state']='REJECTED'; return False
+                d['verified_counts']={'shards':len(actual),'items':sum(len(v['items']) for v in d['shards'].values())}
+                d['verified']=digest({'manifest':d['manifest'],'metadata':d['metadata'],'counts':d['verified_counts']})
+                d['state']='READY'; return True
+            # Legacy synthetic manifest compatibility; not sufficient for offline acceptance.
             valid_content = bool(d['metadata'].get('source')) and all(isinstance(v, dict) and isinstance(v.get('items'), list) for v in d['shards'].values())
             item_count = sum(len(v['items']) for v in d['shards'].values()) if valid_content else 0
             if quality_ok is not True or actual != d['manifest'] or item_count == 0:
@@ -107,6 +124,7 @@ class FakeDatasetStore:
             d=self.datasets[dataset_id]
             if job.state != State.VALIDATING or d['state'] != 'READY' or (d['resource'],d['job_id'],d['owner'],d['token']) != (resource,job_id,owner,token): raise Conflict('not ready')
             if d['verified'] != digest({'manifest':d['manifest'],'metadata':d['metadata'],'counts':d['verified_counts']}): raise Conflict('manifest changed')
+            if d['manifest'].get('manifest_version') == 'offline-manifest-v1' and not validate_manifest(d['manifest'],dataset_id=dataset_id,job_id=job_id,resource_id=resource,metadata=d['metadata'],shards=d['shards'],hash_fn=digest): raise Conflict('persisted content changed')
             if (lease['active'],lease['pointer_revision']) != (expected_active,expected_revision): raise Conflict('pointer CAS')
             if expected_active is not None: self.datasets[expected_active]['state']='SUPERSEDED'
             lease['active']=dataset_id; lease['pointer_revision']+=1
