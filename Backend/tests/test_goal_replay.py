@@ -46,6 +46,12 @@ class WorkerReplayTests(unittest.TestCase):
         def output(rows): return strict_output({'shards':{'s':{'items':rows}},'quality_ok':True})
         w=RefreshWorker(jobs,store,lambda:[1],lambda x:x,output,budget=OfflineBudget(10000,10000))
         self.assertEqual(w.run(a.job_id,'owner-a','stream','dataset-a',expected_active=None,expected_revision=0,fresh_on_retry=True),'PUBLISHED')
+        from app.datasets.fake import digest
+        from app.datasets.manifest import validate_manifest
+        original_dataset=store.read_dataset('dataset-a-f1')
+        original_manifest_digest=digest(original_dataset['manifest'])
+        original_shard_digests={key:digest(value) for key,value in original_dataset['shards'].items()}
+        self.assertEqual(store.active('stream'),('dataset-a-f1',1))
         import copy
         used=copy.deepcopy(jobs._jobs[a.job_id].refresh_budget)
         data={'jobs':backing.jobs,'keys':backing.keys,'occurrences':backing.occurrences,'resources':store.resources,'datasets':store.datasets,'publications':store.publications}
@@ -55,6 +61,13 @@ class WorkerReplayTests(unittest.TestCase):
             backing2.jobs=state['jobs']; backing2.keys=state['keys']; backing2.occurrences=state['occurrences']
             backing2.resources=state['resources']; backing2.datasets=state['datasets']; backing2.publications=state['publications']
             jobs=FakeCoordinator(clock,backing2); store=FakeDatasetStore(jobs)
+            restored=store.read_dataset('dataset-a-f1')
+            self.assertEqual(restored['state'],'ACTIVE')
+            self.assertEqual(digest(restored['manifest']),original_manifest_digest)
+            self.assertEqual({key:digest(value) for key,value in restored['shards'].items()},original_shard_digests)
+            self.assertTrue(validate_manifest(restored['manifest'],dataset_id='dataset-a-f1',job_id=a.job_id,
+                resource_id='stream',metadata=restored['metadata'],shards=restored['shards'],hash_fn=digest))
+            self.assertEqual(store.active('stream'),('dataset-a-f1',1))
             restored_budget=jobs._jobs[a.job_id].refresh_budget
             self.assertEqual(restored_budget,used)
             self.assertGreater(restored_budget.metadata_operations,0)

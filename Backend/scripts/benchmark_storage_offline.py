@@ -45,7 +45,7 @@ async def benchmark(size):
 
 
 async def main():
-    for n in (1000, 5000):
+    for n in (1000, 5000, 10000):
         print(json.dumps(await benchmark(n), sort_keys=True))
 
 if __name__ == '__main__':
