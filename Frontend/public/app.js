@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { runId: null, dataRunId: null, run: null, category: 'all', q: '', sort: 'score', offset: 0, limit: 20, next: null, poll: null, sequence: 0, runSequence: 0, submitting: false };
+const state = { runId: null, dataRunId: null, run: null, category: 'all', q: '', sort: 'score', offset: 0, limit: 20, next: null, poll: null, sequence: 0, runSequence: 0, detailSequence: 0, readOnly: true, submitting: false };
 const statuses = { QUEUED:'Đang chờ', FETCHING:'Đang thu thập', NORMALIZING:'Đang chuẩn hóa', ANALYZING:'Đang phân tích', PERSISTING:'Đang lưu', COMPLETED:'Hoàn thành', PARTIAL:'Dữ liệu một phần', FAILED:'Thất bại', ABORTED:'Đã gián đoạn' };
 const activeStatuses = new Set(['QUEUED','FETCHING','NORMALIZING','ANALYZING','PERSISTING']);
 const labels = { EMERGING:'EMERGING', STABLE:'STABLE', FALLING:'FALLING', INSUFFICIENT_DATA:'INSUFFICIENT DATA' };
@@ -10,9 +10,13 @@ const el = (tag, text, className) => { const node = document.createElement(tag);
 function notice(message, error = false) { const n = $('#notice'); n.hidden = !message; n.textContent = message || ''; n.classList.toggle('error', error); }
 async function api(path, options = {}) {
   let response;
-  try { response = await fetch(path, { ...options, headers: { Accept:'application/json', ...options.headers } }); }
-  catch { throw new Error('Không kết nối được backend. Kiểm tra server và thử lại.'); }
-  let data; try { data = await response.json(); } catch { throw new Error('Backend trả về dữ liệu không hợp lệ.'); }
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15000);
+  try { response = await fetch(path, { ...options, signal:controller.signal, headers: { Accept:'application/json', ...options.headers } }); }
+  catch { clearTimeout(timeout); throw new Error('Không kết nối được backend hoặc quá thời gian chờ. Kiểm tra server và thử lại.'); }
+  let data;
+  try { data = await response.json(); }
+  catch { throw new Error(controller.signal.aborted ? 'Backend quá thời gian chờ.' : 'Backend trả về dữ liệu không hợp lệ.'); }
+  finally { clearTimeout(timeout); }
   if (!response.ok) {
     const messages = {401:'Token không hợp lệ hoặc không có quyền vận hành.', 404:'Không tìm thấy run hoặc keyword.', 409:'Run đang chạy hoặc kết quả chưa sẵn sàng.', 429:'Đang trong thời gian chờ giữa các lần chạy.', 503:'Backend hoặc storage chưa sẵn sàng.'};
     throw new Error(messages[response.status] || `Không thể hoàn tất yêu cầu (HTTP ${response.status}).`);
@@ -40,11 +44,18 @@ function updateRun(run) {
   if (incomplete.length) warnings.push(`Ngày nguồn chưa đầy đủ: ${incomplete.map(x => `${x.date} (${x.http_status ?? x.status})`).join(', ')}.`);
   if (state.dataRunId && state.dataRunId !== state.runId) warnings.push('Bảng bên dưới vẫn thuộc run trước; kết quả mới chưa sẵn sàng.');
   notice(warnings.join('\n'), run.status === 'FAILED' || run.status === 'ABORTED');
-  $('#open-fetch').disabled = activeStatuses.has(run.status) || state.submitting;
+  $('#open-fetch').disabled = state.readOnly || activeStatuses.has(run.status) || state.submitting;
+  $('#runs-current').textContent = run.run_id || 'NOT_AVAILABLE';
+  $('#runs-state').textContent = run.status || 'NOT_AVAILABLE';
+  $('#runs-count').textContent = run.keyword_count == null ? 'NOT_AVAILABLE' : num(run.keyword_count);
+  $('#runs-coverage').textContent = Array.isArray(run.coverage) ? run.coverage.map(x => `${x.date || '—'}: ${x.status || 'NOT_AVAILABLE'}${x.http_status ? ` (${x.http_status})` : ''}`).join(' · ') || 'NOT_AVAILABLE' : 'NOT_MEASURED';
+  $('#quality-coverage').textContent = $('#runs-coverage').textContent;
+  $('#quality-fetched').textContent = run.fetched_at ? fetchedText(run.fetched_at) : 'NOT_AVAILABLE';
+  $('#overview-context').textContent = `Cửa sổ: ${Array.isArray(run.coverage) && run.coverage.length ? run.coverage.map(x => x.date || '—').join(' · ') : 'NOT_AVAILABLE'} · Thuật toán: ${run.algorithm_version || 'NOT_AVAILABLE'} · Thu thập: ${run.fetched_at ? fetchedText(run.fetched_at) : 'NOT_AVAILABLE'}`;
 }
 async function loadRun(id, { poll = false } = {}) {
   if (!/^[a-f0-9]{32}$/.test(id)) { notice('Run ID phải gồm 32 ký tự hex.', true); return; }
-  if (!poll) { clearTimeout(state.poll); notice('Đang tải thông tin run…'); }
+  if (!poll) { clearTimeout(state.poll); ++state.sequence; ++state.detailSequence; notice('Đang tải thông tin run…'); }
   const sequence = ++state.runSequence;
   try {
     const run = await api(`/api/runs/${encodeURIComponent(id)}`);
@@ -55,7 +66,7 @@ async function loadRun(id, { poll = false } = {}) {
     if ((run.status === 'COMPLETED' || run.status === 'PARTIAL') && Number.isInteger(run.keyword_count)) {
       state.dataRunId = id; state.offset = 0; renderRows([]); showEmpty('Đang tải kết quả', 'Vui lòng đợi.'); updateRun(run); await loadKeywords();
     }
-  } catch (err) { if (sequence === state.runSequence) { notice(err.message, true); $('#open-fetch').disabled = false; } }
+  } catch (err) { if (sequence === state.runSequence) { notice(err.message, true); $('#open-fetch').disabled = state.readOnly; } }
 }
 function makeCell(row, value, className) { const td = el('td'); td.append(el('span', value, className)); row.append(td); }
 function safeEvidenceUrl(value) {
@@ -90,33 +101,38 @@ async function loadKeywords() {
 function detailField(container, label, value, full = false) { const node = el('div', null, `detail-item${full ? ' full' : ''}`); node.append(el('small', label), el('div', value)); container.append(node); }
 async function openDetail(id) {
   if (!state.dataRunId || !/^[a-f0-9]{64}$/.test(id || '')) return;
+  const detailRunId = state.dataRunId; const detailSeq = ++state.detailSequence;
   const dialog = $('#detail-dialog'), box = $('#detail-content'); $('#detail-title').textContent = 'Đang tải…'; $('#detail-subtitle').textContent = ''; box.replaceChildren(); dialog.showModal();
   try {
-    const d = await api(`/api/runs/${encodeURIComponent(state.dataRunId)}/keywords/${id}`);
+    const d = await api(`/api/runs/${encodeURIComponent(detailRunId)}/keywords/${id}`);
+    if (detailSeq !== state.detailSequence || !dialog.open || state.dataRunId !== detailRunId) return;
     $('#detail-title').textContent = d.display_keyword || d.canonical_keyword || 'Keyword'; $('#detail-subtitle').textContent = `${d.source || '—'} · ${d.project || '—'} · ${dateText(d.observation_date)}`;
     detailField(box, 'Score / trạng thái', `${d.score == null ? 'Chưa đủ dữ liệu' : `${num(d.score)} / 100`} · ${d.status || '—'}`);
     detailField(box, 'Views ≈ / baseline ≈', `${num(d.current_views_ceil)} / ${num(d.baseline)}`);
     detailField(box, 'Ratio / ngày quan sát', `${d.ratio == null ? '—' : `${num(d.ratio)}×`} · ${num(d.observed_baseline_days)} / 7 ngày`);
     detailField(box, 'Thuật toán', d.algorithm_version || '—');
+    detailField(box, 'Chủ đề', Array.isArray(d.categories) && d.categories.length ? d.categories.join(' · ') : 'NOT_AVAILABLE');
+    detailField(box, 'Entity type / commercial relevance', `${typeof d.entity_type === 'string' ? d.entity_type : 'NOT_AVAILABLE'} · ${typeof d.commercial_relevance === 'string' ? d.commercial_relevance : 'NOT_ASSESSED'}`);
+    detailField(box, 'Trang gốc / phạm vi', `${typeof d.article_original === 'string' ? d.article_original : 'NOT_AVAILABLE'} · ${typeof d.country_scope === 'string' ? d.country_scope : 'NOT_AVAILABLE'} / ${typeof d.access === 'string' ? d.access : 'NOT_AVAILABLE'}`, true);
     const components = d.score_components; detailField(box, 'Thành phần score', components ? `Tăng trưởng G: ${num(components.growth)} · Độ phổ biến V: ${num(components.volume)} · Max views ≈ ${num(components.max_views_ceil)}` : 'Chưa đủ dữ liệu để tính.', true);
     const missing = Array.isArray(d.missing_baseline_dates) ? d.missing_baseline_dates.map(x => `${x.date}: ${x.reason}`).join(' · ') : ''; detailField(box, 'Ngày thiếu và lý do', missing || 'Không có ngày thiếu được báo cáo.', true);
     const observations = Array.isArray(d.baseline_observations) ? d.baseline_observations.map(x => `${x.date}: ${num(x.views_ceil)}`).join(' · ') : ''; detailField(box, 'Baseline quan sát ≈', observations || 'Chưa có quan sát.', true);
     const evidence = Array.isArray(d.classification_evidence) ? d.classification_evidence.map(x => `${x.category}: ${x.matched_text} (${x.rule_id})`).join(' · ') : ''; detailField(box, 'Bằng chứng phân loại', evidence || 'Chưa có bằng chứng phân loại.', true);
     detailField(box, 'Quality flags', Array.isArray(d.quality_flags) && d.quality_flags.length ? d.quality_flags.join(' · ') : 'Không có cờ được báo cáo.', true);
     const url = safeEvidenceUrl(d.evidence_url || d.source_url); if (url) { const cell = el('div', null, 'detail-item full'); cell.append(el('small','Nguồn bằng chứng')); const a = el('a', 'Mở trang Wikimedia ↗'); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; cell.append(a); box.append(cell); }
-  } catch (err) { $('#detail-title').textContent = 'Không tải được chi tiết'; detailField(box, 'Lỗi', err.message, true); }
+  } catch (err) { if (detailSeq === state.detailSequence && dialog.open) { $('#detail-title').textContent = 'Không tải được chi tiết'; detailField(box, 'Lỗi', err.message, true); } }
 }
 $('#load-run').addEventListener('click', () => loadRun($('#run-id').value.trim()));
 $('#run-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadRun(e.currentTarget.value.trim()); });
-$('#open-fetch').addEventListener('click', () => { $('#fetch-error').textContent = ''; $('#operator-token').value = ''; $('#fetch-dialog').showModal(); });
+$('#open-fetch').addEventListener('click', () => { if (state.readOnly) return; $('#fetch-error').textContent = ''; $('#operator-token').value = ''; $('#fetch-dialog').showModal(); });
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => document.getElementById(button.dataset.close).close()));
 $('#fetch-dialog').addEventListener('close', () => { $('#operator-token').value = ''; });
 $('#fetch-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (state.submitting) return; state.submitting = true; $('#open-fetch').disabled = true;
+  event.preventDefault(); if (state.readOnly || state.submitting) return; state.submitting = true; $('#open-fetch').disabled = true;
   const token = $('#operator-token').value; $('#operator-token').value = ''; $('#fetch-error').textContent = '';
   try { const created = await api('/api/runs', { method:'POST', headers:{ Authorization:`Bearer ${token}` } }); if (!/^[a-f0-9]{32}$/.test(created.run_id || '')) throw new Error('Backend trả run ID không hợp lệ.'); $('#fetch-dialog').close(); await loadRun(created.run_id); }
   catch (err) { $('#fetch-error').textContent = err.message; }
-  finally { state.submitting = false; $('#open-fetch').disabled = Boolean(state.run && activeStatuses.has(state.run.status)); }
+  finally { state.submitting = false; $('#open-fetch').disabled = state.readOnly || Boolean(state.run && activeStatuses.has(state.run.status)); }
 });
 document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-pressed','false'); }); button.classList.add('active'); button.setAttribute('aria-pressed','true'); state.category = button.dataset.category; state.offset = 0; loadKeywords(); }));
 let searchTimer; $('#search').addEventListener('input', e => { clearTimeout(searchTimer); const value = e.currentTarget.value; searchTimer = setTimeout(() => { state.q = value; state.offset = 0; loadKeywords(); }, 350); });
@@ -126,8 +142,29 @@ $('#next').addEventListener('click', () => { if (state.next != null) { state.off
 window.addEventListener('pagehide', () => { clearTimeout(state.poll); clearTimeout(searchTimer); });
 api('/api/health').then(() => { $('#connection-dot').classList.add('good'); $('#connection-text').textContent = 'Backend đã kết nối'; }).catch(() => { $('#connection-dot').classList.add('error'); $('#connection-text').textContent = 'Backend chưa kết nối'; notice('Không kết nối được backend. Khởi động server để tiếp tục.', true); });
 api('/api/config').then(config => {
-  if (config.read_only) {
-    $('#open-fetch').hidden = true;
-    $('#connection-text').textContent = 'Demo chỉ đọc';
-  }
-}).catch(() => {});
+  if (typeof config.read_only !== 'boolean') return;
+  state.readOnly = config.read_only;
+  $('#open-fetch').hidden = config.read_only;
+  $('#open-fetch').disabled = config.read_only || Boolean(state.run && activeStatuses.has(state.run.status));
+  if (config.read_only) $('#connection-text').textContent = 'Demo chỉ đọc';
+}).catch(() => { state.readOnly = true; });
+
+// Navigation changes presentation only; no hidden panel can initiate a write.
+const viewNames = {overview:'TỔNG QUAN', sources:'NGUỒN', runs:'LẦN PHÂN TÍCH', keywords:'KHÁM PHÁ TỪ KHÓA', algorithms:'SO SÁNH THUẬT TOÁN', quality:'CHẤT LƯỢNG', refresh:'WEEKLY REFRESH', research:'PRODUCT RESEARCH', usage:'AI USAGE', settings:'CÀI ĐẶT'};
+function showView(name) {
+  if (name === 'results') name = 'keywords';
+  if (!Object.hasOwn(viewNames, name)) name = 'overview';
+  document.querySelectorAll('[data-view]').forEach(panel => { panel.hidden = panel.dataset.view !== name; });
+  document.querySelectorAll('[data-nav]').forEach(link => { const active=link.dataset.nav === name; link.classList.toggle('active',active); if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); });
+  $('#breadcrumb-current').textContent=viewNames[name];
+}
+window.addEventListener('hashchange', () => showView(window.location.hash.slice(1)));
+showView(window.location.hash.slice(1));
+$('#draft-translation').addEventListener('change', () => { $('#draft-status').textContent='Bản nháp giả lập chưa lưu; không thay đổi cấu hình server.'; });
+$('#reset-draft').addEventListener('click', () => { $('#draft-translation').checked=false; $('#draft-status').textContent='Bản nháp đã đặt lại; không thay đổi cấu hình server.'; });
+$('#detail-dialog').addEventListener('close', () => { ++state.detailSequence; });
+
+const comparisonStates = {wikimedia:'wikimedia-trend-v0.1: COMPLETED · trend score / điểm · 3 ngày baseline', robust:'robust-z-mad: SKIPPED · robust z / không thứ nguyên · thiếu mẫu', ewma:'ewma: FAILED · delta / đơn vị nguồn · fixture lỗi'};
+function describeComparison() { $('#compare-description').textContent = `${comparisonStates[$('#compare-first').value]} · ${comparisonStates[$('#compare-second').value]} · NOT_COMPARABLE · OFFLINE DEMO`; }
+$('#compare-first').addEventListener('change', describeComparison);
+$('#compare-second').addEventListener('change', describeComparison);
