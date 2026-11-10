@@ -1,0 +1,186 @@
+{
+  "dataset_id": "synthetic-evaluation",
+  "dataset_version": "v1",
+  "label_policy_version": "synthetic-v1",
+  "mode": "SYNTHETIC",
+  "scope": {
+    "source": "wikimedia_pageviews_top_per_country",
+    "country": "US",
+    "access": "all-access",
+    "project": "en.wikipedia",
+    "metric": "views_ceil",
+    "unit": "approx_pageviews_upper_bound"
+  },
+  "evaluation_date": "2026-01-31",
+  "window_days": 7,
+  "entities": [
+    {
+      "entity_id": "A",
+      "title": "SYNTHETIC A",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 100,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 20
+        }
+      ],
+      "label": {
+        "value": "POSITIVE",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": "synthetic-reviewer",
+        "review_timestamp": "2026-02-01T00:00:00Z",
+        "disagreement": false
+      }
+    },
+    {
+      "entity_id": "B",
+      "title": "SYNTHETIC B",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 90,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 21
+        }
+      ],
+      "label": {
+        "value": "NEGATIVE",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": "synthetic-reviewer",
+        "review_timestamp": "2026-02-01T00:00:00Z",
+        "disagreement": false
+      }
+    },
+    {
+      "entity_id": "C",
+      "title": "SYNTHETIC C",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 80,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 22
+        }
+      ],
+      "label": {
+        "value": "POSITIVE",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": "synthetic-reviewer",
+        "review_timestamp": "2026-02-01T00:00:00Z",
+        "disagreement": false
+      }
+    },
+    {
+      "entity_id": "D",
+      "title": "SYNTHETIC D",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 70,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 23
+        }
+      ],
+      "label": {
+        "value": "NEGATIVE",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": "synthetic-reviewer",
+        "review_timestamp": "2026-02-01T00:00:00Z",
+        "disagreement": false
+      }
+    },
+    {
+      "entity_id": "E",
+      "title": "SYNTHETIC E",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 60,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 24
+        }
+      ],
+      "label": {
+        "value": "UNCERTAIN",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": "synthetic-reviewer",
+        "review_timestamp": "2026-02-01T00:00:00Z",
+        "disagreement": true
+      }
+    },
+    {
+      "entity_id": "F",
+      "title": "SYNTHETIC F",
+      "provenance": "synthetic://fixture",
+      "scope": {
+        "source": "wikimedia_pageviews_top_per_country",
+        "country": "US",
+        "access": "all-access",
+        "project": "en.wikipedia",
+        "metric": "views_ceil",
+        "unit": "approx_pageviews_upper_bound"
+      },
+      "current_date": "2026-01-31",
+      "current_value": 50,
+      "history": [
+        {
+          "date": "2026-01-30",
+          "value": 25
+        }
+      ],
+      "label": {
+        "value": "NOT_REVIEWED",
+        "evidence_as_of": "2026-01-31",
+        "reviewer_id": null,
+        "review_timestamp": null,
+        "disagreement": false
+      }
+    }
+  ]
+}
