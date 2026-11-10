@@ -31,3 +31,28 @@ Quota estimates Bước 12 vẫn chỉ là dự toán; chưa có distributed quo
 - Chưa kiểm thử đầy đủ 404/429/algorithm skipped, retry/backoff end-to-end, quota hết giữa persist, partial writes/restart/resume draft, crash trước publish, server transaction failure hoặc lost network; chưa chứng minh restart process giữ fake state. Không gọi fake test là emulator/live.
 - File: `Backend/app/scheduling/recurrence.py`, `Backend/app/datasets/fake.py`, `Backend/app/workers/refresh.py`, các `__init__.py`, `Backend/tests/test_refresh_offline.py`, báo cáo này.
 - Rollback: module chưa wire vào app; revert commit code/report theo quy trình Git, manual-run nguyên trạng. Điều kiện sang Bước 15: hoàn thiện và nghiệm thu offline những thiếu sót nêu trên, thống nhất retention/fallback; live vẫn blocked cho đến khi adapter và an toàn multi-host được chứng minh và phê duyệt.
+
+## Bổ sung nghiệm thu offline — vòng 2
+
+**OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE.** Đã xử lý một phần blocker cũ: worker chạy business components thật với fake source, scheduler nối được job và có mô phỏng recovery một trường hợp. Chưa hoàn thiện manifest, retry và toàn bộ ma trận recovery nên không đạt nghiệm thu offline đầy đủ.
+
+### Pipeline và dispatch
+
+`OfflineWikimediaPipeline` chỉ chấp nhận `httpx.MockTransport`: SourceRegistry → WikimediaAdapter thực (từng ngày fixture) → `clean_snapshot` Bước 7 → extraction/classification v0.1 → `algorithm_engine().legacy_results` / scoring v0.1 một lần. Output score shard được fake persist, đọc lại, verify digest và publish CAS. Test dùng `golden_v1/source.json` synthetic, so từng entity với `golden_v1/expected.json`, gồm score null; expected không sửa. Scheduler occurrence tạo job qua `dispatch_job`; coordinator fake store dùng lại cho client mới cho cùng job ID, key trùng payload khác báo conflict. Đây là state trong RAM, không phải process restart hoặc storage bền.
+
+### Checkpoint, heartbeat và recovery
+
+Thêm checkpoints trước/sau fetch, cleaning, analysis; trước/sau draft, trước từng shard, seal, verify, publish. Mỗi checkpoint kiểm tra job revision/cancel, resource fencing và gia hạn job/resource trong cùng fake lock; test expiry tại 13 điểm không publish. Không thể heartbeat trong sync blocking call; nếu lease hết hạn, bước sau từ chối publish. Adapter fixture gọi từng ngày nhưng chưa có checkpoint giữa các request trong fetch. Cancel được kiểm tra giữa các bước; không hủy được sync call đang thực hiện.
+
+Fault injection crash bằng `BaseException` trước seal sau shard write: giữ draft cũ; sau expiry, coordinator mới cùng fake state và dataset repository còn trong RAM, worker claim token mới và `fresh_on_retry=True` tạo namespace mới, publish đúng một lần. Các checkpoint khác mới test **lease expiry**, không phải kiểm thử crash/recovery từng điểm; chưa resume draft verified hay tránh fetch lại. Chưa có fault injection sau publish trước acknowledgement ở worker; fake publication replay đã test ở vòng trước. Không xóa draft. Đường retry tự động, phân loại transient/permanent, backoff/timeout và quota mỗi write chưa triển khai; 404/429/500 ngày phân tích hiện đi FAILED, không tự retry, không biến thành 0. Test không có active mới sau các lỗi này; test cũ xác nhận failure giữ active trước đó. Scheduler fake đánh dấu dispatched trước job create, nếu create lỗi cần recovery/atomic dispatch: chưa chứng minh crash an toàn tại ranh giới này.
+
+### Manifest và publication
+
+Giữ manifest map shard/digest, kiểm nội dung persisted, metadata nguồn, count tối thiểu, quality flag, fingerprint bất biến và READY; bảo vệ resource fence và active CAS bằng fake lock. Chưa có contract đầy đủ dataset/job/occurrence/source/scope/window/version/partition/count/provenance/quality report; chưa phân biệt tốt partition rỗng hợp lệ, chưa bảo đảm quality cho missing snapshot/baseline theo policy được duyệt. Không khẳng định các dataset partial được ngăn theo mọi policy. Cần hoàn thiện manifest/quality gate và test tampering, missing/extra partitions trước nghiệm thu. Resource fencing giữa job khác occurrence, stale owner và fake publication replay tiếp tục được test, không suy ra Firestore atomicity.
+
+### Kiểm thử, giới hạn và bước tiếp theo
+
+- 157 tests pass, 0 fail/skip; golden tests 7/7 cho mỗi seed 1 và 983; pip check, bash -n và node --check pass. Integration test chạy pipeline thật bằng HTTP mock, không gọi cloud/network.
+- Môi trường không có `firebase` CLI hoặc `FIRESTORE_EMULATOR_HOST`; chưa chạy emulator và chưa có transactional Firestore publisher. Không bật scheduler/worker, runtime cache, classifier mới, AI, retention hoặc billing; API/schema/Vercel/manual-run giữ nguyên.
+- Trước khi chốt OFFLINE_ACCEPTED: hoàn thiện manifest/version/quality dựa persisted records; recovery và retry bounded theo failure matrix, dispatch không mất occurrence khi job create lỗi, batch checkpoint, quota từng write, lost ack và full crash matrix; chạy test hợp đồng. Cần duyệt policy quality/partial, scheduler, retention/fallback và budget (`PENDING_APPROVAL`). Bước 15 chưa bắt đầu.
+- LIVE: cần adapter transaction atomic cùng lease/resource fence/manifest revision/pointer, đồng hồ tin cậy, emulator hai client, xử lý unknown commit, IAM/hosting/quota/rollback được duyệt và bằng chứng phù hợp. Fake state không chứng minh multi-host safety.
