@@ -38,6 +38,14 @@ class FakeDatasetStore:
             raise LeaseLost('resource lease lost')
         return job, lease
 
+    def heartbeat_resource(self, resource, job_id, owner, job_token, revision, token):
+        """Renew job and resource together in the fake transaction boundary."""
+        with self.lock:
+            job, lease = self._owned(resource, job_id, owner, job_token, revision, token)
+            updated = self.c.heartbeat(job_id, owner, job_token, revision)
+            lease['expires_at'] = updated.expires_at
+            return updated
+
     def draft(self, dataset_id, resource, job_id, owner, job_token, revision, token, metadata):
         with self.lock:
             self._owned(resource,job_id,owner,job_token,revision,token)
@@ -78,6 +86,10 @@ class FakeDatasetStore:
             d['verified_counts']={'shards':len(actual),'items':item_count}
             d['verified']=digest({'manifest':d['manifest'],'metadata':d['metadata'],'counts':d['verified_counts']})
             d['state']='READY'; return True
+
+    def read_dataset(self, dataset_id):
+        with self.lock:
+            return deepcopy(self.datasets.get(dataset_id))
 
     def active(self,resource):
         with self.lock:
