@@ -129,3 +129,91 @@ Budget estimated trong fake: source HTTP requests đếm riêng qua `Policy.max_
 Failure matrix: A `test_retry_exhausted_preserves_previous_active` PASS; B `test_429_then_success_after_retry_after` PASS; C `test_invalid_source_payload_is_permanent_and_preserves_active` PASS cho active chưa có, **OPEN** test có active cũ; D config/algorithm `test_persisted_evidence_tampering_rejects_even_if_hashes_updated` PASS nhưng window/scope E2E đầy đủ **OPEN**; E `CancellationMatrixTests` PASS trước persist/giữa shard/trước publish/sau commit; F `CrashMatrixTests` và `test_concurrent_publish_idempotence` PARTIAL, **OPEN** replay worker sau mất ack và kiểm active đã tiến tiếp; G stale owner `test_resource_fencing_two_distinct_occurrences_and_lost_ack` PASS fake; H `test_reload_fake_snapshot_from_temporary_file` PASS budget và re-claim fake, **OPEN** kiểm toàn bộ publication identity/idempotency sau reload. Khi cần tái thử dùng fresh token namespace; chưa resume draft cũ. Source requests, retry và hoạt động coordinator chỉ được test trong tiến trình; không chứng minh crash durability thật.
 
 179 tests pass, 0 fail/skip; golden 7/7 mỗi seed 1 và 983; pip check, bash -n và node --check pass. Golden expected/API/Firestore demo/HostRunLock/Vercel không thay đổi. OFFLINE cần các test OPEN nêu trên và budget thực thi đủ; LIVE cần Firestore transactional coordinator/publisher, emulator/multi-host, trusted time, IAM/hosting/quota/rollback approvals. Retention, lịch vận hành và quality threshold vẫn PENDING_APPROVAL; chưa chuyển Bước 15.
+
+## Final Goal Execution — Offline Acceptance
+
+Trạng thái kiểm tra hiện tại: **đang thực hiện**, chưa kết luận nghiệm thu. Các test chỉ chứng minh fake, live vẫn `BLOCKED_FOR_LIVE`.
+
+- Budget tại job creation/idempotency và ranh giới coordinator/dataset: đang rà soát; `test_goal_budget.py` tái hiện fail-closed/không reset/stale owner, `test_goal_boundaries.py` duyệt các ngưỡng reads/writes. Cần audit đầy đủ các operation và tác động failure/retry.
+- Identity/evidence: đang rà soát; `test_goal_identity_integration.py` mutation fields và `test_refresh_integration.py` tamper raw/status/score. Verifier đã chặn source không có profile, so raw gốc, replay cleaning và entity set; cần tiếp tục audit.
+- Recovery/publish: `test_goal_replay.py` kiểm tra mất ack, replay sau active mới, reload receipt và lỗi `_record`; `test_goal_concurrency.py` kiểm tra stale blocking worker và race cancel/publish. Cần hoàn thiện failure matrix và đối chiếu toàn bộ tiêu chí trước kết luận.
+
+Ghi nhận sự cố trong quá trình kiểm thử goal: một test âm tính đã thay MockTransport bằng `httpx.AsyncHTTPTransport` và vô tình thử một request tới Wikimedia; response không được lưu hoặc báo cáo là dữ liệu demo. Test đã được sửa để dùng transport giả luôn lỗi nếu bị gọi; pipeline kiểm tra MockTransport ngay trước tạo client. Các lần kiểm thử sau được chạy với `socket.socket.connect` bị chặn. Không có Firestore cloud write, deploy hoặc thay billing.
+
+### Kết quả kiểm tra bổ sung và điều kiện chưa đạt
+
+**OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE.** Các thay đổi dưới đây chỉ được kiểm thử trong fake; không chứng minh transaction hoặc durability của Firestore. Không thể kết luận `OFFLINE_ACCEPTED`: điều kiện tuyệt đối của goal yêu cầu không gọi live/cloud trong quá trình thực hiện, nhưng đã có một lần thử request Wikimedia ngoài ý muốn như ghi nhận ở trên. Không thể làm cho sự kiện này chưa từng xảy ra; cần quyết định của người yêu cầu về cách xử lý điều kiện nghiệm thu này. Các kiểm thử sau sự cố chặn socket kết nối.
+
+| Nội dung | Bằng chứng offline | Trạng thái kỹ thuật / giới hạn |
+|---|---|---|
+| Budget từ creation đến publish | `test_goal_budget.py`, `test_goal_boundaries.py` duyệt các ngưỡng reads/writes; `test_publish_accounts_each_persisted_shard_read` kiểm tra charge khi publish đọc lại từng shard | Đã thực thi fail-closed trong fake; đây là ước tính, không phải Firestore billing. Job có thể còn ở trạng thái chưa kết thúc nếu hết budget trước khi ghi trạng thái lỗi. |
+| Identity và evidence | `test_goal_identity_integration.py` mutation các trường job; `test_persisted_evidence_tampering_rejects_even_if_hashes_updated` thay đổi raw/status/score | Fake xác minh identity đã lưu, dữ liệu và cleaning persisted; không xác thực mật mã nguồn bên ngoài và không tính lại toàn bộ scoring ở verifier. |
+| Replay, fencing, CAS | `test_goal_replay.py`, `test_goal_concurrency.py`; gồm mất ack, reload state tạm, publication mới hơn, stale worker và CAS conflict qua worker | PASS theo mô hình cùng tiến trình; pickle chỉ dùng cho state thử nghiệm đáng tin cậy, không phải durability cloud. |
+| Dispatch và failure matrix | `test_goal_dispatch.py`, `test_refresh_integration.py`, `test_refresh_safety.py` | Kiểm tra cạnh tranh dispatch, retry 429/500/502/503/timeout, deadline, cancellation, invalid/404 và active cũ với mock. Scheduler/worker production vẫn tắt. |
+| Golden và regression | 212/212 tests pass bằng `unittest discover`, chặn socket; Golden 7/7 với mỗi `PYTHONHASHSEED=1` và `983`; `pip check`, `bash -n`, `node --check` pass | Không sửa golden expected, public API, Firestore schema demo hay quy tắc phân loại/scoring v0.1. |
+| Điều kiện không có live/cloud call | Một test lỗi đã thử kết nối Wikimedia; không lưu response hay sử dụng kết quả làm dữ liệu demo | **OPEN — không thể đảo ngược sự kiện đã xảy ra.** Không có Firestore cloud write, deploy hoặc thay billing trong goal này. |
+
+Chưa tạo hai commit nghiệm thu vì goal chỉ cho phép commit sau khi toàn bộ tiêu chí đạt; chưa push. Các sửa đổi và test vẫn nằm trong working tree để tiếp tục xử lý. Trước bất kỳ live acceptance nào vẫn cần adapter transaction Firestore, emulator/kiểm thử đồng thời phù hợp, cấu hình IAM/quota và phê duyệt.
+
+### Kiểm tra bổ sung tính nhất quán score
+
+Rà soát tiếp phát hiện verifier trước đó chấp nhận score bị sửa thành `STABLE` dù thiếu baseline, và chấp nhận sửa lý do ngày thiếu nếu caller đồng thời sửa digest. Hai biến thể `score_forged` và `score_missing` của `test_persisted_evidence_tampering_rejects_even_if_hashes_updated` đã thất bại trước khi sửa và pass sau khi sửa. `validate_source_evidence` hiện dựng lại `DayData` từ snapshot/raw đã persist, chạy lại cleaning/extraction và **tái sử dụng** scorer v0.1 hiện hữu rồi so sánh toàn bộ record; fixture fake cũng dùng chính scorer. Điều này bổ sung và thay thế nhận xét ở bảng trên rằng verifier không tính lại toàn bộ scoring. Không thay đổi công thức hay Golden Expected. Full regression sau sửa: 212/212 pass với socket bị chặn. Tình trạng nghiệm thu và sự cố kết nối ở trên giữ nguyên; đối chiếu này không chứng minh nguồn fake đến từ Wikimedia thật.
+
+### Retry-After ở ngày lịch sử
+
+`test_historical_429_stops_requests_and_honors_retry_after` tái hiện qua worker việc request ngày tiếp theo bị gửi sau HTTP 429 của ngày baseline mặc dù `Retry-After` còn 12 giây. Test thất bại trước sửa; sau sửa `OfflineWikimediaPipeline.fetch` dừng vòng lấy ngày, đưa job vào `RETRY_WAIT` theo delay và không publish. Nếu `Retry-After: 0` ở ngày lịch sử, không có thời gian chờ cần tuân thủ; snapshot lỗi vẫn được giữ để scorer báo thiếu, phù hợp fixture Golden. Chỉ MockTransport và đồng hồ giả được dùng. Full regression sau thay đổi: **213/213 pass**, chặn socket. Trạng thái `OFFLINE_INCOMPLETE` và `BLOCKED_FOR_LIVE` không đổi do điều kiện sự cố đã ghi ở trên.
+
+### Cô lập pipeline giữa worker đồng thời
+
+`test_shared_pipeline_does_not_use_replacement_guard_for_stale_worker` tái hiện trường hợp hai worker dùng cùng một `OfflineWikimediaPipeline`: sau khi worker mới takeover và publish, worker cũ tiếp tục và trước sửa đã làm tăng budget của job mới do guard bị ghi đè. Test đã thất bại trước sửa và pass sau sửa. Guard và cleaning reports nay dùng context riêng; header Retry-After chỉ nằm trong lần fetch tương ứng; guard được reset sau fetch thành công hoặc lỗi. `test_scheduled_real_pipeline_golden_results` và `test_http_429_retry_after_enforced_with_fake_clock` kiểm tra guard được reset. Đây là mô hình đồng thời trong cùng tiến trình, không phải distributed fencing. Regression: **214/214 pass**, kết nối socket bị chặn. Điều kiện `OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE` và sự cố đã ghi nhận không thay đổi.
+
+### Đối chiếu provenance từng observation
+
+Hai mutation `raw_source_url` và `raw_timestamp` trong `test_persisted_evidence_tampering_rejects_even_if_hashes_updated` chứng minh verifier trước sửa vẫn chấp nhận URL bằng chứng hoặc timestamp của observation bị thay đổi khi digest và score liên quan được cập nhật. Sau sửa, `validate_source_evidence` dựng lại toàn bộ observation từ `raw_record` bằng `_parse` của adapter với timestamp snapshot, rồi so sánh toàn bộ record trước cleaning/scoring. Cả hai mutation thất bại trước sửa và bị từ chối sau sửa; 214/214 tests pass với socket bị chặn. Việc dựng lại chứng minh tính nhất quán nội bộ của dữ liệu fake, không xác thực nguồn Internet hay giải quyết sự cố đã ghi nhận.
+
+### Trạng thái snapshot và adapter rejections
+
+Mutation `forged_success` chuyển snapshot `PARTIAL` thành `SUCCESS`, đồng thời chỉnh quality flags, score flags và digest; trước sửa verifier vẫn chấp nhận. Nay `validate_source_evidence` yêu cầu số rejected records khớp `rejected_count`, `SUCCESS` có zero adapter rejections, và `PARTIAL` có rejection cùng ít nhất một observation hợp lệ, theo semantics adapter. Mutation đã bị từ chối sau sửa; regression 214/214 pass với socket bị chặn. Các nhận định `OFFLINE_INCOMPLETE` và `BLOCKED_FOR_LIVE` cùng sự cố đã ghi nhận vẫn giữ nguyên.
+
+### Chống cấp lại budget cho cùng occurrence
+
+`test_changed_payload_cannot_create_second_budget_for_same_occurrence` đã tái hiện lỗi: coordinator từng dùng digest của toàn payload làm khóa occurrence, vì vậy đổi config/resource/tenant/job type cùng occurrence ID và idempotency key khác có thể tạo job và budget thứ hai. Sau sửa, fake coordinator kiểm tra tính duy nhất của `occurrence_id` trước và báo conflict nếu payload/policy không khớp; payload trùng vẫn replay cùng job. `test_recreated_scheduler_cannot_duplicate_occurrence_with_changed_config` kiểm tra qua dispatch; `test_reload_receipt_budget_idempotency_and_fence` kiểm tra lại sau reload fake state. Chỉ là contract fake trong tiến trình, không phải unique index cloud. Chưa thay đổi tình trạng `OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE` do sự cố đã ghi nhận.
+
+Sau sửa này, full regression **216/216 pass** với socket bị chặn; Golden 7/7 ở mỗi hash seed 1 và 983, `pip check`, `bash -n`, `node --check` và `git diff --check` pass.
+
+### Đối chiếu schedule identity cả trường hợp không có lịch
+
+`test_unscheduled_job_cannot_publish_invented_schedule_identity` tái hiện một job không có schedule trong coordinator nhưng manifest/metadata tự khai thêm `schedule_id` và `schedule_version`; trước sửa worker vẫn publish. `FakeDatasetStore.verify` hiện kiểm tra sự hiện diện lẫn giá trị của hai trường với identity coordinator, và từ chối metadata có schedule khác identity. Test thất bại trước sửa và pass sau sửa; full regression **217/217 pass** với socket bị chặn. Đây chỉ chứng minh kiểm tra trong fake; trạng thái `OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE` và sự cố đã ghi vẫn giữ nguyên.
+
+### Đối chiếu bổ sung theo goal
+
+| Nhóm | Bằng chứng tại trạng thái hiện tại | Tình trạng và phạm vi |
+|---|---|---|
+| A — creation/occurrence budget | `test_goal_budget.py`, `test_goal_dispatch.py`, `test_reload_receipt_budget_idempotency_and_fence` | CLOSED trong fake; không cấp budget mới cho cùng occurrence, kể cả đổi payload hoặc reload state fake. |
+| B — budget boundaries | `test_goal_boundaries.py`, `test_source_request_budget_stops_before_next_http_call`, `test_stale_dataset_operations_do_not_mutate_or_spend` | CLOSED theo ước tính operations của fake; không đại diện billing hay quota cloud. |
+| C — identity/window/version | `test_goal_identity_integration.py`, gồm mutation từng field và schedule không có trong job | CLOSED cho contract identity fake đã mô hình hóa; không chứng minh IAM hay identity phân tán. |
+| D — persisted evidence/manifest | `test_persisted_evidence_tampering_rejects_even_if_hashes_updated`, `test_publish_boundary.py`, golden worker integration | CLOSED cho integrity và replay business logic trên fake; không chứng minh tính xác thực nguồn bên ngoài. |
+| E — replay/recovery/fencing | `test_goal_replay.py`, `test_crash_matrix_restarts_new_draft_or_keeps_published`, `test_goal_concurrency.py` | CLOSED trong giả lập cùng tiến trình và file tạm; không phải crash durability hoặc transaction Firestore. |
+| F — retry/failure | `test_refresh_integration.py`, `test_refresh_safety.py`, `test_goal_dispatch.py` | CLOSED trong fake với các trường hợp được liệt kê; test mới `test_scheduler_retry_after_past_deadline_fails_without_publish` đi qua scheduler và worker, xác nhận 429 có delay vượt deadline làm job `FAILED` và không publish. |
+| Giới hạn không gọi live/cloud trong goal | Sự cố đã ghi trong mục Final Goal Execution | **OPEN:** một test đã thử kết nối Wikimedia ngoài ý muốn; không thể xác nhận tiêu chí lịch sử là chưa từng xảy ra. |
+
+Đợt chạy sau cùng: **218/218 tests pass**, socket bị chặn; Golden 7/7 ở mỗi hash seed 1 và 983; `pip check`, `bash -n`, `node --check` pass. `OFFLINE_INCOMPLETE; BLOCKED_FOR_LIVE` giữ nguyên. Các mục CLOSED chỉ nói về bằng chứng kỹ thuật fake, không thay thế điều kiện nghiệm thu tổng thể và không cho phép kết luận `OFFLINE_ACCEPTED`.
+
+## Final Goal Closure — Owner-Approved Historical Exception
+
+**Kết luận: `OFFLINE_ACCEPTED_WITH_RECORDED_EXCEPTION`; `BLOCKED_FOR_LIVE`.** Kết luận này cập nhật trạng thái của các mục `OFFLINE_INCOMPLETE` trước đó; các ghi nhận lịch sử được giữ nguyên. Chủ dự án đã chấp thuận ngoại lệ chỉ cho sự cố trong quá trình phát triển: một test âm tính vô tình thử kết nối Wikimedia. Sự cố đã xảy ra và không được mô tả là chưa từng xảy ra. Không có bằng chứng ghi/sửa Firestore cloud hoặc dùng response từ lần thử đó làm dữ liệu demo. Test đã được thay bằng transport giả luôn báo lỗi nếu bị gọi; pipeline cũng kiểm tra MockTransport ngay trước khi tạo client. Ngoại lệ không cho phép gọi live mới.
+
+| Nhóm nghiệm thu | Bằng chứng kiểm thử offline | Kết luận trong phạm vi fake |
+|---|---|---|
+| A — budget tạo job và occurrence | `test_goal_budget.py`, `test_goal_dispatch.py`, `test_reload_receipt_budget_idempotency_and_fence` | CLOSED: budget bắt buộc tại creation, idempotency/occurrence không cấp lại, reload giữ counters. |
+| B — accounting và recovery | `test_goal_boundaries.py`, `test_source_request_budget_stops_before_next_http_call`, `test_exhausted_job_can_be_aborted_after_lease_without_new_budget`, `test_retry_wait_write_exhaustion_recovers_after_fake_reload` | CLOSED theo ước tính fake: tách source requests và storage operations; hết budget không publish. Creation trả trước 1 estimated read và 1 estimated write riêng cho một lần `abort_stale`; sau lease hết hạn, thao tác này chuyển job stale sang `ABORTED`, giữ draft/active, không tăng quota hay reset budget. Đây là thao tác fake **gọi tường minh**, không có scheduler/worker tự động chạy; retry chờ hợp lệ chỉ abort sau deadline. Các ngưỡng test được điều chỉnh thêm đúng phần dự trữ. |
+| C — identity | `test_goal_identity_integration.py`, `test_goal_identity.py` | CLOSED cho job/occurrence/resource/scope/window/config/version/provenance và schedule kể cả khi không có schedule, với owner/fencing của fake. |
+| D — evidence và strict manifest | `test_scheduled_real_pipeline_golden_results`, `test_persisted_evidence_tampering_rejects_even_if_hashes_updated`, `test_publish_boundary.py` | CLOSED trong fake: đọc lại partitions, tái dựng adapter/cleaning/scoring v0.1, đối chiếu digests/counts và từ chối legacy/tamper. Không chứng minh tính xác thực nguồn từ Internet. |
+| E — recovery, replay, fencing/CAS | `test_goal_replay.py`, `test_goal_concurrency.py`, `test_crash_matrix_restarts_new_draft_or_keeps_published` | CLOSED trong mô phỏng: lost ack/reload, takeover, stale worker, CAS và active mới hơn không bị rollback. |
+| F — retry/failure | `test_refresh_integration.py`, `test_refresh_safety.py`, `test_goal_dispatch.py` | CLOSED trong fake: 429/Retry-After kể cả lịch sử và deadline, 500/502/503/timeout, 404/invalid, attempts, budget, cancel, lease, manifest, CAS, lost ack và duplicate dispatch. |
+
+Kiểm tra cuối: **220/220 tests pass**; Golden Regression **7/7** với từng `PYTHONHASHSEED=1` và `983`; `pip check`, `bash -n setup.sh start.sh`, `node --check Frontend/public/app.js`, `git diff --check` pass. Tất cả lệnh kiểm thử cuối được chạy dưới bộ lọc seccomp của Linux, từ chối syscall `socket`, `connect`, `io_uring_setup`, đóng file descriptor kế thừa và áp dụng cho tiến trình con. Đã kiểm tra độc lập syscall socket qua Python và libc, connect, và tiến trình con đều bị từ chối; Unix socketpair dùng nội bộ được phép. `unshare -n` không khả dụng trong môi trường nên không được tuyên bố là đã dùng network namespace. Các response nguồn trong tests dùng mock, không gọi Wikimedia mới.
+
+Kiểm tra diff so với `d58bd58`: API, Firestore demo storage/schema, cleaning/classification/scoring v0.1, manual-run, frontend, Vercel read-only, `start.sh` và `setup.sh` không thay đổi; tests API/Golden/Vercel tiếp tục pass. Scheduler và refresh worker chỉ là fake/offline prototype, không được wire để chạy production. Các tệp `.env`, `.venv`, cache và credential được bỏ qua; kiểm tra đường dẫn tệp thay đổi và quét mẫu secret độ tin cậy cao không phát hiện tệp nhạy cảm hoặc artifact được đưa vào thay đổi. Kiểm tra mẫu không phải bảo đảm tuyệt đối không có secret.
+
+Fake state, concurrency và publication dùng bộ nhớ/RLock cùng tiến trình; pickle file tạm chỉ phục vụ kiểm thử với state đáng tin cậy. Chúng không chứng minh Firestore transaction, durability hay fencing liên tiến trình. **`BLOCKED_FOR_LIVE` vẫn giữ nguyên**: Firestore transaction adapter, emulator concurrency, IAM, hosting, quota, đồng hồ tin cậy và production rollback chưa được nghiệm thu. Không triển khai Bước 15, không deploy, không bật billing và không push trong lần chốt này.
