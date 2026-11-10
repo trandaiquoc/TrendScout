@@ -1,6 +1,7 @@
 """Offline worker prototype with injected steps; never starts itself or calls live sources."""
 from app.jobs.contracts import State, LeaseLost, Conflict
 from app.datasets.fake import digest
+from app.datasets.manifest import build_offline_manifest
 from app.workers.safety import OfflineBudget, RefreshError, RetryPolicy
 
 
@@ -43,7 +44,10 @@ class RefreshWorker:
             with self.jobs._mutex:
                 self.jobs._jobs[job_id].refresh_budget.charge(reads=reads,writes=writes)
         try:
-            checkpoint(1, "before_fetch")
+            pipeline=getattr(self.fetch,'__self__',None)
+            bind=getattr(pipeline,'set_request_guard',None)
+            if callable(bind): bind(lambda: checkpoint(1, "before_source_request"))
+            checkpoint(0 if callable(bind) else 1, "before_fetch")
             job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.FETCHING)
             raw=self.fetch()
             checkpoint(name="after_fetch")
@@ -57,8 +61,10 @@ class RefreshWorker:
             checkpoint(name="after_analysis")
             job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.PERSISTING)
             checkpoint(name="before_draft")
+            if not isinstance(output.get('manifest_input'),dict): raise ValueError('strict manifest inputs required')
+            strict_metadata=dict(output['manifest_input'],occurrence_id=job.identity['occurrence_id'])
             charge(writes=1)
-            self.datasets.draft(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,output['metadata'])
+            self.datasets.draft(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,strict_metadata)
             checkpoint(name="after_draft")
             for key, value in output['shards'].items():
                 checkpoint(name="before_shard")
@@ -66,14 +72,20 @@ class RefreshWorker:
                 self.datasets.put_shard(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,key,value)
                 self.checkpoint_hook('after_shard')
             checkpoint(name="before_seal")
-            manifest=output.get('manifest') or {key:digest(value) for key,value in output['shards'].items()}
+            if not isinstance(output.get('manifest_input'),dict) or not isinstance(output.get('quality_report'),dict): raise ValueError('strict manifest inputs required')
+            report=dict(output['quality_report'],dataset_id=dataset_id)
+            charge(writes=1)
+            self.datasets.put_quality_report(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,report)
+            metadata=dict(output['manifest_input'],occurrence_id=job.identity['occurrence_id'])
+            manifest=build_offline_manifest(dataset_id=dataset_id,job_id=job_id,resource_id=resource,identity=job.identity,
+                                            metadata=metadata,shards=output['shards'],quality_report=report,hash_fn=digest)
             charge(writes=1)
             self.datasets.seal(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,manifest)
             checkpoint(name="after_seal")
             job=self.jobs.transition(job_id,owner,job.fencing,job.revision,State.VALIDATING)
             checkpoint(name="before_verify")
             charge(reads=len(output["shards"]), writes=1)
-            if not self.datasets.verify(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,quality_ok=output['quality_ok']):
+            if not self.datasets.verify(dataset_id,resource,job_id,owner,job.fencing,job.revision,token,quality_ok=None):
                 raise ValueError('quality or manifest verification failed')
             checkpoint(name="before_publish")
             charge(reads=3, writes=3)

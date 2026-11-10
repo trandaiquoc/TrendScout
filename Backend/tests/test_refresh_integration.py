@@ -15,7 +15,8 @@ from app.workers.safety import OfflineBudget
 
 def RefreshWorker(*args, **kwargs):
     kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
-    return _RefreshWorker(*args, **kwargs)
+    from refresh_fixtures import strict_worker
+    return strict_worker(_RefreshWorker, *args, **kwargs)
 from test_golden_contract import SOURCE, EXPECTED, assert_expected
 from test_job_coordinator import Clock, payload
 
@@ -35,7 +36,7 @@ class OfflineIntegrationTests(TestCase):
         clock=Clock(); shared=FakeTransactionalStore(); jobs=FakeCoordinator(clock,shared)
         policy=Policy(3,20,2,clock.now+timedelta(hours=1),30,10,3,Estimate(writes=4),Estimate(writes=10))
         schedule=Schedule('golden','v1',clock.now,enabled=True)
-        def make_payload(occ): return payload(occ['occurrence_id'])
+        def make_payload(occ): return dict(payload(occ['occurrence_id']),source='wikimedia_pageviews_top_per_country')
         job=dispatch_job(FakeScheduler(schedule),clock.now,active_jobs=0,budget_ok=True,coordinator=jobs,payload_factory=make_payload,policy=policy)
         again=dispatch_job(FakeScheduler(schedule),clock.now,active_jobs=0,budget_ok=True,coordinator=FakeCoordinator(clock,shared),payload_factory=make_payload,policy=policy)
         self.assertEqual(job.job_id,again.job_id)
@@ -127,3 +128,40 @@ class OfflineIntegrationTests(TestCase):
         source=OfflineWikimediaPipeline(httpx.MockTransport(lambda req:httpx.Response(429,headers={'Retry-After':header})),date(2026,1,8),[date(2026,1,8)],clock=clock)
         with self.assertRaises(RefreshError) as caught: source.fetch()
         self.assertEqual(caught.exception.retry_after,17)
+
+    def test_source_request_budget_stops_before_next_http_call(self):
+        calls=[]
+        def handler(req):
+            calls.append(str(req.url))
+            day=req.url.path[-10:].replace('/','-'); entry=SOURCE['days'][day]
+            year,month,daypart=day.split('-')
+            return httpx.Response(200,json={'items':[{**SOURCE['scope'],'year':year,'month':month,'day':daypart,'articles':entry['articles']}]})
+        clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs)
+        policy=Policy(3,1,2,clock.now+timedelta(hours=1),30,10,3,Estimate(),Estimate())
+        job=jobs.create('limited',payload('limited'),policy)
+        pipeline=OfflineWikimediaPipeline(httpx.MockTransport(handler),date(2026,1,8),[date(2026,1,8),date(2026,1,7)],clock=clock)
+        from app.jobs.contracts import BudgetExceeded
+        with self.assertRaises(BudgetExceeded): RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze).run(job.job_id,'w','stream','d',expected_active=None,expected_revision=0)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(repo.active('stream'),(None,0))
+
+    def test_http_500_and_timeout_retry_then_publish(self):
+        from app.workers.safety import RetryPolicy, RefreshError
+        for failure in ('500','timeout'):
+            with self.subTest(failure=failure):
+                clock=Clock(); jobs=FakeCoordinator(clock); repo=FakeDatasetStore(jobs); calls=[]
+                policy=Policy(3,4,2,clock.now+timedelta(hours=1),30,10,1,Estimate(),Estimate())
+                job=jobs.create(failure,dict(payload(failure),source='wikimedia_pageviews_top_per_country'),policy)
+                def handler(req):
+                    calls.append(1)
+                    if len(calls)==1:
+                        if failure=='timeout': raise httpx.ReadTimeout('synthetic',request=req)
+                        return httpx.Response(500)
+                    return httpx.Response(200,json={'items':[{**SOURCE['scope'],'year':'2026','month':'01','day':'08','articles':SOURCE['days']['2026-01-08']['articles']}]})
+                pipeline=OfflineWikimediaPipeline(httpx.MockTransport(handler),date(2026,1,8),[date(2026,1,8)],clock=clock)
+                worker=RefreshWorker(jobs,repo,pipeline.fetch,pipeline.clean,pipeline.analyze,retry_policy=RetryPolicy(3,2,10))
+                with self.assertRaises(RefreshError): worker.run(job.job_id,'w1','stream','dataset',expected_active=None,expected_revision=0,fresh_on_retry=True)
+                clock.advance(2)
+                result=worker.run(job.job_id,'w2','stream','dataset',expected_active=None,expected_revision=0,fresh_on_retry=True)
+                self.assertEqual(result,'PUBLISHED')
+                self.assertEqual((len(calls),repo.active('stream')),(2,('dataset-f2',1)))

@@ -27,3 +27,14 @@ def validate_manifest(manifest, *, dataset_id, job_id, resource_id, metadata, sh
         if type(spec.get('count')) is not int or spec['count'] != count or spec.get('sha256') != hash_fn(shard): return False
         total+=count
     return type(manifest.get('expected_count')) is int and total == manifest['expected_count'] and report.get('observed_count') == total
+
+
+def build_offline_manifest(*, dataset_id, job_id, resource_id, identity, metadata, shards, quality_report, hash_fn):
+    """Bind source/quality inputs to the coordinator's independently stored identity."""
+    base=dict(metadata)
+    base.update(dataset_id=dataset_id,job_id=job_id,resource_id=resource_id,occurrence_id=identity['occurrence_id'])
+    base.update(manifest_version='offline-manifest-v1',required_partitions=sorted(shards),
+                shards={key:{'sha256':hash_fn(value),'count':len(value['items'])} for key,value in shards.items()},
+                expected_count=sum(len(value['items']) for value in shards.values()),
+                quality_report=quality_report, quality_report_digest=hash_fn(quality_report))
+    return base

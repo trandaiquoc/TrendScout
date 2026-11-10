@@ -13,14 +13,16 @@ from app.workers.safety import OfflineBudget
 
 def RefreshWorker(*args, **kwargs):
     kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
-    return _RefreshWorker(*args, **kwargs)
+    from refresh_fixtures import strict_worker
+    return strict_worker(_RefreshWorker, *args, **kwargs)
 from test_job_coordinator import Clock, payload
 
 
 def manifest(job_id):
     fields=dict(occurrence_id='once',source_id='wikimedia',country='US',access='all-access',project='all',analysis_date='2026-01-08',window_start='2026-01-01',window_end='2026-01-08',source_version='v1',processing_version='v1',cleaning_version='v1',classification_version='v1',algorithm_version='v1',provenance='synthetic://fixture',quality_report_ref='report-v1')
     shards={'full':{'items':[1]},'empty':{'items':[]}}
-    m=dict(fields,manifest_version='offline-manifest-v1',dataset_id='dataset',job_id=job_id,resource_id='stream',required_partitions=['full','empty'],shards={k:{'sha256':digest(v),'count':len(v['items'])} for k,v in shards.items()},expected_count=1,quality_report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':1})
+    m=dict(fields,manifest_version='offline-manifest-v1',dataset_id='dataset',job_id=job_id,resource_id='stream',required_partitions=['full','empty'],shards={k:{'sha256':digest(v),'count':len(v['items'])} for k,v in shards.items()},expected_count=1,quality_report={'policy_version':'offline-quality-v1','status':'PASS','observed_count':1,'dataset_id':'dataset','source_id':'wikimedia','processing_version':'v1','snapshots':[{'date':'2026-01-08','status':'SUCCESS','source_url':'synthetic://fixture','quality_flags':[],'rejection_reasons':{},'raw_count':1,'accepted_count':1,'rejected_count':0,'duplicate_count':0}]})
+    m['quality_report_digest']=digest(m['quality_report'])
     return fields,shards,m
 
 
@@ -40,6 +42,7 @@ class SafetyTests(unittest.TestCase):
         for state in (State.FETCHING,State.NORMALIZING,State.ANALYZING,State.PERSISTING): j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,state)
         self.repo.draft('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,meta)
         for key,value in shards.items(): self.repo.put_shard('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,key,value)
+        self.repo.put_quality_report('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m['quality_report'])
         self.repo.seal('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m)
         j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,State.VALIDATING)
         self.assertTrue(self.repo.verify('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=False))
@@ -55,6 +58,7 @@ class SafetyTests(unittest.TestCase):
             j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,state)
         self.repo.draft('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,meta)
         for key,value in shards.items(): self.repo.put_shard('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,key,value)
+        self.repo.put_quality_report('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m['quality_report'])
         self.repo.seal('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,m)
         j=self.jobs.transition(j.job_id,j.owner,j.fencing,j.revision,State.VALIDATING)
         self.assertFalse(self.repo.verify('dataset','stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=True))
@@ -169,11 +173,12 @@ class RequiredBudgetTests(unittest.TestCase):
         job=c.create('b',payload('b'),policy)
         def crash(name):
             if name=='after_draft': raise SystemExit()
-        first=RealWorker(c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2),checkpoint_hook=crash)
+        from refresh_fixtures import strict_worker
+        first=strict_worker(RealWorker,c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2),checkpoint_hook=crash)
         with self.assertRaises(SystemExit): first.run(job.job_id,'a','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True)
         self.assertEqual(c.get(job.job_id).refresh_budget.writes,1)
         clock.advance(31)
-        second=RealWorker(c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2))
+        second=strict_worker(RealWorker,c,repo,lambda:[1],lambda x:x,lambda x:{'metadata':{'source':'s'},'shards':{'a':{'items':x}},'quality_ok':True},budget=OfflineBudget(100,2))
         with self.assertRaises(RefreshError): second.run(job.job_id,'b','stream','d',expected_active=None,expected_revision=0,fresh_on_retry=True)
         self.assertEqual(c.get(job.job_id).refresh_budget.writes,2)
         self.assertEqual(repo.active('stream'),(None,0))

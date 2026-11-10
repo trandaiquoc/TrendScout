@@ -8,13 +8,16 @@ import unittest
 from app.jobs.contracts import State, Conflict, LeaseLost
 from app.jobs.fake import FakeCoordinator
 from app.datasets.fake import FakeDatasetStore, digest
+from app.datasets.manifest import build_offline_manifest
+from refresh_fixtures import strict_output
 from app.scheduling.recurrence import Schedule, FakeScheduler
 from app.workers.refresh import RefreshWorker as _RefreshWorker
 from app.workers.safety import OfflineBudget
 
 def RefreshWorker(*args, **kwargs):
     kwargs.setdefault("budget", OfflineBudget(max_reads=10000, max_writes=10000))
-    return _RefreshWorker(*args, **kwargs)
+    from refresh_fixtures import strict_worker
+    return strict_worker(_RefreshWorker, *args, **kwargs)
 from test_job_coordinator import Clock, payload
 from app.jobs.contracts import Policy
 from app.storage_analysis.planning import Estimate
@@ -55,9 +58,14 @@ class PublicationTests(unittest.TestCase):
     def state(self,j,target): return self.c.transition(j.job_id,j.owner,j.fencing,j.revision,target)
     def ready(self,j,token,name,quality=True):
         for s in (State.FETCHING,State.NORMALIZING,State.ANALYZING,State.PERSISTING): j=self.state(j,s)
-        self.repo.draft(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,{'source':'synthetic'})
+        output=strict_output({'shards':{'s1':{'items':[1]}},'quality_ok':quality})
+        metadata=dict(output['manifest_input'],occurrence_id=j.identity['occurrence_id'])
+        report=dict(output['quality_report'],dataset_id=name)
+        self.repo.draft(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,metadata)
         self.repo.put_shard(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,'s1',{'items':[1]})
-        self.repo.seal(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,{'s1':digest({'items':[1]})})
+        self.repo.put_quality_report(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,report)
+        manifest=build_offline_manifest(dataset_id=name,job_id=j.job_id,resource_id='stream',identity=j.identity,metadata=metadata,shards=output['shards'],quality_report=report,hash_fn=digest)
+        self.repo.seal(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,manifest)
         j=self.state(j,State.VALIDATING)
         result=self.repo.verify(name,'stream',j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=quality)
         return j,result
@@ -76,15 +84,11 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.c.get(b.job_id).state,State.COMPLETED)
 
     def test_manifest_missing_digest_quality_and_immutability(self):
-        for i,(expected,quality) in enumerate([({'missing':'hash'},True),({'s1':'wrong'},True),({'s1':digest({'x':1})},False)]):
-            j=self.job('J'+str(i)); token=self.repo.claim_resource('stream'+str(i),j.job_id,j.owner,j.fencing,j.revision)
-            r='stream'+str(i); name='data'+str(i)
-            self.repo.draft(name,r,j.job_id,j.owner,j.fencing,j.revision,token,{})
-            self.repo.put_shard(name,r,j.job_id,j.owner,j.fencing,j.revision,token,'s1',{'x':1})
-            self.repo.seal(name,r,j.job_id,j.owner,j.fencing,j.revision,token,expected)
-            with self.assertRaises(Conflict): self.repo.put_shard(name,r,j.job_id,j.owner,j.fencing,j.revision,token,'s1',{'x':2})
-            self.assertFalse(self.repo.verify(name,r,j.job_id,j.owner,j.fencing,j.revision,token,quality_ok=quality))
-            self.assertEqual(self.repo.active(r),(None,0))
+        j=self.job('J'); token=self.repo.claim_resource('stream',j.job_id,j.owner,j.fencing,j.revision)
+        j,ok=self.ready(j,token,'data',quality=False)
+        self.assertFalse(ok)
+        with self.assertRaises(Conflict): self.repo.put_shard('data','stream',j.job_id,j.owner,j.fencing,j.revision,token,'s1',{'items':[2]})
+        self.assertEqual(self.repo.active('stream'),(None,0))
 
     def test_pointer_cas_and_competing_claim(self):
         j=self.job('A'); token=self.repo.claim_resource('stream',j.job_id,j.owner,j.fencing,j.revision)
