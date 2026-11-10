@@ -59,6 +59,7 @@ class FakeTransactionalStore:
         self.resources = {}
         self.datasets = {}
         self.publications = {}
+        self.retention_state = {'references': {}, 'reference_version': 0, 'runs': {}, 'plans': {}, 'audit': []}
 
 
 class FakeCoordinator:
