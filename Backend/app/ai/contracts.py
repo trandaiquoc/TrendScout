@@ -80,6 +80,7 @@ class Request:
     language_pair: str = ''
     request_version: str = 'synthetic-request-v1'
     source_permission_version: str = 'synthetic-permission-v1'
+    entity_id: str = ''
 
 @dataclass(frozen=True)
 class Result:
