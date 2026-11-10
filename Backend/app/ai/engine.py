@@ -141,7 +141,15 @@ class Engine:
                              and req.request_version == 'translation-request-v1'
                              and isinstance(req.entity_id, str) and 0 < len(req.entity_id) <= 256
                              and req.language_pair in ('en:vi', 'vi:en'))
-                            or (req.task is not Task.TRANSLATION and req.schema_version == 'synthetic-v1'
+                            or (req.task in (Task.CLASSIFICATION, Task.NER)
+                                and req.schema_version == ('classification-v1' if req.task is Task.CLASSIFICATION else 'ner-v1')
+                                and req.request_version == ('classification-request-v1' if req.task is Task.CLASSIFICATION else 'ner-request-v1')
+                                and isinstance(req.entity_id, str) and 0 < len(req.entity_id) <= 256
+                                and req.source_language in ('en', 'vi') and req.taxonomy_version == 'topics-v1.0'
+                                and type(req.evidence_ids) is tuple and 0 < len(req.evidence_ids) <= 10
+                                and all(isinstance(x, str) and 0 < len(x) <= 128 for x in req.evidence_ids)
+                                and isinstance(req.model_version, str) and 0 < len(req.model_version) <= 128)
+                            or (req.task not in (Task.TRANSLATION, Task.CLASSIFICATION, Task.NER) and req.schema_version == 'synthetic-v1'
                                 and req.request_version == 'synthetic-request-v1'))
             if not valid_schema:
                 return Result('INVALID_REQUEST')
@@ -157,12 +165,16 @@ class Engine:
             meta = provider.metadata
             if 'strict-json' not in meta.output_modes or req.max_output_tokens > meta.output_tokens or req.max_estimated_input_tokens + req.max_output_tokens > meta.context_tokens:
                 return Result('INVALID_REQUEST')
+            if req.task in (Task.CLASSIFICATION, Task.NER) and req.model_version != meta.model_version:
+                return Result('INVALID_REQUEST')
             if not meta.timeout:
                 return Result('PROVIDER_UNAVAILABLE')
             # The identity binds every output-affecting and policy-sensitive field.
             identity = (tenant, job, req.task.value, req.provider_id, meta.provider_version, req.model_id,
                         meta.model_version, req.prompt_version, req.request_version, req.schema_version, req.policy_version,
-                        req.input_fingerprint, req.source_permission_version, req.language_pair, req.entity_id, tuple(sorted(req.data_categories)),
+                        req.input_fingerprint, req.source_permission_version, req.language_pair, req.entity_id, req.taxonomy_version,
+                        req.source_language, req.evidence_ids, req.model_version, req.allowed_categories, req.allowed_subcategories,
+                        tuple(sorted(req.data_categories)),
                         req.max_estimated_input_tokens, req.max_output_tokens)
             digest = fingerprint(json.dumps(identity, ensure_ascii=True, separators=(',', ':')))
             cache_key = digest
@@ -233,6 +245,13 @@ class Engine:
                                'input_fingerprint': req.input_fingerprint, 'entity_id': req.entity_id,
                                'request_id': req.request_id}
                     instructions += ' Translate only. Return strict JSON with translated_text and matching fields: ' + json.dumps(binding, ensure_ascii=True)
+                if req.schema_version in ('classification-v1', 'ner-v1'):
+                    binding = {'schema': req.schema_version, 'entity_id': req.entity_id,
+                               'input_fingerprint': req.input_fingerprint, 'request_id': req.request_id,
+                               'taxonomy_version': req.taxonomy_version, 'source_language': req.source_language,
+                               'model_version': req.model_version, 'evidence_ids': req.evidence_ids,
+                               'allowed_categories': req.allowed_categories, 'allowed_subcategories': req.allowed_subcategories}
+                    instructions += ' Propose only; use supplied taxonomy and evidence. Binding: ' + json.dumps(binding)
                 reply = provider.invoke(instructions, req.source_data, timeout=req.deadline-self.clock.now, max_output_tokens=req.max_output_tokens)
                 if self.clock.now >= req.deadline:
                     raise ProviderFailure('TIMEOUT', acknowledged=False)

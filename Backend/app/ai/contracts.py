@@ -81,6 +81,12 @@ class Request:
     request_version: str = 'synthetic-request-v1'
     source_permission_version: str = 'synthetic-permission-v1'
     entity_id: str = ''
+    taxonomy_version: str = ''
+    source_language: str = ''
+    evidence_ids: tuple[str, ...] = ()
+    model_version: str = ''
+    allowed_categories: tuple[str, ...] = ()
+    allowed_subcategories: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
 class Result:
