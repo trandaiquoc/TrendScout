@@ -1,0 +1,9 @@
+# D5 live-capable architecture — work in progress
+
+The anonymous browser reads capabilities and submits a server-controlled Fetch. The backend gates admission; durable coordination, quotas and bounded workers eventually call source-specific adapters, normalize observations, run discovery and publish versioned evidence to the dashboard. Public clients cannot control provider endpoints, plans, credentials, quota or authorization. Vercel remains read-only. Legacy `POST /api/runs` retains its Bearer requirement.
+
+Provider credentials enter adapters through the backend `CredentialProvider` port. Account ownership, provider secret, runtime service identity, organization admin and anonymous public user are separate concepts. Secrets, connection status and non-sensitive configuration have separate boundaries. The D6 admin system will require independent authentication and authorization; no public dashboard login is introduced.
+
+Business persistence must use Storage Port/Repository contracts with Firestore behind infrastructure adapters; retain Firebase/Firestore until a separately approved decision. The existing analysis storage port does not yet prove all D5 data flows comply. Existing Firestore emulator coordination is explicitly guarded and cannot be considered verified production distributed Fetch. [Admission design](D5_QUOTA_CACHE_QUEUE_AND_ADMISSION_DESIGN.md), [discovery design](D5_KEYWORD_EXTRACTION_AND_TREND_DETECTION.md), [approval register](D5_FOUR_SOURCE_LIVE_APPROVAL_REGISTER.md) and [D6 plan](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md) describe remaining work and decisions.
+
+Revised acceptance gates and their current status are maintained in the [D5 blueprint](D5_FOUR_SOURCE_LIVE_INTEGRATION_BLUEPRINT.md). Live providers remain unverified and disabled until D6 approvals; D7 performs final live E2E, security, data quality, performance and UAT.

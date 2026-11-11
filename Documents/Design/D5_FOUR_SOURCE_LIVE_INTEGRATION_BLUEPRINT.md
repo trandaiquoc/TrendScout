@@ -1,6 +1,6 @@
 # D5 — Blueprint tích hợp live bốn nguồn
 
-**Trạng thái:** thiết kế, không phải lệnh bật live. Rà soát 11/11/2026. Bốn nguồn duy nhất trong Phase 1: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public Fetch hiện chỉ synthetic/local/test; Vercel hiện read-only. D5 chỉ bắt đầu sau chỉ thị riêng; không có provider, credential, quota thực hay chi phí nào được chứng minh bởi D4.
+**Trạng thái:** D5 đang thực hiện; không phải lệnh bật live. Điều chỉnh roadmap 11/11/2026: D5 xây dựng và kiểm chứng offline hạ tầng live-capable; D6 thiết lập tài khoản thuộc tổ chức, quản lý credential và kích hoạt live; D7 nghiệm thu live cuối. Không có D3C. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public Fetch hiện chỉ synthetic/local/test; Vercel hiện read-only. D4 không chứng minh provider, credential, quota thực hay chi phí.
 
 ## 1. Ranh giới và nghiệm thu từng nguồn
 
@@ -37,7 +37,7 @@ sequenceDiagram
     A-->>U: trạng thái từng nguồn và freshness
 ```
 
-Admission phải chạy trên backend phù hợp với worker, không chỉ bật POST trên Vercel. Database/queue cụ thể chưa được chọn. Atomic check-and-reserve gồm global concurrency, per-provider quota, shared SerpApi budget, cost ceiling, cooldown, idempotency và dedup trên nhiều host; bảo vệ direct clients, bots, nhiều IP/process, restart và retry storm. Origin/Host là tín hiệu browser, không phải xác thực. Queue cần durable state, lease expiry, fencing, outbox hoặc cơ chế tương đương, idempotent writes, bounded retries và recovery. Test crash giữa reserve, enqueue, request và commit; tránh chi hai lần hoặc mất job. D4 pool process-local chỉ là mô phỏng, không được dùng làm bảo đảm production.
+Admission phải chạy trên backend phù hợp với worker, không chỉ bật POST trên Vercel. Giữ Firebase/Firestore hiện có và sử dụng Storage Port; không migration database trong D5/D6 khi chưa có quyết định riêng. Phương án worker/queue và khả năng Firestore đáp ứng giao dịch phân tán còn cần chứng minh. Atomic check-and-reserve gồm global concurrency, per-provider quota, shared SerpApi budget, cost ceiling, cooldown, idempotency và dedup trên nhiều host; bảo vệ direct clients, bots, nhiều IP/process, restart và retry storm. Origin/Host là tín hiệu browser, không phải xác thực. Queue cần durable state, lease expiry, fencing, outbox hoặc cơ chế tương đương, idempotent writes, bounded retries và recovery. Test crash giữa reserve, enqueue, request và commit; tránh chi hai lần hoặc mất job. D4 pool process-local chỉ là mô phỏng, không được dùng làm bảo đảm production.
 
 Không cho client thay plan, query, URL, source, provider, quota hoặc permissions. Server quyết định source allowlist, lịch và ngân sách; người dùng được join job đã có, nhận cache còn quyền hoặc deferred khi hết quota. Không trả provider secrets hay request URL chứa key. SerpApi tài liệu hóa `api_key` là parameter: live design phải bảo vệ URL khỏi access logs, tracing, proxy, errors và telemetry, xác nhận cơ chế credential trước activation.
 
@@ -51,12 +51,43 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 
 ## 4. Thứ tự thực thi D5 đề xuất
 
-1. Chốt provider agreements, chi phí, quyền sử dụng và retention; ghi người duyệt, thời hạn và scope.
-2. Thiết kế môi trường backend, durable store/queue, network egress, secret management và atomic reservation; threat-model, load và chaos test offline trước.
-3. Kết nối từng adapter sau khi được bật riêng; contract tests, live smoke nhỏ có ngân sách được duyệt, pagination và error evidence; không chuyển trạng thái nguồn khác.
-4. Thực hiện orchestration, shared cache, source-level progress và partial results; kiểm tra restart, duplicate, multi-process và quota reconciliation.
-5. Thêm extraction/detection với baseline đủ dữ liệu, explainability, UI và data governance; UAT có nguồn và hạn chế rõ.
-6. Chuyển D6 sau review bảo mật/chi phí và bằng chứng; D6 xác minh end-to-end độc lập. Live Public Fetch vẫn disabled cho tới quyết định riêng.
+1. Xây dựng live-capable adapters và CredentialProvider backend chung; không cấu hình secrets hay gửi live requests.
+2. Hoàn thiện Storage Port, distributed admission, quota, durable queue/cache và kiểm chứng offline, bao gồm crash, duplicate, multi-process và reconciliation.
+3. Tích hợp orchestration, extraction/detection, evidence và dashboard; chạy full regression offline.
+4. Bàn giao [kế hoạch D6](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md): tổ chức sở hữu provider accounts, phê duyệt và cấu hình secrets, admin riêng, kích hoạt và xác minh từng nguồn.
+5. D7 thực hiện final live E2E, security, data quality, performance và UAT. Public live Fetch disabled cho tới quyết định riêng.
+
+### Revised D5 acceptance matrix
+
+| Gate | Bằng chứng bắt buộc | Trạng thái hiện tại |
+|---|---|---|
+| Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | OPEN: ba adapter vẫn chỉ MockTransport |
+| Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | OPEN: protocol chung đã tạo, chưa hoàn tất wiring và review |
+| Storage abstraction | Business logic dùng port, Firestore ở adapter | OPEN: port hiện có chưa bao phủ đầy đủ D5 |
+| Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: coordinator Firestore chỉ guarded emulator, chưa xác minh deployment |
+| Quota/cache/queue | Atomic shared quota/cost, durable cache/queue và crash tests | OPEN |
+| Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | OPEN: module ban đầu chưa tích hợp |
+| Dashboard integration | Workflow offline, status, evidence, accessibility và regression | OPEN |
+| Offline integration tests | End-to-end fixture không gọi provider/cloud | OPEN |
+| Full regression | Readiness script và Golden pass | OPEN cho thay đổi D5 hiện tại |
+| D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | OPEN cho đến khi review hoàn tất |
+
+Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VERIFIED`; khi đó vẫn ghi `D6_PROVIDER_ONBOARDING_PENDING` và `LIVE_ACTIVATION_NOT_YET_ACCEPTED`. Không yêu cầu bốn nguồn `LIVE_VERIFIED` cho D5.
+
+### Demo-first presentation checklist
+
+`DEMO_READY_FOR_PRESENTATION` là checklist riêng, không đồng nghĩa `FOUR_SOURCE_LIVE_VERIFIED` hoặc hoàn thành các gate D5. Không cần tài khoản công ty, credential cá nhân hoặc Firebase cá nhân để chạy demo. Wikimedia live chỉ dùng sau phép và kiểm chứng riêng; trong khi thiếu credentials, dữ liệu còn lại phải ghi `SYNTHETIC`. Từng nguồn cần phân biệt provenance `LIVE`, `CACHED`, `SYNTHETIC`; `INSUFFICIENT_EVIDENCE` là trạng thái đánh giá, không phải nguồn dữ liệu. Không gán lại cached hay synthetic thành live.
+
+| Kiểm tra trình diễn | Trạng thái |
+|---|---|
+| Khởi động local, loopback, storage tạm, không yêu cầu secret/account | Có `bash demo.sh`; đã kiểm thử API offline, cần kiểm thử trình duyệt với launcher thật |
+| Fetch một nút, kết quả và trạng thái rõ ràng | Luồng synthetic Wikimedia hiện có; cần kiểm thử launcher thật |
+| Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | OPEN |
+| Phân biệt LIVE/CACHED/SYNTHETIC và INSUFFICIENT_EVIDENCE xuyên API, thuật toán, UI | OPEN |
+| Light/dark, VI/EN, responsive và regression | Cần chạy lại sau thay đổi D5 |
+| Dữ liệu không bị nhận nhầm là live; phân biệt presentation với live acceptance | Nhãn synthetic có trong workflow hiện tại; cần đánh giá toàn pipeline bốn nguồn |
+
+Storage tạm là lựa chọn demo local, không chứng minh durable, distributed admission hay an toàn public production. D6 xử lý account/secret của công ty và live activation; D7 nghiệm thu live cuối.
 
 ## 5. Open decisions và rollback
 

@@ -201,13 +201,13 @@ Chỉ SERP đơn giản nhưng bị seed/query bias và không phát hiện ch�
 
 Giả định 14 seeds × một page × hai SERP engines = tối đa 28 attempt cho một batch không retry; 1/4/24 batch mỗi ngày trong 30 ngày tương ứng 840/3.360/20.160 attempts trước retry, cache và thất bại. YouTube thêm tối đa 14 first-page calls/batch; Wikimedia có quota/rate và cache riêng. Theo [SerpApi pricing](https://serpapi.com/pricing) truy cập 11/11/2026, các gói và hourly throughput thay đổi; successful search tính vào monthly allowance, cached/error có quy tắc riêng. Ví dụ 840 successful searches nằm dưới 1.000/tháng của gói được công bố $25/tháng, nhưng chưa tính thuế, giờ cao điểm, chi phí khác hoặc phê duyệt mua. Dự trù reserve mọi attempt là bảo thủ, không suy ra hóa đơn hay quota tài khoản thực.
 
-## 38. D4–D5–D6 delivery map
+## 38. D4–D5–D6–D7 delivery map
 
-D4: thiết kế và adapters MockTransport, fixture tests, inventory; không live. D5: sau approval, kết nối đúng bốn nguồn, distributed admission/queue, cache, orchestration, extraction và UI theo quyền. D6: kiểm thử từng provider live, chất lượng, bảo mật, hiệu năng, chi phí và UAT; mỗi nguồn chỉ `LIVE_VERIFIED` sau bằng chứng riêng. Không có D3C.
+D4: thiết kế và adapters MockTransport, fixture tests, inventory; không live. D5: xây dựng live-capable code cho bốn nguồn, distributed admission/queue, quota/cache, orchestration, extraction và UI; nghiệm thu bằng offline evidence. D6: tài khoản provider thuộc tổ chức, credential management, admin console riêng và xác minh/kích hoạt live từng nguồn sau phê duyệt. D7: final live E2E, security, data quality, performance và UAT. Mỗi nguồn chỉ `LIVE_VERIFIED` sau bằng chứng riêng. Không có D3C. Xem [D6 plan](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md).
 
 ## 39. Acceptance cases
 
-Given baseline thiếu, when nhận một spike, then hiển thị insufficient. Given cùng URL từ hai query, then giữ cả hai evidence. Given quota cạn, then dừng request và hiển thị deferred/stale có timestamp. Given một provider lỗi, then job partial giữ nguồn khác và lý do. Given SERP rank cao, then không hiển thị search volume/sales. Given keyword không thuộc Fashion/Home, then vẫn hiển thị theo taxonomy. Given bốn nguồn chưa đại diện toàn US, then coverage được mô tả rõ. D6 cần evidence live và UAT riêng, không suy luận từ fixture.
+Given baseline thiếu, when nhận một spike, then hiển thị insufficient. Given cùng URL từ hai query, then giữ cả hai evidence. Given quota cạn, then dừng request và hiển thị deferred/stale có timestamp. Given một provider lỗi, then job partial giữ nguồn khác và lý do. Given SERP rank cao, then không hiển thị search volume/sales. Given keyword không thuộc Fashion/Home, then vẫn hiển thị theo taxonomy. Given bốn nguồn chưa đại diện toàn US, then coverage được mô tả rõ. D6 cần evidence live riêng và D7 cần UAT riêng, không suy luận từ fixture.
 
 ## 40. Risks, quyết định mở và references
 
