@@ -38,7 +38,7 @@ window.fetch=(path,options={{}})=>{{
   if(value==='/api/health') body={{status:'ok'}};
   else if(value==='/api/v1/capabilities') body={{contract_version:'1.0',authentication_required:false,public_fetch_enabled:true,fetch_enabled:true,data_mode:'SYNTHETIC',fetch_block_reason:null,sources:[
     {{source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',live_verification_status:'UNVERIFIED',enabled_for_current_operation:true}},
-    {{source_id:'youtube_video_search',adapter_status:'NOT_IMPLEMENTED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',enabled_for_current_operation:false}},
+    {{source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}},
     {{source_id:'google_web_serp',adapter_status:'NOT_IMPLEMENTED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',enabled_for_current_operation:false}},
     {{source_id:'bing_web_serp',adapter_status:'NOT_IMPLEMENTED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',enabled_for_current_operation:false}}
   ]}};
@@ -66,7 +66,7 @@ check(statusReads===1,'one bounded status read receives terminal state');
 check(document.querySelector('#fetch-status').textContent.includes('độ phủ nguồn chưa đầy đủ'),'partial synthetic state announced');
 check(document.querySelector('#runs-current').textContent===RUN_ID,'run results load without user-entered ID');
 check(document.querySelector('#rows').textContent.includes('Synthetic phrase'),'synthetic result rendered');
-check(document.querySelector('[data-source=youtube]').dataset.sourceStatus==='not_implemented-not_verified','pending source remains disabled');
+check(document.querySelector('[data-source=youtube]').dataset.sourceStatus==='implemented_offline_verified-not_verified','offline-implemented source remains live-disabled');
 check(!Object.keys(localStorage).some(key=>/token|secret|credential|password/i.test(key)),'no credentials stored');
 document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>""".replace("RUN_ID", json.dumps(RUN_ID))
@@ -98,7 +98,9 @@ document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+err
             raise SystemExit(
                 f"Public Fetch Chrome E2E failed: {marker}; browser stderr={result.stderr[-700:]}"
             )
-    print("Chrome public one-click synthetic Fetch, duplicate-click guard, polling, and result display: PASS")
+    print(
+        "Chrome public one-click synthetic Fetch, duplicate-click guard, polling, and result display: PASS"
+    )
 
 
 if __name__ == "__main__":
