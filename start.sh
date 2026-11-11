@@ -39,7 +39,11 @@ if [[ -f "$project_dir/.env" ]]; then
     fi
   done < "$project_dir/.env"
 fi
-export GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-trendscout-192e4}"
+if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  printf '%s\n' 'Lỗi: cần GOOGLE_CLOUD_PROJECT cho runtime cloud. Để chạy demo synthetic local, dùng bash demo.sh.' >&2
+  exit 1
+fi
+export GOOGLE_CLOUD_PROJECT
 operator_token="${TREND_SCOUT_OPERATOR_TOKEN:-}"
 if [[ ${#operator_token} -lt 24 ]]; then
   printf '%s\n' 'Lỗi: cần TREND_SCOUT_OPERATOR_TOKEN tối thiểu 24 ký tự trong environment hoặc .env.' >&2

@@ -213,6 +213,10 @@ FastAPI phục vụ giao diện tại `http://127.0.0.1:8000/dashboard/` cùng o
 
 ## D3A — Public Fetch ngoại tuyến
 
+### D5: demo local không cần tài khoản
+
+Chạy `bash demo.sh` tại thư mục gốc, sau đó mở `http://127.0.0.1:8000/dashboard/` và nhấn Fetch. Ứng dụng bind loopback, dùng bộ nhớ tạm và fixture tự tạo được gắn `SYNTHETIC`; dữ liệu mất khi dừng. Không cần Firebase, Firestore, API key hay token. Demo hiện chỉ đưa fixture Wikimedia vào pipeline; các adapter Google/Bing/YouTube chưa tích hợp vào workflow này. `bash start.sh` là runtime cloud cũ và cần cấu hình project/token riêng; nó không còn mặc định một cloud project. Không triển khai demo local ra Internet hoặc coi giới hạn trong một process là kiểm soát phân tán production.
+
 Website không có luồng đăng nhập, đăng xuất, đăng ký hoặc tài khoản người dùng. `GET /api/v1/capabilities` đọc công khai trạng thái runtime và bốn mô tả nguồn; response không chứa credential. `POST /api/v1/fetches` là endpoint riêng, không thay đổi `POST /api/runs` (endpoint cũ vẫn yêu cầu Bearer operator token). Request public chỉ nhận JSON `{}`; backend tự chọn plan `demo-us-en`, Wikimedia source ID, mode synthetic, tối đa một request/page cho mỗi nguồn và không nhận URL/query/provider/budget từ client.
 
 Public Fetch mặc định tắt qua `TREND_SCOUT_PUBLIC_FETCH_ENABLED=false`. Khi bật, cấu hình vẫn chỉ hợp lệ ở profile `local`/`test`, mode `synthetic`, không read-only, không khai báo Google Cloud project, có `FakeStorage` và adapter fixture được inject rõ ràng. Runtime chỉ cho một tiến trình giữ khóa file dùng chung trên máy; tiến trình thứ hai fail closed. Giới hạn là tối đa 3 lượt mới trong 60 phút, một lần chạy đồng thời, cooldown hiện hữu, deadline mặc định 60 giây (cấu hình 1–300), body tối đa 1 KiB, polling tối đa 120 lần và ID/idempotency có TTL một giờ. Idempotency và rate counter là in-memory, mất khi process khởi động lại.
