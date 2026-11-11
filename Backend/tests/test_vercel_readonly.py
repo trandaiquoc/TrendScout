@@ -29,8 +29,10 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
                     self.assertEqual((await client.get('/api/health')).status_code, 200)
                     self.assertEqual((await client.get('/api/runs/' + RUN)).status_code, 401)
+                    self.assertEqual((await client.get('/api/v1/capabilities')).status_code, 200)
                     self.assertEqual((await client.get('/dashboard/modules/api.js')).status_code, 401)
                     self.assertEqual((await client.post('/api/runs', headers={'Authorization': AUTH})).status_code, 405)
+                    self.assertEqual((await client.post('/api/v1/fetches', content='{}')).status_code, 405)
                     for path in ['/dashboard/', '/dashboard/app.js', '/dashboard/styles.css', '/dashboard/modules/api.js', '/dashboard/modules/i18n/en.js', '/api/runs/' + RUN, '/api/runs/' + RUN + '/keywords']:
                         response = await client.get(path, headers={'Authorization': AUTH})
                         self.assertEqual(response.status_code, 200, path)

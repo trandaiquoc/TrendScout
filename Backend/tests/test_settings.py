@@ -27,6 +27,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.run_cooldown_seconds, 60)
         self.assertEqual(settings.http_policy.max_retries, 2)
         self.assertEqual(settings.allowed_fetch_operations, frozenset())
+        self.assertFalse(settings.public_fetch_enabled)
         self.assertTrue(Path(settings.lock_path).is_absolute())
         self.assertNotIn("youtube_video_search", settings.enabled_source_ids)
 
@@ -109,6 +110,44 @@ class SettingsTests(unittest.TestCase):
         vercel_profile = Settings.from_environment({"TREND_SCOUT_ENVIRONMENT": "vercel"})
         self.assertEqual(vercel_profile.environment_profile, "vercel")
         self.assertTrue(vercel_profile.read_only)
+
+    def test_public_fetch_flag_requires_local_synthetic_non_cloud_runtime(self):
+        settings = Settings.from_environment(
+            {
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+            }
+        )
+        self.assertTrue(settings.public_fetch_enabled)
+
+        unsafe = (
+            {
+                "TREND_SCOUT_ENVIRONMENT": "production",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+            },
+            {
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "live",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+            },
+            {
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+                "TREND_SCOUT_READ_ONLY": "true",
+            },
+            {
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+                "GOOGLE_CLOUD_PROJECT": "must-not-be-used",
+            },
+        )
+        for environ in unsafe:
+            with self.subTest(environ=environ), self.assertRaises(ValueError):
+                Settings.from_environment(environ)
 
 
 class SettingsApiTests(unittest.IsolatedAsyncioTestCase):

@@ -47,6 +47,17 @@ class SourceCatalogTests(unittest.TestCase):
         )
         self.assertNotIn("key=", " ".join(item.endpoint for item in SOURCE_CAPABILITIES))
 
+    def test_public_descriptors_keep_live_approval_separate_from_adapter_status(self):
+        wikimedia = source_capability(WIKIMEDIA_SOURCE_ID)
+        self.assertEqual(wikimedia.adapter_status, "IMPLEMENTED")
+        self.assertEqual(wikimedia.approval_status, "PENDING_LIVE_APPROVAL")
+        self.assertEqual(wikimedia.live_verification_status, "UNVERIFIED")
+        for source_id in (YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+            capability = source_capability(source_id)
+            self.assertEqual(capability.adapter_status, "NOT_IMPLEMENTED")
+            self.assertEqual(capability.approval_status, "PENDING_APPROVAL")
+            self.assertEqual(capability.configuration_status, "NOT_CONFIGURED")
+
     def test_default_registry_registers_only_enabled_implemented_sources(self):
         settings = Settings.from_environment({})
         registry = composition.source_registry(settings)

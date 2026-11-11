@@ -1,12 +1,12 @@
 """Local-host manual run coordinator and durable Firestore persistence."""
 
 import asyncio
-from collections.abc import Callable
-from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -114,7 +114,7 @@ class RunService:
         finally:
             self.lock.release()
 
-    async def start(self):
+    async def start(self, *, execution_timeout_seconds=None):
         state = self.lock.acquire()
         try:
             if state.get("active_run_id"):
@@ -125,13 +125,37 @@ class RunService:
             # Write marker first so a crash during creation never leaves an untracked run.
             self.lock.write({"active_run_id": run_id})
             await self.storage.create_run(run_id, {"run_id": run_id, "status": "QUEUED", "mode": self.mode, "created_at": now(), "source": "wikimedia_pageviews_top_per_country"})
-            task = asyncio.create_task(self._execute(run_id))
+            executor = (
+                self._execute(run_id)
+                if execution_timeout_seconds is None
+                else self._execute_with_deadline(run_id, execution_timeout_seconds)
+            )
+            task = asyncio.create_task(executor)
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             return run_id
         except BaseException:
             self.lock.release()
             raise
+
+    async def _execute_with_deadline(self, run_id, timeout_seconds):
+        if not 1 <= timeout_seconds <= 300:
+            raise ValueError("Invalid run execution deadline")
+        try:
+            await asyncio.wait_for(self._execute(run_id), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            try:
+                await self.storage.update_run(
+                    run_id,
+                    {
+                        "status": "ABORTED",
+                        "finished_at": now(),
+                        "error": "Configured execution deadline exceeded",
+                    },
+                )
+            except Exception:
+                # The host lock marker remains available for restart recovery.
+                return
 
     async def _execute(self, run_id):
         writes = 0

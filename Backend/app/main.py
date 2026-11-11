@@ -4,6 +4,7 @@ import base64
 import binascii
 import hmac
 import mimetypes
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 
@@ -11,9 +12,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from app.api.capabilities import router as capabilities_router
+from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
 from app.composition import build_run_service, read_only_storage
+from app.orchestration.public_fetch import (
+    FETCH_TTL_SECONDS,
+    FETCH_WINDOW_SECONDS,
+    MAX_FETCHES_PER_WINDOW,
+    MAX_STATUS_POLLS,
+    PUBLIC_SOURCE_IDS,
+    PublicFetchRegistry,
+    SingleProcessGuard,
+)
 from app.orchestration.runs import HostRunLock, RunService
 from app.ports.storage import StorageError
 from app.settings import Settings
@@ -37,32 +49,55 @@ def create_app(
         if read_only is None
         else read_only or settings.environment_profile == "vercel"
     )
+    public_fetch_enabled, public_fetch_block_reason = _public_fetch_policy(
+        settings,
+        read_only=read_only,
+        run_mode=run_mode,
+        storage=storage,
+        adapter_factory=adapter_factory,
+    )
+    effective_lock_path = lock_path or settings.lock_path
 
     @asynccontextmanager
     async def lifespan(app):
         app.state.run_service = None
-        if read_only:
-            yield
-            return
-        app.state.run_service = build_run_service(
-            storage=storage,
-            adapter_factory=adapter_factory,
-            lock_path=lock_path,
-            mode=run_mode,
-            lock_factory=HostRunLock,
-            service_factory=RunService,
-            settings=settings,
-        )
-        if app.state.run_service is not None:
-            await app.state.run_service.recover()
-        app.state.operator_token = (
-            operator_token if operator_token is not None else settings.operator_token
-        )
+        runtime_guard = None
         try:
+            if read_only:
+                yield
+                return
+            if app.state.public_fetch_enabled:
+                runtime_guard = SingleProcessGuard(
+                    str(effective_lock_path) + ".public-fetch-runtime"
+                )
+                try:
+                    acquired = runtime_guard.acquire()
+                except OSError:
+                    acquired = False
+                if not acquired:
+                    runtime_guard = None
+                    app.state.public_fetch_enabled = False
+                    app.state.public_fetch_block_reason = "MULTI_PROCESS_RUNTIME_UNSUPPORTED"
+            app.state.run_service = build_run_service(
+                storage=storage,
+                adapter_factory=adapter_factory,
+                lock_path=effective_lock_path,
+                mode=run_mode,
+                lock_factory=HostRunLock,
+                service_factory=RunService,
+                settings=settings,
+            )
+            if app.state.run_service is not None:
+                await app.state.run_service.recover()
+            app.state.operator_token = (
+                operator_token if operator_token is not None else settings.operator_token
+            )
             yield
         finally:
             if app.state.run_service:
                 await app.state.run_service.shutdown()
+            if runtime_guard is not None:
+                runtime_guard.release()
 
     application = FastAPI(
         title=settings.app_name,
@@ -73,6 +108,15 @@ def create_app(
     )
     application.state.read_only = read_only
     application.state.settings = settings
+    application.state.public_fetch_enabled = public_fetch_enabled
+    application.state.public_fetch_block_reason = public_fetch_block_reason
+    application.state.fetch_registry = PublicFetchRegistry()
+    application.state.public_fetch_source_ids = PUBLIC_SOURCE_IDS
+    application.state.public_fetch_limit = MAX_FETCHES_PER_WINDOW
+    application.state.public_fetch_window_seconds = FETCH_WINDOW_SECONDS
+    application.state.public_fetch_poll_limit = MAX_STATUS_POLLS
+    application.state.public_fetch_ttl_seconds = FETCH_TTL_SECONDS
+    application.state.public_fetch_deadline_seconds = settings.public_fetch_deadline_seconds
     application.state.read_storage_factory = (
         read_storage_factory
         if read_storage_factory is not None
@@ -82,6 +126,16 @@ def create_app(
     @application.middleware("http")
     async def protect_read_only(request: Request, call_next):
         path = request.url.path
+        if (
+            read_only
+            and (path == "/api/v1/fetches" or path.startswith("/api/v1/fetches/"))
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        ):
+            return JSONResponse(
+                {"detail": "Read-only deployment"},
+                status_code=405,
+                headers={"Cache-Control": "no-store"},
+            )
         protected = (
             path == "/dashboard"
             or path.startswith("/dashboard/")
@@ -133,6 +187,8 @@ def create_app(
 
     application.include_router(health_router, prefix="/api")
     application.include_router(runs_router, prefix="/api")
+    application.include_router(capabilities_router, prefix="/api/v1")
+    application.include_router(fetches_router, prefix="/api/v1")
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     if read_only:
 
@@ -168,6 +224,37 @@ def create_app(
         return JSONResponse(status_code=503, content={"detail": "Storage operation failed"})
 
     return application
+
+
+def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory):
+    if not settings.public_fetch_enabled:
+        return False, "FEATURE_DISABLED"
+    if read_only:
+        return False, "READ_ONLY_DEPLOYMENT"
+    if settings.environment_profile not in {"local", "test"}:
+        return False, "UNAPPROVED_ENVIRONMENT"
+    if run_mode != "synthetic":
+        return False, "LIVE_FETCH_NOT_APPROVED"
+    if settings.google_cloud_project:
+        return False, "CLOUD_STORAGE_NOT_ALLOWED"
+    if storage is None or not getattr(storage, "__trendscout_offline_only__", False):
+        return False, "OFFLINE_FAKE_STORAGE_REQUIRED"
+    if adapter_factory is None or not getattr(
+        adapter_factory, "__trendscout_offline_only__", False
+    ):
+        return False, "OFFLINE_FIXTURE_ADAPTER_REQUIRED"
+    if not set(PUBLIC_SOURCE_IDS) <= settings.enabled_source_ids:
+        return False, "SOURCE_NOT_ENABLED"
+    for variable in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
+        raw = os.environ.get(variable)
+        if raw is not None:
+            try:
+                workers = int(raw)
+            except ValueError:
+                return False, "MULTI_PROCESS_RUNTIME_UNSUPPORTED"
+            if workers != 1:
+                return False, "MULTI_PROCESS_RUNTIME_UNSUPPORTED"
+    return True, None
 
 
 app = create_app()

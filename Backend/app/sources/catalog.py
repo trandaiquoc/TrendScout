@@ -19,6 +19,12 @@ class SourceCapability:
     method: str
     readiness: str
     default_enabled: bool
+    adapter_status: str
+    approval_status: str
+    configuration_status: str
+    live_verification_status: str
+    supported_data_modes: tuple[str, ...]
+    known_limitations: tuple[str, ...]
     credential_reference: str | None
     market: str
     language: str | None
@@ -40,6 +46,16 @@ SOURCE_CAPABILITIES = (
         method="GET",
         readiness="IMPLEMENTED",
         default_enabled=True,
+        adapter_status="IMPLEMENTED",
+        approval_status="PENDING_LIVE_APPROVAL",
+        configuration_status="NOT_REQUIRED",
+        live_verification_status="UNVERIFIED",
+        supported_data_modes=("SYNTHETIC", "LIVE"),
+        known_limitations=(
+            "Top-list membership is censored; absence is not zero.",
+            "Approximate pageviews do not measure unique audience or purchase intent.",
+            "Live connectivity has not been verified.",
+        ),
         credential_reference=None,
         market="US country-scoped Wikimedia top list",
         language=None,
@@ -62,6 +78,12 @@ SOURCE_CAPABILITIES = (
         method="GET",
         readiness="PENDING_APPROVAL",
         default_enabled=False,
+        adapter_status="NOT_IMPLEMENTED",
+        approval_status="PENDING_APPROVAL",
+        configuration_status="NOT_CONFIGURED",
+        live_verification_status="NOT_VERIFIED",
+        supported_data_modes=(),
+        known_limitations=("Provider policy and metric scope require approval.",),
         credential_reference="YOUTUBE_API_KEY",
         market="US regionCode filter; not author or viewer residence",
         language="en relevance filter",
@@ -79,6 +101,12 @@ SOURCE_CAPABILITIES = (
         method="GET",
         readiness="PENDING_APPROVAL",
         default_enabled=False,
+        adapter_status="NOT_IMPLEMENTED",
+        approval_status="PENDING_APPROVAL",
+        configuration_status="NOT_CONFIGURED",
+        live_verification_status="NOT_VERIFIED",
+        supported_data_modes=(),
+        known_limitations=("Provider, terms, retention, and cost require approval.",),
         credential_reference="SERPAPI_API_KEY",
         market="Google gl=us localization filter; not author or viewer residence",
         language="Google hl=en interface/results filter",
@@ -96,6 +124,12 @@ SOURCE_CAPABILITIES = (
         method="GET",
         readiness="PENDING_APPROVAL",
         default_enabled=False,
+        adapter_status="NOT_IMPLEMENTED",
+        approval_status="PENDING_APPROVAL",
+        configuration_status="NOT_CONFIGURED",
+        live_verification_status="NOT_VERIFIED",
+        supported_data_modes=(),
+        known_limitations=("Provider, terms, retention, and cost require approval.",),
         credential_reference="SERPAPI_API_KEY",
         market="Bing mkt=en-US localization filter; not author or viewer residence",
         language="en-US localization filter",

@@ -8,6 +8,8 @@ from app.storage.common import validate_fields, validate_id, validate_kind
 
 
 class FakeStorage:
+    __trendscout_offline_only__ = True
+
     def __init__(self) -> None:
         self._runs: dict[str, Record] = {}
         self._records: dict[tuple[str, str, str], Record] = {}

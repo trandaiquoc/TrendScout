@@ -81,6 +81,8 @@ class Settings:
     run_cooldown_seconds: int
     wikimedia_user_agent: str
     allowed_fetch_operations: frozenset[str]
+    public_fetch_enabled: bool = False
+    public_fetch_deadline_seconds: float = 60.0
 
     def __post_init__(self):
         if self.environment_profile not in _ALLOWED_PROFILES:
@@ -116,6 +118,21 @@ class Settings:
             or not 0 <= self.run_cooldown_seconds <= 86400
         ):
             raise ValueError("Run cooldown must be between 0 and 86400 seconds")
+        if type(self.public_fetch_enabled) is not bool:
+            raise ValueError("Public Fetch setting must be boolean")
+        if (
+            isinstance(self.public_fetch_deadline_seconds, bool)
+            or not isinstance(self.public_fetch_deadline_seconds, (int, float))
+            or not 1.0 <= self.public_fetch_deadline_seconds <= 300.0
+        ):
+            raise ValueError("Public Fetch deadline must be between 1 and 300 seconds")
+        if self.public_fetch_enabled and (
+            self.environment_profile not in {"local", "test"}
+            or self.run_mode != "synthetic"
+            or self.read_only
+            or self.google_cloud_project
+        ):
+            raise ValueError("Public Fetch is limited to local offline synthetic profiles")
         if self.read_only and self.allowed_fetch_operations:
             raise ValueError("Read-only settings cannot allow fetch operations")
         operations = frozenset(self.allowed_fetch_operations)
@@ -214,6 +231,12 @@ class Settings:
             raise ValueError("Invalid WIKIMEDIA_USER_AGENT")
 
         operator_token = environment.get("TREND_SCOUT_OPERATOR_TOKEN") or None
+        public_fetch_enabled = _boolean(
+            environment, "TREND_SCOUT_PUBLIC_FETCH_ENABLED", False
+        )
+        public_fetch_deadline_seconds = _bounded_float(
+            environment, "TREND_SCOUT_PUBLIC_FETCH_DEADLINE_SECONDS", 60.0, 1.0, 300.0
+        )
         allowed_fetch_operations = (
             frozenset({"manual_run"})
             if not read_only and operator_token and len(operator_token) >= 24
@@ -244,4 +267,6 @@ class Settings:
             ),
             wikimedia_user_agent=user_agent,
             allowed_fetch_operations=allowed_fetch_operations,
+            public_fetch_enabled=public_fetch_enabled,
+            public_fetch_deadline_seconds=public_fetch_deadline_seconds,
         )
