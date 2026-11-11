@@ -26,7 +26,7 @@ The browser safely renders API values as text and only links to validated HTTPS 
 
 The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. Fetch uses the separate `POST /api/v1/fetches` contract only when the backend explicitly enables the offline synthetic runtime; the feature flag defaults off and production/Vercel cannot enable it. In an enabled local/test fixture run, the button executes the injected fixture, reports its real backend state, and reads the resulting run. Otherwise it stays disabled with the backend's reason. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
 
-The existing Vercel HTTP Basic access gate for the read-only dashboard is unchanged by D3A. It is a hosting-level restriction inherited from the prior deployment setup, not an application user account; no claim is made here that the gated Vercel URL opens without a password.
+The Vercel application serves dashboard HTML, CSS, and JavaScript modules anonymously. Private `/api/runs/...` reads remain behind HTTP Basic and the configured Vercel OIDC/Firestore identity; a missing `TREND_SCOUT_READ_PASSWORD` blocks those private reads, not dashboard rendering. Vercel Deployment Protection is a separate platform gate and may still require authentication before a request reaches the application.
 
 The legacy `POST /api/runs` route remains separate and still requires its operator Bearer token. The public Fetch route accepts only `{}` and the backend selects a fixed source, query plan, request budget, and synthetic mode. Vercel remains read-only and returns 405 for Fetch/run creation. Live Wikimedia and paid/provider APIs are not called by this flow.
 
@@ -39,7 +39,7 @@ Capability data distinguishes adapter implementation from approval, configuratio
 
 ## Static assets and Vercel
 
-Local FastAPI serves the files under public/ at /dashboard/. The Vercel build runs Backend/scripts/prepare_vercel.py, which packages every non-hidden file under Frontend/public into the function's generated app/dashboard_assets.py. The same authenticated dashboard route serves HTML, CSS, and nested JavaScript modules; assets are not moved to an unprotected CDN path. Read-only Basic authentication continues to protect the dashboard and its static modules.
+Local FastAPI serves the files under public/ at /dashboard/. The Vercel build runs Backend/scripts/prepare_vercel.py, which packages every non-hidden file under Frontend/public into the function's generated app/dashboard_assets.py. The same application route serves the public HTML, CSS, and nested JavaScript modules. Private run data stays behind its API boundary; assets are not moved to an unrelated CDN path.
 
 ## Checks
 

@@ -16,6 +16,9 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
             app = create_app(storage=FakeStorage(), lock_path=str(Path(directory) / 'lock'))
             async with app.router.lifespan_context(app):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                    root = await client.get('/')
+                    self.assertEqual(root.status_code, 307)
+                    self.assertEqual(root.headers['location'], '/dashboard/')
                     page = await client.get('/dashboard/')
                     self.assertEqual(page.status_code, 200)
                     self.assertIn('data-theme="light"', page.text)

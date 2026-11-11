@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.capabilities import router as capabilities_router
@@ -136,12 +136,7 @@ def create_app(
                 status_code=405,
                 headers={"Cache-Control": "no-store"},
             )
-        protected = (
-            path == "/dashboard"
-            or path.startswith("/dashboard/")
-            or path == "/api/runs"
-            or path.startswith("/api/runs/")
-        )
+        protected = path == "/api/runs" or path.startswith("/api/runs/")
         if not read_only or not protected:
             return await call_next(request)
         if path.rstrip("/") == "/api/runs" and request.method == "POST":
@@ -180,6 +175,10 @@ def create_app(
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @application.get("/", include_in_schema=False)
+    async def dashboard_root():
+        return RedirectResponse(url="/dashboard/", status_code=307)
 
     @application.get("/api/config")
     async def app_config():
