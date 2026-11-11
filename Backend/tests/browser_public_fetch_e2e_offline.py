@@ -44,7 +44,7 @@ window.fetch=(path,options={{}})=>{{
   ]}};
   else if(value==='/api/v1/fetches'&&requestOptions.method==='POST') body={{fetch_id:{json.dumps(FETCH_ID)},status:'QUEUED',data_mode:'SYNTHETIC'}};
   else if(value==='/api/v1/fetches/{FETCH_ID}'){{statusReads+=1;body={{fetch_id:{json.dumps(FETCH_ID)},run_id:{json.dumps(RUN_ID)},status:'PARTIAL',stage:'PARTIAL',data_mode:'SYNTHETIC',terminal:true}};}}
-  else if(value==='/api/runs/{RUN_ID}') body={{run_id:{json.dumps(RUN_ID)},status:'PARTIAL',mode:'synthetic',data_date:'2026-11-06',keyword_count:1,scored_count:0,coverage:[],fetched_at:'2026-11-07T00:00:00Z'}};
+  else if(value==='/api/runs/{RUN_ID}') body={{run_id:{json.dumps(RUN_ID)},status:'PARTIAL',mode:'synthetic',data_date:'2026-11-06',keyword_count:1,scored_count:0,coverage:[],fetched_at:'2026-11-07T00:00:00Z',synthetic_discovery:{{data_mode:'SYNTHETIC',shown_count:1,candidate_count:1,sources:[{{source_id:'google_web_serp',status:'PARTIAL',record_count:1,stop_reason:'QUERY_CAP_REACHED'}}],candidates:[{{keyword:'<img src=x onerror=alert(1)>',categories:['fashion'],assessments:[{{classification:'INSUFFICIENT_EVIDENCE'}}],evidence:[{{source_id:'google_web_serp',data_mode:'SYNTHETIC',delivery_mode:'CACHED',fetched_at:'2026-11-07T00:00:00Z',scope:'US filter',query_evidence:['fixture']}}]}}]}}}};
   else if(value==='/api/runs/{RUN_ID}/keywords') body={{items:[{{keyword_id:'b'.repeat(64),display_keyword:'Synthetic phrase',canonical_keyword:'synthetic phrase',score:null,status:'INSUFFICIENT_DATA',categories:[],current_views_ceil:0}}],total:1,offset:0,limit:20,next_offset:null}};
   else return Promise.resolve(new Response('{{}}',{{status:404,headers:{{'content-type':'application/json'}}}}));
   return Promise.resolve(new Response(JSON.stringify(body),{{status:200,headers:{{'content-type':'application/json','cache-control':'no-store'}}}}));
@@ -66,6 +66,14 @@ check(statusReads===1,'one bounded status read receives terminal state');
 check(document.querySelector('#fetch-status').textContent.includes('độ phủ nguồn chưa đầy đủ'),'partial synthetic state announced');
 check(document.querySelector('#runs-current').textContent===RUN_ID,'run results load without user-entered ID');
 check(document.querySelector('#rows').textContent.includes('Synthetic phrase'),'synthetic result rendered');
+check(document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),'discovery assessment rendered');
+check(document.querySelector('#demo-discovery-list').textContent.includes('<img src=x onerror=alert(1)>'),'untrusted keyword rendered as text');
+check(!document.querySelector('#demo-discovery-list img'),'untrusted keyword is not HTML');
+check(document.querySelector('#demo-discovery-list').textContent.includes('CACHED'),'cache provenance rendered');
+document.querySelector('[data-category=home_goods]').click();
+check(!document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),'synthetic candidates respect category filter');
+document.querySelector('[data-category=fashion]').click();
+check(document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),'matching category restores candidate');
 check(document.querySelector('[data-source=youtube]').dataset.sourceStatus==='implemented_offline_verified-not_verified','offline-implemented source remains live-disabled');
 check(!Object.keys(localStorage).some(key=>/token|secret|credential|password/i.test(key)),'no credentials stored');
 document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();

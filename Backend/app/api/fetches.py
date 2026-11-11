@@ -148,7 +148,7 @@ async def create_fetch(
     try:
         record, replay = await request.app.state.fetch_registry.accept(
             idempotency_key,
-            request_fingerprint(request.app.state.settings),
+            request_fingerprint(request.app.state.settings, request.app.state.public_fetch_source_ids),
             start=lambda: run_service.start(
                 execution_timeout_seconds=request.app.state.public_fetch_deadline_seconds
             ),

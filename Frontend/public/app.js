@@ -222,6 +222,7 @@ function safeEvidenceUrl(value) {
 
 function updateRun(run) {
   state.run = run;
+  renderSyntheticDiscovery(run);
   const status = typeof run.status === 'string' ? run.status : '';
   $('#run-status').textContent = t('status.' + status) === 'status.' + status
     ? (status || 'NOT_AVAILABLE')
@@ -293,6 +294,58 @@ function updateRun(run) {
     warnings.push(t('error.old-table'));
   }
   announce(warnings.join(' '), status === 'FAILED' || status === 'ABORTED');
+}
+
+function renderSyntheticDiscovery(run) {
+  const bundle = run?.mode === 'synthetic' && run.synthetic_discovery?.data_mode === 'SYNTHETIC'
+    ? run.synthetic_discovery : null;
+  const sourcePanel = $('#demo-source-results');
+  const panel = $('#demo-discovery');
+  sourcePanel.hidden = !bundle;
+  panel.hidden = !bundle;
+  const sourceList = $('#demo-source-list');
+  const list = $('#demo-discovery-list');
+  sourceList.replaceChildren();
+  list.replaceChildren();
+  if (!bundle) return;
+  if (bundle.error) {
+    sourceList.append(element('li', t('demo.failed')));
+    $('#demo-discovery-count').textContent = t('demo.failed');
+    return;
+  }
+  for (const source of Array.isArray(bundle.sources) ? bundle.sources : []) {
+    const name = ({ google_web_serp: 'Google / SerpApi', bing_web_serp: 'Bing / SerpApi',
+      youtube_video_search: 'YouTube' })[source.source_id] || '—';
+    sourceList.append(element('li', `${name} · SYNTHETIC · ${source.status} · ${source.record_count} · ${source.stop_reason || '—'}`));
+  }
+  const category = state.category === 'home_goods' ? 'home_living' : state.category;
+  const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
+  const candidates = (Array.isArray(bundle.candidates) ? bundle.candidates : []).filter((candidate) => {
+    const categories = Array.isArray(candidate.categories) ? candidate.categories : [];
+    return (!query || String(candidate.keyword || '').normalize('NFC').toLocaleLowerCase().includes(query))
+      && (category === 'all' || categories.includes(category));
+  });
+  $('#demo-discovery-count').textContent = t('demo.count', {
+    shown: candidates.length, total: bundle.candidate_count ?? 0,
+  });
+  for (const candidate of candidates) {
+    const item = element('li');
+    item.append(element('strong', candidate.keyword));
+    const assessments = Array.isArray(candidate.assessments) ? candidate.assessments : [];
+    const classifications = [...new Set(assessments.map((assessment) => assessment.classification))];
+    item.append(element('span', ` · SYNTHETIC · ${classifications.join(', ') || '—'}`));
+    const details = element('details');
+    details.append(element('summary', t('demo.evidence')));
+    const evidenceList = element('ul');
+    for (const evidence of Array.isArray(candidate.evidence) ? candidate.evidence : []) {
+      evidenceList.append(element('li', [evidence.source_id, evidence.data_mode,
+        evidence.delivery_mode, timestamp(evidence.fetched_at), evidence.scope,
+        ...(Array.isArray(evidence.query_evidence) ? evidence.query_evidence : [])].join(' · ')));
+    }
+    details.append(evidenceList);
+    item.append(details);
+    list.append(item);
+  }
 }
 
 async function loadRun(id, { poll = false } = {}) {
@@ -634,6 +687,7 @@ function bindEvents() {
     button.setAttribute('aria-pressed', 'true');
     state.category = button.dataset.category;
     state.offset = 0;
+    if (state.run) renderSyntheticDiscovery(state.run);
     loadKeywords();
   }));
   let searchTimer;
@@ -643,6 +697,7 @@ function bindEvents() {
     searchTimer = setTimeout(() => {
       state.query = query;
       state.offset = 0;
+      if (state.run) renderSyntheticDiscovery(state.run);
       loadKeywords();
     }, 350);
   });

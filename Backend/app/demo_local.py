@@ -7,6 +7,7 @@ from app.main import create_app
 from app.models.observations import CollectionResult, DatasetSnapshot, FetchStatus, PageObservation
 from app.settings import Settings
 from app.storage.fake import FakeStorage
+from app.synthetic_multisource import collect_synthetic_discovery
 
 _END = date(2026, 1, 8)
 _FETCHED = datetime(2026, 1, 9, tzinfo=timezone.utc)
@@ -55,4 +56,5 @@ def create_demo_app():
         "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
         "TREND_SCOUT_RUN_COOLDOWN_SECONDS": "0",
     })
-    return create_app(settings=settings, storage=FakeStorage(), adapter_factory=DemoFixtureAdapter)
+    return create_app(settings=settings, storage=FakeStorage(), adapter_factory=DemoFixtureAdapter,
+                      synthetic_supplement=collect_synthetic_discovery)

@@ -111,20 +111,21 @@
             <article class="panel source-card" data-source="youtube" data-source-status="not-configured">
               <div class="source-card-head"><span class="source-monogram source-monogram--red">▶</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
               <h2>YouTube</h2><p data-i18n="sources.youtube-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
             </article>
             <article class="panel source-card" data-source="google-search" data-source-status="not-configured">
               <div class="source-card-head"><span class="source-monogram source-monogram--blue">G</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
               <h2>Google Search</h2><p data-i18n="sources.google-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
             </article>
             <article class="panel source-card" data-source="bing-search" data-source-status="not-configured">
               <div class="source-card-head"><span class="source-monogram source-monogram--cyan">b</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
               <h2>Bing Search</h2><p data-i18n="sources.bing-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
             </article>
           </div>
           <p class="fine-print" data-i18n="sources.no-aggregation"></p>
+          <div class="panel" id="demo-source-results" hidden><h2 data-i18n="demo.source-title"></h2><p data-i18n="demo.source-help"></p><ul id="demo-source-list"></ul></div>
         </section>
 
         <section class="view-panel" data-view="runs" hidden aria-labelledby="runs-heading">
@@ -137,6 +138,7 @@
 
         <section class="view-panel" data-view="keywords" hidden aria-labelledby="keywords-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h1 id="keywords-heading"><span data-i18n="nav.keywords"></span> <span class="count-chip" id="results-count">—</span></h1><p data-i18n="keywords.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
+          <div class="panel" id="demo-discovery" hidden><h2 data-i18n="demo.discovery-title"></h2><p data-i18n="demo.discovery-help"></p><p id="demo-discovery-count"></p><ul id="demo-discovery-list"></ul></div>
           <div id="keyword-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
           <div class="panel table-panel">
             <div class="table-toolbar">

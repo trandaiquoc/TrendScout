@@ -47,6 +47,7 @@ def build_run_service(
     lock_factory,
     service_factory,
     settings: Settings | None = None,
+    synthetic_supplement=None,
 ):
     """Build the local service; callers must never invoke this in read-only mode."""
     settings = settings or Settings.from_environment()
@@ -56,6 +57,7 @@ def build_run_service(
         return None
     path = lock_path or settings.lock_path
     lock = lock_factory(path, cooldown_seconds=settings.run_cooldown_seconds)
+    extra = {"synthetic_supplement": synthetic_supplement} if synthetic_supplement else {}
     return service_factory(
         storage,
         lock,
@@ -65,6 +67,7 @@ def build_run_service(
         extract_keywords=extract_keywords,
         score_trends=algorithm_engine().legacy_results,
         day_data_factory=DayData,
+        **extra,
     )
 
 

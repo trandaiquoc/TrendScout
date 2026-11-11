@@ -86,9 +86,15 @@ class HostRunLock:
 class RunService:
     def __init__(self, storage: AnalysisStorage, lock: HostRunLock,
                  adapter_factory: Callable[[], CollectionSource], *, mode="live",
-                 clean_snapshot, extract_keywords, score_trends, day_data_factory):
+                 clean_snapshot, extract_keywords, score_trends, day_data_factory,
+                 synthetic_supplement=None):
         if mode not in {"live", "synthetic", "replay"}:
             raise ValueError("Invalid run mode")
+        if synthetic_supplement is not None and not (
+            mode == "synthetic" and getattr(storage, "__trendscout_offline_only__", False)
+            and getattr(synthetic_supplement, "__trendscout_offline_only__", False)
+        ):
+            raise ValueError("Synthetic supplement requires offline-only dependencies")
         self.storage = storage
         self.lock = lock
         self.adapter_factory = adapter_factory
@@ -97,6 +103,7 @@ class RunService:
         self.score_trends = score_trends
         self.day_data_factory = day_data_factory
         self.mode = mode
+        self.synthetic_supplement = synthetic_supplement
         self.tasks = set()
 
     async def recover(self):
@@ -162,6 +169,16 @@ class RunService:
         try:
             await self.storage.update_run(run_id, {"status": "FETCHING", "started_at": now()})
             collected = await self.adapter_factory().collect()
+            supplement = None
+            if self.synthetic_supplement is not None:
+                try:
+                    supplement = await self.synthetic_supplement()
+                    if not isinstance(supplement, dict) or supplement.get("data_mode") != "SYNTHETIC":
+                        raise ValueError("Invalid synthetic supplement")
+                    safe_doc(supplement)
+                except Exception:
+                    supplement = {"data_mode": "SYNTHETIC", "sources": [], "candidates": [],
+                                  "error": "SYNTHETIC_SUPPLEMENT_FAILED"}
             if collected.analysis_date is None:
                 failures = [{"date": snapshot.observation_date.isoformat(), "status": snapshot.fetch_status.value,
                              "http_status": snapshot.http_status, "error": snapshot.error}
@@ -173,9 +190,18 @@ class RunService:
                     metadata["rejected_records"] = list(snapshot.rejected_records)
                     await self.storage.put_record(run_id, "snapshots", snapshot.observation_date.isoformat(), safe_doc(metadata))
                     writes += 1
-                await self.storage.update_run(run_id, {"status": "FAILED", "finished_at": now(),
-                    "error": "Wikimedia did not return an analysis date", "request_count": collected.request_count,
-                    "coverage": failures, "snapshot_count": len(failures), "document_writes": writes})
+                supplement_has_results = bool(supplement and any(
+                    source.get("record_count", 0) > 0 for source in supplement.get("sources", [])
+                ))
+                failure = {"status": "PARTIAL" if supplement_has_results else "FAILED",
+                    "finished_at": now(), "error": "Wikimedia did not return an analysis date",
+                    "request_count": collected.request_count, "coverage": failures,
+                    "snapshot_count": len(failures), "document_writes": writes}
+                if supplement is not None:
+                    failure["synthetic_discovery"] = supplement
+                if supplement_has_results:
+                    failure.update({"keyword_count": 0, "scored_count": 0})
+                await self.storage.update_run(run_id, failure)
                 return
             await self.storage.update_run(run_id, {"status": "NORMALIZING", "data_date": collected.analysis_date.isoformat(), "request_count": collected.request_count})
             days, cleaning, total = [], [], 0
@@ -226,12 +252,18 @@ class RunService:
             coverage = [{"date": d.snapshot.observation_date.isoformat(), "status": d.snapshot.fetch_status.value,
                          "http_status": d.snapshot.http_status, "error": d.snapshot.error}
                         for d in days if history_start <= d.snapshot.observation_date <= collected.analysis_date]
-            partial = any(item["status"] != FetchStatus.SUCCESS.value for item in coverage) or len(coverage) != 8
-            await self.storage.update_run(run_id, {"status": "PARTIAL" if partial else "COMPLETED", "finished_at": now(),
+            partial = (any(item["status"] != FetchStatus.SUCCESS.value for item in coverage)
+                       or len(coverage) != 8 or bool(supplement and (
+                           supplement.get("error") or any(not source.get("complete")
+                                                          for source in supplement["sources"]))))
+            completion = {"status": "PARTIAL" if partial else "COMPLETED", "finished_at": now(),
                 "fetched_at": max(d.snapshot.fetched_at for d in days), "observation_count": total,
                 "keyword_count": len(scores), "scored_count": sum(s.score is not None for s in scores),
                 "snapshot_count": len(days), "document_writes": writes, "coverage": coverage,
-                "algorithm_version": "wikimedia-trend-v0.1", "classification_version": "title-rules-v0.1", "error": None})
+                "algorithm_version": "wikimedia-trend-v0.1", "classification_version": "title-rules-v0.1", "error": None}
+            if supplement is not None:
+                completion["synthetic_discovery"] = supplement
+            await self.storage.update_run(run_id, completion)
         except asyncio.CancelledError:
             try:
                 await asyncio.shield(self.storage.update_run(run_id, {"status": "ABORTED", "finished_at": now(), "error": "Process shutdown interrupted run"}))

@@ -2,7 +2,6 @@
 
 from fastapi import APIRouter, Request, Response
 
-from app.orchestration.public_fetch import PUBLIC_SOURCE_IDS
 from app.ports.storage import StorageError
 from app.sources.catalog import SOURCE_CAPABILITIES
 from app.sources.query_plan import get_query_plan
@@ -80,10 +79,10 @@ async def capabilities(request: Request, response: Response):
                 "language_scope": item.language,
                 "known_limitations": list(item.known_limitations),
                 "enabled_for_current_operation": (
-                    enabled and item.source_id in PUBLIC_SOURCE_IDS
+                    enabled and item.source_id in request.app.state.public_fetch_source_ids
                 ),
                 "disabled_reason": None
-                if enabled and item.source_id in PUBLIC_SOURCE_IDS
+                if enabled and item.source_id in request.app.state.public_fetch_source_ids
                 else (block_reason or "SOURCE_NOT_ALLOWED"),
             }
             for item in SOURCE_CAPABILITIES

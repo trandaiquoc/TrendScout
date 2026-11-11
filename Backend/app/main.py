@@ -29,6 +29,7 @@ from app.orchestration.public_fetch import (
 from app.orchestration.runs import HostRunLock, RunService
 from app.ports.storage import StorageError
 from app.settings import Settings
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 
 def create_app(
@@ -41,6 +42,7 @@ def create_app(
     read_only=None,
     read_storage_factory=None,
     settings: Settings | None = None,
+    synthetic_supplement=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -56,6 +58,11 @@ def create_app(
         storage=storage,
         adapter_factory=adapter_factory,
     )
+    if synthetic_supplement is not None and not (
+        public_fetch_enabled and run_mode == "synthetic"
+        and getattr(synthetic_supplement, "__trendscout_offline_only__", False)
+    ):
+        raise ValueError("Synthetic supplement requires an enabled offline fixture runtime")
     effective_lock_path = lock_path or settings.lock_path
 
     @asynccontextmanager
@@ -86,6 +93,7 @@ def create_app(
                 lock_factory=HostRunLock,
                 service_factory=RunService,
                 settings=settings,
+                synthetic_supplement=synthetic_supplement,
             )
             if app.state.run_service is not None:
                 await app.state.run_service.recover()
@@ -111,7 +119,10 @@ def create_app(
     application.state.public_fetch_enabled = public_fetch_enabled
     application.state.public_fetch_block_reason = public_fetch_block_reason
     application.state.fetch_registry = PublicFetchRegistry()
-    application.state.public_fetch_source_ids = PUBLIC_SOURCE_IDS
+    application.state.public_fetch_source_ids = (
+        PUBLIC_SOURCE_IDS + (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        if synthetic_supplement is not None else PUBLIC_SOURCE_IDS
+    )
     application.state.public_fetch_limit = MAX_FETCHES_PER_WINDOW
     application.state.public_fetch_window_seconds = FETCH_WINDOW_SECONDS
     application.state.public_fetch_poll_limit = MAX_STATUS_POLLS

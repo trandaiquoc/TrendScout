@@ -80,12 +80,12 @@ class FetchRecord:
     poll_count: int = 0
 
 
-def request_fingerprint(settings) -> str:
+def request_fingerprint(settings, source_ids=PUBLIC_SOURCE_IDS) -> str:
     """Hash server-selected operation inputs; no request-controlled source fields exist."""
     plan = {
         "operation": "public_fetch_v1",
         "data_mode": "SYNTHETIC",
-        "source_ids": list(PUBLIC_SOURCE_IDS),
+        "source_ids": list(source_ids),
         "query_plan_id": settings.query_plan_id,
         "query_plan_version": settings.query_plan_version,
         "query_plan_fingerprint": get_query_plan(
