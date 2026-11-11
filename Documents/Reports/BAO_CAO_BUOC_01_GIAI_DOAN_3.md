@@ -6,9 +6,9 @@ Kết quả: **`EMULATOR_NOT_VERIFIED` — `BLOCKED_FOR_LIVE` — `COMMERCIAL_NO
 
 ## Kết luận
 
-Không thể nghiệm thu Firestore transaction ở goal này vì Firestore Emulator chưa được cài và không có sẵn trong môi trường. Tôi không tải CLI/emulator, không bật kết nối cloud, không dùng ADC/credential, không chạy transaction, không deploy và không push. Do goal yêu cầu chặn outbound Internet và không cho phép tải dependency/emulator, công việc dừng tại prerequisite cài emulator.
+Không thể nghiệm thu Firestore transaction ở goal này vì Firestore Emulator chưa được cài và không có sẵn trong môi trường. Tôi không tải CLI/emulator, không bật kết nối cloud, không dùng ADC/credential, không chạy transaction, không deploy và không push. Phần kiểm chứng transaction phụ thuộc emulator dừng tại prerequisite cài emulator; trong lúc đó đã bổ sung guard/runner và regression tests offline mà không khẳng định transaction đã được triển khai.
 
-Không có transactional adapter mới được triển khai; do đó chưa có kết quả concurrency/replay từ Firestore SDK hoặc emulator và không được gọi là `IMPLEMENTED_NOT_EMULATOR_VERIFIED`. Chưa đạt `EMULATOR_ACCEPTED`. Các fake hiện tại vẫn chỉ là reference contract, không chứng minh distributed safety.
+Chưa có transactional job coordinator, resource lease/fencing hoặc atomic dataset publisher mới; do đó chưa có kết quả concurrency/replay từ Firestore SDK hoặc emulator và không được gọi là `IMPLEMENTED_NOT_EMULATOR_VERIFIED`. Chưa đạt `EMULATOR_ACCEPTED`. Các fake hiện tại vẫn chỉ là reference contract, không chứng minh distributed safety. Sau audit, đã thêm riêng một emulator-only client guard cùng 9 offline tests; guard này chưa kết nối emulator thật.
 
 ## Audit baseline
 
@@ -18,6 +18,9 @@ Không có transactional adapter mới được triển khai; do đó chưa có 
 - `Backend/app/datasets/manifest.py` xác thực `offline-manifest-v1`; `Backend/app/datasets/evidence.py` dựng lại evidence pipeline và score từ persisted fake shards.
 - `Backend/app/workers/refresh.py` là prototype worker dùng coordinator/dataset interfaces; không được nối vào production composition.
 - `Backend/app/storage/firestore.py` là Firestore storage CRUD cho demo, khởi tạo Firebase Admin app từ project env/ADC. Đây không phải transaction coordinator, và không được tái dùng cho đường emulator nếu có thể fallback ADC.
+- `Backend/app/storage/firestore_emulator.py` là factory emulator-only mới: synthetic project cố định, numeric loopback host, reject ADC/production project env, kiểm tra network namespace chỉ có loopback/no external routes và REST read-only probe trước khi tạo `google.cloud.firestore.Client` với `AnonymousCredentials`. Factory không được gọi từ production composition.
+- `Backend/tests/test_firestore_emulator_guard.py` có 9 tests offline cho thiếu host, endpoint ngoài loopback, production project/ADC, namespace host, emulator unavailable, REST response sai schema và explicit anonymous client construction.
+- `Backend/scripts/run_firestore_emulator_tests.sh` là runner chuẩn bị sẵn: yêu cầu integration test files, Firebase CLI và JAR cache tồn tại trước; config tạm bind `127.0.0.1`; chạy CLI + emulator + tests trong cùng `bwrap --unshare-net`; seccomp chỉ cho IPv4/IPv6, từ chối AF_UNIX/socketpair/io_uring; dùng temporary `HOME` không có ADC/login profile, bind cache JAR read-only, project synthetic và timeout 10 phút. Hiện runner fail-closed code 4 do chưa có integration test suite; nó không tải hoặc start gì.
 - `Backend/app/composition.py` giữ wiring API hiện tại; không sửa production composition, manual HostRunLock hoặc Vercel read-only.
 - Chỉ có `AGENTS.md` tại root và `Frontend/AGENTS.md`; không có chỉ dẫn Backend riêng.
 
@@ -34,7 +37,7 @@ Không có transactional adapter mới được triển khai; do đó chưa có 
 | Firestore emulator process/listener | Không có process; không có listener tại `127.0.0.1:8080`. |
 | Google Cloud CLI | Có, Snap `Google Cloud SDK 592.0.0`; component list local không có `cloud-firestore-emulator`. Snap wrapper bị từ chối bởi capability policy, nhưng executable bên trong Snap chạy được cho thao tác inventory local. |
 | CLI Java compatibility | Release notes hiện hành cho SDK `592.0.0` yêu cầu Java 25 cho Firestore Emulator; máy hiện có Java 21. |
-| Bubblewrap network isolation | `bwrap --unshare-net` hoạt động. Loopback TCP round-trip thành công bên trong namespace; kết nối thử tới `1.1.1.1:443` trả `ENETUNREACH` (`101`). Không có gói nào được gửi ra Internet. |
+| Bubblewrap + seccomp isolation | `bwrap --unshare-net` hoạt động. Probe kết hợp seccomp pass: loopback TCP round-trip thành công; public `1.1.1.1:443` không có route; AF_UNIX và socketpair trả `EPERM`, kể cả process con. Factory xác nhận `/proc/net/dev` và route state chỉ có loopback; Unix socket proxy không được phép trong emulator process tree. |
 
 Bubblewrap tạo network namespace riêng cho command tree và vẫn cho loopback; vì vậy emulator và test runner phải được khởi chạy **cùng trong một namespace**. Chạy emulator trên host rồi chạy test trong namespace khác sẽ không kết nối được. Lệnh `unshare -n` trực tiếp bị `Operation not permitted`, nhưng bubblewrap được xác minh hoạt động.
 
@@ -57,7 +60,8 @@ Truy cập ngày 11/11/2026:
 
 | Nhóm | Yêu cầu | Kết quả hiện tại |
 |---|---|---|
-| Emulator guard/factory | Chỉ loopback, synthetic project, anonymous credentials, không ADC/cloud fallback | Chưa triển khai; unit/integration tests chưa có. |
+| Emulator guard/factory | Chỉ loopback, synthetic project, anonymous credentials, không ADC/cloud fallback | Guard + 9 mocked offline tests pass; actual emulator REST probe chưa được chạy vì emulator binary/listener vắng mặt. |
+| Emulator runner | Có test suite, cached emulator, synthetic project, loopback, outbound blocked, timeout/nonzero | Runner syntax pass; chạy preflight trả code 4 `no Firestore integration test suite is present`; chưa start Firebase CLI/emulator. |
 | Occurrence/idempotent create | Stable identity, replay cùng payload, conflict payload khác, không double budget | Fake có reference behavior; Firestore chưa có. |
 | Job transaction/state | Create/claim/revision/state/cancel/deadline/retry/budget durable | Chưa triển khai hoặc kiểm chứng. |
 | Resource lease/fencing | Token đơn điệu theo resource; takeover; heartbeat/cancel race; stale owner | Chỉ fake lock test; hai SDK client chưa được chạy. |
@@ -76,13 +80,15 @@ Không có nhóm nào trong acceptance matrix được xem là nghiệm thu emul
 
 Lệnh `./Backend/scripts/verify_offline_readiness.sh` chạy trong strict seccomp sandbox, chặn socket Internet:
 
-- 357/357 unittest pass.
+- 366/366 unittest pass, gồm 9 test guard mới; emulator tests không bị skip vì chưa có emulator suite nào được thêm vào default unittest discovery.
 - Golden Regression: 7/7 với `PYTHONHASHSEED=1` và 7/7 với `983`.
 - `pip check`: không có dependency conflict.
 - `bash -n`, `node --check`, Vercel asset bundle byte comparison: pass.
 - Chrome dashboard, keyboard/mobile và adapter → ASGI API → dashboard E2E với fixture synthetic: pass.
 - Synthetic API/storage benchmark 1k/5k/10k: pass.
 - Dòng kết quả: `OFFLINE_READINESS_VERIFICATION=PASS`.
+- Emulator guard chạy trực tiếp bên trong bubblewrap; do port trống, factory trả lỗi unavailable trước khi khởi tạo SDK client. Emulator runner được kiểm tra riêng và fail-closed khi chưa có suite.
+- Emulator network probe: `loopback PASS; public route BLOCKED; AF_UNIX EPERM`, filter kế thừa ở process con.
 
 Đây là regression baseline offline, không có emulator tests. Không có test nào bị đổi thành pass giả; không thay Golden Expected. Không gọi Wikimedia, Firestore, Firebase Console, gcloud cloud API, AI, marketplace hoặc deployment. Không đọc ADC hoặc credential. Không tạo document.
 
@@ -114,4 +120,4 @@ Các mục dưới đây tiếp tục **`PENDING_APPROVAL`**; không được su
 
 ## Git và giới hạn nghiệm thu
 
-Working tree không có code change khi audit kết thúc. Báo cáo này là hồ sơ blocker/prerequisite, không phải completion report. Không tạo commit tính năng, không chạy cloud, không deploy và không push. Sau khi emulator binary được cài riêng và được xác minh trong cache, tiếp tục triển khai theo goal; khi đó mới tạo adapter, integration tests, failure matrix và hai commit yêu cầu nếu các điều kiện nghiệm thu thực sự pass.
+Tiến độ local được ghi thành hai commit: `8373d5a test(firestore): add isolated emulator test guard` và commit báo cáo này. Đây không phải completion report. Không chạy cloud, không deploy và không push. Sau khi emulator binary được cài riêng và được xác minh trong cache, tiếp tục triển khai coordinator/publisher, integration tests, failure matrix và các commit trạng thái trung thực; `EMULATOR_ACCEPTED` chỉ được đặt nếu mọi điều kiện nghiệm thu thực sự pass.
