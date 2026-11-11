@@ -50,13 +50,15 @@ class WikimediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.user_agent, configured)
 
     def test_http_policy_and_disabled_flag_flow_from_typed_settings(self):
-        settings = Settings.from_environment({
-            "TREND_SCOUT_HTTP_CONNECT_TIMEOUT_SECONDS": "2.5",
-            "TREND_SCOUT_HTTP_READ_TIMEOUT_SECONDS": "4",
-            "TREND_SCOUT_HTTP_TOTAL_TIMEOUT_SECONDS": "6",
-            "TREND_SCOUT_HTTP_MAX_RETRIES": "1",
-            "TREND_SCOUT_HTTP_MAX_RETRY_WAIT_SECONDS": "8",
-        })
+        settings = Settings.from_environment(
+            {
+                "TREND_SCOUT_HTTP_CONNECT_TIMEOUT_SECONDS": "2.5",
+                "TREND_SCOUT_HTTP_READ_TIMEOUT_SECONDS": "4",
+                "TREND_SCOUT_HTTP_TOTAL_TIMEOUT_SECONDS": "6",
+                "TREND_SCOUT_HTTP_MAX_RETRIES": "1",
+                "TREND_SCOUT_HTTP_MAX_RETRY_WAIT_SECONDS": "8",
+            }
+        )
         adapter = WikimediaAdapter(settings=settings)
         self.assertEqual(adapter.http_policy.connect_timeout_seconds, 2.5)
         self.assertEqual(adapter.http_policy.read_timeout_seconds, 4.0)

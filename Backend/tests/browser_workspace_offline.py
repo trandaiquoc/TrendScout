@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[2]
-FAKE=r'''<script>
+FAKE = r"""<script>
 const requests=[]; const runA='a'.repeat(32),runB='b'.repeat(32),keyword='c'.repeat(64);window.pwned=false;
 window.fetch=(path,opts={})=>{requests.push([String(path),opts.method||'GET',opts]);const p=String(path);let payload;
 if(p==='/timeout-json')return Promise.resolve({ok:true,json:()=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
@@ -20,8 +20,8 @@ else if(p===`/api/runs/${'d'.repeat(32)}`)return Promise.resolve(new Response('{
 else if(p.startsWith('/api/runs/')){const id=p.split('/')[3];payload={run_id:id,status:'PARTIAL',keyword_count:25,scored_count:3,data_date:'2026-01-08',mode:'synthetic',fetched_at:'2026-01-09T00:00:00Z',coverage:[{date:'2026-01-07',status:'DAY_UNAVAILABLE',http_status:404}],algorithm_version:'wikimedia-trend-v0.1'};}
 else return Promise.resolve(new Response('{}',{status:404}));const delay=p===`/api/runs/${runA}`||p.includes('q=slow')?80:1;
 return new Promise(resolve=>setTimeout(()=>resolve(new Response(JSON.stringify(payload),{status:200})),delay));};
-</script>'''
-CHECK=r'''<script>
+</script>"""
+CHECK = r"""<script>
 (async()=>{const errors=[];const check=(v,m)=>{if(!v)errors.push(m)};const wait=ms=>new Promise(r=>setTimeout(r,ms));
 try{await wait(20);check(document.querySelectorAll('[data-nav]').length===10,'nav count');
 for(const link of document.querySelectorAll('[data-nav]')){location.hash=link.hash;window.dispatchEvent(new Event('hashchange'));check(!document.querySelector(`[data-view="${link.dataset.nav}"]`).hidden,`nav ${link.dataset.nav}`);check(link.getAttribute('aria-current')==='page','aria current');link.focus();check(document.activeElement===link,'keyboard focus');check(document.documentElement.scrollWidth<=innerWidth+1,'overflow '+link.dataset.nav);}
@@ -43,7 +43,7 @@ try {await api('/api-client-unauthorized');check(false,'HTTP auth error');} catc
 try {await api('/api-client-invalid-json');check(false,'invalid JSON error');} catch(e){check(String(e).includes('dữ liệu không hợp lệ'),'invalid JSON error');}
 check(!requests.some(x=>x[1]==='POST'),'no automatic or read-only write');check(localStorage.length===0&&sessionStorage.length===0,'no browser credential storage');check(document.documentElement.scrollWidth<=innerWidth+1,`overflow ${document.documentElement.scrollWidth}/${innerWidth}`);check(document.querySelectorAll('table th').length>0,'table headers');check(!document.body.innerText.includes('RAW-SECRET-FAKE'),'no secret output');check(document.querySelector('#notice').getAttribute('aria-live')==='polite','aria live');
 }catch(e){errors.push('exception:'+String(e))}document.body.setAttribute('data-viewport-width',String(innerWidth));document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
-</script>'''
+</script>"""
 def main():
     for family in (socket.AF_INET,socket.AF_INET6):
         try: s=socket.socket(family);s.close()

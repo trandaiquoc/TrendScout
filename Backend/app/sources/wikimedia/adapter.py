@@ -101,10 +101,17 @@ def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageO
 class WikimediaAdapter:
     metadata = METADATA
 
-    def __init__(self, client: httpx.AsyncClient | None = None, *, user_agent: str | None = None,
-                 max_retries: int | None = None, max_retry_wait: float | None = None,
-                 timeout: float | None = None, http_policy: HttpPolicy | None = None,
-                 settings: Settings | None = None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        *,
+        user_agent: str | None = None,
+        max_retries: int | None = None,
+        max_retry_wait: float | None = None,
+        timeout: float | None = None,
+        http_policy: HttpPolicy | None = None,
+        settings: Settings | None = None,
+    ):
         if settings is None:
             settings = Settings.from_environment()
         if SOURCE not in settings.enabled_source_ids:
@@ -114,7 +121,9 @@ class WikimediaAdapter:
         self.user_agent = user_agent
         if not self.user_agent.strip() or "\n" in self.user_agent or "\r" in self.user_agent:
             raise ValueError("Invalid Wikimedia User-Agent")
-        if http_policy is not None and any(value is not None for value in (max_retries, max_retry_wait, timeout)):
+        if http_policy is not None and any(
+            value is not None for value in (max_retries, max_retry_wait, timeout)
+        ):
             raise ValueError("Pass an HTTP policy or legacy retry/timeout overrides, not both")
         if http_policy is None:
             overrides = {}
@@ -174,8 +183,14 @@ class WikimediaAdapter:
             if status_code == 200:
                 try:
                     fetched = datetime.now(timezone.utc)
-                    result, count, rejected, rejected_records = _parse(response.json(), day, fetched)
-                    status = (FetchStatus.PARTIAL if result else FetchStatus.FETCH_ERROR) if rejected else FetchStatus.SUCCESS
+                    result, count, rejected, rejected_records = _parse(
+                        response.json(), day, fetched
+                    )
+                    status = (
+                        (FetchStatus.PARTIAL if result else FetchStatus.FETCH_ERROR)
+                        if rejected
+                        else FetchStatus.SUCCESS
+                    )
                     error = f"{rejected} invalid article records" if rejected else None
                 except (ValueError, TypeError) as exc:
                     error = f"Invalid response: {exc}"

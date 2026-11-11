@@ -19,8 +19,15 @@ from app.settings import Settings
 
 
 def create_app(
-    *, storage=None, adapter_factory=None, lock_path=None, operator_token=None,
-    run_mode=None, read_only=None, read_storage_factory=None, settings: Settings | None = None,
+    *,
+    storage=None,
+    adapter_factory=None,
+    lock_path=None,
+    operator_token=None,
+    run_mode=None,
+    read_only=None,
+    read_storage_factory=None,
+    settings: Settings | None = None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -47,7 +54,9 @@ def create_app(
         )
         if app.state.run_service is not None:
             await app.state.run_service.recover()
-        app.state.operator_token = operator_token if operator_token is not None else settings.operator_token
+        app.state.operator_token = (
+            operator_token if operator_token is not None else settings.operator_token
+        )
         try:
             yield
         finally:
@@ -64,7 +73,8 @@ def create_app(
     application.state.read_only = read_only
     application.state.settings = settings
     application.state.read_storage_factory = (
-        read_storage_factory if read_storage_factory is not None
+        read_storage_factory
+        if read_storage_factory is not None
         else lambda oidc_token: read_only_storage(oidc_token, settings=settings)
     )
 

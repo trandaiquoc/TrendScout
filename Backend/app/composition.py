@@ -28,14 +28,24 @@ def source_registry(settings: Settings | None = None):
 def algorithm_engine():
     registry = AlgorithmRegistry()
     for strategy in (
-        WikimediaLegacy(score_trends), GrowthRatio(), MedianBaseline(), RobustZMad(), EWMA()
+        WikimediaLegacy(score_trends),
+        GrowthRatio(),
+        MedianBaseline(),
+        RobustZMad(),
+        EWMA(),
     ):
         registry.register(strategy)
     return AlgorithmRunner(registry)
 
 
 def build_run_service(
-    *, storage, adapter_factory, lock_path, mode, lock_factory, service_factory,
+    *,
+    storage,
+    adapter_factory,
+    lock_path,
+    mode,
+    lock_factory,
+    service_factory,
     settings: Settings | None = None,
 ):
     """Build the local service; callers must never invoke this in read-only mode."""
@@ -51,14 +61,17 @@ def build_run_service(
         lock,
         adapter_factory=adapter_factory or source_registry(settings).factory(METADATA.source_id),
         mode=mode,
-        clean_snapshot=clean_snapshot, extract_keywords=extract_keywords,
-        score_trends=algorithm_engine().legacy_results, day_data_factory=DayData,
+        clean_snapshot=clean_snapshot,
+        extract_keywords=extract_keywords,
+        score_trends=algorithm_engine().legacy_results,
+        day_data_factory=DayData,
     )
 
 
 def read_only_storage(oidc_token, *, settings: Settings | None = None):
     """Construct a per-request WIF client without a local ADC fallback."""
     from app.storage.vercel_identity import storage_for_request
+
     settings = settings or Settings.from_environment()
     return storage_for_request(
         oidc_token,
