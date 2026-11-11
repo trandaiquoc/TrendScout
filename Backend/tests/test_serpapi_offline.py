@@ -328,6 +328,19 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.quota.attempted_requests, 0)
         self.assertFalse(calls)
 
+    async def test_future_provider_timestamp_is_rejected_with_quality_flag(self):
+        def handler(request):
+            return httpx.Response(200, json={"search_metadata": {"status": "Cached",
+                "created_at": "2026-11-12 12:00:00 UTC"},
+                "organic_results": [{"link": "https://example.com/"}]})
+
+        async with create_offline_client(httpx.MockTransport(handler)) as http:
+            client = SerpApiClient(http, Resolver(), SharedQuotaPool(1, 1))
+            result = await GoogleSearchAdapter(client, utcnow=lambda: NOW).execute(
+                limits=ExecutionLimits(max_queries=1))
+        self.assertIsNone(result.records[0].evidence[0].provider_created_at)
+        self.assertIn("PROVIDER_CREATION_TIME_IN_FUTURE", result.records[0].quality_flags)
+
     async def test_malformed_large_and_excess_results_are_bounded(self):
         responses = [
             httpx.Response(200, content=b"{", headers={"content-type": "application/json"}),

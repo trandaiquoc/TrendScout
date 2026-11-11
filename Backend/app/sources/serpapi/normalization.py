@@ -51,6 +51,9 @@ def normalize_items(context: QueryContext, items: tuple[object, ...], *, fetched
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         raise ValueError("Fetch time must be timezone-aware")
     fetched_at = fetched_at.astimezone(timezone.utc)
+    future_provider_time = provider_created_at is not None and provider_created_at > fetched_at
+    if future_provider_time:
+        provider_created_at = None
     records, rejected = [], []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
@@ -69,6 +72,8 @@ def normalize_items(context: QueryContext, items: tuple[object, ...], *, fetched
         evidence = QueryEvidence(context, fetched_at, page, offset, position, http_status,
                                  cache_state, provider_created_at)
         flags = ["SYNTHETIC_OFFLINE_EVIDENCE", "QUERY_SCOPED_POSITION_NOT_SEARCH_VOLUME"]
+        if future_provider_time:
+            flags.append("PROVIDER_CREATION_TIME_IN_FUTURE")
         if provider_created_at is None:
             flags.append("PROVIDER_CREATION_TIME_UNAVAILABLE")
         if "position" not in item:
