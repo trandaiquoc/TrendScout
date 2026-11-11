@@ -18,6 +18,23 @@ from google.cloud import firestore
 
 SYNTHETIC_PROJECT_ID = "demo-trendscout-p3s1"
 _HOST_RE = re.compile(r"^(127\.0\.0\.1):([0-9]{1,5})$")
+_GUARD_TOKEN = object()
+
+
+class GuardedFirestoreEmulatorClient:
+    """Capability wrapper returned only by the validated emulator factory."""
+
+    __slots__ = ("_client", "project_id", "host")
+
+    def __init__(self, client, *, project_id: str, host: str, _token) -> None:
+        if _token is not _GUARD_TOKEN:
+            raise EmulatorConfigurationError("construct clients through create_guarded_emulator_client")
+        self._client = client
+        self.project_id = project_id
+        self.host = host
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 class EmulatorConfigurationError(RuntimeError):
@@ -110,7 +127,7 @@ def _probe_firestore_emulator(target: EmulatorTarget) -> None:
         connection.close()
 
 
-def create_guarded_emulator_client(*, client_factory=None):
+def create_guarded_emulator_client():
     """Return an anonymous SDK client only after strict local safety checks.
 
     Callers must run inside ``bwrap --unshare-net``. The SDK's emulator mode is
@@ -121,9 +138,14 @@ def create_guarded_emulator_client(*, client_factory=None):
     _assert_network_namespace_isolated()
     _probe_firestore_emulator(target)
 
-    factory = firestore.Client if client_factory is None else client_factory
-    return factory(
+    sdk_client = firestore.Client(
         project=target.project_id,
         credentials=AnonymousCredentials(),
         database="(default)",
+    )
+    return GuardedFirestoreEmulatorClient(
+        sdk_client,
+        project_id=target.project_id,
+        host=f"{target.host}:{target.port}",
+        _token=_GUARD_TOKEN,
     )

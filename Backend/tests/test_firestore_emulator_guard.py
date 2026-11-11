@@ -8,8 +8,10 @@ from google.auth.credentials import AnonymousCredentials
 
 from app.storage.firestore_emulator import (
     EmulatorConfigurationError,
+    GuardedFirestoreEmulatorClient,
     create_guarded_emulator_client,
 )
+from app.jobs.firestore_transactional import FirestoreTransactionalCoordinator
 
 
 PROJECT = "demo-trendscout-p3s1"
@@ -132,12 +134,17 @@ class FirestoreEmulatorGuardTests(TestCase):
                     with patch("app.storage.firestore_emulator.firestore.Client") as client:
                         client.return_value = object()
                         result = create_guarded_emulator_client()
-            self.assertIs(result, client.return_value)
+            self.assertIsInstance(result, GuardedFirestoreEmulatorClient)
+            self.assertIs(result._client, client.return_value)
             kwargs = client.call_args.kwargs
             self.assertEqual(kwargs["project"], PROJECT)
             self.assertEqual(kwargs["database"], "(default)")
             self.assertIsInstance(kwargs["credentials"], AnonymousCredentials)
             probe.assert_called_once_with("127.0.0.1", 8080, timeout=1.0)
+
+    def test_transactional_adapter_rejects_unmarked_sdk_client(self):
+        with self.assertRaisesRegex(ValueError, "guarded synthetic Firestore Emulator client"):
+            FirestoreTransactionalCoordinator(object())
 
 
 if __name__ == "__main__":
