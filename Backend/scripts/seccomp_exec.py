@@ -1,10 +1,11 @@
-"""Execute a command with Linux seccomp network syscalls denied.
+"""Execute a command with Linux seccomp socket families constrained.
 
 Strict mode denies Internet socket creation, all connect calls, and io_uring
 for this process tree while allowing AF_UNIX socketpairs used by asyncio. The
-optional Unix-only mode also allows AF_UNIX connect for local Chrome IPC;
-AF_INET/AF_INET6 and other non-AF_UNIX socket creation remain denied. This is a
-test launcher, not a production firewall.
+optional Unix-only mode allows AF_UNIX for local Chrome IPC while blocking IP
+sockets. The emulator mode allows only AF_INET/AF_INET6; it must be combined
+with an isolated network namespace that has loopback and no external routes.
+This is a test launcher, not a production firewall.
 """
 
 import argparse
@@ -19,7 +20,17 @@ ALLOW = 0x7FFF0000
 ERRNO = 0x00050000
 SCMP_CMP_NE = 1
 AF_UNIX = 1
+AF_INET = 2
+AF_INET6 = 10
 PR_SET_NO_NEW_PRIVS = 38
+PR_SET_SECCOMP = 22
+SECCOMP_MODE_FILTER = 2
+BPF_LD_W_ABS = 0x20
+BPF_JMP_JEQ_K = 0x15
+BPF_RET_K = 0x06
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_ERRNO = 0x00050000
+SECCOMP_RET_KILL_PROCESS = 0x80000000
 
 
 class ArgCmp(ctypes.Structure):
@@ -31,8 +42,76 @@ class ArgCmp(ctypes.Structure):
     ]
 
 
-def _load_filter(allow_unix_sockets: bool) -> None:
+class SockFilter(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_ushort),
+        ("jt", ctypes.c_ubyte),
+        ("jf", ctypes.c_ubyte),
+        ("k", ctypes.c_uint32),
+    ]
+
+
+class SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(SockFilter))]
+
+
+def _load_ip_socket_filter(libc, seccomp) -> None:
+    """Allow only Internet socket families; network namespace does egress deny."""
+    numbers = {
+        name: seccomp.seccomp_syscall_resolve_name(name.encode())
+        for name in ("socket", "socketpair", "io_uring_setup")
+    }
+    if any(number < 0 for number in numbers.values()):
+        raise SystemExit("required syscall names could not be resolved")
+
+    seccomp.seccomp_arch_native.restype = ctypes.c_uint32
+    native_arch = seccomp.seccomp_arch_native()
+
+    instructions = (SockFilter * 13)(
+        SockFilter(BPF_LD_W_ABS, 0, 0, 4),
+        SockFilter(BPF_JMP_JEQ_K, 1, 0, native_arch),
+        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        SockFilter(BPF_LD_W_ABS, 0, 0, 0),
+        SockFilter(BPF_JMP_JEQ_K, 3, 0, numbers["socket"]),
+        SockFilter(BPF_JMP_JEQ_K, 5, 0, numbers["socketpair"]),
+        SockFilter(BPF_JMP_JEQ_K, 4, 0, numbers["io_uring_setup"]),
+        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
+        SockFilter(BPF_LD_W_ABS, 0, 0, 16),
+        SockFilter(BPF_JMP_JEQ_K, 2, 0, AF_INET),
+        SockFilter(BPF_JMP_JEQ_K, 1, 0, AF_INET6),
+        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),
+        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
+    )
+    program = SockFprog(len(instructions), instructions)
+
+    libc.prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(
+        PR_SET_SECCOMP,
+        SECCOMP_MODE_FILTER,
+        ctypes.cast(ctypes.pointer(program), ctypes.c_void_p),
+        0,
+        0,
+    ) != 0:
+        raise OSError(ctypes.get_errno(), "IP-only seccomp filter setup failed")
+
+
+def _load_filter(allow_unix_sockets: bool, allow_ip_sockets: bool) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    libc.prctl.restype = ctypes.c_int
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS failed")
 
@@ -60,6 +139,10 @@ def _load_filter(allow_unix_sockets: bool) -> None:
     ]
     seccomp.seccomp_load.argtypes = [ctypes.c_void_p]
 
+    if allow_ip_sockets:
+        _load_ip_socket_filter(libc, seccomp)
+        return
+
     context = seccomp.seccomp_init(ALLOW)
     if not context:
         raise SystemExit("seccomp_init failed")
@@ -76,7 +159,7 @@ def _load_filter(allow_unix_sockets: bool) -> None:
         if result != 0:
             raise SystemExit(f"seccomp rule setup failed for {name.decode()}")
 
-    if not allow_unix_sockets:
+    if not allow_unix_sockets and not allow_ip_sockets:
         syscall = seccomp.seccomp_syscall_resolve_name(b"connect")
         if syscall >= 0 and seccomp.seccomp_rule_add(context, denied, syscall, 0) != 0:
             raise SystemExit("seccomp rule setup failed for connect")
@@ -91,10 +174,16 @@ def _load_filter(allow_unix_sockets: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--allow-unix-sockets",
         action="store_true",
-        help="allow AF_UNIX only for local browser IPC; still deny Internet socket families",
+        help="allow AF_UNIX only for local browser IPC; deny all IP socket families",
+    )
+    mode.add_argument(
+        "--allow-ip-sockets",
+        action="store_true",
+        help="allow AF_INET/AF_INET6; use only inside a loopback-only network namespace",
     )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     options = parser.parse_args()
@@ -104,7 +193,7 @@ def main() -> None:
     if not command:
         parser.error("provide a command after --")
 
-    _load_filter(options.allow_unix_sockets)
+    _load_filter(options.allow_unix_sockets, options.allow_ip_sockets)
     soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
     os.closerange(3, soft)
     os.execvp(command[0], command)
