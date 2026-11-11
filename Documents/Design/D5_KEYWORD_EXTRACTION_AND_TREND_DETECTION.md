@@ -1,6 +1,6 @@
 # D5 keyword extraction and trend detection
 
-**In progress, offline module only.** The module is not yet connected to the Fetch pipeline or dashboard. It does not establish live provider rights or production quality.
+**In progress, offline module only.** The local presentation connects synthetic query-source observations to the module and displays a bounded sample separately from Wikimedia results. It does not establish live provider rights or production quality.
 
 `app.discovery` extracts bounded, deterministic 1–4 word candidates directly from English synthetic observations rather than limiting candidates to the fixed query seeds. It records source, provider, document, timestamps, scope, query evidence, content fingerprint, market evidence, parser version and canonical URL; an explicit `tee shirt` alias is the only synonym merge. Simple vocabulary rules assign fashion, home, technology, food and gaming; unmatched candidates remain unclassified. Fashion/home research priority does not filter other categories. All labels are unvalidated heuristics, not claims about US population, demand, revenue or purchase probability.
 
@@ -8,4 +8,4 @@ Each `(source, scope, parser version, data mode)` is evaluated separately over a
 
 Candidate selection for future verification is bounded by server-side request budget and freshness and does not call providers or modify the existing query plan. Product suggestions are optional research hypotheses, separate from trend classification. The algorithm, taxonomy and limitations must be validated against actual permitted data and measured false positives before production; a category suggestion is not a recommendation backed by sales or intent.
 
-Discovery records origin (`SYNTHETIC` or `LIVE`) independently from delivery (`FRESH` or `CACHED`); an assessment with cached evidence includes a limitation. A cached synthetic observation stays synthetic. This distinction is not yet integrated into the public API or dashboard.
+Discovery records origin (`SYNTHETIC` or `LIVE`) independently from delivery (`FRESH` or `CACHED`); an assessment with cached evidence includes a limitation. A cached synthetic observation stays synthetic. The local demo exposes origin, delivery and source evidence via its run API and dashboard; live and shared-cache paths remain unimplemented.

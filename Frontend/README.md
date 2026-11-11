@@ -4,7 +4,7 @@ The dashboard is a browser-native HTML, CSS, and JavaScript workspace served by 
 
 ## Run locally
 
-From the repository root, **./setup.sh** and **./start.sh** start the backend and dashboard. For a manual backend setup, see the [Backend README](../Backend/README.md). Open **http://127.0.0.1:8000/dashboard/**.
+From the repository root, `bash demo.sh` starts the loopback synthetic presentation with ephemeral storage and no account or credential. Open **http://127.0.0.1:8000/dashboard/**. For dependencies, an alternate port or the separately configured legacy cloud runtime, see the [Backend README](../Backend/README.md).
 
 The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
@@ -28,12 +28,12 @@ The dashboard has no login, logout, registration, account, or credential entry f
 
 The Vercel application serves dashboard HTML, CSS, and JavaScript modules anonymously. Private `/api/runs/...` reads remain behind HTTP Basic and the configured Vercel OIDC/Firestore identity; a missing `TREND_SCOUT_READ_PASSWORD` blocks those private reads, not dashboard rendering. Vercel Deployment Protection is a separate platform gate and may still require authentication before a request reaches the application.
 
-The legacy `POST /api/runs` route remains separate and still requires its operator Bearer token. The public Fetch route accepts only `{}` and the backend selects a fixed source, query plan, request budget, and synthetic mode. Vercel remains read-only and returns 405 for Fetch/run creation. Live Wikimedia and paid/provider APIs are not called by this flow.
+The legacy `POST /api/runs` route remains separate and still requires its operator Bearer token. The public Fetch route accepts only `{}` and the backend selects fixed sources, query plan, request budget, and synthetic mode. The demo runs one fixture query each through Google, Bing and YouTube adapters using MockTransport; it reports incomplete scope and shows their candidate evidence separately from the Wikimedia score table. Vercel remains read-only and returns 405 for Fetch/run creation. Live Wikimedia and paid/provider APIs are not called by this flow.
 
 Source status is deliberately limited to repository evidence:
 
 - **Wikimedia Pageviews:** adapter implemented; live connectivity and account access have not been verified.
-- **YouTube, Google Search, and Bing Search:** adapters/credentials are not configured; they are not called.
+- **YouTube, Google Search, and Bing Search:** adapters are tested with offline fixtures. Live credentials, approval and live connectivity are not verified.
 
 Capability data distinguishes adapter implementation from approval, configuration, live verification, and source limitations. No cross-source data is combined. Weekly refresh, AI usage, and product research screens disclose their unconfigured or illustrative state.
 

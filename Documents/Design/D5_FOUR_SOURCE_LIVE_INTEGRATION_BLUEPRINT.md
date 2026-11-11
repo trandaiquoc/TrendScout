@@ -81,11 +81,11 @@ Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VE
 | Kiểm tra trình diễn | Trạng thái |
 |---|---|
 | Khởi động local, loopback, storage tạm, không yêu cầu secret/account | `bash demo.sh`; kiểm thử API offline và trình duyệt với launcher thật |
-| Fetch một nút, kết quả và trạng thái rõ ràng | PASS thủ công qua trình duyệt local cho fixture Wikimedia; chưa chứng minh bốn nguồn |
-| Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | OPEN |
+| Fetch một nút, kết quả và trạng thái rõ ràng | PASS thủ công qua trình duyệt local cho Wikimedia và ba nhánh synthetic bổ sung; trạng thái tổng PARTIAL |
+| Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | PASS phạm vi demo local: MockTransport, mỗi nguồn một query, không có baseline; lọc chỉ áp dụng trên tối đa 30 mẫu |
 | Phân biệt LIVE/CACHED/SYNTHETIC và INSUFFICIENT_EVIDENCE xuyên API, thuật toán, UI | OPEN |
-| Light/dark, VI/EN, responsive và regression | Cần chạy lại sau thay đổi D5 |
-| Dữ liệu không bị nhận nhầm là live; phân biệt presentation với live acceptance | Nhãn synthetic có trong workflow hiện tại; cần đánh giá toàn pipeline bốn nguồn |
+| Light/dark, VI/EN, responsive và regression | Offline regression PASS; cần thêm kiểm thử tự động toàn flow demo bốn nguồn và rà soát trình diễn |
+| Dữ liệu không bị nhận nhầm là live; phân biệt presentation với live acceptance | Các nguồn fixture ghi SYNTHETIC; vẫn cần đánh giá trạng thái LIVE/CACHED trong flow tương lai |
 
 Storage tạm là lựa chọn demo local, không chứng minh durable, distributed admission hay an toàn public production. D6 xử lý account/secret của công ty và live activation; D7 nghiệm thu live cuối.
 
