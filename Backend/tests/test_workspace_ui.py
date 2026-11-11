@@ -23,11 +23,15 @@ class WorkspaceStructureTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn('data-view="' + name + '"', html)
-        self.assertIn("OFFLINE DEMO / SYNTHETIC DATA", html)
+        self.assertIn('data-i18n="common.synthetic"', html)
 
     def test_all_browser_http_access_uses_the_shared_client(self):
-        source = (PUBLIC / "app.js").read_text()
-        self.assertIn("async function api(path, options = {})", source)
+        source = "\n".join(
+            path.read_text()
+            for path in (PUBLIC / "app.js", *sorted((PUBLIC / "modules").rglob("*.js")))
+        )
+        self.assertIn("method: 'GET'", source)
         self.assertEqual(source.count("fetch("), 1)
+        self.assertNotIn("Authorization", source)
         self.assertNotIn("YOUTUBE_API_KEY", source)
         self.assertNotIn("SERPAPI_API_KEY", source)

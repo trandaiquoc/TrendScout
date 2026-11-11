@@ -34,7 +34,9 @@ run_strict "$PYTHON" -m pip check
 
 echo "[5/10] Check shell and dashboard JavaScript syntax"
 run_strict bash -n "$ROOT/setup.sh" "$ROOT/start.sh" "$BACKEND/scripts/verify_offline_readiness.sh"
-run_strict node --check "$ROOT/Frontend/public/app.js"
+while IFS= read -r -d '' script; do
+  run_strict node --check "$script"
+done < <(find "$ROOT/Frontend/public" -type f -name '*.js' -print0)
 
 echo "[6/10] Check Vercel dashboard bundle against source assets"
 ASSET="$BACKEND/app/dashboard_assets.py"
@@ -47,7 +49,7 @@ cleanup_asset() {
 }
 trap cleanup_asset EXIT
 (cd "$BACKEND" && run_strict "$PYTHON" scripts/prepare_vercel.py)
-run_strict "$PYTHON" -c 'import runpy,sys; from pathlib import Path; root=Path(sys.argv[1]); bundle=runpy.run_path(str(root/"Backend/app/dashboard_assets.py"))["ASSETS"]; source=root/"Frontend/public"; assert set(bundle)=={"index.html","app.js","styles.css"}; assert all(bundle[name]==(source/name).read_bytes() for name in bundle); print("Vercel bundle bytes match index.html, app.js, styles.css")' "$ROOT"
+run_strict "$PYTHON" -c 'import runpy,sys; from pathlib import Path; root=Path(sys.argv[1]); bundle=runpy.run_path(str(root/"Backend/app/dashboard_assets.py"))["ASSETS"]; source=root/"Frontend/public"; expected={p.relative_to(source).as_posix():p.read_bytes() for p in source.rglob("*") if p.is_file() and not any(x.startswith(".") for x in p.relative_to(source).parts)}; assert bundle==expected; print(f"Vercel bundle byte parity: {len(bundle)} assets")' "$ROOT"
 cleanup_asset
 trap - EXIT
 

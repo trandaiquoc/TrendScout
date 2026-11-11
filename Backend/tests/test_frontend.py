@@ -18,10 +18,13 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
                     page = await client.get('/dashboard/')
                     self.assertEqual(page.status_code, 200)
-                    self.assertIn('Fetch &amp; Analyze', page.text)
-                    self.assertIn('operator-token', page.text)
+                    self.assertIn('data-theme="light"', page.text)
+                    self.assertIn('id="open-fetch"', page.text)
+                    self.assertNotIn('operator-token', page.text)
                     self.assertEqual((await client.get('/dashboard/app.js')).status_code, 200)
                     self.assertEqual((await client.get('/dashboard/styles.css')).status_code, 200)
+                    self.assertEqual((await client.get('/dashboard/modules/api.js')).status_code, 200)
+                    self.assertEqual((await client.get('/dashboard/modules/i18n/en.js')).status_code, 200)
                     self.assertEqual((await client.get('/api/health')).json(), {'status': 'ok'})
                     self.assertEqual((await client.post('/api/runs')).status_code, 503)
 

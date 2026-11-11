@@ -19,7 +19,8 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_paths_protection_and_no_recovery(self):
         storage = FakeStorage()
         await storage.create_run(RUN, {'status': 'COMPLETED', 'keyword_count': 0})
-        factory = lambda token: storage
+        def factory(token):
+            return storage
         with patch.dict(os.environ, {'TREND_SCOUT_READ_PASSWORD': PASSWORD}, clear=False), \
              patch('app.main.HostRunLock', side_effect=AssertionError('must not create lock')), \
              patch('app.main.RunService', side_effect=AssertionError('must not start runs')):
@@ -28,14 +29,15 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
                     self.assertEqual((await client.get('/api/health')).status_code, 200)
                     self.assertEqual((await client.get('/api/runs/' + RUN)).status_code, 401)
-                    self.assertEqual((await client.get('/dashboard/app.js')).status_code, 401)
+                    self.assertEqual((await client.get('/dashboard/modules/api.js')).status_code, 401)
                     self.assertEqual((await client.post('/api/runs', headers={'Authorization': AUTH})).status_code, 405)
-                    for path in ['/dashboard/', '/dashboard/app.js', '/dashboard/styles.css', '/api/runs/' + RUN, '/api/runs/' + RUN + '/keywords']:
+                    for path in ['/dashboard/', '/dashboard/app.js', '/dashboard/styles.css', '/dashboard/modules/api.js', '/dashboard/modules/i18n/en.js', '/api/runs/' + RUN, '/api/runs/' + RUN + '/keywords']:
                         response = await client.get(path, headers={'Authorization': AUTH})
                         self.assertEqual(response.status_code, 200, path)
                         self.assertEqual(response.headers['cache-control'], 'no-store')
                     self.assertEqual((await client.get('/api/runs/' + RUN, headers={'Authorization': 'Basic invalid'})).status_code, 401)
                     self.assertEqual((await client.get('/dashboard/AGENTS.md', headers={'Authorization': AUTH})).status_code, 404)
+                    self.assertEqual((await client.get('/dashboard/modules/../app/main.py', headers={'Authorization': AUTH})).status_code, 404)
                     self.assertTrue((await client.get('/api/config')).json()['read_only'])
 
     async def test_fail_closed_and_vercel_forces_read_only(self):

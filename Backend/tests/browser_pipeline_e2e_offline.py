@@ -1,14 +1,15 @@
 """Chrome checks dashboard rendering of rows returned by the real offline API pipeline."""
 
+# The isolated browser runner adds Backend to sys.path before importing app modules.
+# ruff: noqa: E402
 import asyncio
 import json
 import os
-from pathlib import Path
 import shutil
 import socket
 import subprocess
 import tempfile
-import time
+from pathlib import Path
 
 import httpx
 
@@ -16,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
 os.sys.path.insert(0, str(BACKEND))
 
+from test_refresh_integration import SOURCE
+
 from app.adapters.wikimedia import WikimediaAdapter
 from app.main import create_app
 from app.storage.fake import FakeStorage
-from test_refresh_integration import SOURCE
 
 
 def browser_page(run, keyword_page, detail):
@@ -151,14 +153,10 @@ def main():
     run, keyword_page, detail = asyncio.run(prepare_api_data())
     public = ROOT / "Frontend" / "public"
     html = (public / "index.html").read_text()
-    js = (public / "app.js").read_text()
     css = (public / "styles.css").read_text()
     bridge = browser_page(run, keyword_page, detail)
-    html = html.replace(
-        '<link rel="stylesheet" href="/dashboard/styles.css"><script type="module" src="/dashboard/app.js"></script>',
-        f"<style>{css}</style>{bridge}<script>{js}</script>",
-        1,
-    )
+    html = html.replace('href="/dashboard/styles.css"', f"<style>{css}</style>", 1)
+    html = html.replace('src="/dashboard/app.js"', f'src="{(public / "app.js").as_uri()}"', 1)
     expectation = json.dumps(
         {
             "run_id": run["run_id"],
@@ -171,22 +169,23 @@ def main():
         ensure_ascii=True,
         separators=(",", ":"),
     ).replace("<", "\\u003c")
-    check = f"""<script>
-(async()=>{{const e={expectation};const errors=[];const check=(x,m)=>{{if(!x)errors.push(m)}};const wait=ms=>new Promise(r=>setTimeout(r,ms));
-await wait(400);document.querySelector('#run-id').value=e.run_id;await loadRun(e.run_id);await wait(100);
+    check = """<script>
+(async()=>{const e=EXPECTATION;const errors=[];const check=(x,m)=>{if(!x)errors.push(m)};const wait=ms=>new Promise(r=>setTimeout(r,ms));
+await wait(200);location.hash='#runs';window.dispatchEvent(new Event('hashchange'));document.querySelector('#run-id').value=e.run_id;document.querySelector('#load-run').click();await wait(180);
 check(document.querySelector('#runs-current').textContent===e.run_id,'run id');
 check(document.querySelector('#run-status').textContent.includes('một phần'),'partial status');
 check(document.querySelector('#rows').textContent.includes(e.display_keyword),'API title rendered');
 const button=document.querySelector('#rows button');check(!!button,'row button');if(button)button.click();await wait(60);
 check(document.querySelector('#detail-title').textContent===e.display_keyword,'detail title');
 check(document.querySelector('#detail-subtitle').textContent.includes(e.project),'project provenance');
-check(document.querySelector('#detail-content').textContent.includes(e.status),'score status');
-check(requests.includes(`/api/runs/${{e.run_id}}/keywords/${{e.keyword_id}}`),'detail API identity');
+check(document.querySelector('#detail-content').textContent.includes(e.score===null?'Chưa đủ dữ liệu':String(e.score)),'score and sufficiency detail');
+check(requests.includes('/api/runs/'+e.run_id+'/keywords/'+e.keyword_id),'detail API identity');
+check(document.querySelector('#open-fetch').disabled,'fetch remains disabled');
 document.body.setAttribute('data-e2e-requests',requests.join('|'));
-document.body.setAttribute('data-e2e-state',JSON.stringify({{run:document.querySelector('#runs-current').textContent,rows:document.querySelector('#rows').textContent,hidden:document.querySelector('#open-fetch').hidden,loadRun:typeof loadRun,fetch:typeof window.fetch,scripts:document.scripts.length}}));
-document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join('; '):'PASS');}})();
-</script>"""
-    html = html.replace("</body>", check + "</body>")
+document.body.setAttribute('data-e2e-state',JSON.stringify({run:document.querySelector('#runs-current').textContent,rows:document.querySelector('#rows').textContent,fetch:typeof window.fetch,scripts:document.scripts.length}));
+document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
+</script>""".replace("EXPECTATION", expectation)
+    html = html.replace("</body>", bridge + check + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-browser-e2e-") as directory:
         page = Path(directory) / "index.html"
         page.write_text(html)
@@ -200,6 +199,7 @@ document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join(
             "--no-proxy-server",
             "--disable-sync",
             "--disable-component-update",
+            "--allow-file-access-from-files",
             "--no-first-run",
             f"--user-data-dir={directory}/profile",
             "--window-size=1280,900",
