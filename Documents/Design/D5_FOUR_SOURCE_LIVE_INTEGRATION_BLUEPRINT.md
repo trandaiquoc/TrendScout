@@ -80,8 +80,8 @@ Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VE
 
 | Kiểm tra trình diễn | Trạng thái |
 |---|---|
-| Khởi động local, loopback, storage tạm, không yêu cầu secret/account | Có `bash demo.sh`; đã kiểm thử API offline, cần kiểm thử trình duyệt với launcher thật |
-| Fetch một nút, kết quả và trạng thái rõ ràng | Luồng synthetic Wikimedia hiện có; cần kiểm thử launcher thật |
+| Khởi động local, loopback, storage tạm, không yêu cầu secret/account | `bash demo.sh`; kiểm thử API offline và trình duyệt với launcher thật |
+| Fetch một nút, kết quả và trạng thái rõ ràng | PASS thủ công qua trình duyệt local cho fixture Wikimedia; chưa chứng minh bốn nguồn |
 | Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | OPEN |
 | Phân biệt LIVE/CACHED/SYNTHETIC và INSUFFICIENT_EVIDENCE xuyên API, thuật toán, UI | OPEN |
 | Light/dark, VI/EN, responsive và regression | Cần chạy lại sau thay đổi D5 |

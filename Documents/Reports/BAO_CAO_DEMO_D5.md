@@ -11,13 +11,13 @@
 
 ## Bằng chứng offline
 
-`bash Backend/scripts/verify_offline_readiness.sh` PASS: 476 unittest, Golden với hai hash seed, dependency check, bundle parity, browser UI/keyboard/responsive, synthetic pipeline và one-click synthetic Fetch, benchmark synthetic. Test demo mới kiểm tra API, fixture và cloud config dưới network isolation; các browser harness hiện có chưa chứng minh launcher demo thật trong trình duyệt. Ruff cho các file Python mới/sửa và `git diff --check` PASS. Không gọi live provider, Firestore hay emulator; không phát sinh provider cost.
+`bash Backend/scripts/verify_offline_readiness.sh` PASS: 476 unittest, Golden với hai hash seed, dependency check, bundle parity, browser UI/keyboard/responsive, synthetic pipeline và one-click synthetic Fetch, benchmark synthetic. Test demo kiểm tra API, fixture và cloud config dưới network isolation. Kiểm thử thủ công launcher thật trên loopback bằng Chrome: Fetch hoàn tất, ba keyword và nhãn `SYNTHETIC` hiển thị; đó là bằng chứng cho fixture Wikimedia, chưa cho bốn nguồn. Ruff cho các file Python mới/sửa và `git diff --check` PASS. Không gọi live provider, Firestore hay emulator; không phát sinh provider cost.
 
 ## Công việc và giới hạn còn lại
 
 1. Làm live-capable transport có kiểm soát cho Google, Bing, YouTube và nối credential backend, nhưng giữ live disabled cho đến D6. Wikimedia live chưa được duyệt hoặc xác minh.
 2. Xây dựng và kiểm chứng admission/queue/cache/quota phân tán, crash recovery, fencing, cost accounting và Storage Port cho toàn bộ D5. Firestore coordinator hiện chỉ guarded emulator; fake/in-memory không chứng minh multi-host. Không migration database khi chưa có quyết định riêng.
-3. Tích hợp bốn fixture synthetic vào workflow, discovery và dashboard; phân biệt origin `LIVE`/`SYNTHETIC`, delivery `CACHED` và trạng thái `INSUFFICIENT_EVIDENCE` xuyên API và UI. Kiểm thử browser với ứng dụng demo thật và hoàn thành checklist presentation.
+3. Tích hợp bốn fixture synthetic vào workflow, discovery và dashboard; phân biệt origin `LIVE`/`SYNTHETIC`, delivery `CACHED` và trạng thái `INSUFFICIENT_EVIDENCE` xuyên API và UI. Tự động hóa browser test với ứng dụng demo thật và hoàn thành checklist presentation.
 4. Chạy lại full regression sau các thay đổi tiếp theo, review bảo mật, hoàn thiện blueprint triển khai và cập nhật ma trận trước khi nghiệm thu D5.
 
 Không deploy, push, tạo account/dịch vụ trả phí, dùng credential cá nhân hoặc bật live. D6 cần chủ sở hữu tổ chức, quyền sử dụng và budget trước khi setup; D7 cần bằng chứng live độc lập.

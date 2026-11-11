@@ -7,7 +7,7 @@ export const en = {
   'a11y.next-page': 'Next page',
   'brand.caption': 'INSIGHT WORKSPACE',
   'brand.home': 'TrendScout — overview',
-  'brand.demo': 'DEMO · READ ONLY',
+  'brand.demo': 'DEMO',
   'brand.footer': 'Signals with context.',
   'nav.section': 'WORKSPACE',
   'nav.overview': 'Overview',

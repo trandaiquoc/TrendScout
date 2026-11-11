@@ -7,7 +7,7 @@ export const vi = {
   'a11y.next-page': 'Trang sau',
   'brand.caption': 'KHÔNG GIAN PHÂN TÍCH',
   'brand.home': 'TrendScout — trang tổng quan',
-  'brand.demo': 'BẢN DEMO · CHỈ ĐỌC',
+  'brand.demo': 'BẢN DEMO',
   'brand.footer': 'Tín hiệu, có ngữ cảnh.',
   'nav.section': 'KHÔNG GIAN LÀM VIỆC',
   'nav.overview': 'Tổng quan',
