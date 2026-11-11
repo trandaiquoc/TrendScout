@@ -1,170 +1,579 @@
-const $ = (selector) => document.querySelector(selector);
-const state = { runId: null, dataRunId: null, run: null, category: 'all', q: '', sort: 'score', offset: 0, limit: 20, next: null, poll: null, sequence: 0, runSequence: 0, detailSequence: 0, readOnly: true, submitting: false };
-const statuses = { QUEUED:'Đang chờ', FETCHING:'Đang thu thập', NORMALIZING:'Đang chuẩn hóa', ANALYZING:'Đang phân tích', PERSISTING:'Đang lưu', COMPLETED:'Hoàn thành', PARTIAL:'Dữ liệu một phần', FAILED:'Thất bại', ABORTED:'Đã gián đoạn' };
-const activeStatuses = new Set(['QUEUED','FETCHING','NORMALIZING','ANALYZING','PERSISTING']);
-const labels = { EMERGING:'EMERGING', STABLE:'STABLE', FALLING:'FALLING', INSUFFICIENT_DATA:'INSUFFICIENT DATA' };
-const num = (n) => typeof n === 'number' && Number.isFinite(n) ? new Intl.NumberFormat('vi-VN', { maximumFractionDigits: 2 }).format(n) : '—';
-const dateText = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.split('-').reverse().join('/') : '—';
-const fetchedText = (s) => { const d = new Date(s); return s && !Number.isNaN(d.getTime()) ? `${new Intl.DateTimeFormat('vi-VN', {dateStyle:'short', timeStyle:'short'}).format(d)} (giờ máy)` : '—'; };
-const el = (tag, text, className) => { const node = document.createElement(tag); if (text != null) node.textContent = String(text); if (className) node.className = className; return node; };
-function notice(message, error = false) { const n = $('#notice'); n.hidden = !message; n.textContent = message || ''; n.classList.toggle('error', error); }
-async function api(path, options = {}) {
-  let response;
-  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15000);
-  try { response = await fetch(path, { ...options, signal:controller.signal, headers: { Accept:'application/json', ...options.headers } }); }
-  catch { clearTimeout(timeout); throw new Error('Không kết nối được backend hoặc quá thời gian chờ. Kiểm tra server và thử lại.'); }
-  let data;
-  try { data = await response.json(); }
-  catch { throw new Error(controller.signal.aborted ? 'Backend quá thời gian chờ.' : 'Backend trả về dữ liệu không hợp lệ.'); }
-  finally { clearTimeout(timeout); }
-  if (!response.ok) {
-    const messages = {401:'Token không hợp lệ hoặc không có quyền vận hành.', 404:'Không tìm thấy run hoặc keyword.', 409:'Run đang chạy hoặc kết quả chưa sẵn sàng.', 429:'Đang trong thời gian chờ giữa các lần chạy.', 503:'Backend hoặc storage chưa sẵn sàng.'};
-    throw new Error(messages[response.status] || `Không thể hoàn tất yêu cầu (HTTP ${response.status}).`);
-  }
-  return data;
+import { getJson } from './modules/api.js';
+import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
+import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
+import { initializeTheme } from './modules/theme.js';
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const activeStatuses = new Set(['QUEUED', 'FETCHING', 'NORMALIZING', 'ANALYZING', 'PERSISTING']);
+const state = {
+  runId: null,
+  dataRunId: null,
+  run: null,
+  category: 'all',
+  query: '',
+  sort: 'score',
+  offset: 0,
+  limit: 20,
+  next: null,
+  pollTimer: null,
+  pollCount: 0,
+  runSequence: 0,
+  keywordSequence: 0,
+  detailSequence: 0,
+  detail: null,
+};
+
+function number(value) {
+  return formatNumber(value, getLocale());
 }
-function showEmpty(title, detail) { const box = $('#empty'); box.hidden = false; box.querySelector('strong').textContent = title; box.querySelector('p').textContent = detail; }
+
+function date(value) {
+  return formatDate(value, getLocale());
+}
+
+function timestamp(value) {
+  const rendered = formatTimestamp(value, getLocale());
+  return rendered === '—' ? rendered : rendered + ' · ' + t('time.local');
+}
+
+function element(tagName, text = null, className = '') {
+  const node = document.createElement(tagName);
+  if (text !== null && text !== undefined) {
+    node.textContent = String(text);
+  }
+  if (className) {
+    node.className = className;
+  }
+  return node;
+}
+
+function setNotice(target, message, kind = 'warning') {
+  const box = $(target);
+  if (!box) {
+    return;
+  }
+  box.hidden = !message;
+  box.classList.remove('notice--warning', 'notice--error', 'notice--info');
+  box.classList.add('notice--' + kind);
+  box.replaceChildren();
+  if (!message) {
+    return;
+  }
+  box.append(element('span', kind === 'error' ? '!' : 'i', 'notice-icon'));
+  box.append(element('p', message));
+}
+
+function announce(message, error = false) {
+  setNotice('#global-notice', message, error ? 'error' : 'warning');
+}
+
+function getErrorMessage(error, fallbackKey) {
+  return error && typeof error.message === 'string' ? error.message : t(fallbackKey);
+}
+
+function localizedStatus(prefix, status) {
+  if (typeof status !== 'string' || !status) {
+    return '—';
+  }
+  const key = prefix + status;
+  const value = t(key);
+  return value === key ? status : value;
+}
+
+function safeEvidenceUrl(value) {
+  try {
+    const url = new URL(value);
+    const trustedHost = /^(?:[a-z0-9-]+\.)*(?:wikipedia|wikimedia|wiktionary|wikiquote|wikibooks|wikinews|wikisource|wikiversity|wikivoyage|wikidata|mediawiki|wikifunctions)\.org$/i;
+    return url.protocol === 'https:' && !url.username && !url.password && trustedHost.test(url.hostname)
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function updateRun(run) {
   state.run = run;
-  $('#run-status').textContent = statuses[run.status] || `Trạng thái: ${run.status || 'không rõ'}`;
-  $('#run-note').textContent = run.run_id ? `Run ${run.run_id.slice(0, 10)}…` : 'Chưa có run';
-  $('#data-date').textContent = dateText(run.data_date);
-  $('#keyword-count').textContent = num(run.keyword_count);
-  $('#scored-count').textContent = num(run.scored_count);
-  const mode = run.mode === 'live' ? 'LIVE' : run.mode === 'synthetic' ? 'SYNTHETIC' : run.mode === 'replay' ? 'REPLAY' : 'CHƯA XÁC ĐỊNH';
-  $('#source-meta').textContent = `US · All access · ${mode} · Fetch: ${fetchedText(run.fetched_at)}`;
-  const warnings = [];
-  if (run.mode === 'synthetic' || run.mode === 'replay') warnings.push(`${mode}: dữ liệu kiểm thử, không phải kết quả live.`);
-  if (run.mode !== 'live' && run.mode !== 'synthetic' && run.mode !== 'replay') warnings.push('Chưa xác định chế độ dữ liệu.');
-  if (run.status === 'PARTIAL') warnings.push('Run chỉ có dữ liệu một phần; kiểm tra các ngày nguồn hoặc lỗi lưu trữ.');
-  if (run.status === 'FAILED' || run.status === 'ABORTED') warnings.push(`Run ${statuses[run.status].toLowerCase()}: ${run.error || 'không có chi tiết lỗi'}.`);
-  const dataDate = Date.parse(`${run.data_date}T00:00:00Z`);
-  if (Number.isFinite(dataDate) && Date.now() - dataDate > 3 * 86400000) warnings.push('Dữ liệu cũ: ngày quan sát cách hiện tại hơn 3 ngày.');
-  const incomplete = Array.isArray(run.coverage) ? run.coverage.filter(x => x.status !== 'SUCCESS') : [];
-  if (incomplete.length) warnings.push(`Ngày nguồn chưa đầy đủ: ${incomplete.map(x => `${x.date} (${x.http_status ?? x.status})`).join(', ')}.`);
-  if (state.dataRunId && state.dataRunId !== state.runId) warnings.push('Bảng bên dưới vẫn thuộc run trước; kết quả mới chưa sẵn sàng.');
-  notice(warnings.join('\n'), run.status === 'FAILED' || run.status === 'ABORTED');
-  $('#open-fetch').disabled = state.readOnly || activeStatuses.has(run.status) || state.submitting;
+  const status = typeof run.status === 'string' ? run.status : '';
+  $('#run-status').textContent = t('status.' + status) === 'status.' + status
+    ? (status || 'NOT_AVAILABLE')
+    : t('status.' + status);
+  $('#run-note').textContent = run.run_id
+    ? t('run.selected', { id: run.run_id.slice(0, 10) + '…' })
+    : t('run.none');
+  $('#data-date').textContent = date(run.data_date);
+  $('#keyword-count').textContent = number(run.keyword_count);
+  $('#scored-count').textContent = number(run.scored_count);
   $('#runs-current').textContent = run.run_id || 'NOT_AVAILABLE';
-  $('#runs-state').textContent = run.status || 'NOT_AVAILABLE';
-  $('#runs-count').textContent = run.keyword_count == null ? 'NOT_AVAILABLE' : num(run.keyword_count);
-  $('#runs-coverage').textContent = Array.isArray(run.coverage) ? run.coverage.map(x => `${x.date || '—'}: ${x.status || 'NOT_AVAILABLE'}${x.http_status ? ` (${x.http_status})` : ''}`).join(' · ') || 'NOT_AVAILABLE' : 'NOT_MEASURED';
-  $('#quality-coverage').textContent = $('#runs-coverage').textContent;
-  $('#quality-fetched').textContent = run.fetched_at ? fetchedText(run.fetched_at) : 'NOT_AVAILABLE';
-  $('#overview-context').textContent = `Cửa sổ: ${Array.isArray(run.coverage) && run.coverage.length ? run.coverage.map(x => x.date || '—').join(' · ') : 'NOT_AVAILABLE'} · Thuật toán: ${run.algorithm_version || 'NOT_AVAILABLE'} · Thu thập: ${run.fetched_at ? fetchedText(run.fetched_at) : 'NOT_AVAILABLE'}`;
+  $('#runs-state').textContent = status ? localizedStatus('status.', status) : 'NOT_AVAILABLE';
+  $('#runs-count').textContent = run.keyword_count == null ? 'NOT_AVAILABLE' : number(run.keyword_count);
+
+  const coverage = Array.isArray(run.coverage)
+    ? run.coverage.map((item) => (item.date || '—') + ': ' + (item.status || 'NOT_AVAILABLE')
+      + (item.http_status ? ' (' + item.http_status + ')' : '')).join(' · ') || 'NOT_AVAILABLE'
+    : 'NOT_MEASURED';
+  $('#runs-coverage').textContent = coverage;
+  $('#quality-coverage').textContent = coverage;
+  $('#quality-fetched').textContent = run.fetched_at ? timestamp(run.fetched_at) : 'NOT_AVAILABLE';
+
+  const mode = run.mode === 'live' ? 'LIVE'
+    : run.mode === 'synthetic' ? 'SYNTHETIC'
+      : run.mode === 'replay' ? 'REPLAY'
+        : 'UNKNOWN';
+  const context = [];
+  context.push('US · ' + (run.access || 'all-access') + ' · ' + mode);
+  if (Array.isArray(run.coverage) && run.coverage.length) {
+    context.push(run.coverage.map((item) => item.date || '—').join(' · '));
+  }
+  context.push(run.algorithm_version || 'NOT_AVAILABLE');
+  context.push(run.fetched_at ? timestamp(run.fetched_at) : 'NOT_AVAILABLE');
+  $('#overview-context').replaceChildren(
+    element('span', '◉', 'meta-mark'),
+    element('span', context.join('  /  ')),
+  );
+
+  const warnings = [];
+  if (run.mode === 'synthetic' || run.mode === 'replay') {
+    warnings.push(t('quality.synthetic', { mode }));
+  } else if (!['live', 'synthetic', 'replay'].includes(run.mode)) {
+    warnings.push(t('quality.unknown-mode'));
+  }
+  if (status === 'PARTIAL') {
+    warnings.push(t('quality.partial'));
+  }
+  if (status === 'FAILED' || status === 'ABORTED') {
+    warnings.push(t('error.run-failed', {
+      status: t('status.' + status).toLowerCase(),
+      message: typeof run.error === 'string' && run.error ? run.error : t('error.empty-detail'),
+    }));
+  }
+  const observationTime = Date.parse(String(run.data_date || '') + 'T00:00:00Z');
+  const isStale = Number.isFinite(observationTime) && Date.now() - observationTime > 3 * 86400000;
+  $('#quality-staleness').textContent = isStale ? t('quality.stale') : t('quality.fresh');
+  if (isStale) {
+    warnings.push(t('quality.stale'));
+  }
+  const incomplete = Array.isArray(run.coverage)
+    ? run.coverage.filter((item) => item.status !== 'SUCCESS')
+    : [];
+  if (incomplete.length) {
+    warnings.push(t('quality.coverage-missing', {
+      days: incomplete.map((item) => (item.date || '—') + ' (' + (item.http_status ?? item.status) + ')').join(', '),
+    }));
+  }
+  if (state.dataRunId && state.dataRunId !== state.runId) {
+    warnings.push(t('error.old-table'));
+  }
+  announce(warnings.join(' '), status === 'FAILED' || status === 'ABORTED');
 }
+
 async function loadRun(id, { poll = false } = {}) {
-  if (!/^[a-f0-9]{32}$/.test(id)) { notice('Run ID phải gồm 32 ký tự hex.', true); return; }
-  if (!poll) { clearTimeout(state.poll); ++state.sequence; ++state.detailSequence; notice('Đang tải thông tin run…'); }
+  const runId = String(id || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{32}$/i.test(runId)) {
+    announce(t('error.run-id'), true);
+    return;
+  }
+  if (!poll) {
+    clearTimeout(state.pollTimer);
+    state.pollCount = 0;
+    state.runSequence += 1;
+    state.detailSequence += 1;
+    announce('');
+  }
   const sequence = ++state.runSequence;
   try {
-    const run = await api(`/api/runs/${encodeURIComponent(id)}`);
-    if (sequence !== state.runSequence) return;
-    if (!run || typeof run.status !== 'string') throw new Error('Dữ liệu trạng thái run không hợp lệ.');
-    state.runId = id; $('#run-id').value = id; updateRun(run);
-    if (activeStatuses.has(run.status)) { state.poll = setTimeout(() => loadRun(id, {poll:true}), 2000); return; }
-    if ((run.status === 'COMPLETED' || run.status === 'PARTIAL') && Number.isInteger(run.keyword_count)) {
-      state.dataRunId = id; state.offset = 0; renderRows([]); showEmpty('Đang tải kết quả', 'Vui lòng đợi.'); updateRun(run); await loadKeywords();
+    const run = await getJson('/api/runs/' + encodeURIComponent(runId), { locale: getLocale() });
+    if (sequence !== state.runSequence) {
+      return;
     }
-  } catch (err) { if (sequence === state.runSequence) { notice(err.message, true); $('#open-fetch').disabled = state.readOnly; } }
-}
-function makeCell(row, value, className) { const td = el('td'); td.append(el('span', value, className)); row.append(td); }
-function safeEvidenceUrl(value) {
-  try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password && /^(?:[a-z0-9-]+\.)*(?:wikipedia|wikimedia|wiktionary|wikiquote|wikibooks|wikinews|wikisource|wikiversity|wikivoyage|wikidata|mediawiki|wikifunctions)\.org$/i.test(url.hostname) ? url.href : null; } catch { return null; }
-}
-function renderRows(items) {
-  const body = $('#rows'); body.replaceChildren();
-  for (const item of items) {
-    const row = el('tr'); const title = el('td'); title.append(el('strong', item.display_keyword || item.canonical_keyword || '—'), el('small', item.project || '—')); row.append(title);
-    makeCell(row, item.score == null ? '—' : `${num(item.score)} / 100`, 'score');
-    makeCell(row, labels[item.status] || item.status || '—', `badge ${['EMERGING','STABLE','FALLING','INSUFFICIENT_DATA'].includes(item.status) ? item.status : ''}`);
-    makeCell(row, num(item.current_views_ceil)); makeCell(row, num(item.baseline)); makeCell(row, item.ratio == null ? '—' : `${num(item.ratio)}×`); makeCell(row, dateText(item.observation_date));
-    const flags = Array.isArray(item.quality_flags) ? item.quality_flags : []; makeCell(row, flags.length ? `${flags.length} cờ` : '—');
-    const action = el('td'); const button = el('button', 'Chi tiết ↗', 'row-button'); button.type = 'button'; button.setAttribute('aria-label', `Xem chi tiết ${item.display_keyword || item.canonical_keyword || 'keyword'}`); button.addEventListener('click', () => openDetail(item.keyword_id)); action.append(button); row.append(action); body.append(row);
+    if (!run || typeof run.status !== 'string') {
+      throw new Error(t('error.run-invalid'));
+    }
+    state.runId = runId;
+    $('#run-id').value = runId;
+    updateRun(run);
+    if (activeStatuses.has(run.status)) {
+      if (state.pollCount >= 30) {
+        announce(t('error.run-timeout', { count: state.pollCount }));
+        return;
+      }
+      state.pollCount += 1;
+      state.pollTimer = setTimeout(() => loadRun(runId, { poll: true }), 2000);
+      return;
+    }
+    if ((run.status === 'COMPLETED' || run.status === 'PARTIAL') && Number.isInteger(run.keyword_count)) {
+      state.dataRunId = runId;
+      state.offset = 0;
+      renderRows([]);
+      showEmpty(t('keywords.empty-title'), t('keywords.page-empty'));
+      await loadKeywords();
+    }
+  } catch (error) {
+    if (sequence === state.runSequence) {
+      announce(getErrorMessage(error, 'error.run-fetch'), true);
+    }
   }
 }
+
+function appendCell(row, value, className = '') {
+  const cell = element('td');
+  cell.append(element('span', value, className));
+  row.append(cell);
+}
+
+function renderRows(items) {
+  const body = $('#rows');
+  body.replaceChildren();
+  for (const item of items) {
+    const row = element('tr');
+    const title = element('td');
+    title.append(element('strong', item.display_keyword || item.canonical_keyword || '—'));
+    title.append(element('small', item.project || '—'));
+    row.append(title);
+    appendCell(row, item.score == null ? '—' : number(item.score) + ' / 100', 'score-cell');
+    const status = item.status || '—';
+    appendCell(row, localizedStatus('keywordstatus.', status), 'pill table-status ' + (
+      ['EMERGING', 'STABLE', 'FALLING', 'INSUFFICIENT_DATA'].includes(status) ? 'pill--' + status.toLowerCase() : ''
+    ));
+    appendCell(row, number(item.current_views_ceil));
+    appendCell(row, number(item.baseline));
+    appendCell(row, item.ratio == null ? '—' : number(item.ratio) + '×');
+    appendCell(row, date(item.observation_date));
+    const flags = Array.isArray(item.quality_flags) ? item.quality_flags : [];
+    appendCell(row, flags.length ? t('table.flags', { count: number(flags.length) }) : '—');
+    const action = element('td');
+    const button = element('button', '↗', 'icon-button row-detail');
+    button.type = 'button';
+    button.setAttribute('aria-label', t('table.open-detail', {
+      name: item.display_keyword || item.canonical_keyword || t('common.keyword'),
+    }));
+    button.addEventListener('click', () => openDetail(item.keyword_id));
+    action.append(button);
+    row.append(action);
+    body.append(row);
+  }
+}
+
+function showEmpty(title, detail) {
+  const box = $('#empty');
+  box.hidden = false;
+  $('strong', box).textContent = title;
+  $('p', box).textContent = detail;
+}
+
 async function loadKeywords() {
-  if (!state.dataRunId) return;
-  const seq = ++state.sequence;
-  const params = new URLSearchParams({ q:state.q, category:state.category, sort:state.sort, limit:String(state.limit), offset:String(state.offset) });
+  if (!state.dataRunId) {
+    renderRows([]);
+    showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
+    $('#results-count').textContent = '—';
+    $('#pagination-info').textContent = t('keywords.no-results');
+    $('#prev').disabled = true;
+    $('#next').disabled = true;
+    return;
+  }
+  const sequence = ++state.keywordSequence;
+  const params = new URLSearchParams({
+    q: state.query,
+    category: state.category,
+    sort: state.sort,
+    limit: String(state.limit),
+    offset: String(state.offset),
+  });
   try {
-    const result = await api(`/api/runs/${encodeURIComponent(state.dataRunId)}/keywords?${params}`);
-    if (seq !== state.sequence) return;
-    if (!result || !Array.isArray(result.items) || !Number.isInteger(result.total)) throw new Error('Danh sách keyword không hợp lệ.');
-    renderRows(result.items); state.next = result.next_offset;
-    $('#results-count').textContent = num(result.total);
-    $('#pagination-info').textContent = result.total ? `${num(state.offset + 1)}–${num(state.offset + result.items.length)} / ${num(result.total)} kết quả` : '0 kết quả';
-    $('#prev').disabled = state.offset === 0; $('#next').disabled = result.next_offset == null;
-    if (!result.items.length) showEmpty(result.empty_reason || 'Không có kết quả ở trang này', result.empty_reason ? 'Không có keyword phù hợp trong dữ liệu đã phân tích.' : 'Hãy quay lại trang trước.'); else $('#empty').hidden = true;
-  } catch (err) { if (seq === state.sequence) { renderRows([]); notice(err.message, true); showEmpty('Không tải được kết quả', 'Kiểm tra kết nối hoặc thử lại.'); } }
+    const result = await getJson('/api/runs/' + encodeURIComponent(state.dataRunId) + '/keywords?' + params, {
+      locale: getLocale(),
+    });
+    if (sequence !== state.keywordSequence) {
+      return;
+    }
+    if (!result || !Array.isArray(result.items) || !Number.isInteger(result.total)) {
+      throw new Error(t('error.keyword-invalid'));
+    }
+    renderRows(result.items);
+    state.next = result.next_offset;
+    $('#results-count').textContent = number(result.total);
+    const shown = result.items.length;
+    if (!result.total) {
+      $('#pagination-info').textContent = t('table.zero-results');
+    } else {
+      $('#pagination-info').textContent = t('table.range', {
+        start: number(state.offset + 1),
+        end: number(state.offset + shown),
+        total: number(result.total),
+      });
+    }
+    $('#prev').disabled = state.offset === 0;
+    $('#next').disabled = result.next_offset == null;
+    if (!result.items.length) {
+      showEmpty(result.empty_reason ? t('keywords.none-match') : t('keywords.page-empty'), t('keywords.empty-help'));
+    } else {
+      $('#empty').hidden = true;
+    }
+    setNotice('#keyword-notice', '');
+  } catch (error) {
+    if (sequence === state.keywordSequence) {
+      renderRows([]);
+      setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'), 'error');
+      showEmpty(t('error.keyword-fetch'), t('keywords.empty-help'));
+    }
+  }
 }
-function detailField(container, label, value, full = false) { const node = el('div', null, `detail-item${full ? ' full' : ''}`); node.append(el('small', label), el('div', value)); container.append(node); }
+
+function detailField(container, label, value, full = false) {
+  const field = element('div', null, 'detail-item' + (full ? ' detail-item--wide' : ''));
+  field.append(element('small', label));
+  field.append(element('div', value));
+  container.append(field);
+}
+
+function renderDetail(detail) {
+  const content = $('#detail-content');
+  content.replaceChildren();
+  $('#detail-title').textContent = detail.display_keyword || detail.canonical_keyword || t('detail.title-fallback');
+  $('#detail-subtitle').textContent = [detail.source || '—', detail.project || '—', date(detail.observation_date)].join(' · ');
+  detailField(content, t('detail.score-status'), (detail.score == null
+    ? t('detail.insufficient')
+    : number(detail.score) + ' / 100') + ' · ' + localizedStatus('keywordstatus.', detail.status));
+  detailField(content, t('detail.views-baseline'), number(detail.current_views_ceil) + ' / ' + number(detail.baseline));
+  detailField(content, t('detail.ratio-date'), (detail.ratio == null ? '—' : number(detail.ratio) + '×')
+    + ' · ' + number(detail.observed_baseline_days) + ' / 7');
+  detailField(content, t('detail.algorithm'), detail.algorithm_version || '—');
+  detailField(content, t('detail.categories'), Array.isArray(detail.categories) && detail.categories.length
+    ? detail.categories.join(' · ')
+    : 'NOT_AVAILABLE');
+  detailField(content, t('detail.entity-commercial'), (typeof detail.entity_type === 'string' ? detail.entity_type : 'NOT_AVAILABLE')
+    + ' · ' + (typeof detail.commercial_relevance === 'string' ? detail.commercial_relevance : 'NOT_ASSESSED'));
+  detailField(content, t('detail.article-scope'), (typeof detail.article_original === 'string' ? detail.article_original : 'NOT_AVAILABLE')
+    + ' · ' + (typeof detail.country_scope === 'string' ? detail.country_scope : 'NOT_AVAILABLE')
+    + ' / ' + (typeof detail.access === 'string' ? detail.access : 'NOT_AVAILABLE'), true);
+  const components = detail.score_components;
+  detailField(content, t('detail.score-components'), components
+    ? t('detail.components', {
+      growth: number(components.growth),
+      volume: number(components.volume),
+      views: number(components.max_views_ceil),
+    })
+    : t('detail.not-enough-score'), true);
+  const missing = Array.isArray(detail.missing_baseline_dates)
+    ? detail.missing_baseline_dates.map((item) => item.date + ': ' + item.reason).join(' · ')
+    : '';
+  detailField(content, t('detail.missing-dates'), missing || t('detail.no-missing'), true);
+  const observations = Array.isArray(detail.baseline_observations)
+    ? detail.baseline_observations.map((item) => item.date + ': ' + number(item.views_ceil)).join(' · ')
+    : '';
+  detailField(content, t('detail.observations'), observations || t('detail.no-observations'), true);
+  const classification = Array.isArray(detail.classification_evidence)
+    ? detail.classification_evidence.map((item) => item.category + ': ' + item.matched_text + ' (' + item.rule_id + ')').join(' · ')
+    : '';
+  detailField(content, t('detail.classification'), classification || t('detail.no-classification'), true);
+  detailField(content, t('detail.quality-flags'), Array.isArray(detail.quality_flags) && detail.quality_flags.length
+    ? detail.quality_flags.join(' · ')
+    : t('detail.no-flags'), true);
+  const sourceUrl = safeEvidenceUrl(detail.evidence_url || detail.source_url);
+  if (sourceUrl) {
+    const evidence = element('div', null, 'detail-item detail-item--wide');
+    evidence.append(element('small', t('detail.evidence-source')));
+    const link = element('a', t('detail.open-wikimedia'));
+    link.href = sourceUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    evidence.append(link);
+    content.append(evidence);
+  }
+}
+
 async function openDetail(id) {
-  if (!state.dataRunId || !/^[a-f0-9]{64}$/.test(id || '')) return;
-  const detailRunId = state.dataRunId; const detailSeq = ++state.detailSequence;
-  const dialog = $('#detail-dialog'), box = $('#detail-content'); $('#detail-title').textContent = 'Đang tải…'; $('#detail-subtitle').textContent = ''; box.replaceChildren(); dialog.showModal();
+  if (!state.dataRunId || !/^[a-f0-9]{64}$/i.test(id || '')) {
+    return;
+  }
+  const runId = state.dataRunId;
+  const sequence = ++state.detailSequence;
+  const dialog = $('#detail-dialog');
+  const content = $('#detail-content');
+  state.detail = null;
+  $('#detail-title').textContent = t('detail.loading');
+  $('#detail-subtitle').textContent = '';
+  content.replaceChildren();
+  if (!dialog.open) {
+    dialog.showModal();
+  }
   try {
-    const d = await api(`/api/runs/${encodeURIComponent(detailRunId)}/keywords/${id}`);
-    if (detailSeq !== state.detailSequence || !dialog.open || state.dataRunId !== detailRunId) return;
-    $('#detail-title').textContent = d.display_keyword || d.canonical_keyword || 'Keyword'; $('#detail-subtitle').textContent = `${d.source || '—'} · ${d.project || '—'} · ${dateText(d.observation_date)}`;
-    detailField(box, 'Score / trạng thái', `${d.score == null ? 'Chưa đủ dữ liệu' : `${num(d.score)} / 100`} · ${d.status || '—'}`);
-    detailField(box, 'Views ≈ / baseline ≈', `${num(d.current_views_ceil)} / ${num(d.baseline)}`);
-    detailField(box, 'Ratio / ngày quan sát', `${d.ratio == null ? '—' : `${num(d.ratio)}×`} · ${num(d.observed_baseline_days)} / 7 ngày`);
-    detailField(box, 'Thuật toán', d.algorithm_version || '—');
-    detailField(box, 'Chủ đề', Array.isArray(d.categories) && d.categories.length ? d.categories.join(' · ') : 'NOT_AVAILABLE');
-    detailField(box, 'Entity type / commercial relevance', `${typeof d.entity_type === 'string' ? d.entity_type : 'NOT_AVAILABLE'} · ${typeof d.commercial_relevance === 'string' ? d.commercial_relevance : 'NOT_ASSESSED'}`);
-    detailField(box, 'Trang gốc / phạm vi', `${typeof d.article_original === 'string' ? d.article_original : 'NOT_AVAILABLE'} · ${typeof d.country_scope === 'string' ? d.country_scope : 'NOT_AVAILABLE'} / ${typeof d.access === 'string' ? d.access : 'NOT_AVAILABLE'}`, true);
-    const components = d.score_components; detailField(box, 'Thành phần score', components ? `Tăng trưởng G: ${num(components.growth)} · Độ phổ biến V: ${num(components.volume)} · Max views ≈ ${num(components.max_views_ceil)}` : 'Chưa đủ dữ liệu để tính.', true);
-    const missing = Array.isArray(d.missing_baseline_dates) ? d.missing_baseline_dates.map(x => `${x.date}: ${x.reason}`).join(' · ') : ''; detailField(box, 'Ngày thiếu và lý do', missing || 'Không có ngày thiếu được báo cáo.', true);
-    const observations = Array.isArray(d.baseline_observations) ? d.baseline_observations.map(x => `${x.date}: ${num(x.views_ceil)}`).join(' · ') : ''; detailField(box, 'Baseline quan sát ≈', observations || 'Chưa có quan sát.', true);
-    const evidence = Array.isArray(d.classification_evidence) ? d.classification_evidence.map(x => `${x.category}: ${x.matched_text} (${x.rule_id})`).join(' · ') : ''; detailField(box, 'Bằng chứng phân loại', evidence || 'Chưa có bằng chứng phân loại.', true);
-    detailField(box, 'Quality flags', Array.isArray(d.quality_flags) && d.quality_flags.length ? d.quality_flags.join(' · ') : 'Không có cờ được báo cáo.', true);
-    const url = safeEvidenceUrl(d.evidence_url || d.source_url); if (url) { const cell = el('div', null, 'detail-item full'); cell.append(el('small','Nguồn bằng chứng')); const a = el('a', 'Mở trang Wikimedia ↗'); a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; cell.append(a); box.append(cell); }
-  } catch (err) { if (detailSeq === state.detailSequence && dialog.open) { $('#detail-title').textContent = 'Không tải được chi tiết'; detailField(box, 'Lỗi', err.message, true); } }
+    const detail = await getJson('/api/runs/' + encodeURIComponent(runId) + '/keywords/' + encodeURIComponent(id), {
+      locale: getLocale(),
+    });
+    if (sequence !== state.detailSequence || !dialog.open || state.dataRunId !== runId) {
+      return;
+    }
+    state.detail = detail;
+    renderDetail(detail);
+  } catch (error) {
+    if (sequence === state.detailSequence && dialog.open) {
+      state.detail = null;
+      $('#detail-title').textContent = t('detail.load-error');
+      detailField(content, t('detail.load-error'), getErrorMessage(error, 'error.detail-fetch'), true);
+    }
+  }
 }
-$('#load-run').addEventListener('click', () => loadRun($('#run-id').value.trim()));
-$('#run-id').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadRun(e.currentTarget.value.trim()); });
-$('#open-fetch').addEventListener('click', () => { if (state.readOnly) return; $('#fetch-error').textContent = ''; $('#operator-token').value = ''; $('#fetch-dialog').showModal(); });
-document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => document.getElementById(button.dataset.close).close()));
-$('#fetch-dialog').addEventListener('close', () => { $('#operator-token').value = ''; });
-$('#fetch-form').addEventListener('submit', async (event) => {
-  event.preventDefault(); if (state.readOnly || state.submitting) return; state.submitting = true; $('#open-fetch').disabled = true;
-  const token = $('#operator-token').value; $('#operator-token').value = ''; $('#fetch-error').textContent = '';
-  try { const created = await api('/api/runs', { method:'POST', headers:{ Authorization:`Bearer ${token}` } }); if (!/^[a-f0-9]{32}$/.test(created.run_id || '')) throw new Error('Backend trả run ID không hợp lệ.'); $('#fetch-dialog').close(); await loadRun(created.run_id); }
-  catch (err) { $('#fetch-error').textContent = err.message; }
-  finally { state.submitting = false; $('#open-fetch').disabled = state.readOnly || Boolean(state.run && activeStatuses.has(state.run.status)); }
-});
-document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => { document.querySelectorAll('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-pressed','false'); }); button.classList.add('active'); button.setAttribute('aria-pressed','true'); state.category = button.dataset.category; state.offset = 0; loadKeywords(); }));
-let searchTimer; $('#search').addEventListener('input', e => { clearTimeout(searchTimer); const value = e.currentTarget.value; searchTimer = setTimeout(() => { state.q = value; state.offset = 0; loadKeywords(); }, 350); });
-$('#sort').addEventListener('change', e => { state.sort = e.currentTarget.value; state.offset = 0; loadKeywords(); });
-$('#prev').addEventListener('click', () => { state.offset = Math.max(0, state.offset - state.limit); loadKeywords(); });
-$('#next').addEventListener('click', () => { if (state.next != null) { state.offset = state.next; loadKeywords(); } });
-window.addEventListener('pagehide', () => { clearTimeout(state.poll); clearTimeout(searchTimer); });
-api('/api/health').then(() => { $('#connection-dot').classList.add('good'); $('#connection-text').textContent = 'Backend đã kết nối'; }).catch(() => { $('#connection-dot').classList.add('error'); $('#connection-text').textContent = 'Backend chưa kết nối'; notice('Không kết nối được backend. Khởi động server để tiếp tục.', true); });
-api('/api/config').then(config => {
-  if (typeof config.read_only !== 'boolean') return;
-  state.readOnly = config.read_only;
-  $('#open-fetch').hidden = config.read_only;
-  $('#open-fetch').disabled = config.read_only || Boolean(state.run && activeStatuses.has(state.run.status));
-  if (config.read_only) $('#connection-text').textContent = 'Demo chỉ đọc';
-}).catch(() => { state.readOnly = true; });
 
-// Navigation changes presentation only; no hidden panel can initiate a write.
-const viewNames = {overview:'TỔNG QUAN', sources:'NGUỒN', runs:'LẦN PHÂN TÍCH', keywords:'KHÁM PHÁ TỪ KHÓA', algorithms:'SO SÁNH THUẬT TOÁN', quality:'CHẤT LƯỢNG', refresh:'WEEKLY REFRESH', research:'PRODUCT RESEARCH', usage:'AI USAGE', settings:'CÀI ĐẶT'};
 function showView(name) {
-  if (name === 'results') name = 'keywords';
-  if (!Object.hasOwn(viewNames, name)) name = 'overview';
-  document.querySelectorAll('[data-view]').forEach(panel => { panel.hidden = panel.dataset.view !== name; });
-  document.querySelectorAll('[data-nav]').forEach(link => { const active=link.dataset.nav === name; link.classList.toggle('active',active); if (active) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); });
-  $('#breadcrumb-current').textContent=viewNames[name];
+  const view = name === 'results' ? 'keywords' : name;
+  const valid = new Set(['overview', 'sources', 'runs', 'keywords', 'algorithms', 'quality', 'refresh', 'research', 'usage', 'settings']);
+  const selected = valid.has(view) ? view : 'overview';
+  $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
+  $$('[data-nav]').forEach((link) => {
+    const active = link.dataset.nav === selected;
+    link.classList.toggle('active', active);
+    if (active) {
+      link.setAttribute('aria-current', 'page');
+    } else {
+      link.removeAttribute('aria-current');
+    }
+  });
+  $('#breadcrumb-current').textContent = t('nav.' + selected);
+  if (selected === 'keywords' && !state.dataRunId) {
+    showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
+  }
+  closeMobileNav();
 }
-window.addEventListener('hashchange', () => showView(window.location.hash.slice(1)));
-showView(window.location.hash.slice(1));
-$('#draft-translation').addEventListener('change', () => { $('#draft-status').textContent='Bản nháp giả lập chưa lưu; không thay đổi cấu hình server.'; });
-$('#reset-draft').addEventListener('click', () => { $('#draft-translation').checked=false; $('#draft-status').textContent='Bản nháp đã đặt lại; không thay đổi cấu hình server.'; });
-$('#detail-dialog').addEventListener('close', () => { ++state.detailSequence; });
 
-const comparisonStates = {wikimedia:'wikimedia-trend-v0.1: COMPLETED · trend score / điểm · 3 ngày baseline', robust:'robust-z-mad: SKIPPED · robust z / không thứ nguyên · thiếu mẫu', ewma:'ewma: FAILED · delta / đơn vị nguồn · fixture lỗi'};
-function describeComparison() { $('#compare-description').textContent = `${comparisonStates[$('#compare-first').value]} · ${comparisonStates[$('#compare-second').value]} · NOT_COMPARABLE · OFFLINE DEMO`; }
-$('#compare-first').addEventListener('change', describeComparison);
-$('#compare-second').addEventListener('change', describeComparison);
+function isMobileNav() {
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function setMobileNav(open) {
+  const shell = $('#app-shell');
+  const panel = $('#workspace-nav-panel');
+  const toggle = $('#menu-toggle');
+  const scrim = $('#nav-scrim');
+  const visible = isMobileNav() && open;
+  shell.classList.toggle('menu-open', visible);
+  toggle.setAttribute('aria-expanded', String(visible));
+  toggle.setAttribute('aria-label', t(visible ? 'a11y.close-nav' : 'a11y.open-nav'));
+  scrim.hidden = !visible;
+  panel.inert = isMobileNav() && !visible;
+}
+
+function closeMobileNav() {
+  if (isMobileNav()) {
+    setMobileNav(false);
+  }
+}
+
+function describeComparison() {
+  const states = {
+    wikimedia: 'algorithms.fixture-wikimedia',
+    robust: 'algorithms.fixture-robust',
+    ewma: 'algorithms.fixture-ewma',
+  };
+  $('#compare-description').textContent = t(states[$('#compare-first').value]) + ' · '
+    + t(states[$('#compare-second').value]) + ' · ' + t('algorithms.fixture-note');
+}
+
+function bindEvents() {
+  $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
+  $('#nav-scrim').addEventListener('click', closeMobileNav);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeMobileNav();
+    }
+  });
+  window.addEventListener('resize', () => setMobileNav($('#app-shell').classList.contains('menu-open')));
+  window.addEventListener('hashchange', () => showView(window.location.hash.slice(1)));
+  $$('[data-nav]').forEach((link) => link.addEventListener('click', closeMobileNav));
+  $$('[data-goto]').forEach((link) => link.addEventListener('click', closeMobileNav));
+  $$('[data-close]').forEach((button) => {
+    button.addEventListener('click', () => document.getElementById(button.dataset.close).close());
+  });
+
+  $('#load-run').addEventListener('click', () => loadRun($('#run-id').value));
+  $('#run-id').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      loadRun(event.currentTarget.value);
+    }
+  });
+
+  $$('.filter-tab').forEach((button) => button.addEventListener('click', () => {
+    $$('.filter-tab').forEach((tab) => {
+      tab.classList.remove('active');
+      tab.setAttribute('aria-pressed', 'false');
+    });
+    button.classList.add('active');
+    button.setAttribute('aria-pressed', 'true');
+    state.category = button.dataset.category;
+    state.offset = 0;
+    loadKeywords();
+  }));
+  let searchTimer;
+  $('#search').addEventListener('input', (event) => {
+    clearTimeout(searchTimer);
+    const query = event.currentTarget.value;
+    searchTimer = setTimeout(() => {
+      state.query = query;
+      state.offset = 0;
+      loadKeywords();
+    }, 350);
+  });
+  $('#sort').addEventListener('change', (event) => {
+    state.sort = event.currentTarget.value;
+    state.offset = 0;
+    loadKeywords();
+  });
+  $('#prev').addEventListener('click', () => {
+    state.offset = Math.max(0, state.offset - state.limit);
+    loadKeywords();
+  });
+  $('#next').addEventListener('click', () => {
+    if (state.next !== null && state.next !== undefined) {
+      state.offset = state.next;
+      loadKeywords();
+    }
+  });
+  $('#compare-first').addEventListener('change', describeComparison);
+  $('#compare-second').addEventListener('change', describeComparison);
+  $('#detail-dialog').addEventListener('close', () => {
+    state.detailSequence += 1;
+    state.detail = null;
+  });
+  window.addEventListener('pagehide', () => {
+    clearTimeout(state.pollTimer);
+    clearTimeout(searchTimer);
+  });
+  document.addEventListener('trendscout:locale', () => {
+    if (state.run) {
+      updateRun(state.run);
+    }
+    describeComparison();
+    if (state.dataRunId) {
+      loadKeywords();
+    }
+    if ($('#detail-dialog').open && state.detail) {
+      renderDetail(state.detail);
+    }
+  });
+}
+
+async function checkBackend() {
+  let connected = false;
+  try {
+    await getJson('/api/health', { locale: getLocale() });
+    connected = true;
+    $('#connection-dot').className = 'status-dot status-dot--green';
+    $('#connection-text').textContent = t('connection.online');
+  } catch {
+    $('#connection-dot').className = 'status-dot status-dot--red';
+    $('#connection-text').textContent = t('connection.offline');
+  }
+  document.addEventListener('trendscout:locale', () => {
+    $('#connection-text').textContent = t(connected ? 'connection.online' : 'connection.offline');
+  });
+}
+
+initializeLocale();
+initializeTheme();
+bindEvents();
+showView(window.location.hash.slice(1));
+describeComparison();
+setMobileNav(false);
+document.documentElement.classList.remove('js-pending');
+checkBackend();

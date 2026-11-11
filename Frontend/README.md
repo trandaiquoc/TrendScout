@@ -1,36 +1,51 @@
 # TrendScout Dashboard
 
-Từ root, có thể dùng `./setup.sh` một lần rồi `./start.sh` để chạy cả backend và dashboard; xem [README chính](../README.md). Các lệnh dưới đây là cách chạy thủ công.
+The dashboard is a browser-native HTML, CSS, and JavaScript workspace served by FastAPI at **/dashboard/**. It has ten views: Overview, Sources, Runs, Explore Keywords, Algorithm Comparison, Data Quality, Refresh Schedule, Product Research, AI Usage, and Settings. It uses native ES modules; no frontend framework, npm install, or local bundling step is required.
 
-Giao diện HTML/CSS/JavaScript thuần, được FastAPI phục vụ cùng origin tại `/dashboard/`. Không cần cài npm hoặc build frontend; trình duyệt không gọi trực tiếp Wikimedia hay Firestore.
+## Run locally
 
-## Chạy trên Ubuntu
+From the repository root, **./setup.sh** and **./start.sh** start the backend and dashboard. For a manual backend setup, see the [Backend README](../Backend/README.md). Open **http://127.0.0.1:8000/dashboard/**.
 
-Từ repository:
+The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
-```bash
-cd Backend
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
-# ADC phải được cấu hình trên máy; không đưa credential vào repository.
-export TREND_SCOUT_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
+## Frontend structure
 
-Mở `http://127.0.0.1:8000/dashboard/`. Nhập run ID đã có để xem dữ liệu đã lưu, hoặc chọn **Fetch & Analyze** và nhập operator token trong hộp thoại. Token chỉ được giữ trong bộ nhớ khi gửi request, không được lưu vào localStorage, URL hay source. Server và giao diện nên chạy trên localhost; xem [Backend README](../Backend/README.md) trước khi cho phép truy cập mạng. Không tự khởi chạy phân tích khi reload.
+- **public/index.html** contains the semantic workspace shell and all ten views.
+- **public/styles.css** owns design tokens, Light/Dark themes, focus styles, and responsive layouts.
+- **public/app.js** composes views and interactions. It contains no HTTP write flow.
+- **public/modules/api.js** is the single API boundary. It issues same-origin GET requests with a bounded timeout and validates JSON/HTTP errors.
+- **public/modules/format.js** formats dates and numbers for the selected locale.
+- **public/modules/theme.js** and **public/modules/i18n.js** manage display preferences.
+- **public/modules/i18n/vi.js** and **public/modules/i18n/en.js** are separate user-facing copy catalogs.
 
-Backend hiện không có API liệt kê run; cần giữ run ID để mở lại. Dashboard dùng các API `/api/health`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/keywords` và chi tiết keyword. Tìm kiếm có debounce, chỉ đọc kết quả backend đã lưu. Phân trang theo API; nhóm không có kết quả hiển thị `NO_MATCHES_IN_ANALYZED_DATA`.
+The browser safely renders API values as text and only links to validated HTTPS Wikimedia-family hosts. Missing values remain distinct from zero. Run, keyword, and detail reads preserve API pagination and source evidence; stale, synthetic, partial, and failed runs remain labeled.
 
-Điểm số là heuristic của backend, không phải xác suất hoặc bằng chứng nhu cầu mua. Giao diện phân biệt giá trị thiếu với 0, nguồn và ngày quan sát; thời gian fetch hiển thị theo múi giờ của máy. Nhãn `SYNTHETIC`/`REPLAY` dựa trên `mode` của run. Dữ liệu cũ hơn 3 ngày theo đồng hồ máy được cảnh báo; đây là quy ước hiển thị, không phải cam kết độ trễ nguồn.
+## Fetch and source readiness
 
-## Kiểm tra
+The prominent **Fetch new data / Thu thập dữ liệu mới** button is disabled. The dashboard has no authenticated operator session, so it does not send a create-run request or simulate progress. The existing POST /api/runs contract remains behind its operator Bearer token; this UI does not collect, store, or transmit that token. Vercel remains read-only and returns 405 for run creation.
 
-```bash
-cd Backend
-python -m unittest discover -s tests -v
-node --check ../Frontend/public/app.js
-```
+Source status is deliberately limited to repository evidence:
 
-Test backend dùng fake repository; fixture UI được gắn nhãn `SYNTHETIC`. Kiểm thử trình duyệt với fake không thay thế nghiệm thu live Firestore. Không tự tạo run live khi chưa xác minh quota. Xem [Backend README](../Backend/README.md) về token, storage, trạng thái run và giới hạn chạy trên một host.
+- **Wikimedia Pageviews:** adapter implemented; live connectivity and account access have not been verified.
+- **YouTube, Google Search, and Bing Search:** adapters/credentials are not configured; they are not called.
+
+GET /api/config reports only read_only; it is not a source, credential, or authenticated-session capability check. No cross-source data is combined. Weekly refresh, AI usage, and product research screens disclose their unconfigured or illustrative state.
+
+## Static assets and Vercel
+
+Local FastAPI serves the files under public/ at /dashboard/. The Vercel build runs Backend/scripts/prepare_vercel.py, which packages every non-hidden file under Frontend/public into the function's generated app/dashboard_assets.py. The same authenticated dashboard route serves HTML, CSS, and nested JavaScript modules; assets are not moved to an unprotected CDN path. Read-only Basic authentication continues to protect the dashboard and its static modules.
+
+## Checks
+
+From the repository root:
+
+    bash Backend/scripts/verify_offline_readiness.sh
+
+This runs backend regressions, Golden seeds, JavaScript syntax checks, recursive Vercel asset parity, offline Chrome workspace/keyboard/mobile checks, synthetic pipeline integration, and bounded fake-storage workloads. It does not contact Wikimedia, YouTube, search providers, Firestore, or Vercel.
+
+The focused screenshot review can be repeated with Chrome installed:
+
+    cd Backend
+    .venv/bin/python scripts/seccomp_exec.py --allow-unix-sockets -- .venv/bin/python tests/browser_d2_visual_offline.py
+
+This creates compact WebP evidence under Documents/Reports/evidence/d2/. Those fixture screenshots show UI states only; they do not establish live source access, production authentication, or market validity. See the [Backend README](../Backend/README.md) for API, operator authorization, storage, and deployment constraints.

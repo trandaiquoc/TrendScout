@@ -1,70 +1,198 @@
 <!doctype html>
-<html lang="vi">
+<html lang="vi" data-theme="light" data-locale="vi">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0a1020"><title>TrendScout — Khám phá tín hiệu</title>
-  <link rel="stylesheet" href="/dashboard/styles.css"><script type="module" src="/dashboard/app.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <meta name="color-scheme" content="light dark">
+  <title>TrendScout — Insight workspace</title>
+  <script>
+    (() => {
+      document.documentElement.classList.add('js-pending');
+      try {
+        const theme = localStorage.getItem('trendscout.theme');
+        const locale = localStorage.getItem('trendscout.locale');
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+        if (locale === 'vi' || locale === 'en') {
+          document.documentElement.dataset.locale = locale;
+          document.documentElement.lang = locale;
+        }
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/dashboard/styles.css">
+  <script type="module" src="/dashboard/app.js"></script>
 </head>
 <body>
-<div class="shell">
-  <aside class="sidebar">
-    <a class="brand" href="/dashboard/" aria-label="TrendScout trang tổng quan"><span class="brand-icon">✳</span><span>trend<span>scout</span><small>INSIGHT WORKSPACE</small></span></a>
-    <div class="nav-label">WORKSPACE</div>
-    <nav aria-label="Điều hướng workspace" id="workspace-nav">
-      <a class="nav-link active" href="#overview" data-nav="overview" aria-current="page">◈ Tổng quan</a>
-      <a class="nav-link" href="#sources" data-nav="sources">◉ Nguồn</a>
-      <a class="nav-link" href="#runs" data-nav="runs">◷ Lần phân tích</a>
-      <a class="nav-link" href="#keywords" data-nav="keywords">▤ Khám phá từ khóa</a>
-      <a class="nav-link" href="#algorithms" data-nav="algorithms">⌁ So sánh thuật toán</a>
-      <a class="nav-link" href="#quality" data-nav="quality">◇ Chất lượng dữ liệu</a>
-      <a class="nav-link" href="#refresh" data-nav="refresh">↻ Weekly Refresh</a>
-      <a class="nav-link" href="#research" data-nav="research">▧ Product Research</a>
-      <a class="nav-link" href="#usage" data-nav="usage">◴ AI Usage</a>
-      <a class="nav-link" href="#settings" data-nav="settings">⚙ Cài đặt</a>
-    </nav>
-    <div class="side-bottom"><div class="side-dot"></div><div><strong>Wikimedia Pageviews</strong><small>Nguồn dữ liệu · US / all access</small></div></div>
-  </aside>
-  <main id="workspace"><h1 class="sr-only">TrendScout Workspace</h1>
-    <header class="topbar"><div class="breadcrumbs">WORKSPACE <span>/</span> <strong id="breadcrumb-current">TỔNG QUAN</strong></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-text">Đang kiểm tra backend</span></div></header>
-    <div class="content">
-      <section data-view="overview" aria-label="Tổng quan">
-      <div class="eyebrow"><span class="eyebrow-dot"></span> TREND INTELLIGENCE <span class="eyebrow-line"></span> US MARKET</div>
-      <div class="hero"><div><h2 class="hero-title">Tín hiệu theo dữ liệu<span>.</span></h2><p>Khám phá các chủ đề đang được quan tâm qua dữ liệu Wikimedia.</p></div><button id="open-fetch" class="primary" type="button" disabled><span>✦</span> Fetch &amp; Analyze <span>↗</span></button></div>
-      <div class="intro-note"><span>ⓘ</span> Điểm xu hướng là chỉ số thử nghiệm dựa trên lượt xem trang, không phải xu hướng mua sắm hay mạng xã hội.</div>
-      <section class="overview-grid" aria-label="Tổng quan lần phân tích">
-        <article class="metric"><div class="metric-top">TRẠNG THÁI <span>◷</span></div><div id="run-status" class="metric-value">Chưa có run</div><div id="run-note" class="metric-foot">Chờ chọn hoặc tạo lần phân tích</div></article>
-        <article class="metric"><div class="metric-top">NGÀY DỮ LIỆU <span>▦</span></div><div id="data-date" class="metric-value">—</div><div class="metric-foot">Ngày quan sát từ nguồn</div></article>
-        <article class="metric"><div class="metric-top">ĐÃ PHÂN TÍCH <span>⌁</span></div><div id="keyword-count" class="metric-value">—</div><div class="metric-foot">Keyword trong ngày dữ liệu</div></article>
-        <article class="metric"><div class="metric-top">ĐỦ DỮ LIỆU <span>↗</span></div><div id="scored-count" class="metric-value">—</div><div class="metric-foot">Keyword có thể tính điểm</div></article>
-      </section>
-      <div class="workspace-note" id="overview-context">Cửa sổ quan sát, thuật toán và thời điểm thu thập: chưa có dữ liệu.</div>
-      </section>
-      <section class="run-strip"><div class="run-info"><span class="source-icon">W</span><div><strong>Wikimedia Pageviews</strong><small id="source-meta">US · All access · Chưa có dữ liệu</small></div></div><div class="run-open"><label class="sr-only" for="run-id">Run ID đã có</label><input id="run-id" autocomplete="off" spellcheck="false" placeholder="Nhập run ID đã có"><button id="load-run" class="secondary" type="button">Mở run <span>→</span></button></div></section>
-      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
-      <section id="results" class="results-panel" data-view="keywords" hidden>
-        <div class="section-head"><div><div class="overline">EXPLORE THE SIGNALS</div><h2>Khám phá từ khóa <span class="count" id="results-count">—</span></h2><p>Các chủ đề xuất hiện trong dữ liệu đã phân tích.</p></div><div class="section-mark">✳</div></div>
-        <div class="toolbar"><div class="tabs" role="group" aria-label="Lọc theo chủ đề"><button class="tab active" data-category="all" aria-pressed="true">Tất cả</button><button class="tab" data-category="fashion" aria-pressed="false">Thời trang</button><button class="tab" data-category="home_goods" aria-pressed="false">Đồ gia dụng</button><button class="tab" data-category="unclassified" aria-pressed="false">Chưa phân loại</button></div><div class="tools"><label class="search"><span>⌕</span><span class="sr-only">Tìm kiếm keyword</span><input id="search" type="search" placeholder="Tìm kiếm keyword..." maxlength="100"></label><label class="sr-only" for="sort">Sắp xếp</label><select id="sort"><option value="score">Điểm cao nhất</option><option value="views">Lượt xem cao nhất</option><option value="keyword">Tên keyword</option></select></div></div>
-        <div class="table-wrap"><table><thead><tr><th>KEYWORD / PROJECT</th><th>SCORE</th><th>TRẠNG THÁI</th><th>VIEWS ≈</th><th>BASELINE ≈</th><th>RATIO</th><th>NGÀY</th><th>CẢNH BÁO</th><th><span class="sr-only">Chi tiết</span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty"><div class="empty-icon">⌁</div><strong>Chưa có dữ liệu phân tích</strong><p>Mở một run đã có hoặc tạo run mới để bắt đầu.</p></div></div>
-        <div class="table-footer"><span id="pagination-info">Chưa có kết quả</span><div class="pagination"><button id="prev" type="button" disabled aria-label="Trang trước">←</button><button id="next" type="button" disabled aria-label="Trang sau">→</button></div></div>
-      </section>
-      <section class="workspace-panel" data-view="sources" hidden aria-labelledby="sources-heading">
-        <div class="overline">SOURCE CAPABILITIES</div><h2 id="sources-heading">Nguồn dữ liệu</h2>
-        <p>Chỉ Wikimedia Pageviews có adapter trong demo. Các nguồn khác chưa được cấu hình.</p>
-        <div class="workspace-grid"><article class="workspace-card"><h3>Wikimedia Pageviews <span class="state-tag">DEMO SOURCE</span></h3><dl><dt>Source ID</dt><dd>wikimedia_pageviews_top_per_country</dd><dt>Phạm vi</dt><dd>US · all-access · nhiều project</dd><dt>Metric</dt><dd>views_ceil · lượt xem xấp xỉ</dd><dt>Cửa sổ</dt><dd>Ngày phân tích và tối đa 7 ngày trước</dd><dt>Giới hạn</dt><dd>Top theo ngày; vắng mặt không phải 0. Tuân thủ rate limit và quyền nguồn.</dd></dl></article>
-        <article class="workspace-card"><h3>Nguồn tương lai</h3><p>Reddit · YouTube · Bluesky</p><strong>NOT_CONFIGURED / NOT_IMPLEMENTED</strong><p>Chưa có adapter hoặc quyền sử dụng được xác nhận.</p><button disabled type="button">Bật nguồn</button></article></div>
-      </section>
-      <section class="workspace-panel" data-view="runs" hidden aria-labelledby="runs-heading"><div class="overline">RUNS</div><h2 id="runs-heading">Lần phân tích</h2><p>Nhập Run ID trong thanh phía trên để xem một run đã lưu. API chưa hỗ trợ danh sách tất cả runs.</p><dl><dt>Run hiện tại</dt><dd id="runs-current">Chưa chọn run</dd><dt>Trạng thái</dt><dd id="runs-state">NOT_AVAILABLE</dd><dt>Số keyword</dt><dd id="runs-count">NOT_AVAILABLE</dd><dt>Coverage</dt><dd id="runs-coverage">NOT_MEASURED</dd></dl><a href="#keywords" data-goto="keywords">Mở kết quả keyword →</a></section>
-      <section class="workspace-panel" data-view="algorithms" hidden aria-labelledby="algorithms-heading"><div class="overline">ALGORITHM COMPARISON</div><h2 id="algorithms-heading">So sánh thuật toán</h2><p>API demo chưa cung cấp kết quả của nhiều thuật toán cho cùng run.</p><div class="preview-badge">OFFLINE DEMO / SYNTHETIC DATA</div><p>Ví dụ minh họa: các thang đo và điều kiện không tự động tương thích.</p><div class="table-wrap"><table class="preview-table"><thead><tr><th>ALGORITHM</th><th>METRIC / ĐƠN VỊ</th><th>TRẠNG THÁI</th><th>LÝ DO / MẪU</th></tr></thead><tbody><tr><td>wikimedia-trend-v0.1</td><td>trend score / điểm</td><td>COMPLETED</td><td>3 ngày baseline giả lập</td></tr><tr><td>robust-z-mad</td><td>robust z / không thứ nguyên</td><td>SKIPPED</td><td>Không đủ quan sát giả lập</td></tr><tr><td>ewma</td><td>delta / đơn vị nguồn</td><td>FAILED</td><td>Fixture minh họa lỗi</td></tr></tbody></table></div><div class="comparison-controls"><label for="compare-source">Nguồn</label><select id="compare-source"><option>Wikimedia synthetic</option></select><label for="compare-scope">Phạm vi</label><select id="compare-scope"><option>US · all-access</option></select><label for="compare-window">Cửa sổ</label><select id="compare-window"><option>Fixture · 7 ngày</option></select><label for="compare-dataset">Dataset</label><select id="compare-dataset"><option>Fixture synthetic</option></select><label for="compare-metric">Metric</label><select id="compare-metric"><option>Chỉ xem theo từng thuật toán</option></select><label for="compare-first">Thuật toán thứ nhất</label><select id="compare-first"><option value="wikimedia">wikimedia-trend-v0.1</option><option value="robust">robust-z-mad</option><option value="ewma">ewma</option></select><label for="compare-second">Thuật toán thứ hai</label><select id="compare-second"><option value="robust">robust-z-mad</option><option value="wikimedia">wikimedia-trend-v0.1</option><option value="ewma">ewma</option></select></div><p id="compare-description" role="status" aria-live="polite">Wikimedia: COMPLETED · robust z: SKIPPED. Fixture giả lập, không so điểm.</p><strong class="warning-copy">NOT_COMPARABLE</strong><p>Không có chính sách chuẩn hóa được duyệt; không xếp hạng chung hoặc chọn winner.</p></section>
-      <section class="workspace-panel" data-view="quality" hidden aria-labelledby="quality-heading"><div class="overline">QUALITY &amp; COVERAGE</div><h2 id="quality-heading">Chất lượng và độ phủ</h2><dl><dt>Trạng thái nguồn / ngày thiếu</dt><dd id="quality-coverage">NOT_MEASURED</dd><dt>Thời gian thu thập</dt><dd id="quality-fetched">NOT_AVAILABLE</dd><dt>Cleaning / rejected / duplicate</dt><dd>NOT_MEASURED — API run chưa cung cấp tổng hợp</dd><dt>Censored data</dt><dd>Danh sách top có thể thiếu trang; vắng mặt không phải 0.</dd></dl></section>
-      <section class="workspace-panel" data-view="refresh" hidden aria-labelledby="refresh-heading"><div class="overline">WEEKLY REFRESH</div><h2 id="refresh-heading">Lịch làm mới</h2><div class="capability">DISABLED_PENDING_BACKEND / DISABLED_PENDING_APPROVAL</div><p>Chưa có scheduler API hoặc transaction coordinator production được nghiệm thu.</p><dl><dt>Interval / anchor / timezone</dt><dd>NOT_CONFIGURED</dd><dt>Next occurrence / last job</dt><dd>NOT_AVAILABLE</dd><dt>Lease / heartbeat / retry</dt><dd>NOT_MEASURED</dd><dt>Budget / stale dataset</dt><dd>NOT_MEASURED</dd></dl><div class="disabled-actions"><button type="button" disabled>Start</button><button type="button" disabled>Pause</button><button type="button" disabled>Stop</button></div></section>
-      <section class="workspace-panel" data-view="research" hidden aria-labelledby="research-heading"><div class="overline">PRODUCT RESEARCH</div><h2 id="research-heading">Nghiên cứu sản phẩm</h2><div class="preview-badge">OFFLINE DEMO / SYNTHETIC DATA</div><div class="workspace-grid"><article class="workspace-card"><h3>Case minh họa</h3><dl><dt>Attention</dt><dd>Tín hiệu giả lập · không phải nhu cầu mua</dd><dt>Commercial relevance</dt><dd>UNKNOWN — chưa được đánh giá</dd><dt>Opportunity</dt><dd>Chưa đủ bằng chứng thương mại</dd><dt>Evidence coverage</dt><dd>NOT_MEASURED</dd></dl></article><article class="workspace-card"><h3>Giả thuyết cần nghiên cứu</h3><p>UNVERIFIED · Không phải khuyến nghị sản phẩm.</p><p>Risk: quyền sử dụng, nhãn hiệu và tính thương mại chưa được xác nhận.</p><p>APPROVED_FOR_RESEARCH chỉ cho phép nghiên cứu tiếp; không xác minh demand.</p><p>Tenant: synthetic preview</p></article></div><p>Không có API lưu research production. AI proposals chỉ là REVIEW_REQUIRED.</p></section>
-      <section class="workspace-panel" data-view="usage" hidden aria-labelledby="usage-heading"><div class="overline">AI USAGE</div><h2 id="usage-heading">AI Usage</h2><dl><dt>AI</dt><dd>DISABLED</dd><dt>Usage / request / tokens</dt><dd>NOT_MEASURED</dd><dt>Estimated cost</dt><dd>COST_UNKNOWN</dd><dt>Budget / audit</dt><dd>NOT_CONFIGURED</dd></dl><p>Chưa có dữ liệu usage production; không suy ra chi phí từ fixture.</p></section>
-      <section class="workspace-panel" data-view="settings" hidden aria-labelledby="settings-heading"><div class="overline">SETTINGS</div><h2 id="settings-heading">Cài đặt AI</h2><div class="capability">DISABLED_PENDING_APPROVAL</div><dl><dt>AI / Provider / Model</dt><dd>DISABLED · UNCONFIGURED · UNCONFIGURED</dd><dt>Tasks / translation / classification</dt><dd>NOT_CONFIGURED</dd><dt>Token / request budget / retry / cache</dt><dd>NOT_CONFIGURED</dd><dt>Data sharing / prompt version / audit</dt><dd>NOT_CONFIGURED</dd><dt>Credential source</dt><dd>SERVER_SIDE_REQUIRED</dd><dt>BYOK</dt><dd>DISABLED_PENDING_APPROVAL</dd></dl><button type="button" disabled>Test Connection</button><p>Chưa có secret resolver và endpoint được kiểm soát ở server. Không nhập API key vào giao diện.</p><div class="preview-badge">OFFLINE DEMO / SYNTHETIC DATA</div><label class="draft-control"><input id="draft-translation" type="checkbox"> Mô phỏng lựa chọn translation trong bản nháp</label><button type="button" id="reset-draft">Đặt lại bản nháp</button><p id="draft-status" role="status" aria-live="polite">Bản nháp chưa lưu; không thay đổi cấu hình server.</p></section>
-      <footer><span><b>✳</b> TrendScout <span> / </span> Tín hiệu, có ngữ cảnh.</span><span>WIKIMEDIA DATA · DEMO ANALYTICS</span></footer>
-    </div>
-  </main>
-</div>
-<dialog id="fetch-dialog" aria-labelledby="fetch-title"><form id="fetch-form"><div class="dialog-head"><div><div class="overline">MANUAL RUN</div><h2 id="fetch-title">Fetch &amp; Analyze</h2></div><button class="close" type="button" data-close="fetch-dialog" aria-label="Đóng">×</button></div><p>Chỉ người vận hành được phép bắt đầu phân tích. Token chỉ được giữ tạm trong bộ nhớ của trang.</p><label for="operator-token">Operator token</label><input id="operator-token" type="password" autocomplete="off" required minlength="24" placeholder="Nhập token vận hành"><div id="fetch-error" class="form-error" role="alert"></div><div class="dialog-actions"><button class="secondary" type="button" data-close="fetch-dialog">Hủy</button><button class="primary" type="submit">Bắt đầu phân tích ↗</button></div></form></dialog>
-<dialog id="detail-dialog" aria-labelledby="detail-title"><div class="dialog-head"><div><div class="overline">KEYWORD DETAILS</div><h2 id="detail-title">Chi tiết keyword</h2><p id="detail-subtitle"></p></div><button class="close" type="button" data-close="detail-dialog" aria-label="Đóng">×</button></div><div id="detail-content" class="detail-content"></div></dialog>
+  <a class="skip-link" href="#main-content" data-i18n="a11y.skip"></a>
+  <div class="shell" id="app-shell">
+    <button class="scrim" id="nav-scrim" type="button" data-i18n-aria="a11y.close-nav" aria-label="Close navigation" hidden></button>
+    <aside class="sidebar" id="workspace-nav-panel" data-i18n-aria="a11y.navigation" aria-label="Workspace navigation">
+      <a class="brand" href="#overview" data-i18n-aria="brand.home" aria-label="TrendScout overview">
+        <span class="brand-mark" aria-hidden="true">✳</span>
+        <span class="brand-word">trend<span>scout</span><small data-i18n="brand.caption"></small></span>
+      </a>
+      <div class="nav-label" data-i18n="nav.section"></div>
+      <nav id="workspace-nav" aria-label="Workspace">
+        <a class="nav-link active" href="#overview" data-nav="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◈</span><span data-i18n="nav.overview"></span></a>
+        <a class="nav-link" href="#sources" data-nav="sources"><span class="nav-icon" aria-hidden="true">◎</span><span data-i18n="nav.sources"></span></a>
+        <a class="nav-link" href="#runs" data-nav="runs"><span class="nav-icon" aria-hidden="true">◷</span><span data-i18n="nav.runs"></span></a>
+        <a class="nav-link" href="#keywords" data-nav="keywords"><span class="nav-icon" aria-hidden="true">▤</span><span data-i18n="nav.keywords"></span></a>
+        <a class="nav-link" href="#algorithms" data-nav="algorithms"><span class="nav-icon" aria-hidden="true">⌁</span><span data-i18n="nav.algorithms"></span></a>
+        <a class="nav-link" href="#quality" data-nav="quality"><span class="nav-icon" aria-hidden="true">◇</span><span data-i18n="nav.quality"></span></a>
+        <a class="nav-link" href="#refresh" data-nav="refresh"><span class="nav-icon" aria-hidden="true">↻</span><span data-i18n="nav.refresh"></span></a>
+        <a class="nav-link" href="#research" data-nav="research"><span class="nav-icon" aria-hidden="true">▧</span><span data-i18n="nav.research"></span></a>
+        <a class="nav-link" href="#usage" data-nav="usage"><span class="nav-icon" aria-hidden="true">◴</span><span data-i18n="nav.usage"></span></a>
+        <a class="nav-link" href="#settings" data-nav="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span data-i18n="nav.settings"></span></a>
+      </nav>
+      <div class="sidebar-source">
+        <span class="source-monogram">W</span>
+        <span><strong>Wikimedia Pageviews</strong><small data-i18n="source.adapter"></small></span>
+        <span class="status-dot status-dot--amber" aria-hidden="true"></span>
+      </div>
+      <div class="sidebar-foot"><span data-i18n="brand.demo"></span><span class="foot-dot"></span></div>
+    </aside>
+
+    <main id="main-content">
+      <header class="topbar">
+        <div class="topbar-leading">
+          <button class="icon-button menu-button" id="menu-toggle" type="button" aria-controls="workspace-nav-panel" aria-expanded="false" data-i18n-aria="a11y.open-nav" aria-label="Open navigation"><span aria-hidden="true">☰</span></button>
+          <div class="breadcrumbs"><span data-i18n="nav.section"></span><span class="crumb-slash">/</span><strong id="breadcrumb-current" data-i18n="nav.overview"></strong></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="connection" role="status" aria-live="polite"><span id="connection-dot" class="status-dot status-dot--muted"></span><span id="connection-text" data-i18n="connection.checking"></span></div>
+          <span class="toolbar-divider" aria-hidden="true"></span>
+          <button class="toolbar-toggle" type="button" data-theme-toggle aria-label="Change color theme"><span class="toggle-icon" aria-hidden="true">☼</span><span data-theme-label>Light</span></button>
+          <button class="toolbar-toggle locale-toggle" type="button" data-locale-toggle aria-label="Change language"><span data-locale-label>VI</span><span class="toggle-chevron" aria-hidden="true">⌄</span></button>
+        </div>
+      </header>
+
+      <div class="content">
+        <div id="global-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
+        <section data-view="overview" aria-labelledby="overview-heading">
+          <div class="eyebrow"><span class="eyebrow-dot"></span><span data-i18n="overview.eyebrow"></span><span class="eyebrow-rule"></span><span class="eyebrow-market">US</span></div>
+          <div class="hero">
+            <div class="hero-copy">
+              <p class="hero-kicker" data-i18n="overview.kicker"></p>
+              <h1 id="overview-heading" data-i18n="overview.title"></h1>
+              <p data-i18n="overview.subtitle"></p>
+            </div>
+            <div class="fetch-card">
+              <div class="fetch-card-top"><span class="fetch-icon" aria-hidden="true">✦</span><span class="pill pill--amber" data-i18n="fetch.unavailable"></span></div>
+              <button id="open-fetch" class="button button-primary" type="button" disabled aria-describedby="fetch-readiness"><span data-i18n="fetch.cta"></span><span aria-hidden="true">↗</span></button>
+              <p id="fetch-readiness" class="fetch-help" data-i18n="fetch.auth-required"></p>
+            </div>
+          </div>
+          <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="overview.disclaimer"></p></div>
+          <div class="section-row"><div><p class="section-kicker" data-i18n="overview.snapshot-kicker"></p><h2 data-i18n="overview.snapshot-title"></h2></div><a class="text-link" href="#runs" data-goto="runs"><span data-i18n="overview.open-runs"></span><span aria-hidden="true">→</span></a></div>
+          <div class="metrics-grid" aria-label="Run summary">
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.status"></span><span aria-hidden="true">◷</span></div><strong id="run-status" class="metric-value" data-i18n="run.none"></strong><span id="run-note" class="metric-foot" data-i18n="run.choose"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.data-date"></span><span aria-hidden="true">▦</span></div><strong id="data-date" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.data-date-help"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.keywords"></span><span aria-hidden="true">⌁</span></div><strong id="keyword-count" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.keywords-help"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.scored"></span><span aria-hidden="true">↗</span></div><strong id="scored-count" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.scored-help"></span></article>
+          </div>
+          <div class="snapshot-meta" id="overview-context"><span class="meta-mark" aria-hidden="true">◉</span><span data-i18n="run.no-context"></span></div>
+          <div class="overview-bottom">
+            <article class="panel mini-panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="overview.source-kicker"></p><h2 data-i18n="overview.source-title"></h2></div><a class="text-link" href="#sources" data-goto="sources"><span data-i18n="common.view-details"></span><span aria-hidden="true">→</span></a></div><div class="source-inline"><span class="source-monogram">W</span><div><strong>Wikimedia Pageviews</strong><small data-i18n="source.not-live"></small></div><span class="pill pill--amber" data-i18n="source.adapter-status"></span></div></article>
+            <article class="panel mini-panel signal-panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="overview.signal-kicker"></p><h2 data-i18n="overview.signal-title"></h2></div><span class="signal-glyph" aria-hidden="true">⌁</span></div><p data-i18n="overview.signal-help"></p><a class="button button-secondary" href="#keywords" data-goto="keywords"><span data-i18n="overview.open-keywords"></span><span aria-hidden="true">→</span></a></article>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view="sources" hidden aria-labelledby="sources-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="sources.kicker"></p><h1 id="sources-heading" data-i18n="sources.title"></h1><p data-i18n="sources.description"></p></div><span class="page-heading-mark" aria-hidden="true">◎</span></div>
+          <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="sources.scope-note"></p></div>
+          <div class="source-grid">
+            <article class="panel source-card source-card--active" data-source="wikimedia" data-source-status="adapter-implemented-live-unverified">
+              <div class="source-card-head"><span class="source-monogram">W</span><span class="pill pill--amber" data-i18n="source.adapter-status"></span></div>
+              <h2>Wikimedia Pageviews</h2><p data-i18n="sources.wikimedia-summary"></p>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented"></dd></div><div><dt data-i18n="sources.live-status"></dt><dd class="text-amber" data-i18n="sources.not-verified"></dd></div><div><dt data-i18n="sources.coverage"></dt><dd>US · all-access · top pages</dd></div><div><dt data-i18n="sources.metric"></dt><dd>views_ceil · pageviews</dd></div><div><dt data-i18n="sources.window"></dt><dd data-i18n="sources.wikimedia-window"></dd></div><div><dt data-i18n="sources.limit"></dt><dd data-i18n="sources.wikimedia-limit"></dd></div></dl>
+            </article>
+            <article class="panel source-card" data-source="youtube" data-source-status="not-configured">
+              <div class="source-card-head"><span class="source-monogram source-monogram--red">▶</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+              <h2>YouTube</h2><p data-i18n="sources.youtube-summary"></p>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+            </article>
+            <article class="panel source-card" data-source="google-search" data-source-status="not-configured">
+              <div class="source-card-head"><span class="source-monogram source-monogram--blue">G</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+              <h2>Google Search</h2><p data-i18n="sources.google-summary"></p>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+            </article>
+            <article class="panel source-card" data-source="bing-search" data-source-status="not-configured">
+              <div class="source-card-head"><span class="source-monogram source-monogram--cyan">b</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+              <h2>Bing Search</h2><p data-i18n="sources.bing-summary"></p>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.not-implemented"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+            </article>
+          </div>
+          <p class="fine-print" data-i18n="sources.no-aggregation"></p>
+        </section>
+
+        <section class="view-panel" data-view="runs" hidden aria-labelledby="runs-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="runs.kicker"></p><h1 id="runs-heading" data-i18n="runs.title"></h1><p data-i18n="runs.description"></p></div><span class="page-heading-mark" aria-hidden="true">◷</span></div>
+          <div class="panel run-lookup"><div class="panel-heading"><div><p class="section-kicker" data-i18n="runs.open-kicker"></p><h2 data-i18n="runs.open-title"></h2></div><span class="pill pill--blue" data-i18n="runs.read-only"></span></div><p id="run-id-help" data-i18n="runs.open-help"></p><div class="lookup-form"><label for="run-id" data-i18n="runs.run-id"></label><div class="input-action"><input id="run-id" autocomplete="off" spellcheck="false" maxlength="32" aria-describedby="run-id-help global-notice" data-i18n-placeholder="runs.run-id-placeholder"><button id="load-run" class="button button-secondary" type="button"><span data-i18n="runs.open-action"></span><span aria-hidden="true">→</span></button></div></div></div>
+          <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="runs.list-limitation"></p></div>
+          <div class="panel run-summary"><div class="panel-heading"><div><p class="section-kicker" data-i18n="runs.current-kicker"></p><h2 data-i18n="runs.current-title"></h2></div><span id="runs-state" class="pill pill--gray">NOT_AVAILABLE</span></div><dl class="detail-list detail-list--grid"><div><dt data-i18n="runs.run-id"></dt><dd id="runs-current" class="mono">NOT_AVAILABLE</dd></div><div><dt data-i18n="runs.keyword-count"></dt><dd id="runs-count">NOT_AVAILABLE</dd></div><div class="wide"><dt data-i18n="runs.coverage"></dt><dd id="runs-coverage">NOT_MEASURED</dd></div></dl><div class="panel-actions"><a class="button button-secondary" href="#keywords" data-goto="keywords"><span data-i18n="runs.open-results"></span><span aria-hidden="true">→</span></a></div></div>
+          <div id="notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
+        </section>
+
+        <section class="view-panel" data-view="keywords" hidden aria-labelledby="keywords-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h1 id="keywords-heading"><span data-i18n="nav.keywords"></span> <span class="count-chip" id="results-count">—</span></h1><p data-i18n="keywords.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
+          <div id="keyword-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
+          <div class="panel table-panel">
+            <div class="table-toolbar">
+          <div class="filter-tabs" role="group" data-i18n-aria="keywords.filter-label" aria-label="Keyword categories"><button class="filter-tab active" type="button" data-category="all" aria-pressed="true" data-i18n="filter.all"></button><button class="filter-tab" type="button" data-category="fashion" aria-pressed="false" data-i18n="filter.fashion"></button><button class="filter-tab" type="button" data-category="home_goods" aria-pressed="false" data-i18n="filter.home"></button><button class="filter-tab" type="button" data-category="unclassified" aria-pressed="false" data-i18n="filter.unclassified"></button></div>
+              <div class="table-tools"><label class="search-field"><span aria-hidden="true">⌕</span><span class="sr-only" data-i18n="keywords.search-label"></span><input id="search" type="search" maxlength="100" aria-describedby="keyword-notice" data-i18n-placeholder="keywords.search-placeholder"></label><label class="sr-only" for="sort" data-i18n="keywords.sort-label"></label><select id="sort"><option value="score" data-i18n="sort.score"></option><option value="views" data-i18n="sort.views"></option><option value="keyword" data-i18n="sort.keyword"></option></select></div>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th data-i18n="table.keyword"></th><th data-i18n="table.score"></th><th data-i18n="table.status"></th><th data-i18n="table.views"></th><th data-i18n="table.baseline"></th><th data-i18n="table.ratio"></th><th data-i18n="table.date"></th><th data-i18n="table.warnings"></th><th><span class="sr-only" data-i18n="table.details"></span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty-state"><span class="empty-art" aria-hidden="true">⌁</span><strong data-i18n="keywords.empty-title"></strong><p data-i18n="keywords.empty-help"></p><a class="text-link" href="#runs" data-goto="runs"><span data-i18n="runs.open-action"></span><span aria-hidden="true">→</span></a></div></div>
+          <div class="table-footer"><span id="pagination-info" data-i18n="keywords.no-results"></span><div class="pagination"><button id="prev" type="button" disabled data-i18n-aria="a11y.previous-page" aria-label="Previous page">←</button><button id="next" type="button" disabled data-i18n-aria="a11y.next-page" aria-label="Next page">→</button></div></div>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view="algorithms" hidden aria-labelledby="algorithms-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="algorithms.kicker"></p><h1 id="algorithms-heading" data-i18n="nav.algorithms"></h1><p data-i18n="algorithms.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
+          <div class="notice notice--synthetic"><span class="notice-icon" aria-hidden="true">✳</span><p data-i18n="common.synthetic"></p></div>
+          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="algorithms.preview-kicker"></p><h2 data-i18n="algorithms.preview-title"></h2></div><span class="pill pill--gray">NOT_COMPARABLE</span></div><p data-i18n="algorithms.preview-help"></p>
+            <div class="table-wrap"><table class="preview-table"><thead><tr><th data-i18n="algorithms.algorithm"></th><th data-i18n="algorithms.metric"></th><th data-i18n="table.status"></th><th data-i18n="algorithms.reason"></th></tr></thead><tbody><tr><td>wikimedia-trend-v0.1</td><td data-i18n="algorithms.metric-one"></td><td><span class="pill pill--green" data-i18n="algorithms.completed"></span></td><td data-i18n="algorithms.row-one"></td></tr><tr><td>robust-z-mad</td><td data-i18n="algorithms.metric-two"></td><td><span class="pill pill--gray" data-i18n="algorithms.skipped"></span></td><td data-i18n="algorithms.row-two"></td></tr><tr><td>ewma</td><td data-i18n="algorithms.metric-three"></td><td><span class="pill pill--red" data-i18n="algorithms.failed"></span></td><td data-i18n="algorithms.row-three"></td></tr></tbody></table></div>
+            <div class="comparison-controls"><label for="compare-first" data-i18n="algorithms.first"></label><select id="compare-first"><option value="wikimedia">wikimedia-trend-v0.1</option><option value="robust">robust-z-mad</option><option value="ewma">ewma</option></select><label for="compare-second" data-i18n="algorithms.second"></label><select id="compare-second"><option value="robust">robust-z-mad</option><option value="wikimedia">wikimedia-trend-v0.1</option><option value="ewma">ewma</option></select></div>
+            <p id="compare-description" class="comparison-description" role="status" aria-live="polite"></p><p class="fine-print" data-i18n="algorithms.not-comparable"></p>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view="quality" hidden aria-labelledby="quality-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="quality.kicker"></p><h1 id="quality-heading" data-i18n="nav.quality"></h1><p data-i18n="quality.description"></p></div><span class="page-heading-mark" aria-hidden="true">◇</span></div>
+          <div class="quality-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="quality.coverage-kicker"></p><h2 data-i18n="quality.coverage-title"></h2></div><span class="quality-icon" aria-hidden="true">◉</span></div><dl class="detail-list"><div><dt data-i18n="quality.source-days"></dt><dd id="quality-coverage">NOT_MEASURED</dd></div><div><dt data-i18n="quality.fetched"></dt><dd id="quality-fetched">NOT_AVAILABLE</dd></div><div><dt data-i18n="quality.staleness"></dt><dd id="quality-staleness" data-i18n="quality.no-run"></dd></div></dl></article><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="quality.integrity-kicker"></p><h2 data-i18n="quality.integrity-title"></h2></div><span class="quality-icon" aria-hidden="true">✓</span></div><dl class="detail-list"><div><dt data-i18n="quality.cleaning"></dt><dd data-i18n="quality.not-measured"></dd></div><div><dt data-i18n="quality.missing"></dt><dd data-i18n="quality.missing-help"></dd></div><div><dt data-i18n="quality.null-zero"></dt><dd data-i18n="quality.null-zero-help"></dd></div></dl></article></div>
+        </section>
+
+        <section class="view-panel" data-view="refresh" hidden aria-labelledby="refresh-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="refresh.kicker"></p><h1 id="refresh-heading" data-i18n="nav.refresh"></h1><p data-i18n="refresh.description"></p></div><span class="page-heading-mark" aria-hidden="true">↻</span></div>
+          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="refresh.status-kicker"></p><h2 data-i18n="refresh.status-title"></h2></div><span class="pill pill--gray">DISABLED</span></div><p data-i18n="refresh.unavailable"></p><dl class="detail-list detail-list--grid"><div><dt data-i18n="refresh.interval"></dt><dd>NOT_CONFIGURED</dd></div><div><dt data-i18n="refresh.next"></dt><dd>NOT_AVAILABLE</dd></div><div><dt data-i18n="refresh.lease"></dt><dd>NOT_MEASURED</dd></div><div><dt data-i18n="refresh.budget"></dt><dd>NOT_MEASURED</dd></div></dl><div class="button-row"><button class="button button-secondary" type="button" disabled data-i18n="refresh.start"></button><button class="button button-secondary" type="button" disabled data-i18n="refresh.pause"></button><button class="button button-secondary" type="button" disabled data-i18n="refresh.stop"></button></div></div>
+        </section>
+
+        <section class="view-panel" data-view="research" hidden aria-labelledby="research-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="research.kicker"></p><h1 id="research-heading" data-i18n="nav.research"></h1><p data-i18n="research.description"></p></div><span class="page-heading-mark" aria-hidden="true">▧</span></div>
+          <div class="notice notice--synthetic"><span class="notice-icon" aria-hidden="true">✳</span><p data-i18n="common.synthetic"></p></div>
+          <div class="research-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.example-kicker"></p><h2 data-i18n="research.example-title"></h2></div><span class="pill pill--gray">UNVERIFIED</span></div><dl class="detail-list"><div><dt data-i18n="research.attention-label"></dt><dd data-i18n="research.attention"></dd></div><div><dt data-i18n="research.commercial-label"></dt><dd data-i18n="research.unknown"></dd></div><div><dt data-i18n="research.opportunity-label"></dt><dd data-i18n="research.not-enough"></dd></div><div><dt data-i18n="research.coverage-label"></dt><dd>NOT_MEASURED</dd></div></dl></article><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.hypothesis-kicker"></p><h2 data-i18n="research.hypothesis-title"></h2></div><span class="quality-icon" aria-hidden="true">?</span></div><p data-i18n="research.hypothesis-help"></p><p data-i18n="research.risk"></p><p data-i18n="research.approved"></p><span class="pill pill--blue" data-i18n="research.preview-tag"></span></article></div><p class="fine-print" data-i18n="research.no-api"></p>
+        </section>
+
+        <section class="view-panel" data-view="usage" hidden aria-labelledby="usage-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="usage.kicker"></p><h1 id="usage-heading" data-i18n="nav.usage"></h1><p data-i18n="usage.description"></p></div><span class="page-heading-mark" aria-hidden="true">◴</span></div>
+          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="usage.status-kicker"></p><h2 data-i18n="usage.status-title"></h2></div><span class="pill pill--gray">DISABLED</span></div><dl class="detail-list detail-list--grid"><div><dt data-i18n="usage.ai"></dt><dd>DISABLED</dd></div><div><dt data-i18n="usage.measurement"></dt><dd>NOT_MEASURED</dd></div><div><dt data-i18n="usage.cost"></dt><dd>COST_UNKNOWN</dd></div><div><dt data-i18n="usage.budget"></dt><dd>NOT_CONFIGURED</dd></div></dl><p class="fine-print" data-i18n="usage.no-production"></p></div>
+        </section>
+
+        <section class="view-panel" data-view="settings" hidden aria-labelledby="settings-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="settings.kicker"></p><h1 id="settings-heading" data-i18n="nav.settings"></h1><p data-i18n="settings.description"></p></div><span class="page-heading-mark" aria-hidden="true">⚙</span></div>
+          <div class="settings-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.display-kicker"></p><h2 data-i18n="settings.display-title"></h2></div></div><div class="setting-row"><div><strong data-i18n="settings.theme"></strong><small data-i18n="settings.theme-help"></small></div><button class="button button-secondary" type="button" data-theme-toggle><span class="toggle-icon" aria-hidden="true">☼</span><span data-theme-label>Light</span></button></div><div class="setting-row"><div><strong data-i18n="settings.language"></strong><small data-i18n="settings.language-help"></small></div><button class="button button-secondary" type="button" data-locale-toggle><span data-locale-label>VI</span><span class="toggle-chevron" aria-hidden="true">⌄</span></button></div></article>
+          <article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.ai-kicker"></p><h2 data-i18n="settings.ai-title"></h2></div><span class="pill pill--gray">DISABLED</span></div><dl class="detail-list"><div><dt data-i18n="settings.provider"></dt><dd>UNCONFIGURED</dd></div><div><dt data-i18n="settings.features"></dt><dd>NOT_CONFIGURED</dd></div><div><dt data-i18n="settings.credentials"></dt><dd>SERVER_SIDE_REQUIRED</dd></div><div><dt data-i18n="settings.byok"></dt><dd>DISABLED_PENDING_APPROVAL</dd></div></dl><button class="button button-secondary" type="button" disabled data-i18n="settings.test-connection"></button><p class="fine-print" data-i18n="settings.ai-help"></p></article></div>
+        </section>
+
+        <footer class="page-footer"><span><b aria-hidden="true">✳</b> TrendScout <span class="footer-divider">/</span> <span data-i18n="brand.footer"></span></span><span data-i18n="brand.demo"></span></footer>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="detail-dialog" aria-labelledby="detail-title">
+    <div class="dialog-head"><div><p class="section-kicker" data-i18n="detail.kicker"></p><h2 id="detail-title" data-i18n="detail.loading"></h2><p id="detail-subtitle"></p></div><button class="icon-button dialog-close" type="button" data-close="detail-dialog" data-i18n-aria="common.close" aria-label="Close">×</button></div>
+    <div id="detail-content" class="detail-content"></div>
+  </dialog>
+  <noscript><p class="noscript">TrendScout cần bật JavaScript để tải ngôn ngữ và dữ liệu của bảng điều khiển.</p></noscript>
 </body>
 </html>
