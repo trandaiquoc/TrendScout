@@ -1,9 +1,8 @@
 """Request-scoped Vercel OIDC federation; never falls back to local ADC."""
-import os
-
 from google.auth import external_account
 from google.cloud import firestore
 
+from app.settings import Settings
 from app.storage.firestore import FirestoreStorage
 
 
@@ -22,10 +21,12 @@ class VercelCredentials(external_account.Credentials):
         return self._oidc_token
 
 
-def storage_for_request(oidc_token):
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-    audience = os.environ.get("GOOGLE_WIF_AUDIENCE", "")
-    if not oidc_token or not project or not audience.startswith("//iam.googleapis.com/projects/"):
+def storage_for_request(oidc_token, *, project_id=None, audience=None, settings=None):
+    if settings is None and (project_id is None or audience is None):
+        settings = Settings.from_environment()
+    project = project_id if project_id is not None else (settings.google_cloud_project or "")
+    identity_audience = audience if audience is not None else (settings.google_wif_audience or "")
+    if not oidc_token or not project or not identity_audience.startswith("//iam.googleapis.com/projects/"):
         raise ValueError("Read-only Firestore identity is not configured")
-    credentials = VercelCredentials(oidc_token=oidc_token, audience=audience)
+    credentials = VercelCredentials(oidc_token=oidc_token, audience=identity_audience)
     return FirestoreStorage(firestore.Client(project=project, database="(default)", credentials=credentials))

@@ -1,21 +1,30 @@
 """Wikimedia top-per-country adapter. No topic or language filter is applied."""
 
+from __future__ import annotations
+
 import asyncio
-import os
 import re
-import math
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 
 import httpx
 
-from app.models.observations import CollectionResult, DatasetSnapshot, FetchStatus, ObservationStatus, PageObservation
+from app.models.observations import (
+    CollectionResult,
+    DatasetSnapshot,
+    FetchStatus,
+    ObservationStatus,
+    PageObservation,
+)
+from app.settings import Settings
 from app.sources.base import SourceMetadata
+from app.sources.catalog import DEFAULT_WIKIMEDIA_USER_AGENT, WIKIMEDIA_SOURCE_ID, source_capability
+from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy
 
-SOURCE = "wikimedia_pageviews_top_per_country"
-BASE_URL = "https://wikimedia.org/api/rest_v1/metrics/pageviews/top-per-country/US/all-access"
-DEFAULT_USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
+SOURCE = WIKIMEDIA_SOURCE_ID
+BASE_URL = source_capability(SOURCE).endpoint
+DEFAULT_USER_AGENT = DEFAULT_WIKIMEDIA_USER_AGENT
 METADATA = SourceMetadata(
     source_id=SOURCE,
     name="Wikimedia Pageviews top per country",
@@ -24,7 +33,14 @@ METADATA = SourceMetadata(
     metric="views_ceil",
     metric_description="Approximate upper-bound pageviews in the country top list",
     capabilities=("daily_snapshot", "latest_available", "seven_day_history", "top_list_censored"),
-    configuration=("WIKIMEDIA_USER_AGENT", "max_retries", "max_retry_wait", "timeout"),
+    configuration=(
+        "WIKIMEDIA_USER_AGENT",
+        "TREND_SCOUT_HTTP_CONNECT_TIMEOUT_SECONDS",
+        "TREND_SCOUT_HTTP_READ_TIMEOUT_SECONDS",
+        "TREND_SCOUT_HTTP_TOTAL_TIMEOUT_SECONDS",
+        "TREND_SCOUT_HTTP_MAX_RETRIES",
+        "TREND_SCOUT_HTTP_MAX_RETRY_WAIT_SECONDS",
+    ),
 )
 _PROJECT = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\Z")
 _WIKIMEDIA_DOMAINS = frozenset({"wikipedia", "wikimedia", "wiktionary", "wikiquote", "wikibooks", "wikinews", "wikisource", "wikiversity", "wikivoyage", "wikidata", "mediawiki", "wikifunctions"})
@@ -41,20 +57,8 @@ def observation_status(snapshot: DatasetSnapshot, observations: list[PageObserva
 
 
 def _retry_delay(value: str | None, attempt: int, now: datetime) -> float:
-    if value:
-        try:
-            seconds = float(value)
-            if math.isfinite(seconds):
-                return max(0.0, seconds)
-        except ValueError:
-            try:
-                parsed = parsedate_to_datetime(value)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return max(0.0, (parsed - now).total_seconds())
-            except (TypeError, ValueError, OverflowError):
-                pass
-    return float(2 ** attempt)
+    """Compatibility wrapper for the former adapter-local retry helper."""
+    return HttpPolicy.parse_retry_after(value, attempt, now)
 
 
 def _parse(payload: object, day: date, fetched_at: datetime) -> tuple[list[PageObservation], int, int, tuple[object, ...]]:
@@ -98,27 +102,48 @@ class WikimediaAdapter:
     metadata = METADATA
 
     def __init__(self, client: httpx.AsyncClient | None = None, *, user_agent: str | None = None,
-                 max_retries: int = 2, max_retry_wait: float = 30.0, timeout: float = 15.0):
-        self.user_agent = user_agent or os.environ.get("WIKIMEDIA_USER_AGENT", DEFAULT_USER_AGENT)
+                 max_retries: int | None = None, max_retry_wait: float | None = None,
+                 timeout: float | None = None, http_policy: HttpPolicy | None = None,
+                 settings: Settings | None = None):
+        if settings is None:
+            settings = Settings.from_environment()
+        if SOURCE not in settings.enabled_source_ids:
+            raise ValueError("Wikimedia source is disabled")
+        if user_agent is None:
+            user_agent = settings.wikimedia_user_agent
+        self.user_agent = user_agent
         if not self.user_agent.strip() or "\n" in self.user_agent or "\r" in self.user_agent:
             raise ValueError("Invalid Wikimedia User-Agent")
-        if not 0 <= max_retries <= 5 or not 0 <= max_retry_wait <= 300 or not 0 < timeout <= 60:
-            raise ValueError("Invalid retry or timeout configuration")
+        if http_policy is not None and any(value is not None for value in (max_retries, max_retry_wait, timeout)):
+            raise ValueError("Pass an HTTP policy or legacy retry/timeout overrides, not both")
+        if http_policy is None:
+            overrides = {}
+            if max_retries is not None:
+                overrides["max_retries"] = max_retries
+            if max_retry_wait is not None:
+                overrides["max_retry_wait_seconds"] = max_retry_wait
+            if timeout is not None:
+                overrides["total_timeout_seconds"] = timeout
+            http_policy = replace(settings.http_policy, **overrides) if overrides else settings.http_policy
         self.client = client
-        self.max_retries = max_retries
-        self.max_retry_wait = max_retry_wait
-        self.timeout = timeout
+        self.http_policy = http_policy
+        self.max_retries = http_policy.max_retries
+        self.max_retry_wait = http_policy.max_retry_wait_seconds
+        self.timeout = http_policy.total_timeout_seconds
+        self.base_url = settings.source_endpoints[SOURCE]
         self._lock = asyncio.Lock()
 
     async def fetch_day(self, observation_date: date) -> tuple[DatasetSnapshot, list[PageObservation]]:
         async with self._lock:
             if self.client is not None:
                 return await self._fetch(self.client, observation_date)
-            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(
+                timeout=self.http_policy.request_timeout(), follow_redirects=False
+            ) as client:
                 return await self._fetch(client, observation_date)
 
     async def _fetch(self, client: httpx.AsyncClient, day: date) -> tuple[DatasetSnapshot, list[PageObservation]]:
-        url = f"{BASE_URL}/{day:%Y/%m/%d}"
+        url = f"{self.base_url}/{day:%Y/%m/%d}"
         attempts = 0
         status_code = None
         error = None
@@ -131,11 +156,15 @@ class WikimediaAdapter:
             attempts += 1
             status_code = None
             try:
-                response = await client.get(url, headers={"User-Agent": self.user_agent, "Accept": "application/json"}, timeout=self.timeout)
-            except httpx.RequestError as exc:
+                response = await self.http_policy.get(
+                    client,
+                    url,
+                    headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+                )
+            except (httpx.RequestError, HttpDeadlineExceeded) as exc:
                 error = type(exc).__name__
                 if attempts <= self.max_retries:
-                    await asyncio.sleep(min(2 ** (attempts - 1), self.max_retry_wait))
+                    await asyncio.sleep(self.http_policy.backoff_delay(attempts - 1))
                     continue
                 break
             status_code = response.status_code
@@ -152,9 +181,11 @@ class WikimediaAdapter:
                     error = f"Invalid response: {exc}"
                 break
             error = f"HTTP {status_code}"
-            if (status_code == 429 or 500 <= status_code <= 599) and attempts <= self.max_retries:
-                delay = _retry_delay(response.headers.get("Retry-After"), attempts - 1, datetime.now(timezone.utc))
-                if delay > self.max_retry_wait:
+            if self.http_policy.is_retryable_status(status_code) and attempts <= self.max_retries:
+                delay = self.http_policy.retry_delay(
+                    response.headers.get("Retry-After"), attempts - 1, datetime.now(timezone.utc)
+                )
+                if delay is None:
                     error += "; Retry-After exceeds wait limit"
                     break
                 await asyncio.sleep(delay)

@@ -55,9 +55,10 @@ class SourceRegistryTests(unittest.TestCase):
             self.assertIn('top_list_censored', METADATA.capabilities)
             self.assertIn('WIKIMEDIA_USER_AGENT', METADATA.configuration)
             self.assertTrue(callable(registry.factory(SOURCE)))
+        settings = composition.Settings.from_environment({})
         with patch.object(composition, 'WikimediaAdapter', return_value=FakeSource()) as factory:
-            self.assertIsInstance(composition.source_registry().create(SOURCE), FakeSource)
-            factory.assert_called_once_with()
+            self.assertIsInstance(composition.source_registry(settings).create(SOURCE), FakeSource)
+            factory.assert_called_once_with(settings=settings)
 
     def test_old_and_new_paths_are_the_same_module_and_public_symbols(self):
         old = importlib.import_module('app.adapters.wikimedia')

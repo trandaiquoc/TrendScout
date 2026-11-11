@@ -1,0 +1,118 @@
+"""Versioned provider endpoints and capabilities; adapters remain source-specific."""
+
+from dataclasses import dataclass
+
+WIKIMEDIA_SOURCE_ID = "wikimedia_pageviews_top_per_country"
+YOUTUBE_SOURCE_ID = "youtube_video_search"
+GOOGLE_SOURCE_ID = "google_web_serp"
+BING_SOURCE_ID = "bing_web_serp"
+
+DEFAULT_WIKIMEDIA_USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
+
+
+@dataclass(frozen=True)
+class SourceCapability:
+    source_id: str
+    provider_id: str
+    capability_version: int
+    endpoint: str
+    method: str
+    readiness: str
+    default_enabled: bool
+    credential_reference: str | None
+    market: str
+    language: str | None
+    query_based: bool
+    metric_name: str
+    metric_unit: str
+    metric_description: str
+    capabilities: tuple[str, ...]
+
+
+SOURCE_CAPABILITIES = (
+    SourceCapability(
+        source_id=WIKIMEDIA_SOURCE_ID,
+        provider_id="wikimedia_aqs",
+        capability_version=1,
+        endpoint=(
+            "https://wikimedia.org/api/rest_v1/metrics/pageviews/top-per-country/US/all-access"
+        ),
+        method="GET",
+        readiness="IMPLEMENTED",
+        default_enabled=True,
+        credential_reference=None,
+        market="US country-scoped Wikimedia top list",
+        language=None,
+        query_based=False,
+        metric_name="views_ceil",
+        metric_unit="approximate pageviews",
+        metric_description="Approximate upper-bound pageviews for listed pages",
+        capabilities=(
+            "daily_snapshot",
+            "latest_available",
+            "seven_day_history",
+            "top_list_censored",
+        ),
+    ),
+    SourceCapability(
+        source_id=YOUTUBE_SOURCE_ID,
+        provider_id="youtube_data_api_v3",
+        capability_version=1,
+        endpoint="https://www.googleapis.com/youtube/v3/search",
+        method="GET",
+        readiness="PENDING_APPROVAL",
+        default_enabled=False,
+        credential_reference="YOUTUBE_API_KEY",
+        market="US regionCode filter; not author or viewer residence",
+        language="en relevance filter",
+        query_based=True,
+        metric_name="result_rank",
+        metric_unit="ordinal result position",
+        metric_description="Position in query-scoped YouTube search results",
+        capabilities=("query_search", "next_page_token", "region_filter", "language_filter"),
+    ),
+    SourceCapability(
+        source_id=GOOGLE_SOURCE_ID,
+        provider_id="serpapi_google",
+        capability_version=1,
+        endpoint="https://serpapi.com/search.json",
+        method="GET",
+        readiness="PENDING_APPROVAL",
+        default_enabled=False,
+        credential_reference="SERPAPI_API_KEY",
+        market="Google gl=us localization filter; not author or viewer residence",
+        language="Google hl=en interface/results filter",
+        query_based=True,
+        metric_name="result_rank",
+        metric_unit="ordinal result position",
+        metric_description="Position in the returned Google SERP sample",
+        capabilities=("query_search", "offset_pagination", "provider_sample"),
+    ),
+    SourceCapability(
+        source_id=BING_SOURCE_ID,
+        provider_id="serpapi_bing",
+        capability_version=1,
+        endpoint="https://serpapi.com/search.json",
+        method="GET",
+        readiness="PENDING_APPROVAL",
+        default_enabled=False,
+        credential_reference="SERPAPI_API_KEY",
+        market="Bing mkt=en-US localization filter; not author or viewer residence",
+        language="en-US localization filter",
+        query_based=True,
+        metric_name="result_rank",
+        metric_unit="ordinal result position",
+        metric_description="Position in the returned Bing SERP sample",
+        capabilities=("query_search", "offset_pagination", "provider_sample"),
+    ),
+)
+
+_BY_SOURCE_ID = {item.source_id: item for item in SOURCE_CAPABILITIES}
+
+
+def source_capability(source_id: str) -> SourceCapability:
+    """Return a public capability without implying an adapter is available."""
+    try:
+        return _BY_SOURCE_ID[source_id]
+    except KeyError:
+        raise ValueError(f"Unsupported source capability: {source_id}") from None

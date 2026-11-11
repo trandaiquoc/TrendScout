@@ -1,7 +1,6 @@
 """Firestore storage using Firebase Admin SDK and Application Default Credentials."""
 
 import asyncio
-import os
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -11,6 +10,7 @@ from google.api_core.exceptions import AlreadyExists, GoogleAPICallError, NotFou
 from google.auth.exceptions import GoogleAuthError
 
 from app.ports.storage import Record, RecordAlreadyExists, RecordKind, RecordNotFound, StorageError
+from app.settings import Settings
 from app.storage.common import validate_fields, validate_id, validate_kind
 
 
@@ -20,7 +20,8 @@ class FirestoreStorage:
 
     @classmethod
     def from_environment(cls) -> "FirestoreStorage":
-        return cls.from_project(os.environ.get("GOOGLE_CLOUD_PROJECT", ""))
+        project_id = Settings.from_environment().google_cloud_project or ""
+        return cls.from_project(project_id)
 
     @classmethod
     def from_project(cls, project_id: str) -> "FirestoreStorage":

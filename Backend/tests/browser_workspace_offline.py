@@ -1,11 +1,18 @@
 """Chrome DOM tests: run only under externally verified Internet-blocking seccomp."""
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
 from pathlib import Path
-import os, shutil, socket, subprocess, tempfile
+
 ROOT=Path(__file__).resolve().parents[2]
 FAKE=r'''<script>
 const requests=[]; const runA='a'.repeat(32),runB='b'.repeat(32),keyword='c'.repeat(64);window.pwned=false;
-window.fetch=(path,opts={})=>{requests.push([String(path),opts.method||'GET']);const p=String(path);let payload;
+window.fetch=(path,opts={})=>{requests.push([String(path),opts.method||'GET',opts]);const p=String(path);let payload;
 if(p==='/timeout-json')return Promise.resolve({ok:true,json:()=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
+if(p==='/api-client-unauthorized')return Promise.resolve(new Response('{}',{status:401}));
+if(p==='/api-client-invalid-json')return Promise.resolve(new Response('{',{status:200}));
 if(p==='/api/health')payload={status:'ok'};else if(p==='/api/config')payload={read_only:false};
 else if(p.includes('/keywords/'))payload={display_keyword:'<img src=x onerror=window.pwned=true>',source:'Wikimedia',project:'en.wikipedia',observation_date:'2026-01-08',score:null,status:'INSUFFICIENT_DATA',missing_baseline_dates:[{date:'2026-01-07',reason:'DAY_UNAVAILABLE'}],evidence_url:'javascript:alert(1)'};
 else if(p.includes('/keywords?')){const q=new URL(p,'https://local.invalid').searchParams;payload={items:q.get('q')==='empty'?[]:[{keyword_id:keyword,display_keyword:q.get('q')==='slow'?'OLD RESULT':q.get('q')==='fast'?'NEW RESULT':'<img src=x onerror=window.pwned=true>',project:'en.wikipedia',score:null,status:'INSUFFICIENT_DATA',quality_flags:['<script>']}],total:q.get('q')==='empty'?0:25,next_offset:q.get('offset')==='0'?20:null,empty_reason:q.get('q')==='empty'?'NO_MATCH':null};}
@@ -31,6 +38,9 @@ location.hash='#settings';window.dispatchEvent(new Event('hashchange'));document
 document.querySelector('#run-id').value='d'.repeat(32);document.querySelector('#load-run').click();await wait(20);check(document.querySelector('#notice').textContent.includes('Không tìm thấy'),'run error');
 if(READ_ONLY){document.querySelector('#operator-token').value='synthetic-not-a-real-credential';document.querySelector('#fetch-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await wait(10);}
 try {await api('/timeout-json');check(false,'body timeout');} catch(e){check(String(e).includes('thời gian chờ'),'body timeout');}
+await api('/api/health',{headers:{'X-Test-Request':'kept'}});const request=requests.find(x=>x[0]==='/api/health'&&x[2].headers['X-Test-Request']);check(Boolean(request),'API client request');check(request&&request[2].headers.Accept==='application/json','API client Accept');
+try {await api('/api-client-unauthorized');check(false,'HTTP auth error');} catch(e){check(String(e).includes('Token không hợp lệ'),'HTTP auth error');}
+try {await api('/api-client-invalid-json');check(false,'invalid JSON error');} catch(e){check(String(e).includes('dữ liệu không hợp lệ'),'invalid JSON error');}
 check(!requests.some(x=>x[1]==='POST'),'no automatic or read-only write');check(localStorage.length===0&&sessionStorage.length===0,'no browser credential storage');check(document.documentElement.scrollWidth<=innerWidth+1,`overflow ${document.documentElement.scrollWidth}/${innerWidth}`);check(document.querySelectorAll('table th').length>0,'table headers');check(!document.body.innerText.includes('RAW-SECRET-FAKE'),'no secret output');check(document.querySelector('#notice').getAttribute('aria-live')==='polite','aria live');
 }catch(e){errors.push('exception:'+String(e))}document.body.setAttribute('data-viewport-width',String(innerWidth));document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>'''

@@ -1,4 +1,3 @@
-import json
 import unittest
 from datetime import date
 from unittest.mock import AsyncMock, patch
@@ -7,6 +6,7 @@ import httpx
 
 from app.adapters.wikimedia import WikimediaAdapter, observation_status
 from app.models.observations import FetchStatus, ObservationStatus
+from app.settings import Settings
 
 DAY = date(2026, 11, 6)
 
@@ -42,6 +42,31 @@ class WikimediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0].url.path, "/api/rest_v1/metrics/pageviews/top-per-country/US/all-access/2026/11/06")
         self.assertEqual(requests[0].url.query, b"")
         self.assertIn("https://github.com/trandaiquoc/TrendScout", requests[0].headers["User-Agent"])
+
+    async def test_legacy_user_agent_environment_name_uses_central_settings(self):
+        configured = "TrendScout test client (mailto:test@example.invalid)"
+        with patch.dict("os.environ", {"WIKIMEDIA_USER_AGENT": configured}, clear=False):
+            adapter = WikimediaAdapter()
+        self.assertEqual(adapter.user_agent, configured)
+
+    def test_http_policy_and_disabled_flag_flow_from_typed_settings(self):
+        settings = Settings.from_environment({
+            "TREND_SCOUT_HTTP_CONNECT_TIMEOUT_SECONDS": "2.5",
+            "TREND_SCOUT_HTTP_READ_TIMEOUT_SECONDS": "4",
+            "TREND_SCOUT_HTTP_TOTAL_TIMEOUT_SECONDS": "6",
+            "TREND_SCOUT_HTTP_MAX_RETRIES": "1",
+            "TREND_SCOUT_HTTP_MAX_RETRY_WAIT_SECONDS": "8",
+        })
+        adapter = WikimediaAdapter(settings=settings)
+        self.assertEqual(adapter.http_policy.connect_timeout_seconds, 2.5)
+        self.assertEqual(adapter.http_policy.read_timeout_seconds, 4.0)
+        self.assertEqual(adapter.http_policy.total_timeout_seconds, 6.0)
+        self.assertEqual(adapter.max_retries, 1)
+        self.assertEqual(adapter.max_retry_wait, 8.0)
+
+        disabled = Settings.from_environment({"TREND_SCOUT_SOURCE_WIKIMEDIA_ENABLED": "false"})
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            WikimediaAdapter(settings=disabled)
 
     async def test_single_component_project_and_unknown_domain(self):
         data = payload(articles=[{"article": "MediaWiki", "project": "mediawiki", "views_ceil": 10, "rank": 1},
