@@ -205,6 +205,16 @@ Chạy test offline `python -m unittest discover -s tests -v`. Fake repository k
 
 FastAPI phục vụ giao diện tại `http://127.0.0.1:8000/dashboard/` cùng origin với API; không cần mở CORS. Thao tác, cấu hình operator token và các giới hạn kiểm thử được mô tả trong [Frontend README](../Frontend/README.md). Dashboard không tự tạo run khi mở hoặc reload.
 
+## D3A — Public Fetch ngoại tuyến
+
+Website không có luồng đăng nhập, đăng xuất, đăng ký hoặc tài khoản người dùng. `GET /api/v1/capabilities` đọc công khai trạng thái runtime và bốn mô tả nguồn; response không chứa credential. `POST /api/v1/fetches` là endpoint riêng, không thay đổi `POST /api/runs` (endpoint cũ vẫn yêu cầu Bearer operator token). Request public chỉ nhận JSON `{}`; backend tự chọn plan `demo-us-en`, Wikimedia source ID, mode synthetic, tối đa một request/page cho mỗi nguồn và không nhận URL/query/provider/budget từ client.
+
+Public Fetch mặc định tắt qua `TREND_SCOUT_PUBLIC_FETCH_ENABLED=false`. Khi bật, cấu hình vẫn chỉ hợp lệ ở profile `local`/`test`, mode `synthetic`, không read-only, không khai báo Google Cloud project, có `FakeStorage` và adapter fixture được inject rõ ràng. Runtime chỉ cho một tiến trình giữ khóa file dùng chung trên máy; tiến trình thứ hai fail closed. Giới hạn là tối đa 3 lượt mới trong 60 phút, một lần chạy đồng thời, cooldown hiện hữu, deadline mặc định 60 giây (cấu hình 1–300), body tối đa 1 KiB, polling tối đa 120 lần và ID/idempotency có TTL một giờ. Idempotency và rate counter là in-memory, mất khi process khởi động lại.
+
+Các giới hạn này chỉ xác nhận luồng synthetic trong môi trường local/test cô lập. Chúng **không** bảo vệ giữa nhiều host/container độc lập, không chống bot phân tán qua quota bền vững và không đủ để mở public live Fetch. Origin/Host/Fetch Metadata là tín hiệu chống lạm dụng trình duyệt, không xác thực client; client HTTP trực tiếp vẫn gọi được endpoint nếu deployment bật. Vì vậy production/Vercel, Wikimedia live, YouTube, Google Search, Bing Search và mọi provider tính phí đều bị khóa. Không có yêu cầu hoặc thao tác Firestore trong D3A.
+
+Chạy kiểm chứng synthetic offline bằng `bash Backend/scripts/verify_offline_readiness.sh`. Test tạo app với fixture adapter và fake storage; không cần bật flag trong shell, gọi provider thật, Firestore hoặc emulator. Public live chỉ được xem xét sau khi có phê duyệt riêng và xác minh distributed rate/concurrency/idempotency, durable quota/cost budgets, bot/abuse controls, monitoring và provider approvals.
+
 ### Ngân sách kiểm thử Bước 10
 
 Trước khi ghi bucket, backend ước lượng số document writes (snapshot + observation chunks + 16 shard kết quả + 10 lượt dự phòng trạng thái) và dừng nếu vượt 1.000. Đây là guard số thao tác dự kiến, không phải đồng hồ quota Firestore chính xác; retry, ghi từ process khác và độ trễ hiển thị usage có thể ảnh hưởng con số thực tế. Các test có thể truyền `run_mode="synthetic"` hoặc `"replay"` vào `create_app` khi inject nguồn giả, để dữ liệu test không được gắn nhãn live. Production mặc định live và không cho client chọn mode.

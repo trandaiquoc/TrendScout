@@ -12,8 +12,10 @@ The workspace defaults to Light and Vietnamese. Theme and locale preferences per
 
 - **public/index.html** contains the semantic workspace shell and all ten views.
 - **public/styles.css** owns design tokens, Light/Dark themes, focus styles, and responsive layouts.
-- **public/app.js** composes views and interactions. It contains no HTTP write flow.
-- **public/modules/api.js** is the single API boundary. It issues same-origin GET requests with a bounded timeout and validates JSON/HTTP errors.
+- **public/app.js** composes views, capability state, and interactions.
+- **public/modules/api.js** is the single HTTP boundary. It issues same-origin GET/POST requests with a bounded timeout and validates JSON/HTTP errors. POST requests are never retried automatically.
+- **public/modules/capabilities.js** loads server-owned source and Fetch readiness.
+- **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch and bounded status polling.
 - **public/modules/format.js** formats dates and numbers for the selected locale.
 - **public/modules/theme.js** and **public/modules/i18n.js** manage display preferences.
 - **public/modules/i18n/vi.js** and **public/modules/i18n/en.js** are separate user-facing copy catalogs.
@@ -22,14 +24,18 @@ The browser safely renders API values as text and only links to validated HTTPS 
 
 ## Fetch and source readiness
 
-The prominent **Fetch new data / Thu thập dữ liệu mới** button is disabled. The dashboard has no authenticated operator session, so it does not send a create-run request or simulate progress. The existing POST /api/runs contract remains behind its operator Bearer token; this UI does not collect, store, or transmit that token. Vercel remains read-only and returns 405 for run creation.
+The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. Fetch uses the separate `POST /api/v1/fetches` contract only when the backend explicitly enables the offline synthetic runtime; the feature flag defaults off and production/Vercel cannot enable it. In an enabled local/test fixture run, the button executes the injected fixture, reports its real backend state, and reads the resulting run. Otherwise it stays disabled with the backend's reason. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
+
+The existing Vercel HTTP Basic access gate for the read-only dashboard is unchanged by D3A. It is a hosting-level restriction inherited from the prior deployment setup, not an application user account; no claim is made here that the gated Vercel URL opens without a password.
+
+The legacy `POST /api/runs` route remains separate and still requires its operator Bearer token. The public Fetch route accepts only `{}` and the backend selects a fixed source, query plan, request budget, and synthetic mode. Vercel remains read-only and returns 405 for Fetch/run creation. Live Wikimedia and paid/provider APIs are not called by this flow.
 
 Source status is deliberately limited to repository evidence:
 
 - **Wikimedia Pageviews:** adapter implemented; live connectivity and account access have not been verified.
 - **YouTube, Google Search, and Bing Search:** adapters/credentials are not configured; they are not called.
 
-GET /api/config reports only read_only; it is not a source, credential, or authenticated-session capability check. No cross-source data is combined. Weekly refresh, AI usage, and product research screens disclose their unconfigured or illustrative state.
+Capability data distinguishes adapter implementation from approval, configuration, live verification, and source limitations. No cross-source data is combined. Weekly refresh, AI usage, and product research screens disclose their unconfigured or illustrative state.
 
 ## Static assets and Vercel
 
@@ -48,4 +54,4 @@ The focused screenshot review can be repeated with Chrome installed:
     cd Backend
     .venv/bin/python scripts/seccomp_exec.py --allow-unix-sockets -- .venv/bin/python tests/browser_d2_visual_offline.py
 
-This creates compact WebP evidence under Documents/Reports/evidence/d2/. Those fixture screenshots show UI states only; they do not establish live source access, production authentication, or market validity. See the [Backend README](../Backend/README.md) for API, operator authorization, storage, and deployment constraints.
+This creates compact WebP evidence under Documents/Reports/evidence/d2/. Those fixture screenshots show UI states only; they do not establish live source access, production abuse resistance, or market validity. See the [Backend README](../Backend/README.md) for API, legacy operator authorization, public Fetch limits, storage, and deployment constraints.
