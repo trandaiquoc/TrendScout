@@ -18,7 +18,7 @@ window.fetch=(path,opts={})=>{
   const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{}};
   testRequests.push(request);
   const p=request.path;
-  if(p==='/timeout-json')return Promise.resolve({ok:true,json:()=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
+  if(p==='/api/timeout-json')return Promise.resolve({ok:true,json:()=>opts.signal.aborted?Promise.reject(new Error('aborted')):new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
   if(p==='/api/network-fail')return Promise.reject(new TypeError('offline network failure'));
   if(p==='/api/auth-fail')return Promise.resolve(new Response('{}',{status:401}));
   if(p==='/api/status-403')return Promise.resolve(new Response('{}',{status:403}));
@@ -89,8 +89,8 @@ CHECK = r"""<script>
     check(!document.querySelector('#operator-token'),'no token input');
     check(!document.querySelector('#fetch-form'),'no fetch submit form');
     check(document.querySelectorAll('[data-source]').length===4,'four source cards');
-    check(document.querySelector('[data-source=wikimedia]').dataset.sourceStatus==='adapter-implemented-live-unverified','Wikimedia adapter status');
-    check([...document.querySelectorAll('[data-source]:not([data-source=wikimedia])')].every(card=>card.dataset.sourceStatus==='not-configured'),'future sources pending');
+    check(document.querySelector('[data-source=wikimedia]').dataset.sourceStatus==='unknown','Wikimedia status unknown when capabilities are unavailable');
+    check([...document.querySelectorAll('[data-source]:not([data-source=wikimedia])')].every(card=>card.dataset.sourceStatus==='unknown'),'future source status unknown when capabilities are unavailable');
     const go=name=>{
       if(innerWidth<=900)document.querySelector('#menu-toggle').click();
       const link=document.querySelector('[data-nav=\"'+name+'\"]');
@@ -182,7 +182,7 @@ CHECK = r"""<script>
     catch(error){check(String(error).includes('Không kết nối'),'localized network failure');}
     try{await getJson('/api/invalid-json');check(false,'invalid JSON rejected');}
     catch(error){check(String(error).includes('không hợp lệ'),'invalid JSON message');}
-    try{await getJson('/timeout-json',{timeoutMs:20});check(false,'request timeout');}
+    try{await getJson('/api/timeout-json',{timeoutMs:20});check(false,'request timeout');}
     catch(error){check(String(error).includes('quá thời gian'),'body timeout message');}
     const nativeTimeout=window.setTimeout;
     window.setTimeout=(callback,delay,...args)=>nativeTimeout(callback,delay===2000?0:delay,...args);

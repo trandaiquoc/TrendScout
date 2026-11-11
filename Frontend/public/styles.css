@@ -363,6 +363,7 @@ button:disabled { cursor: not-allowed; }
 .button-secondary:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-strong); }
 .button-secondary:disabled { background: var(--surface-soft); color: var(--muted); opacity: .75; }
 .fetch-help { margin: 10px 1px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.fetch-status { margin: 8px 1px 0; color: var(--accent-strong); font-size: 11px; line-height: 1.5; }
 
 .pill {
   display: inline-flex;

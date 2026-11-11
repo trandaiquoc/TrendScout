@@ -1,10 +1,12 @@
 const REQUEST_TIMEOUT_MS = 15000;
 
 export class ApiError extends Error {
-  constructor(message, status = null) {
+  constructor(message, status = null, body = null, retryAfterSeconds = null) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.body = body;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -27,15 +29,34 @@ const httpMessages = {
   },
 };
 
-export async function getJson(path, { locale = 'vi', timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+export async function requestJson(path, {
+  method = 'GET',
+  body: requestBody,
+  headers = {},
+  locale = 'vi',
+  timeoutMs = REQUEST_TIMEOUT_MS,
+} = {}) {
+  if (typeof path !== 'string' || !path.startsWith('/api/')) {
+    throw new ApiError(locale === 'en' ? 'Only same-origin API requests are allowed.' : 'Chỉ cho phép yêu cầu API cùng nguồn gốc.');
+  }
+  if (!['GET', 'POST'].includes(method)) {
+    throw new ApiError(locale === 'en' ? 'This request method is not allowed.' : 'Phương thức yêu cầu này không được phép.');
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(path, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+      method,
+      headers: {
+        Accept: 'application/json',
+        ...(requestBody === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...headers,
+      },
+      ...(requestBody === undefined ? {} : { body: JSON.stringify(requestBody) }),
       signal: controller.signal,
       credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
     });
     let body;
     try {
@@ -49,7 +70,8 @@ export async function getJson(path, { locale = 'vi', timeoutMs = REQUEST_TIMEOUT
     if (!response.ok) {
       throw new ApiError(httpMessages[locale]?.[response.status] || (locale === 'en'
         ? 'The request could not be completed (HTTP ' + response.status + ').'
-        : 'Không thể hoàn tất yêu cầu (HTTP ' + response.status + ').'), response.status);
+        : 'Không thể hoàn tất yêu cầu (HTTP ' + response.status + ').'),
+      response.status, body, Number(response.headers.get('retry-after')) || null);
     }
     return body;
   } catch (error) {
@@ -63,4 +85,8 @@ export async function getJson(path, { locale = 'vi', timeoutMs = REQUEST_TIMEOUT
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function getJson(path, options = {}) {
+  return requestJson(path, { ...options, method: 'GET' });
 }

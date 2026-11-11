@@ -1,4 +1,6 @@
 import { getJson } from './modules/api.js';
+import { loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
+import { PublicFetchController } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
 import { initializeTheme } from './modules/theme.js';
@@ -22,6 +24,11 @@ const state = {
   keywordSequence: 0,
   detailSequence: 0,
   detail: null,
+  capabilityRetryTimer: null,
+  capabilities: null,
+  fetchReady: false,
+  fetchBlockReason: null,
+  fetchPresentation: { kind: 'disabled', busy: false },
 };
 
 function number(value) {
@@ -71,6 +78,126 @@ function announce(message, error = false) {
 function getErrorMessage(error, fallbackKey) {
   return error && typeof error.message === 'string' ? error.message : t(fallbackKey);
 }
+
+const FETCH_BLOCK_MESSAGES = {
+  FEATURE_DISABLED: 'fetch.disabled',
+  LIVE_FETCH_NOT_APPROVED: 'fetch.live-not-approved',
+  READ_ONLY_DEPLOYMENT: 'fetch.read-only',
+  CLOUD_STORAGE_NOT_ALLOWED: 'fetch.read-only',
+  OFFLINE_FAKE_STORAGE_REQUIRED: 'fetch.offline-unavailable',
+  OFFLINE_FIXTURE_ADAPTER_REQUIRED: 'fetch.offline-unavailable',
+  SYNTHETIC_RUNTIME_UNAVAILABLE: 'fetch.offline-unavailable',
+  ADMISSION_STATE_UNAVAILABLE: 'fetch.offline-unavailable',
+  MULTI_PROCESS_RUNTIME_UNSUPPORTED: 'fetch.multi-process-unavailable',
+  SOURCE_NOT_ENABLED: 'fetch.source-unavailable',
+  FETCH_ALREADY_RUNNING: 'fetch.busy',
+  PUBLIC_FETCH_RATE_LIMITED: 'fetch.rate-limited',
+  RUN_COOLDOWN_ACTIVE: 'fetch.rate-limited',
+};
+
+const FETCH_STATE_MESSAGES = {
+  submitting: 'fetch.submitting',
+  queued: 'fetch.queued',
+  running: 'fetch.running',
+  completed: 'fetch.completed',
+  partial: 'fetch.partial',
+  failed: 'fetch.failed',
+  aborted: 'fetch.aborted',
+  'rate-limited': 'fetch.rate-limited',
+  'busy-error': 'fetch.busy',
+  retryable: 'fetch.retryable',
+  'poll-limit': 'fetch.poll-limit',
+  'poll-error': 'fetch.poll-error',
+  expired: 'fetch.expired',
+};
+
+function renderFetchPresentation() {
+  const presentation = state.fetchPresentation;
+  const messageKey = FETCH_STATE_MESSAGES[presentation.kind];
+  const blockKey = FETCH_BLOCK_MESSAGES[state.fetchBlockReason] || 'fetch.disabled';
+  const isActionState = Boolean(messageKey);
+  const button = $('#open-fetch');
+  const badge = $('#fetch-badge');
+  const readiness = $('#fetch-readiness');
+  const status = $('#fetch-status');
+  const canRetry = ['retryable', 'poll-limit', 'poll-error'].includes(presentation.kind);
+  const busy = Boolean(presentation.busy);
+
+  button.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited';
+  const buttonKey = presentation.kind === 'retryable'
+    ? 'fetch.retry'
+    : canRetry ? 'fetch.check-status' : 'fetch.cta';
+  button.querySelector('[data-i18n="fetch.cta"]').textContent = t(buttonKey);
+  badge.textContent = t(state.fetchReady ? 'fetch.synthetic-label' : 'fetch.unavailable');
+  badge.classList.toggle('pill--green', state.fetchReady);
+  badge.classList.toggle('pill--amber', !state.fetchReady);
+  readiness.textContent = state.fetchReady ? t('fetch.ready') : t(blockKey);
+  status.hidden = !isActionState;
+  status.textContent = isActionState ? t(messageKey) : '';
+}
+
+function scheduleCapabilityRefresh(delayMs) {
+  clearTimeout(state.capabilityRetryTimer);
+  state.capabilityRetryTimer = window.setTimeout(() => {
+    state.capabilityRetryTimer = null;
+    loadPublicCapabilities();
+  }, delayMs);
+}
+
+async function loadPublicCapabilities() {
+  try {
+    const capabilities = await loadCapabilities(getLocale());
+    state.capabilities = capabilities;
+    state.fetchBlockReason = capabilities.fetch_block_reason || null;
+    state.fetchReady = capabilities.public_fetch_enabled === true
+      && capabilities.fetch_enabled === true
+      && capabilities.authentication_required === false
+      && capabilities.data_mode === 'SYNTHETIC'
+      && Array.isArray(capabilities.sources)
+      && capabilities.sources.some((source) => source.enabled_for_current_operation === true);
+    if (!state.fetchReady && !state.fetchBlockReason) {
+      state.fetchBlockReason = 'FEATURE_DISABLED';
+    }
+    if (state.fetchReady) {
+      clearTimeout(state.capabilityRetryTimer);
+      state.capabilityRetryTimer = null;
+      if (state.fetchPresentation.kind === 'rate-limited') {
+        state.fetchPresentation = { kind: 'disabled', busy: false };
+      }
+    } else if ([
+      'FETCH_ALREADY_RUNNING',
+      'PUBLIC_FETCH_RATE_LIMITED',
+      'RUN_COOLDOWN_ACTIVE',
+    ].includes(state.fetchBlockReason)) {
+      scheduleCapabilityRefresh(60000);
+    }
+    renderSourceCapabilities(capabilities, t);
+    renderFetchPresentation();
+  } catch {
+    state.capabilities = null;
+    state.fetchReady = false;
+    state.fetchBlockReason = null;
+    renderSourceCapabilities(null, t);
+    renderFetchPresentation();
+    $('#fetch-readiness').textContent = t('fetch.capability-unavailable');
+  }
+}
+
+const fetchController = new PublicFetchController({
+  onState(presentation) {
+    state.fetchPresentation = presentation;
+    renderFetchPresentation();
+    if (presentation.kind === 'busy-error' || presentation.kind === 'rate-limited') {
+      const delay = presentation.error?.retryAfterSeconds || 5;
+      scheduleCapabilityRefresh(Math.min(delay, 60) * 1000);
+    }
+  },
+  onTerminal(runId) {
+    loadRun(runId);
+    scheduleCapabilityRefresh(100);
+  },
+  locale: getLocale,
+});
 
 function localizedStatus(prefix, status) {
   if (typeof status !== 'string' || !status) {
@@ -487,6 +614,11 @@ function bindEvents() {
   });
 
   $('#load-run').addEventListener('click', () => loadRun($('#run-id').value));
+  $('#open-fetch').addEventListener('click', () => {
+    if (state.fetchReady) {
+      fetchController.activate();
+    }
+  });
   $('#run-id').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       loadRun(event.currentTarget.value);
@@ -538,6 +670,8 @@ function bindEvents() {
   window.addEventListener('pagehide', () => {
     clearTimeout(state.pollTimer);
     clearTimeout(searchTimer);
+    clearTimeout(state.capabilityRetryTimer);
+    fetchController.dispose();
   });
   document.addEventListener('trendscout:locale', () => {
     if (state.run) {
@@ -550,6 +684,10 @@ function bindEvents() {
     if ($('#detail-dialog').open && state.detail) {
       renderDetail(state.detail);
     }
+    if (state.capabilities) {
+      renderSourceCapabilities(state.capabilities, t);
+    }
+    renderFetchPresentation();
   });
 }
 
@@ -577,3 +715,4 @@ describeComparison();
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();
+loadPublicCapabilities();

@@ -81,20 +81,22 @@ class D2DashboardContractTests(unittest.TestCase):
             self.assertEqual(required_keys - catalog_keys, set(), locale)
         self.assertEqual(catalog_keysets[0], catalog_keysets[1])
 
-    def test_fetch_is_disabled_without_a_token_or_write_request_path(self):
+    def test_public_fetch_has_no_account_or_credential_flow_and_starts_disabled(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         source = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (PUBLIC / "app.js", *sorted((PUBLIC / "modules").rglob("*.js")))
         )
-        self.assertNotIn("operator-token", html + source)
+        self.assertNotRegex(html.lower(), r"\b(login|logout|register)\b")
+        self.assertNotIn('type="password"', html.lower())
         self.assertNotIn("Authorization", source)
         self.assertIn('id="open-fetch"', html)
         self.assertIn(
             "disabled", html[html.index('id="open-fetch"') : html.index('id="open-fetch"') + 300]
         )
-        self.assertNotIn("method: 'POST'", source)
-        self.assertNotIn('method:"POST"', source)
+        self.assertIn("/api/v1/fetches", source)
+        self.assertIn("Idempotency-Key", source)
+        self.assertNotIn("operator-token", html + source)
 
     def test_source_cards_are_truthful_for_all_four_requested_sources(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")

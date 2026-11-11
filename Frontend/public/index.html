@@ -78,9 +78,10 @@
               <p data-i18n="overview.subtitle"></p>
             </div>
             <div class="fetch-card">
-              <div class="fetch-card-top"><span class="fetch-icon" aria-hidden="true">✦</span><span class="pill pill--amber" data-i18n="fetch.unavailable"></span></div>
+              <div class="fetch-card-top"><span class="fetch-icon" aria-hidden="true">✦</span><span id="fetch-badge" class="pill pill--amber" data-i18n="fetch.unavailable"></span></div>
               <button id="open-fetch" class="button button-primary" type="button" disabled aria-describedby="fetch-readiness"><span data-i18n="fetch.cta"></span><span aria-hidden="true">↗</span></button>
-              <p id="fetch-readiness" class="fetch-help" data-i18n="fetch.auth-required"></p>
+              <p id="fetch-readiness" class="fetch-help" data-i18n="fetch.disabled"></p>
+              <p id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></p>
             </div>
           </div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="overview.disclaimer"></p></div>
