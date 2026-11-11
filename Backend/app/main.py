@@ -3,8 +3,9 @@
 import base64
 import binascii
 import hmac
+import mimetypes
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -134,26 +135,33 @@ def create_app(
     application.include_router(runs_router, prefix="/api")
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     if read_only:
+
         @application.get("/dashboard/")
-        @application.get("/dashboard/{asset}")
+        @application.get("/dashboard/{asset:path}")
         async def dashboard(asset: str = "index.html"):
-            types = {
-                "index.html": "text/html",
-                "app.js": "text/javascript",
-                "styles.css": "text/css",
-            }
-            if asset not in types:
+            asset = asset or "index.html"
+            requested = PurePosixPath(asset)
+            if requested.is_absolute() or any(part in ("", ".", "..") for part in requested.parts):
                 return Response(status_code=404)
             try:
                 from app.dashboard_assets import ASSETS
-                content = ASSETS[asset]
+
+                content = ASSETS[requested.as_posix()]
             except ImportError:
                 if settings.environment_profile == "vercel":
                     return Response(status_code=503)
-                content = (frontend / asset).read_bytes()
-            return Response(content=content, media_type=types[asset])
+                candidate = (frontend / requested).resolve()
+                if frontend.resolve() not in candidate.parents or not candidate.is_file():
+                    return Response(status_code=404)
+                content = candidate.read_bytes()
+            except KeyError:
+                return Response(status_code=404)
+            media_type = mimetypes.guess_type(requested.name)[0] or "application/octet-stream"
+            return Response(content=content, media_type=media_type)
     elif frontend.is_dir():
-        application.mount("/dashboard", StaticFiles(directory=frontend, html=True), name="dashboard")
+        application.mount(
+            "/dashboard", StaticFiles(directory=frontend, html=True), name="dashboard"
+        )
 
     @application.exception_handler(StorageError)
     async def storage_error(_request: Request, _exc: StorageError):
