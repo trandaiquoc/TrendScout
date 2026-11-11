@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy
+from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy, HttpResponseTooLarge
 
 
 class HttpPolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -89,6 +89,36 @@ class HttpPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         timeout = client.get.await_args.kwargs["timeout"]
         self.assertEqual((timeout.connect, timeout.read), (1, 2))
+
+    async def test_bounded_get_returns_small_body_and_rejects_oversized_stream(self):
+        async def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=httpx.ByteStream(b"12345"),
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        policy = HttpPolicy()
+        try:
+            bounded = await policy.get_bounded(
+                client,
+                "https://example.invalid/fixture",
+                headers={"Accept": "application/json"},
+                max_response_bytes=5,
+            )
+            self.assertEqual(bounded.content, b"12345")
+            with self.assertRaises(HttpResponseTooLarge) as raised:
+                await policy.get_bounded(
+                    client,
+                    "https://example.invalid/fixture",
+                    headers={"Accept": "application/json"},
+                    max_response_bytes=4,
+                )
+            self.assertEqual(raised.exception.status_code, 200)
+        finally:
+            await client.aclose()
 
 
 if __name__ == "__main__":

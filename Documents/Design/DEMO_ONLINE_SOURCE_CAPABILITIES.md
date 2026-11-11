@@ -1,7 +1,7 @@
 # TrendScout Demo Online — Source Capability Matrix
 
-- **Status:** D0 proposal; no provider selection, pricing, storage right, or live readiness is owner-approved.
-- **Matrix version:** 1.0
+- **Status:** D0 proposal with a D3B offline implementation update; no provider selection, pricing, storage right, or live readiness is owner-approved.
+- **Matrix version:** 1.1
 - **Checked:** 2026-11-11 (ICT). Official documentation was reviewed; no provider endpoint was called.
 
 This document separates TrendScout's target US/en-US market from the population measured by a provider. Search-result localization does not establish the author's, viewer's, or audience's residence. Provider records are evidence within the returned sample, not a census of the Internet.
@@ -11,7 +11,7 @@ This document separates TrendScout's target US/en-US market from the population 
 | TrendScout source ID | Provider ID | Proposed interface | Data shape | Query or feed | Current repository state | UI publication state |
 |---|---|---|---|---|---|---|
 | wikimedia_pageviews_top_per_country | wikimedia_aqs | Wikimedia Analytics API (AQS) Pageviews REST API | Daily top-list entries with project, article, rank, and views_ceil | Provider-curated top list; no query parameter in the current adapter | Implemented adapter, lazy registry factory, MockTransport/fixture tests; live API was not called in this audit | May be labeled Wikimedia Pageviews, US top-list scope, approximate pageviews; never search volume, unique audience, or complete topic coverage |
-| youtube_video_search | youtube_data_api_v3 | YouTube Data API v3 search.list | Video search resources and metadata; optional public statistics require a separate videos.list call | Query-based video search; not a curated all-topic trending feed | No adapter or API client; disabled and pending approval | PENDING_APPROVAL; do not publish a derived TrendScout score from YouTube data |
+| youtube_video_search | youtube_data_api_v3 | YouTube Data API v3 search.list | Query-scoped video search resources and metadata; no view-count field | Query-based video search; not a curated all-topic trending feed | Adapter implemented and verified with synthetic fixtures/MockTransport only; not registered for production or Public Fetch | PENDING_APPROVAL; do not publish a derived TrendScout score from YouTube data |
 | google_web_serp | serpapi_google | SerpApi Google Search Engine Results API candidate | Query-scoped organic result sample, rank, title, URL, snippets where returned | Query-based search result sample | No adapter, account, key, approval, or live call; SerpApi is a candidate only | PENDING_APPROVAL; label as Google search-result sample, never Google search volume or Google Trends |
 | bing_web_serp | serpapi_bing | SerpApi Bing Search Engine Results API candidate | Query-scoped organic result sample, rank, title, URL, snippets where returned | Query-based search result sample | No adapter, account, key, approval, or live call; SerpApi is a candidate only | PENDING_APPROVAL; label as Bing search-result sample, never search volume or an official Microsoft Bing API |
 
@@ -41,16 +41,20 @@ Official references, accessed 2026-11-11:
 
 | Capability | D0 finding |
 |---|---|
-| Provider / endpoint | Google YouTube Data API v3, GET https://www.googleapis.com/youtube/v3/search; possible follow-up GET videos.list for statistics. Do not use HTML scraping. |
-| Data and metric | search.list returns videos matching a query and search ordering. Candidate raw values are result membership/rank and provider metadata. A result count or rank is not search volume, unique viewers, audience geography, or a cross-source trend metric. |
+| Provider / endpoint | Google YouTube Data API v3, GET https://www.googleapis.com/youtube/v3/search. D3B implements only search.list; possible follow-up videos.list statistics are out of scope. Do not use HTML scraping. |
+| Data and metric | search.list returns videos matching a query and search ordering. The adapter records result membership/rank and provider metadata; it does not request view counts. A result count or rank is not search volume, unique viewers, audience geography, or a cross-source trend metric. |
 | Market / language | Candidate parameters: regionCode=US, relevanceLanguage=en, type=video. regionCode means videos that can be viewed in a country; it does not prove the viewer or creator is US-based. Relevance language does not exclude other languages. |
 | Query / feed distinction | search.list(q=...) is query-based. videos.list(chart=mostPopular) is not an all-topic Trending feed: since 2025-07-21, the chart includes Trending Music, Movies, and Gaming charts. It is not selected as the general feed. |
 | Pagination / maximum | maxResults accepts 0–50; follow nextPageToken and stop at an explicit page budget. The API may return fewer than requested; pageInfo.totalResults is approximate and must not drive pagination. Each requested page is another API call. |
 | Freshness / time | publishedAfter/publishedBefore filter video creation time in RFC3339; they do not measure view velocity. Search-index delay can make new uploads incomplete. |
-| Authentication / quota | Public data requires an enabled Google Cloud project and API key; OAuth is needed for user-authorized/private data. Current official quota docs list a separate search.list bucket of 100 calls/day, one quota unit per call, including each page; daily reset is midnight Pacific Time. Actual project allocation must be checked in its console and may differ. No project or key was configured or checked. |
-| Retry / failures | Treat invalid credentials, quota exhaustion, permission denial, rate limiting, transient 5xx, timeout, and malformed payload as distinct. No live behavior or Retry-After guarantee was verified for this project. Re-read current Google error/quota docs before implementation. |
+| Authentication / quota | Public data requires an enabled Google Cloud project and API key; OAuth is needed for user-authorized/private data. The official quota guide documents a separate `search.list` bucket with a default allocation of 100 calls/day and one quota unit per call; each page request is another call. Actual project allocation must be checked in its console and may differ. No project or key was configured or checked. |
+| D3B request | Fixed HTTPS endpoint, `part=snippet`, `type=video`, one canonical query from `demo-us-en` v1, `regionCode=US`, `relevanceLanguage=en`, one UTC `publishedAfter` cutoff per batch, `maxResults=50`, `order=relevance`, and provider `pageToken` when allowed by the execution cap. The credential boundary uses the `X-Goog-Api-Key` header; it is never included in the query URL. |
+| D3B status | Offline-only implementation. `adapter_status=IMPLEMENTED_OFFLINE_VERIFIED`; `readiness=PENDING_APPROVAL`; `approval_status=PENDING_APPROVAL`; `configuration_status=NOT_CONFIGURED`; `live_verification_status=NOT_VERIFIED`; `default_enabled=false`; supported data mode is `SYNTHETIC` only. MockTransport is enforced and the adapter is absent from the live registry and Public Fetch allowlist. |
+| Retry / failures | The implementation distinguishes invalid credentials, quota exhaustion, permission denial, rate limiting, transient 5xx, timeout, malformed payload, oversized response, and request-budget/deadline/cancellation stops. Retries are bounded by the shared HTTP policy and request budget. No live behavior or Retry-After guarantee was verified for this project. |
 | Terms / storage | YouTube policy generally requires deleting or refreshing non-authorized API data within 30 days. Additional derived metrics and longer statistical storage require an audited analytics use case and explicit approval under the policy amendment effective 2026-06-01. The policy also restricts combining/aggregating YouTube API data with other sources. No cross-source score is designed or authorized here. |
-| Provenance / UI | Preserve API method, project/quota bucket reference (never the key), query fingerprint, region/language, requested page token, fetched_at, provider response time if available, video ID, source URL, and direct metric definition. Do not display trend scores until legal/policy review and approval establish a permitted use. |
+| Provenance / UI | D3B preserves source/provider, plan/version/fingerprint, query fingerprint and scope, region/language filters, exact publication cutoff, fetched_at, requested page/rank, response status, validated video ID, canonical URL, and query evidence across deduplicated results. `result_rank` means ordinal position in this query response only. Do not display trend scores until legal/policy review and approval establish a permitted use. |
+
+The adapter stores no raw provider response, makes no storage writes, and exposes no live factory. Its 14 canonical queries are curated demo seeds, not representative coverage of the US market. The default page cap remains one page per query; a returned cursor is marked `MORE_AVAILABLE`/`PAGE_CAP_REACHED`, and the batch is not called complete.
 
 Official references, accessed 2026-11-11:
 
@@ -58,6 +62,8 @@ Official references, accessed 2026-11-11:
 - [YouTube Videos: list](https://developers.google.com/youtube/data/reference/rest/v3/videos/list)
 - [YouTube Data API quota calculator](https://developers.google.com/youtube/data/determine_quota_cost)
 - [YouTube Data API revision history](https://developers.google.com/youtube/data/revision_history)
+- [Google API key best practices](https://docs.cloud.google.com/docs/authentication/api-keys-best-practices)
+- [Google API key use](https://docs.cloud.google.com/docs/authentication/api-keys-use)
 - [YouTube API Services Developer Policies](https://developers.google.com/youtube/terms/developer-policies)
 - [YouTube derived metrics and data storage policy](https://developers.google.com/youtube/terms/derived-metrics-policy)
 
@@ -117,4 +123,4 @@ References, accessed 2026-11-11:
 - Wikimedia top-list absence is censored; missing, unavailable, rejected, partial, and explicit zero remain separate.
 - YouTube derived metrics, long-term storage, aggregation, and cross-source display require a policy/compliance review and any applicable approval before use.
 - SerpApi is a provider candidate only. Account creation, paid plans, credentials, and result storage/redistribution require owner approval.
-- All three future query sources remain disabled and have no network adapters in D1. No live source claim is authorized by this document.
+- YouTube has an offline-only query adapter, but remains unconfigured, unapproved, unverified live, and absent from production registration/Public Fetch. Google and Bing have no adapters. No live source claim is authorized by this document.

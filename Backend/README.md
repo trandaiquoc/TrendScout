@@ -215,6 +215,23 @@ Các giới hạn này chỉ xác nhận luồng synthetic trong môi trường 
 
 Chạy kiểm chứng synthetic offline bằng `bash Backend/scripts/verify_offline_readiness.sh`. Test tạo app với fixture adapter và fake storage; không cần bật flag trong shell, gọi provider thật, Firestore hoặc emulator. Public live chỉ được xem xét sau khi có phê duyệt riêng và xác minh distributed rate/concurrency/idempotency, durable quota/cost budgets, bot/abuse controls, monitoring và provider approvals.
 
+## D3B — YouTube search adapter ngoại tuyến
+
+`app/sources/youtube/` triển khai adapter query-based riêng cho YouTube Data API v3 `search.list`; không ép video search resource vào `PageObservation`/Wikimedia scoring. Adapter dùng fixed endpoint và allowlist tham số từ plan server-side `demo-us-en` v1, deduplicate theo provider/video ID nhưng giữ từng query evidence, và chỉ tạo descriptor `result_rank` (vị trí trong query response), không tạo views, trend score hay demand score.
+
+Implementation được cô lập ở chế độ offline: constructor chỉ nhận `httpx.MockTransport`; credential boundary đọc tham chiếu server-side `YOUTUBE_API_KEY` và gửi giá trị qua header `X-Goog-Api-Key`, không đưa key vào URL. Giai đoạn này không có resolver môi trường, endpoint live, registry factory hay đường gọi từ Public Fetch; fixtures là dữ liệu synthetic. Quota tracker đếm từng attempt/retry, nhưng không suy ra quota còn lại của Google Cloud project.
+
+Default plan giữ nguyên 14 query và một page/query. Cursor do provider trả về được gắn với query/plan/filter/cutoff context; page cap, request budget, retry wait, deadline, cancellation, malformed body, quota và rate-limit đều có stop/error state riêng. Request/response body không được lưu. YouTube vẫn `PENDING_APPROVAL`, `NOT_CONFIGURED`, `NOT_VERIFIED`, `default_enabled=false`; không được dùng như nguồn live hoặc trong multi-source scoring.
+
+Chạy adapter contract tests riêng:
+
+```bash
+cd Backend
+.venv/bin/python -m unittest discover -s tests -p 'test_youtube_adapter.py' -v
+```
+
+Các kiểm tra tích hợp/regression offline nằm trong `bash Backend/scripts/verify_offline_readiness.sh`. Tham khảo [báo cáo D3B](../Documents/Reports/BAO_CAO_DEMO_D3B.md) và [source capability matrix](../Documents/Design/DEMO_ONLINE_SOURCE_CAPABILITIES.md). Tài liệu Google được đối chiếu ngày 11/11/2026; quota của project thật và quyền dùng/lưu dữ liệu chưa được xác minh hoặc phê duyệt.
+
 ### Ngân sách kiểm thử Bước 10
 
 Trước khi ghi bucket, backend ước lượng số document writes (snapshot + observation chunks + 16 shard kết quả + 10 lượt dự phòng trạng thái) và dừng nếu vượt 1.000. Đây là guard số thao tác dự kiến, không phải đồng hồ quota Firestore chính xác; retry, ghi từ process khác và độ trễ hiển thị usage có thể ảnh hưởng con số thực tế. Các test có thể truyền `run_mode="synthetic"` hoặc `"replay"` vào `create_app` khi inject nguồn giả, để dữ liệu test không được gắn nhãn live. Production mặc định live và không cho client chọn mode.

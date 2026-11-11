@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": 403,
+    "errors": [{"domain": "youtube.quota", "reason": "quotaExceeded"}]
+  }
+}

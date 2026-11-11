@@ -88,17 +88,21 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         sources = {source["source_id"]: source for source in value["sources"]}
         self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["adapter_status"], "IMPLEMENTED")
         self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["live_verification_status"], "UNVERIFIED")
+        youtube = sources[YOUTUBE_SOURCE_ID]
+        self.assertEqual(youtube["adapter_status"], "IMPLEMENTED_OFFLINE_VERIFIED")
+        self.assertEqual(youtube["supported_data_modes"], ["SYNTHETIC"])
+        self.assertEqual(youtube["live_verification_status"], "NOT_VERIFIED")
+        self.assertFalse(youtube["enabled_for_current_operation"])
         for source_id in (YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             self.assertEqual(sources[source_id]["approval_status"], "PENDING_APPROVAL")
             self.assertFalse(sources[source_id]["enabled_for_current_operation"])
+        self.assertEqual(value["query_plan"]["request_budget_per_source"], 1)
         self.assertNotIn("Authorization", response.text)
         self.assertNotIn("password", response.text.lower())
         self.assertNotIn("api_key", response.text.lower())
 
     async def test_same_key_concurrent_posts_return_one_execution(self):
-        first, second = await asyncio.gather(
-            self.post_fetch(), self.post_fetch()
-        )
+        first, second = await asyncio.gather(self.post_fetch(), self.post_fetch())
 
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.status_code, 202)
@@ -136,7 +140,10 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
             headers={**self.headers(), "Origin": "https://attacker.invalid"}
         )
         spoofed_forwarding = await self.post_fetch(
-            headers={**self.headers("public-fetch-action-0002"), "X-Forwarded-Host": "attacker.invalid"}
+            headers={
+                **self.headers("public-fetch-action-0002"),
+                "X-Forwarded-Host": "attacker.invalid",
+            }
         )
         wrong_host = await self.client.post(
             "/api/v1/fetches",
@@ -177,9 +184,7 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(OfflineFixtureAdapter.calls, 1)
 
     async def test_run_cooldown_rejects_new_public_fetch_after_completion(self):
-        settings = Settings.from_environment(
-            {**TEST_ENV, "TREND_SCOUT_RUN_COOLDOWN_SECONDS": "60"}
-        )
+        settings = Settings.from_environment({**TEST_ENV, "TREND_SCOUT_RUN_COOLDOWN_SECONDS": "60"})
         app = create_app(
             settings=settings,
             storage=self.storage,
@@ -292,9 +297,7 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             self.assertFalse(capability["public_fetch_enabled"])
-            self.assertEqual(
-                capability["fetch_block_reason"], "MULTI_PROCESS_RUNTIME_UNSUPPORTED"
-            )
+            self.assertEqual(capability["fetch_block_reason"], "MULTI_PROCESS_RUNTIME_UNSUPPORTED")
             self.assertEqual(response.status_code, 503)
             self.assertEqual(OfflineFixtureAdapter.calls, 0)
         finally:
@@ -315,9 +318,7 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
                 capability = (await client.get("/api/v1/capabilities")).json()
 
         self.assertFalse(capability["public_fetch_enabled"])
-        self.assertEqual(
-            capability["fetch_block_reason"], "MULTI_PROCESS_RUNTIME_UNSUPPORTED"
-        )
+        self.assertEqual(capability["fetch_block_reason"], "MULTI_PROCESS_RUNTIME_UNSUPPORTED")
 
 
 if __name__ == "__main__":

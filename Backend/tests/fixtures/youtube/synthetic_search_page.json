@@ -1,0 +1,31 @@
+{
+  "kind": "youtube#searchListResponse",
+  "pageInfo": {"totalResults": 2, "resultsPerPage": 2},
+  "items": [
+    {
+      "kind": "youtube#searchResult",
+      "id": {"kind": "youtube#video", "videoId": "AbCdEf12345"},
+      "snippet": {
+        "title": "Synthetic fixture: café trends",
+        "description": "Offline test content only.",
+        "channelId": "UCabcdefghij",
+        "channelTitle": "TrendScout Offline Fixture",
+        "publishedAt": "2026-11-08T12:00:00Z",
+        "liveBroadcastContent": "none",
+        "thumbnails": {
+          "default": {"url": "https://i.ytimg.com/vi/AbCdEf12345/default.jpg"}
+        }
+      }
+    },
+    {
+      "kind": "youtube#searchResult",
+      "id": {"kind": "youtube#video", "videoId": "ZyXwVu98765"},
+      "snippet": {
+        "title": "Second synthetic result",
+        "channelId": "UCklmnopqrst",
+        "channelTitle": "Fixture Channel",
+        "publishedAt": "2026-11-09T00:00:00Z"
+      }
+    }
+  ]
+}

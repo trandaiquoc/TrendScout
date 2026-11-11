@@ -52,7 +52,15 @@ class SourceCatalogTests(unittest.TestCase):
         self.assertEqual(wikimedia.adapter_status, "IMPLEMENTED")
         self.assertEqual(wikimedia.approval_status, "PENDING_LIVE_APPROVAL")
         self.assertEqual(wikimedia.live_verification_status, "UNVERIFIED")
-        for source_id in (YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+        youtube = source_capability(YOUTUBE_SOURCE_ID)
+        self.assertEqual(youtube.adapter_status, "IMPLEMENTED_OFFLINE_VERIFIED")
+        self.assertEqual(youtube.readiness, "PENDING_APPROVAL")
+        self.assertEqual(youtube.approval_status, "PENDING_APPROVAL")
+        self.assertEqual(youtube.configuration_status, "NOT_CONFIGURED")
+        self.assertEqual(youtube.live_verification_status, "NOT_VERIFIED")
+        self.assertEqual(youtube.supported_data_modes, ("SYNTHETIC",))
+        self.assertFalse(youtube.default_enabled)
+        for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             capability = source_capability(source_id)
             self.assertEqual(capability.adapter_status, "NOT_IMPLEMENTED")
             self.assertEqual(capability.approval_status, "PENDING_APPROVAL")

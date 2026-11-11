@@ -14,6 +14,14 @@ class HttpDeadlineExceeded(TimeoutError):
     """A request exceeded the policy deadline rather than raising its own timeout."""
 
 
+class HttpResponseTooLarge(ValueError):
+    """A streamed HTTP response exceeded the caller's byte limit."""
+
+    def __init__(self, status_code: int | None = None):
+        self.status_code = status_code
+        super().__init__("HTTP response exceeded configured size limit")
+
+
 @dataclass(frozen=True)
 class HttpPolicy:
     connect_timeout_seconds: float = 5.0
@@ -62,6 +70,64 @@ class HttpPolicy:
         try:
             async with deadline:
                 return await client.get(url, headers=headers, timeout=self.request_timeout())
+        except TimeoutError as exc:
+            if deadline.expired():
+                raise HttpDeadlineExceeded("HTTP request exceeded total deadline") from exc
+            raise
+
+    async def get_bounded(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        params: Mapping[str, str | int] | None = None,
+        max_response_bytes: int,
+        total_timeout_seconds: float | None = None,
+    ) -> httpx.Response:
+        """Stream a GET under shared timeouts and reject oversized bodies before buffering."""
+        if type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 10_000_000:
+            raise ValueError("HTTP response size limit must be between 1 and 10000000 bytes")
+        timeout_seconds = (
+            self.total_timeout_seconds
+            if total_timeout_seconds is None
+            else total_timeout_seconds
+        )
+        if (
+            type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+            or timeout_seconds > self.total_timeout_seconds
+        ):
+            raise ValueError("HTTP request deadline must be within the configured total timeout")
+        deadline = asyncio.timeout(timeout_seconds)
+        response_status = None
+        try:
+            async with deadline:
+                async with client.stream(
+                    "GET",
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=self.request_timeout(),
+                    follow_redirects=False,
+                ) as response:
+                    response_status = response.status_code
+                    content_length = response.headers.get("Content-Length")
+                    if content_length and content_length.isdigit() and int(content_length) > max_response_bytes:
+                        raise HttpResponseTooLarge(response_status)
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > max_response_bytes:
+                            raise HttpResponseTooLarge(response_status)
+                        body.extend(chunk)
+                    return httpx.Response(
+                        status_code=response.status_code,
+                        headers=response.headers,
+                        content=bytes(body),
+                        request=response.request,
+                        extensions=response.extensions,
+                    )
         except TimeoutError as exc:
             if deadline.expired():
                 raise HttpDeadlineExceeded("HTTP request exceeded total deadline") from exc
