@@ -1,5 +1,11 @@
 # TrendScout backend — Bước 3
 
+## D4 — Google/Bing SERP ngoại tuyến
+
+`app/sources/serpapi/` là hợp đồng dùng chung cho Google và Bing qua SerpApi candidate; hai adapter chỉ nhận `httpx.MockTransport`, fake resolver và quota pool được inject. Request dùng query thuộc `demo-us-en` v1, endpoint cố định, Google `start` và Bing `first`; provider next URL chỉ được phân tích offset, không được gọi. Mỗi attempt reserve budget, retry/deadline/page cap có giới hạn; record deduplicate URL nhưng giữ query evidence, trạng thái cache và thời điểm provider nếu hợp lệ. Position là vị trí trong mẫu SERP, không phải search volume hay sales. Không có filter bảy ngày khi ngữ nghĩa chưa được xác minh.
+
+Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; không được dùng để mở public live Fetch. Cả hai source vẫn disabled, chưa cấu hình, chưa phê duyệt hoặc xác minh live; chúng không được thêm vào registry/Public Fetch. [Capability matrix](../Documents/Design/DEMO_ONLINE_SOURCE_CAPABILITIES.md), [inventory](../Documents/Design/US_PLATFORM_SOURCE_INVENTORY.md), [D5 blueprint](../Documents/Design/D5_FOUR_SOURCE_LIVE_INTEGRATION_BLUEPRINT.md).
+
 Để cài đặt và khởi động toàn bộ hệ thống từ root, ưu tiên `./setup.sh` (một lần) và `./start.sh`; xem [README chính](../README.md). Các lệnh dưới đây là cách thiết lập/chạy thủ công.
 
 Backend Python 3.12 + FastAPI có pipeline Wikimedia, Firestore repository, API run và dashboard cùng origin. Khởi động server không tự fetch Wikimedia hoặc tạo run.

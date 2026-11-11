@@ -1,0 +1,1 @@
+"""Google SERP offline adapter."""
