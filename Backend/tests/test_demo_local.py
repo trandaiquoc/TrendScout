@@ -52,6 +52,7 @@ class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(supplement["candidates"])
                 for candidate in supplement["candidates"]:
                     self.assertEqual(candidate["data_mode"], "SYNTHETIC")
+                    self.assertNotIn("synthetic", candidate["keyword"])
                     self.assertTrue(all(a["classification"] == "INSUFFICIENT_EVIDENCE"
                                         for a in candidate["assessments"]))
                     self.assertTrue(all(e["data_mode"] == "SYNTHETIC"

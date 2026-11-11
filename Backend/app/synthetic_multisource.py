@@ -39,8 +39,8 @@ class _FixtureCredentials:
 def _search_response(request):
     engine = request.url.params.get("engine")
     titles = {
-        "google": "Synthetic linen pants guide",
-        "bing": "Synthetic kitchen organizer ideas",
+        "google": "Linen pants guide",
+        "bing": "Kitchen organizer ideas",
     }
     if engine not in titles:
         return httpx.Response(400, json={"error": "invalid fixture engine"})
@@ -56,7 +56,7 @@ def _video_response(_request):
         "kind": "youtube#searchListResponse", "pageInfo": {"totalResults": 1},
         "items": [{"kind": "youtube#searchResult",
                    "id": {"kind": "youtube#video", "videoId": "AbCdEf12345"},
-                   "snippet": {"title": "Synthetic robot gardening demo",
+                   "snippet": {"title": "Robot gardening demo",
                                "description": "Invented demo content",
                                "publishedAt": "2026-01-08T12:00:00Z"}}],
     })
