@@ -39,8 +39,8 @@ window.fetch=(path,options={{}})=>{{
   else if(value==='/api/v1/capabilities') body={{contract_version:'1.0',authentication_required:false,public_fetch_enabled:true,fetch_enabled:true,data_mode:'SYNTHETIC',fetch_block_reason:null,sources:[
     {{source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',live_verification_status:'UNVERIFIED',enabled_for_current_operation:true}},
     {{source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}},
-    {{source_id:'google_web_serp',adapter_status:'NOT_IMPLEMENTED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',enabled_for_current_operation:false}},
-    {{source_id:'bing_web_serp',adapter_status:'NOT_IMPLEMENTED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',enabled_for_current_operation:false}}
+    {{source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}},
+    {{source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}}
   ]}};
   else if(value==='/api/v1/fetches'&&requestOptions.method==='POST') body={{fetch_id:{json.dumps(FETCH_ID)},status:'QUEUED',data_mode:'SYNTHETIC'}};
   else if(value==='/api/v1/fetches/{FETCH_ID}'){{statusReads+=1;body={{fetch_id:{json.dumps(FETCH_ID)},run_id:{json.dumps(RUN_ID)},status:'PARTIAL',stage:'PARTIAL',data_mode:'SYNTHETIC',terminal:true}};}}

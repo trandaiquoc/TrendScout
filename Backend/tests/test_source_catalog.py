@@ -62,9 +62,12 @@ class SourceCatalogTests(unittest.TestCase):
         self.assertFalse(youtube.default_enabled)
         for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             capability = source_capability(source_id)
-            self.assertEqual(capability.adapter_status, "NOT_IMPLEMENTED")
+            self.assertEqual(capability.adapter_status, "IMPLEMENTED_OFFLINE_VERIFIED")
             self.assertEqual(capability.approval_status, "PENDING_APPROVAL")
             self.assertEqual(capability.configuration_status, "NOT_CONFIGURED")
+            self.assertEqual(capability.live_verification_status, "NOT_VERIFIED")
+            self.assertEqual(capability.supported_data_modes, ("SYNTHETIC",))
+            self.assertFalse(capability.default_enabled)
 
     def test_default_registry_registers_only_enabled_implemented_sources(self):
         settings = Settings.from_environment({})
