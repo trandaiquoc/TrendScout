@@ -8,10 +8,11 @@ from typing import Callable
 
 import httpx
 
+from app.ports.credentials import CredentialProvider
 from app.sources.catalog import YOUTUBE_SOURCE_ID
 from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy
 from app.sources.query_plan import DEFAULT_QUERY_PLAN, QueryPlan
-from app.sources.youtube.client import MAX_RESPONSE_BYTES, CredentialResolver, YouTubeSearchClient
+from app.sources.youtube.client import MAX_RESPONSE_BYTES, YouTubeSearchClient
 from app.sources.youtube.errors import YouTubeErrorCode, YouTubeSourceError
 from app.sources.youtube.models import (
     ProviderPage,
@@ -37,7 +38,7 @@ class YouTubeSearchAdapter:
         self,
         *,
         client: httpx.AsyncClient,
-        credential_resolver: CredentialResolver | None,
+        credential_resolver: CredentialProvider | None,
         http_policy: HttpPolicy | None = None,
         utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         monotonic: Callable[[], float] = time.monotonic,

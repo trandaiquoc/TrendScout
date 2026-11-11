@@ -2,21 +2,17 @@
 
 import json
 from datetime import datetime, timezone
-from typing import Protocol
 from urllib.parse import unquote
 
 import httpx
 
+from app.ports.credentials import CredentialProvider
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, source_capability
 from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy, HttpResponseTooLarge
 from app.sources.serpapi.errors import SerpApiError
 from app.sources.serpapi.models import ProviderPage, QueryContext, ScopedOffset
 from app.sources.serpapi.pagination import next_offset, validate_context, validate_offset
 from app.sources.serpapi.quota import SharedQuotaPool
-
-
-class CredentialResolver(Protocol):
-    def resolve(self, reference: str) -> str | None: ...
 
 
 def build_request_params(context: QueryContext, cursor: ScopedOffset) -> dict[str, str | int]:
@@ -43,7 +39,7 @@ def create_offline_client(transport: httpx.MockTransport) -> httpx.AsyncClient:
 class SerpApiClient:
     """One attempt per call; caller owns bounded retries and deadline."""
 
-    def __init__(self, client: httpx.AsyncClient, resolver: CredentialResolver | None,
+    def __init__(self, client: httpx.AsyncClient, resolver: CredentialProvider | None,
                  pool: SharedQuotaPool, policy: HttpPolicy | None = None):
         if (not isinstance(client, httpx.AsyncClient)
                 or not isinstance(getattr(client, "_transport", None), httpx.MockTransport)):

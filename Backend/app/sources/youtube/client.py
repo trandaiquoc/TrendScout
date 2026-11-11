@@ -4,10 +4,10 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Protocol
 
 import httpx
 
+from app.ports.credentials import CredentialProvider
 from app.sources.catalog import YOUTUBE_SOURCE_ID, source_capability
 from app.sources.http_policy import (
     HttpDeadlineExceeded,
@@ -22,12 +22,6 @@ YOUTUBE_API_KEY_REFERENCE = "YOUTUBE_API_KEY"
 MAX_RESPONSE_BYTES = 1_000_000
 YOUTUBE_API_KEY_HEADER = "X-Goog-Api-Key"
 _PAGE_TOKEN = re.compile(r"^[A-Za-z0-9._~+/=-]{1,2048}$")
-
-
-class CredentialResolver(Protocol):
-    """Server-side credential boundary; browser input is never consulted."""
-
-    def resolve(self, reference: str) -> str | None: ...
 
 
 def build_search_params(
@@ -92,7 +86,7 @@ class YouTubeSearchClient:
         self,
         *,
         client: httpx.AsyncClient,
-        credential_resolver: CredentialResolver | None,
+        credential_resolver: CredentialProvider | None,
         http_policy: HttpPolicy,
         utcnow=lambda: datetime.now(timezone.utc),
         max_response_bytes: int = MAX_RESPONSE_BYTES,
