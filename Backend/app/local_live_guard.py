@@ -34,4 +34,20 @@ class LocalLiveGuard:
         except (ValueError, HTTPException):
             await JSONResponse({"detail": {"code": "LOCAL_ONLY"}}, status_code=403)(scope, receive, send)
             return
+        path = scope.get("path", "")
+        method = scope.get("method", "").upper()
+        allowed = (
+            (method == "GET" and path in {
+                "/api/v1/capabilities", "/api/health",
+            })
+            or (method == "POST" and path == "/api/v1/fetches")
+            or (method == "GET" and path.startswith("/api/v1/fetches/"))
+        )
+        if not allowed:
+            status = 405 if path in {
+                "/api/v1/capabilities", "/api/health", "/api/v1/fetches",
+            } or path.startswith("/api/v1/fetches/") else 404
+            await JSONResponse({"detail": {"code": "LOCAL_ROUTE_NOT_ALLOWED"}},
+                               status_code=status)(scope, receive, send)
+            return
         await self.app(scope, receive, send)

@@ -233,6 +233,25 @@ Các giới hạn này chỉ xác nhận luồng synthetic trong môi trường 
 
 Chạy kiểm chứng synthetic offline bằng `bash Backend/scripts/verify_offline_readiness.sh`. Test tạo app với fixture adapter và fake storage; không cần bật flag trong shell, gọi provider thật, Firestore hoặc emulator. Public live chỉ được xem xét sau khi có phê duyệt riêng và xác minh distributed rate/concurrency/idempotency, durable quota/cost budgets, bot/abuse controls, monitoring và provider approvals.
 
+### D6.1B: guarded local LIVE HTTP runtime (offline implementation)
+
+`app.main.create_local_live_app` exposes the existing bounded D6 facade through `GET /api/v1/capabilities`, `POST /api/v1/fetches`, and `GET /api/v1/fetches/{fetch_id}`. It requires `enabled=True`, a caller-supplied async composition factory, local environment settings, live run mode, and one worker. It wraps the existing FastAPI application with `LocalLiveGuard`; only loopback HTTP peers, local Host values, same-origin requests, and those API routes are accepted. Fetch JSON remains `{}` and the server creates the internal fetch ID. Replayed idempotency keys return the actual job status without scheduling another terminal job.
+
+Construct it in an operator-owned Python entry point after explicitly supplying credential, approval, checkpoint-retention, and processing-grant providers to `local_live_composition`. The app factory does not read `.env`, discover credentials, or grant provider permissions. Bind only `127.0.0.1`, use one Uvicorn worker, and do not expose the port through a tunnel or reverse proxy. For example, after defining an explicit `compose_for_this_machine()` context factory:
+
+```python
+from app.main import create_local_live_app, run_local_live
+
+app = create_local_live_app(
+    enabled=True,
+    workers=1,
+    composition_factory=compose_for_this_machine,
+)
+run_local_live(app, port=8001)
+```
+
+App construction and startup do not run a Fetch. A user POST can trigger the existing source handlers, and only a backend-owned source approval can make a source available. A missing processing grant yields no derived candidates. `LocalLiveGuard` is not authentication against other local processes. The composition still uses the one-job/attempt limits and shared SerpApi pool; do not delete or reset its SQLite ledger to regain allowance. Source checkpoints are volatile and logically TTL-bounded, but physical erasure from SQLite WAL, swap, crash dumps, backups, or logs is not guaranteed. Vercel and the normal `create_app()` path remain outside this live composition. The runtime is not provider-live verified; all D6.1B validation must use fixture handlers or mock transports.
+
 ## D3B — YouTube search adapter ngoại tuyến
 
 `app/sources/youtube/` triển khai adapter query-based riêng cho YouTube Data API v3 `search.list`; không ép video search resource vào `PageObservation`/Wikimedia scoring. Adapter dùng fixed endpoint và allowlist tham số từ plan server-side `demo-us-en` v1, deduplicate theo provider/video ID nhưng giữ từng query evidence, và chỉ tạo descriptor `result_rank` (vị trí trong query response), không tạo views, trend score hay demand score.

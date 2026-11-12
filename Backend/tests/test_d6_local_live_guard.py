@@ -10,7 +10,7 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
     async def request(self, *, peer="127.0.0.1", url="http://localhost/", headers=None):
         app = FastAPI()
 
-        @app.get("/")
+        @app.get("/api/v1/capabilities")
         async def index():
             return {"ok": True}
 
@@ -19,7 +19,10 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
             return await client.get(url, headers=headers)
 
     async def test_loopback_and_same_origin_allowed(self):
-        response = await self.request(headers={"Origin": "http://localhost"})
+        response = await self.request(
+            url="http://localhost/api/v1/capabilities",
+            headers={"Origin": "http://localhost"},
+        )
         self.assertEqual(response.status_code, 200)
 
     async def test_remote_peer_host_proxy_and_cross_origin_rejected(self):

@@ -6,22 +6,23 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 
 | Gate | Trạng thái | Bằng chứng và giới hạn |
 | --- | --- | --- |
-| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` gần nhất gồm 634 unittest, Golden hai hash seed và browser E2E; không chứng minh provider live. |
+| OFFLINE regression (historical) | PASS, not rerun in D6.1B | Bản ghi trước đó gồm 634 unittest, Golden hai hash seed và browser E2E; không phải bằng chứng cho checkout/toolchain hiện tại hoặc provider live. |
 | Cấu hình credentials | PRESENT | Hai key hiện diện trong `.env` local được Git bỏ qua và có quyền 600; hiện diện không chứng minh key hợp lệ hoặc quyền/quota. Không ghi giá trị. |
-| LIVE_CONFIGURED | BLOCKED | Gateway và dashboard Fetch live chưa được nối thành runtime local được kiểm thử. |
+| D6.1B local HTTP implementation | IMPLEMENTED, verification pending | `create_local_live_app` nối facade D6.1 qua `LocalLiveGuard`; kiểm thử HTTP offline mới được thêm nhưng môi trường hiện tại thiếu dependency và không có Python 3.12. Không gọi provider. |
+| LIVE_CONFIGURED | BLOCKED | Local HTTP wiring đã có; chưa xác minh provider thật, chính sách sử dụng, credentials/quota thực tế hoặc giao diện dashboard live. |
 | LIVE_SMOKE_VERIFIED | BLOCKED | Chủ dự án đã phê duyệt tối đa bốn request, không retry/phân trang, ngân sách phát sinh 0 đồng và xác nhận quota SerpApi; runtime chưa sẵn sàng và yêu cầu sau đó cấm gọi YouTube live hoặc dùng key thật. Chưa gửi request tới provider. |
 | LIVE_DEMO_ACCEPTED | BLOCKED | Chưa có bằng chứng live bốn nguồn. |
 | Company production multi-host | BLOCKED, track riêng | Không phải điều kiện chạy demo local. |
 
 Các adapter và gateway D5 đã có, song Public Fetch, response provenance và discovery hiện chủ ý khóa synthetic. D6 cần tích hợp local có kiểm soát và xác minh chính sách trước khi bật live; không thay đổi Vercel read-only. Discovery hỗ trợ đầu vào live có grant backend theo nguồn và giữ nguồn gốc mixed; không tự cấp grant. Thiếu quyền trích xuất thì loại record khỏi discovery; thiếu quyền metric thì giữ `INSUFFICIENT_EVIDENCE`.
 
-Đã chuẩn bị `LocalLiveGuard` và test chặn peer/Host ngoài loopback, proxy headers và cross-origin; guard chưa được gắn vào live app. Đây không phải xác thực và không chặn local direct clients; bắt buộc có quota/cooldown, giới hạn đồng thời và phê duyệt riêng trước khi kết nối provider.
+`LocalLiveGuard` hiện bọc riêng `create_local_live_app`; từ chối peer không loopback, Host không tin cậy, proxy headers, cross-origin, HTTPS, route và method ngoài allowlist. Đây không phải xác thực và không chặn local direct clients. Factory yêu cầu opt-in, local profile, facade LIVE hợp lệ và một worker; ứng dụng `create_app()` mặc định và Vercel không nhận được đường live này. HTTP integration hiện có test fixtures, chưa có provider live evidence.
 
 Đã chuẩn bị policy smoke mặc định tắt với một lượt Wikimedia, hai lượt chung SerpApi, một lượt YouTube theo ngày/tháng, một job mỗi 24 giờ và mỗi pool tối đa một attempt đồng thời. `LocalSmokeStore` giới hạn một reservation cho từng nguồn trong ledger, giữ bộ đếm qua khởi tạo lại và không cho Google dùng lượt của Bing; test dùng SQLite local. Cost units nội bộ chỉ đếm attempt, không phải tiền hoặc quota còn lại của provider. Policy và wrapper chưa được gắn vào runtime; ledger thật còn cần được bố trí tại đường dẫn owner-only bền vững trước smoke.
 
 SQLite có factory riêng cho dữ liệu live local, yêu cầu thư mục owner-only và từ chối Vercel; factory không bật API. Cần thiết kế và kiểm chứng xóa dữ liệu, kể cả WAL sau crash, trước khi lưu dữ liệu provider thật. Ledger quota cần tồn tại qua restart; không coi xóa ledger là cách cấp thêm ngân sách.
 
-`LocalVolatileCheckpoints` giữ checkpoint nguồn ở bộ nhớ tiến trình, còn quota receipt lưu trong SQLite; lock ngăn hai tiến trình cùng dùng lớp này và dữ liệu checkpoint mất khi restart. Facade live giờ yêu cầu lớp này thay vì nhận SQLite trực tiếp, và gateway chấp nhận lớp bọc tương ứng. Kiểm thử offline kiểm tra facade từ chối SQLite trực tiếp và dữ liệu fixture không được ghi vào file ledger. Facade vẫn chưa được nối vào live runtime; kiểm thử không chứng minh xử lý crash, swap, core dump hoặc retention của dữ liệu provider thật.
+`LocalVolatileCheckpoints` giữ checkpoint nguồn ở bộ nhớ tiến trình, còn quota receipt lưu trong SQLite; lock ngăn hai tiến trình cùng dùng lớp này và dữ liệu checkpoint mất khi restart. Facade live yêu cầu lớp này thay vì nhận SQLite trực tiếp, và gateway chấp nhận lớp bọc tương ứng. Kiểm thử offline kiểm tra facade từ chối SQLite trực tiếp và dữ liệu fixture không được ghi vào file ledger. HTTP factory dùng lại facade này; kiểm thử không chứng minh xử lý crash, swap, core dump hoặc retention của dữ liệu provider thật.
 
 Kiểm thử ghép offline `test_d6_offline_worker_composition` chạy worker với bốn gateway `MockTransport`, quota smoke, checkpoint tạm và query plan cố định: mỗi nguồn có một request fixture, duplicate cùng job, và nội dung fixture kiểm tra không xuất hiện trong ledger. Các kết quả được gắn `SYNTHETIC`; đây không phải bằng chứng live hoặc bằng chứng chính sách provider đã được chấp thuận.
 
@@ -33,7 +34,7 @@ Dashboard đã chuẩn bị để nhận `LIVE`/`MIXED` chỉ khi capability xá
 
 Fetch facade hỗ trợ contract live local chỉ khi dùng policy smoke và ledger local tương ứng; live result chỉ trả tóm tắt từng nguồn, không trả records thô. Discovery vẫn cần processing grant theo nguồn. Đây mới là kiểm thử contract với dữ liệu giả lập, chưa nối vào API/dashboard hay gọi nguồn thật.
 
-API capability và response tiếp nhận Fetch lấy data mode từ facade được cấu hình, thay vì luôn gắn `SYNTHETIC`; chế độ live vẫn bị chặn ở application factory. Khi checkpoint không còn, status không suy ra `LIVE` chỉ từ retention grant. Kiểm thử offline xác nhận đường synthetic và trường hợp kết quả volatile bị mất; chưa có bằng chứng HTTP live.
+API capability và response tiếp nhận Fetch lấy data mode từ facade được cấu hình, thay vì luôn gắn `SYNTHETIC`. Factory thường tiếp tục chặn live; factory local riêng chỉ mở đường LIVE sau opt-in và composition context rõ ràng. Khi checkpoint không còn, status không suy ra `LIVE` chỉ từ retention grant. Bộ test HTTP fixture mới bao phủ capabilities, Fetch/replay, status, redaction, guard, startup không chạy handler và cleanup; chưa thực thi được do thiếu `httpx` và Python 3.12 trong môi trường hiện tại.
 
 Khi gửi lại idempotency key, admission trả trạng thái job thực tế trong cùng transaction; API không khởi động lại background worker cho job đã kết thúc. Kiểm thử API synthetic xác nhận replay sau khi hoàn tất báo cùng trạng thái với endpoint status. Điều này không thay thế kiểm thử live hoặc supervisor sau crash.
 
@@ -62,6 +63,24 @@ Tài liệu chính thức đối chiếu 12/11/2026; mức quota thực tế và
 
 Chủ dự án đã phê duyệt smoke tối đa **một request mỗi nguồn**, bốn request tổng, không retry/pagination; tối đa hai search SerpApi và một YouTube `search.list`, ngân sách phát sinh 0 đồng, và xác nhận quota SerpApi không tính phí vượt gói. Phê duyệt này không xác nhận quyền xử lý YouTube, không mở rộng sang pagination và không vượt qua yêu cầu sau đó của chủ dự án cấm gọi YouTube live hoặc dùng API key thật. Smoke chưa chạy; cần runtime và quyền provider phù hợp trước khi thực hiện các phần được phép.
 
-## Việc còn lại
+## D6.1B local HTTP runtime — implementation and acceptance (12/11/2026)
 
-Xây dựng và kiểm thử runtime local giới hạn peer/host/origin, khóa ngân sách bền vững trên máy, grant ngắn hạn theo nguồn, retention và redaction; bảo toàn disabled trên Vercel. Kiểm tra hiển thị `LIVE`/`CACHED`/`SYNTHETIC`, freshness và lỗi từng nguồn. Xác nhận quyền sử dụng YouTube cho cách xử lý dự kiến. Khi các điều kiện và chỉ dẫn hiện hành cho phép, xác minh từng nguồn độc lập, tích hợp dashboard và chạy full regression. Không thay mock bằng bằng chứng live.
+`create_local_live_app(enabled=True, composition_factory=...)` is a separate opt-in path in `app.main`. It requires local settings, live run mode, no cloud project/read-only/public-fetch flag, one worker, and a context factory that yields the existing `DistributedPublicFetch` local-live facade. It does not default credentials or permissions, and app construction/startup does not execute handlers. `run_local_live()` binds `127.0.0.1`, one Uvicorn process, and disables proxy-header trust. The ASGI guard permits only capabilities, Fetch submission, Fetch status, and health routes over loopback HTTP with local Host and no forwarded or cross-origin context.
+
+| Gate | Current result | Evidence / limitation |
+| --- | --- | --- |
+| G1 Git baseline | PASS | `origin/main` fetched; clean local tree at `2485281497813e1d82106ebc0b716c22d72572b1`; no divergence. |
+| G2 HTTP integration | IMPLEMENTED, pending execution | Focused fixture test added for capabilities, POST/status/replay, startup with zero handler calls, source isolation, redaction, and context cleanup. Python test import is blocked by missing `httpx`. |
+| G3 Security | IMPLEMENTED, pending execution | Factory/ASGI checks cover opt-in, local-only profile, Vercel, one-worker configuration, loopback peer, Host, proxy/origin/scheme and allowed methods/routes. HTTP cases are written but not run. |
+| G4 Quota and idempotency | PARTIAL | Existing D6 code keeps admission/quota receipts in the SQLite ledger and volatile checkpoints in process memory. New HTTP replay case and relevant regressions could not run here. |
+| G5 Provenance and data | PARTIAL | Existing facade keeps LIVE/source status and removes raw records from LIVE HTTP results; processing grants are still caller-supplied. New HTTP redaction and isolated-source cases could not run here. |
+| G6 Regression | BLOCKED BY LOCAL TOOLCHAIN | Host has Python 3.14.5 and no installed project packages; repository requires Python 3.12. The focused test failed at `import httpx`. `Backend/.venv` is absent, so `verify_offline_readiness.sh`, golden, browser E2E and `pip check` were not run. Python syntax compilation and `git diff --check` passed. |
+| G7 Handoff | IN PROGRESS | Startup/limitations and this report are documented. Local commit remains to be made after review. No push/deploy/provider request. |
+
+The HTTP runtime reuses the existing fixed query plan, one-job policy, shared SerpApi attempt pool, source approvals, checkpoint grants, volatile checkpoint store, and SQLite ledger. Terminal idempotent replays do not schedule another worker; status reads do not invoke source handlers. Missing source approval remains unavailable and missing processing grants do not create derived candidates. These behaviors are specified in the implementation, but current execution evidence is pending because the required Python runtime and dependencies are unavailable.
+
+Retention remains logical and bounded: source checkpoints are process memory and disappear on restart; SQLite persists quota/attempt receipts and must not be reset to regain request allowance. This goal does not prove physical erasure from SQLite WAL files, filesystem backups, swap, crash dumps, logs, or other copies. Loopback is not caller authentication against local processes. The runtime is personal/local only, not a public endpoint or production coordination system.
+
+### Remaining blockers and next goal
+
+Before treating D6.1B as accepted, run the new focused tests and the required offline regression with the repository's Python 3.12 environment. No provider request was made in this goal. D6.2 remains separately gated on source-specific operator permission, data processing/retention approval, credential/quota verification, and an explicit future instruction authorizing that source's live verification. The recommended next action is to establish the Python 3.12 offline environment and review this local commit; do not start D6.2 automatically.

@@ -27,6 +27,7 @@ class DistributedPublicFetch:
         self.worker = worker
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
+        self.local_live = local_live
         self.journal = SourceCheckpointJournal(admission)
         declared_modes = set(worker.source_modes.values())
         if local_live:

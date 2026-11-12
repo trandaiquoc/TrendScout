@@ -17,6 +17,7 @@ from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
 from app.composition import build_run_service, read_only_storage
+from app.local_live_guard import LocalLiveGuard
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.orchestration.public_fetch import (
     FETCH_TTL_SECONDS,
@@ -50,6 +51,8 @@ def create_app(
     settings: Settings | None = None,
     synthetic_supplement=None,
     distributed_public_fetch: DistributedPublicFetch | None = None,
+    local_live_opt_in: bool = False,
+    local_live_context_factory=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -66,15 +69,50 @@ def create_app(
         adapter_factory=adapter_factory,
         distributed_public_fetch=distributed_public_fetch,
     )
+    if local_live_opt_in:
+        if (type(local_live_opt_in) is not bool
+                or not callable(local_live_context_factory)
+                or settings.environment_profile != "local"
+                or run_mode != "live"
+                or settings.read_only
+                or settings.google_cloud_project or settings.public_fetch_enabled
+                or os.environ.get("VERCEL")):
+            raise ValueError(
+                "guarded local LIVE runtime requires explicit local-only configuration"
+            )
+        for variable in ("WEB_CONCURRENCY", "UVICORN_WORKERS", "GUNICORN_WORKERS"):
+            raw = os.environ.get(variable)
+            if raw is not None:
+                try:
+                    workers = int(raw)
+                except ValueError:
+                    raise ValueError("guarded local LIVE runtime requires one worker") from None
+                if workers != 1:
+                    raise ValueError("guarded local LIVE runtime requires one worker")
+        public_fetch_enabled, public_fetch_block_reason = True, None
+    elif local_live_context_factory is not None:
+        raise ValueError("local live context requires explicit opt-in")
     if distributed_public_fetch is not None:
-        expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
+        expected_sources = {
+            WIKIMEDIA_SOURCE_ID,
+            GOOGLE_SOURCE_ID,
+            BING_SOURCE_ID,
+            YOUTUBE_SOURCE_ID,
+        }
         if (not isinstance(distributed_public_fetch, DistributedPublicFetch)
                 or settings.environment_profile not in {"local", "test"}
-                or run_mode != "synthetic" or read_only
-                or not settings.public_fetch_enabled
-                or distributed_public_fetch.data_mode != "SYNTHETIC"
-                or set(distributed_public_fetch.admission.policy.enabled_sources) != expected_sources):
-            raise ValueError("distributed public Fetch injection is restricted to enabled local/test synthetic mode")
+                or read_only
+                or (local_live_opt_in and (run_mode != "live"
+                    or distributed_public_fetch.data_mode != "LIVE"
+                    or not getattr(distributed_public_fetch, "local_live", False)))
+                or (not local_live_opt_in and (run_mode != "synthetic"
+                    or not settings.public_fetch_enabled
+                    or distributed_public_fetch.data_mode != "SYNTHETIC"))
+                or set(distributed_public_fetch.admission.policy.enabled_sources)
+                != expected_sources):
+            raise ValueError(
+                "distributed Fetch injection is restricted to an approved runtime composition"
+            )
     if synthetic_supplement is not None and not (
         public_fetch_enabled and run_mode == "synthetic"
         and getattr(synthetic_supplement, "__trendscout_offline_only__", False)
@@ -87,6 +125,20 @@ def create_app(
         app.state.run_service = None
         runtime_guard = None
         try:
+            if local_live_opt_in:
+                async with local_live_context_factory() as local_live_fetch:
+                    _validate_local_live_facade(local_live_fetch)
+                    app.state.distributed_public_fetch = local_live_fetch
+                    app.state.public_fetch_source_ids = tuple(sorted(
+                        local_live_fetch.admission.policy.enabled_sources
+                    ))
+                    try:
+                        yield
+                    finally:
+                        app.state.distributed_public_fetch = None
+                        app.state.public_fetch_enabled = False
+                        app.state.public_fetch_block_reason = "LOCAL_RUNTIME_STOPPED"
+                return
             if read_only:
                 yield
                 return
@@ -253,7 +305,41 @@ def create_app(
     async def storage_error(_request: Request, _exc: StorageError):
         return JSONResponse(status_code=503, content={"detail": "Storage operation failed"})
 
+    return LocalLiveGuard(application) if local_live_opt_in else application
+
+
+def create_local_live_app(*, enabled=False, workers=1, composition_factory=None, settings=None):
+    """Create an explicitly opted-in, loopback-guarded local LIVE HTTP app.
+
+    The caller supplies a context factory that yields the existing D6 local
+    facade. Credentials and grants are never discovered by this factory.
+    """
+    if enabled is not True or type(workers) is not int or workers != 1 \
+            or not callable(composition_factory):
+        raise ValueError("explicit opt-in and a local live composition are required")
+    settings = settings or Settings.from_environment()
+    application = create_app(
+        settings=settings,
+        local_live_opt_in=True,
+        local_live_context_factory=composition_factory,
+    )
     return application
+
+
+def run_local_live(application, *, port=8001):
+    """Serve a guarded local app on loopback with one process and no proxy trust."""
+    if type(application) is not LocalLiveGuard or type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("guarded local app and valid port are required")
+    import uvicorn
+
+    uvicorn.run(application, host="127.0.0.1", port=port, workers=1, proxy_headers=False)
+
+
+def _validate_local_live_facade(facade):
+    if (not isinstance(facade, DistributedPublicFetch)
+            or facade.data_mode != "LIVE"
+            or not getattr(facade, "local_live", False)):
+        raise ValueError("local composition did not provide a guarded LIVE facade")
 
 
 def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory,

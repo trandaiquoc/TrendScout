@@ -64,6 +64,12 @@ def validate_public_request_origin(request: Request, profile: str) -> None:
             "x-forwarded-proto",
             "x-forwarded-port",
             "x-forwarded-for",
+            "x-forwarded-prefix",
+            "x-forwarded-ssl",
+            "x-real-ip",
+            "x-original-host",
+            "x-original-url",
+            "via",
         )
     ):
         raise HTTPException(403, {"code": "UNTRUSTED_PROXY_HEADERS"})
