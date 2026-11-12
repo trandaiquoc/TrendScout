@@ -140,6 +140,18 @@ class PublicAdmission:
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
         return self._pools[SOURCE_POOLS[source_id]].attempt_timeout_seconds
 
+    def transact_owned(self, job_id: str, owner: str, fence: int, *, now: datetime, operation):
+        """Run an internal pure mutation only while the current job lease is held."""
+        now = _utc(now)
+        if not callable(operation):
+            raise ValueError("checkpoint operation required")
+        def op(state):
+            self._guard_clock(state, now)
+            job = state["jobs"].get(job_id)
+            self._require_lease(job, owner, fence, now)
+            return operation(job)
+        return self._transaction(op)
+
     @staticmethod
     def _guard_clock(state, now):
         previous = state.get("last_observed_at")
