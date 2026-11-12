@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from app.jobs.public_admission import SOURCE_POOLS, AdmissionDenied, PublicAdmission
+from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class GuardedAttemptRunner:
                   request: Callable[[], Awaitable[Any]]) -> AttemptOutcome:
         if source_id not in self.admission.policy.enabled_sources or not callable(request):
             raise ValueError("server-approved source and request factory required")
-        maximum = self.admission._pools[SOURCE_POOLS[source_id]].attempt_timeout_seconds
+        maximum = self.admission.max_attempt_seconds(source_id)
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 0 < timeout_seconds <= maximum):
             raise ValueError("request timeout must fit the reserved in-flight slot")

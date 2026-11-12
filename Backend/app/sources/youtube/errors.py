@@ -60,6 +60,7 @@ class YouTubeSourceError(Exception):
         attempt_count: int = 0,
         retry_after_seconds: float | None = None,
         retry_after_exceeds_limit: bool = False,
+        retry_after_unbounded_seconds: float | None = None,
         source_id: str = "youtube_video_search",
         provider_id: str = "youtube_data_api_v3",
         query_scope: str | None = None,
@@ -73,6 +74,7 @@ class YouTubeSourceError(Exception):
         self.attempt_count = attempt_count
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_exceeds_limit = retry_after_exceeds_limit
+        self.retry_after_unbounded_seconds = retry_after_unbounded_seconds
         self.source_id = source_id
         self.provider_id = provider_id
         self.query_scope = query_scope

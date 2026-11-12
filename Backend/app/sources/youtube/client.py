@@ -184,6 +184,11 @@ class YouTubeSearchClient:
         except httpx.RequestError:
             raise
 
+        return self.parse_response(response, context=context, max_results=max_results)
+
+    def parse_response(self, response: httpx.Response, *, context: QueryContext,
+                       max_results: int) -> ProviderPage:
+        """Parse a bounded search response without performing I/O."""
         status = response.status_code
         if 300 <= status < 400:
             raise YouTubeSourceError(
@@ -272,20 +277,26 @@ class YouTubeSearchClient:
 
         retry_after_seconds = None
         retry_after_exceeds_limit = False
+        retry_after_unbounded_seconds = None
         retry_after_header = response.headers.get("Retry-After")
         if retry_after_header:
+            retry_now = self.utcnow().astimezone(timezone.utc)
             retry_after_seconds = self.http_policy.retry_delay(
                 retry_after_header,
                 0,
-                self.utcnow().astimezone(timezone.utc),
+                retry_now,
             )
             retry_after_exceeds_limit = retry_after_seconds is None
+            retry_after_unbounded_seconds = self.http_policy.parse_retry_after(
+                retry_after_header, 0, retry_now
+            )
         return YouTubeSourceError(
             code,
             http_status=status,
             retryable=retryable,
             retry_after_seconds=retry_after_seconds,
             retry_after_exceeds_limit=retry_after_exceeds_limit,
+            retry_after_unbounded_seconds=retry_after_unbounded_seconds,
             query_scope=context.taxonomy_scope_label,
         )
 

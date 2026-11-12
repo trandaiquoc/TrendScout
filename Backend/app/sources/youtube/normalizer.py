@@ -26,7 +26,10 @@ def normalize_items(
     page_index: int,
     rank_offset: int,
     provider_response_status: int,
+    data_mode: str = "SYNTHETIC",
 ) -> tuple[tuple[YouTubeSearchRecord, ...], tuple[str, ...]]:
+    if data_mode not in {"SYNTHETIC", "LIVE"}:
+        raise ValueError("Invalid source data mode")
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         raise ValueError("Fetch timestamp must be timezone-aware")
     fetched_utc = fetched_at.astimezone(timezone.utc)
@@ -40,6 +43,7 @@ def normalize_items(
             page_index=page_index,
             result_rank=rank_offset + item_index + 1,
             provider_response_status=provider_response_status,
+            data_mode=data_mode,
         )
         if record is None:
             rejection_reasons.append(rejection_reason or "INVALID_PROVIDER_ITEM")
@@ -56,6 +60,7 @@ def _normalize_item(
     page_index: int,
     result_rank: int,
     provider_response_status: int,
+    data_mode: str,
 ) -> tuple[YouTubeSearchRecord | None, str | None]:
     if not isinstance(item, dict) or item.get("kind") != "youtube#searchResult":
         return None, "INVALID_SEARCH_RESULT_SHAPE"
@@ -69,7 +74,9 @@ def _normalize_item(
     if not isinstance(snippet, dict):
         return None, "INVALID_SNIPPET"
 
-    flags = ["SYNTHETIC_OFFLINE_EVIDENCE", "QUERY_SEARCH_RESULT"]
+    flags = ["QUERY_SEARCH_RESULT"]
+    if data_mode == "SYNTHETIC":
+        flags.insert(0, "SYNTHETIC_OFFLINE_EVIDENCE")
     try:
         title = _optional_text(snippet.get("title"), _MAX_TITLE_LENGTH)
         description = _optional_text(snippet.get("description"), _MAX_DESCRIPTION_LENGTH)
@@ -129,7 +136,7 @@ def _normalize_item(
     return YouTubeSearchRecord(
         source_id=context.source_id,
         provider_id=context.provider_id,
-        data_mode="SYNTHETIC",
+        data_mode=data_mode,
         record_schema_version=1,
         provider_video_id=video_id,
         canonical_video_url=f"https://www.youtube.com/watch?v={video_id}",

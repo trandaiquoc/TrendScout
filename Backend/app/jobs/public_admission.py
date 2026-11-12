@@ -135,6 +135,11 @@ class PublicAdmission:
             return state, fn(state)
         return self.store.transact(self.state_key, mutate)
 
+    def max_attempt_seconds(self, source_id: str) -> int:
+        if source_id not in self.policy.enabled_sources:
+            raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
+        return self._pools[SOURCE_POOLS[source_id]].attempt_timeout_seconds
+
     @staticmethod
     def _guard_clock(state, now):
         previous = state.get("last_observed_at")

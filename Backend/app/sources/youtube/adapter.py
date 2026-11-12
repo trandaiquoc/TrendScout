@@ -399,6 +399,7 @@ class YouTubeSearchAdapter:
             attempt_count=attempt,
             retry_after_seconds=error.retry_after_seconds,
             retry_after_exceeds_limit=error.retry_after_exceeds_limit,
+            retry_after_unbounded_seconds=error.retry_after_unbounded_seconds,
             source_id=error.source_id,
             provider_id=error.provider_id,
             query_scope=error.query_scope,
@@ -484,6 +485,10 @@ class YouTubeSearchAdapter:
     ) -> YouTubeSearchRecord:
         if existing is None:
             return incoming
+        if (existing.source_id, existing.provider_id, existing.provider_video_id, existing.data_mode) != (
+            incoming.source_id, incoming.provider_id, incoming.provider_video_id, incoming.data_mode
+        ):
+            raise ValueError("Cannot merge unrelated or differently sourced records")
         return replace(
             existing,
             query_evidence=existing.query_evidence + incoming.query_evidence,

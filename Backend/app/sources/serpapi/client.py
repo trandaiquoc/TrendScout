@@ -40,7 +40,8 @@ class SerpApiClient:
     """One attempt per call; caller owns bounded retries and deadline."""
 
     def __init__(self, client: httpx.AsyncClient, resolver: CredentialProvider | None,
-                 pool: SharedQuotaPool, policy: HttpPolicy | None = None):
+                 pool: SharedQuotaPool, policy: HttpPolicy | None = None,
+                 *, utcnow=lambda: datetime.now(timezone.utc)):
         if (not isinstance(client, httpx.AsyncClient)
                 or not isinstance(getattr(client, "_transport", None), httpx.MockTransport)):
             raise ValueError("D4 refuses live HTTP transports")
@@ -52,6 +53,7 @@ class SerpApiClient:
         self.resolver = resolver
         self.pool = pool
         self.policy = policy or HttpPolicy()
+        self.utcnow = utcnow
 
     def _credential(self, reference: str | None) -> str:
         try:
@@ -85,6 +87,11 @@ class SerpApiClient:
             raise SerpApiError("UPSTREAM_TIMEOUT", retryable=True) from None
         except httpx.RequestError:
             raise SerpApiError("NETWORK_ERROR", retryable=True) from None
+        return self.parse_response(response, context=context, cursor=cursor, sensitive_key=key)
+
+    def parse_response(self, response: httpx.Response, *, context: QueryContext,
+                       cursor: ScopedOffset, sensitive_key: str) -> ProviderPage:
+        """Parse a bounded response without performing I/O or retaining request URLs."""
         status = response.status_code
         try:
             payload = json.loads(response.content.decode("utf-8", errors="strict"))
@@ -112,7 +119,7 @@ class SerpApiClient:
             raise SerpApiError("PROVIDER_RESULT_LIMIT", status=status)
         if items and payload.get("error") is not None:
             raise SerpApiError("PROVIDER_ERROR", status=status)
-        if key in unquote(json.dumps(items, ensure_ascii=False)):
+        if sensitive_key in unquote(json.dumps(items, ensure_ascii=False)):
             raise SerpApiError("MALFORMED_RESPONSE", status=status)
         pagination = payload.get("serpapi_pagination")
         if pagination is not None and not isinstance(pagination, dict):
@@ -143,10 +150,13 @@ class SerpApiClient:
             raise SerpApiError("QUOTA_EXHAUSTED", status=status)
         if status == 429:
             raw = response.headers.get("Retry-After")
-            delay = self.policy.retry_delay(raw, 0, datetime.now(timezone.utc)) if raw else None
+            now = self.utcnow()
+            delay = self.policy.retry_delay(raw, 0, now) if raw else None
+            original_delay = self.policy.parse_retry_after(raw, 0, now) if raw else None
             # A Retry-After longer than the configured cap must never be shortened.
             retryable = not raw or delay is not None
-            raise SerpApiError("RATE_LIMITED", status=status, retryable=retryable, retry_after=delay)
+            raise SerpApiError("RATE_LIMITED", status=status, retryable=retryable,
+                               retry_after=delay, retry_after_unbounded_seconds=original_delay)
         code = {400: "INVALID_QUERY", 401: "UNAUTHORIZED", 403: "PERMISSION_DENIED",
                 408: "UPSTREAM_TIMEOUT", 504: "UPSTREAM_TIMEOUT"}.get(
             status, "TRANSIENT_UPSTREAM_ERROR" if status >= 500 else "PROVIDER_ERROR"

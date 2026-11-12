@@ -46,8 +46,10 @@ def _text(value: object, limit: int) -> str | None:
 
 def normalize_items(context: QueryContext, items: tuple[object, ...], *, fetched_at: datetime,
                     page: int, offset: int, http_status: int, cache_state: str,
-                    provider_created_at: datetime | None
+                    provider_created_at: datetime | None, data_mode: str = "SYNTHETIC"
                     ) -> tuple[tuple[SearchRecord, ...], tuple[str, ...]]:
+    if data_mode not in {"SYNTHETIC", "LIVE"}:
+        raise ValueError("Invalid source data mode")
     if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
         raise ValueError("Fetch time must be timezone-aware")
     fetched_at = fetched_at.astimezone(timezone.utc)
@@ -71,7 +73,9 @@ def normalize_items(context: QueryContext, items: tuple[object, ...], *, fetched
             continue
         evidence = QueryEvidence(context, fetched_at, page, offset, position, http_status,
                                  cache_state, provider_created_at)
-        flags = ["SYNTHETIC_OFFLINE_EVIDENCE", "QUERY_SCOPED_POSITION_NOT_SEARCH_VOLUME"]
+        flags = ["QUERY_SCOPED_POSITION_NOT_SEARCH_VOLUME"]
+        if data_mode == "SYNTHETIC":
+            flags.insert(0, "SYNTHETIC_OFFLINE_EVIDENCE")
         if future_provider_time:
             flags.append("PROVIDER_CREATION_TIME_IN_FUTURE")
         if provider_created_at is None:
@@ -83,14 +87,15 @@ def normalize_items(context: QueryContext, items: tuple[object, ...], *, fetched
         if snippet is None:
             flags.append("MISSING_SNIPPET")
         records.append(SearchRecord(context.source_id, context.provider_id, url, title, snippet,
-                                    fetched_at, (evidence,), tuple(flags)))
+                                    fetched_at, (evidence,), tuple(flags), data_mode=data_mode))
     return tuple(records), tuple(rejected)
 
 
 def merge_record(existing: SearchRecord | None, incoming: SearchRecord) -> SearchRecord:
     if existing is None:
         return incoming
-    if (existing.source_id, existing.canonical_url) != (incoming.source_id, incoming.canonical_url):
+    if (existing.source_id, existing.canonical_url, existing.data_mode) != (
+            incoming.source_id, incoming.canonical_url, incoming.data_mode):
         raise ValueError("Cannot merge unrelated records")
     return replace(existing, evidence=existing.evidence + incoming.evidence,
                    quality_flags=tuple(dict.fromkeys((*existing.quality_flags, "DUPLICATE_URL"))))
