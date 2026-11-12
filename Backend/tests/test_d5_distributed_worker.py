@@ -371,7 +371,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             def handle(request):
                 request_counts[source] += 1
                 return httpx.Response(200, json={
-                    "search_metadata": {"status": "Success"},
+                    "search_metadata": {"status": "Cached" if source == GOOGLE_SOURCE_ID else "Success"},
                     "organic_results": [{"position": 1, "link": "https://example.org/fixture",
                                          "title": "synthetic fixture result"}],
                 })
@@ -422,6 +422,8 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         for source_result in result["sources"].values():
             self.assertEqual(source_result["data_mode"], "SYNTHETIC")
             self.assertGreater(source_result["record_count"], 0)
+        self.assertEqual(result["sources"][GOOGLE_SOURCE_ID]["delivery_state"], "CACHED")
+        self.assertEqual(result["sources"][BING_SOURCE_ID]["delivery_state"], "FRESH")
         self.assertNotIn("raw_record", repr(result))
         first_request_counts = dict(request_counts)
 

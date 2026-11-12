@@ -153,6 +153,13 @@ class D5SourceHandlers:
             if should_defer and result.attempted_calls == 0:
                 return {"status": "DEFERRED", "retry_at": max(retry_times)}
             records, omitted = _bounded_records([_jsonable(record) for record in result.records])
+            # SerpApi may return a cached provider response even on a network call.
+            # Preserve that fact at the source level and keep per-query evidence.
+            cached = any(
+                evidence.get("cache_state") == "CACHED"
+                for record in records for evidence in record.get("evidence", [])
+                if isinstance(evidence, dict)
+            )
             query_results = [{
                 "query_fingerprint": row.query_fingerprint,
                 "pages": row.pages,
@@ -167,6 +174,7 @@ class D5SourceHandlers:
                 "data_mode": result.data_mode or collector.gateway.data_mode,
                 "records": records,
                 "record_count": len(records),
+                "delivery_state": "CACHED" if cached else "FRESH",
                 **({"error_code": "RATE_LIMITED"} if should_defer else {}),
                 "coverage": {"attempted_calls": result.attempted_calls,
                              "complete": result.complete,

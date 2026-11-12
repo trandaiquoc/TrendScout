@@ -216,6 +216,11 @@ class LivePageGateway:
                 if not isinstance(context, SerpContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
                 params = build_request_params(context, cursor)
+                if not self._offline:
+                    # Provider status "Success" does not prove a cache miss.
+                    # Force a new search for live verification and charge it in
+                    # the same guarded budget as every other physical attempt.
+                    params["no_cache"] = "true"
             else:
                 if not isinstance(context, YouTubeContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")

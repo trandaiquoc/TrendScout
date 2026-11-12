@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import replace
 from datetime import date, datetime, time, timezone
 
 from app.discovery.assessment import assess_candidate
-from app.discovery.contracts import Observation
+from app.discovery.contracts import Observation, ProcessingGrant
 from app.discovery.extraction import extract_candidates
 from app.discovery.prioritization import prioritize_for_research
 from app.sources.catalog import (
@@ -73,7 +74,8 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
     capability = source_capability(source_id)
     mode = source_result.get("data_mode")
     delivery = source_result.get("delivery_state", "FRESH")
-    if mode != "SYNTHETIC" or delivery not in {"FRESH", "CACHED"}:
+    if (mode not in {"SYNTHETIC", "LIVE"} or delivery not in {"FRESH", "CACHED"}
+            or record.get("data_mode", mode) != mode):
         return ()
     fetched = _timestamp(record.get("fetched_at"))
     query_evidence = _query_values(source_id, record)
@@ -142,7 +144,7 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         text=phrase,
         observed_at=observed, fetched_at=fetched, scope=scope,
         query_evidence=query_evidence, market_evidence=market,
-        data_mode="SYNTHETIC", parser_version=version,
+        data_mode=mode, parser_version=version,
         source_url=url, delivery_mode=delivery,
     )
     if not query_evidence:
@@ -153,7 +155,8 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
     )
 
 
-def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict:
+def discover_fetch_results(source_results: list[dict], *, now: datetime,
+                           processing_grants: tuple[ProcessingGrant, ...] = ()) -> dict:
     """Extract bounded keywords while preserving source, scope, mode and cache state.
 
     Fetches have no historical coverage yet, so classifications intentionally stay
@@ -161,6 +164,10 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict
     """
     if not isinstance(source_results, list) or len(source_results) > len(_ALLOWED):
         raise ValueError("bounded source results required")
+    grants = {grant.source_id: grant for grant in processing_grants
+              if isinstance(grant, ProcessingGrant)}
+    if len(grants) != len(processing_grants):
+        raise ValueError("invalid or duplicate processing grants")
     observations = []
     rejected_records = 0
     for source_result in source_results:
@@ -175,6 +182,15 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict
         if not isinstance(records, list) or len(records) > 512:
             rejected_records += 1
             continue
+        if source_result.get("data_mode") == "LIVE":
+            grant = grants.get(source_id)
+            if (grant is None or grant.extraction_allowed is not True
+                    or not isinstance(grant.policy_version, str) or not grant.policy_version.strip()
+                    or not isinstance(grant.expires_at, datetime)
+                    or grant.expires_at.tzinfo is None or grant.expires_at.utcoffset() is None
+                    or grant.expires_at <= now):
+                rejected_records += len(records)
+                continue
         for record in records:
             try:
                 mapped = _observation(source_id, record, source_result)
@@ -188,17 +204,28 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict
             except (TypeError, ValueError):
                 rejected_records += 1
 
-    candidates = prioritize_for_research(extract_candidates(tuple(observations), now=now))
+    candidates = prioritize_for_research(extract_candidates(
+        tuple(observations), grants=processing_grants, now=now))
+    modes = {observation.data_mode for observation in observations}
+    result_mode = next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else "SYNTHETIC"
     shown = []
     for candidate in candidates[:_MAX_CANDIDATES_SHOWN]:
-        assessments = assess_candidate(candidate, (), as_of=now.date(), now=now)
+        assessable = tuple(item for item in candidate.evidence
+                           if item.data_mode == "SYNTHETIC"
+                           or grants[item.source_id].derived_metrics_allowed is True)
+        assessments = (assess_candidate(replace(candidate, evidence=assessable), (),
+                                        as_of=now.date(), now=now, grants=processing_grants)
+                       if assessable else ())
+        withheld = {(item.source_id, item.scope, item.market_evidence)
+                    for item in candidate.evidence if item not in assessable}
         shown.append({
             "keyword_id": candidate.keyword_id,
             "keyword": candidate.keyword,
             "categories": list(candidate.categories),
             "status": "INSUFFICIENT_DATA",
             "score": None,
-            "data_mode": "SYNTHETIC",
+            "data_mode": (next(iter({item.data_mode for item in candidate.evidence}))
+                          if len({item.data_mode for item in candidate.evidence}) == 1 else "MIXED"),
             "quality_flags": list(candidate.quality_flags),
             "assessments": [{
                 "source_id": item.source_id,
@@ -207,7 +234,12 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict
                 "classification": item.classification,
                 "reason": item.reason,
                 "limitations": list(item.limitations),
-            } for item in assessments],
+            } for item in assessments] + [{
+                "source_id": source_id, "scope": scope, "market_evidence": market,
+                "classification": "INSUFFICIENT_EVIDENCE",
+                "reason": "DERIVED_METRICS_NOT_APPROVED",
+                "limitations": ["NO_BASELINE"],
+            } for source_id, scope, market in sorted(withheld)],
             "evidence": [{
                 "source_id": item.source_id,
                 "provider_id": item.provider_id,
@@ -224,11 +256,11 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime) -> dict
         })
     return {
         "status": "INSUFFICIENT_EVIDENCE",
-        "data_mode": "SYNTHETIC",
+        "data_mode": result_mode,
         "candidate_count": len(candidates),
         "shown_count": len(shown),
         "rejected_record_count": rejected_records,
         "candidates": shown,
-        "limitations": ["SYNTHETIC_ONLY", "NO_BASELINE", "COVERAGE_LIMITED",
-                        "US_FILTER_IS_NOT_US_AUDIENCE", "NOT_LIVE_VERIFIED"],
+        "limitations": (["SYNTHETIC_ONLY", "NOT_LIVE_VERIFIED"] if result_mode == "SYNTHETIC" else [])
+                       + ["NO_BASELINE", "COVERAGE_LIMITED", "US_FILTER_IS_NOT_US_AUDIENCE"],
     }

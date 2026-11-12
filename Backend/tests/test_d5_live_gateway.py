@@ -119,6 +119,8 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
         try:
             # No fetch is made. This checks construction only, not live verification.
             self.assertEqual(gateway.data_mode, "LIVE")
+            context, cursor = self.context(GOOGLE_SOURCE_ID)
+            self.assertEqual(gateway._params(context, cursor, 50)["no_cache"], "true")
         finally:
             await gateway.aclose()
 

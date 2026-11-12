@@ -1,8 +1,9 @@
 """Public Fetch results feed source-scoped discovery without growth claims."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from app.discovery.contracts import ProcessingGrant
 from app.discovery.source_results import discover_fetch_results
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -96,6 +97,40 @@ class DistributedDiscoveryTests(unittest.TestCase):
         result = discover_fetch_results([source], now=NOW)
 
         self.assertEqual(result["data_mode"], "SYNTHETIC")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["rejected_record_count"], 1)
+
+    def test_live_requires_source_grant_and_preserves_mixed_provenance(self):
+        sources = four_source_results()
+        sources[1]["data_mode"] = "LIVE"
+        sources[3]["data_mode"] = "LIVE"
+        grant = ProcessingGrant(GOOGLE_SOURCE_ID, True, False,
+                                NOW + timedelta(minutes=5), "test-policy")
+        result = discover_fetch_results(sources, now=NOW, processing_grants=(grant,))
+        candidate = next(item for item in result["candidates"] if item["keyword"] == "quiet luxury")
+        self.assertEqual(result["data_mode"], "MIXED")
+        self.assertEqual(candidate["data_mode"], "MIXED")
+        self.assertEqual({item["data_mode"] for item in candidate["evidence"]}, {"LIVE", "SYNTHETIC"})
+        self.assertNotIn(YOUTUBE_SOURCE_ID, {item["source_id"] for item in candidate["evidence"]})
+        self.assertEqual(result["rejected_record_count"], 1)
+        self.assertEqual(candidate["status"], "INSUFFICIENT_DATA")
+
+    def test_expired_live_grant_is_rejected(self):
+        source = four_source_results()[1]
+        source["data_mode"] = "LIVE"
+        grant = ProcessingGrant(GOOGLE_SOURCE_ID, True, False,
+                                NOW - timedelta(seconds=1), "test-policy")
+        result = discover_fetch_results([source], now=NOW, processing_grants=(grant,))
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["rejected_record_count"], 1)
+
+    def test_synthetic_record_cannot_be_relabelled_live(self):
+        source = four_source_results()[1]
+        source["data_mode"] = "LIVE"
+        source["records"][0]["data_mode"] = "SYNTHETIC"
+        grant = ProcessingGrant(GOOGLE_SOURCE_ID, True, False,
+                                NOW + timedelta(minutes=5), "test-policy")
+        result = discover_fetch_results([source], now=NOW, processing_grants=(grant,))
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["rejected_record_count"], 1)
 
