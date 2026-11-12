@@ -222,6 +222,7 @@ export const vi = {
   'detail.no-flags': 'Không có cờ được báo cáo.',
   'detail.evidence-source': 'Nguồn bằng chứng',
   'detail.open-wikimedia': 'Mở trang Wikimedia ↗',
+  'detail.open-evidence': 'Mở nguồn bằng chứng ↗',
   'quality.kicker': 'ĐỘ TIN CẬY CỦA DỮ LIỆU',
   'quality.description': 'Xem độ phủ, thời điểm thu thập và các giới hạn dữ liệu đã được báo cáo.',
   'quality.coverage-kicker': 'ĐỘ PHỦ NGUỒN',

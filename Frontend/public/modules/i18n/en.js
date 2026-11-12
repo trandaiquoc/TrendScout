@@ -222,6 +222,7 @@ export const en = {
   'detail.no-flags': 'No flags were reported.',
   'detail.evidence-source': 'Evidence source',
   'detail.open-wikimedia': 'Open Wikimedia page ↗',
+  'detail.open-evidence': 'Open source evidence ↗',
   'quality.kicker': 'DATA CONFIDENCE',
   'quality.description': 'Review coverage, collection time, and reported data limitations.',
   'quality.coverage-kicker': 'SOURCE COVERAGE',

@@ -12,6 +12,8 @@ const state = {
   runId: null,
   dataRunId: null,
   run: null,
+  publicFetchDiscovery: null,
+  publicFetchSources: [],
   category: 'all',
   query: '',
   sort: 'score',
@@ -215,9 +217,21 @@ const fetchController = new PublicFetchController({
       scheduleCapabilityRefresh(Math.min(delay, 60) * 1000);
     }
   },
-  onTerminal(runId) {
+  onTerminal(runId, fetchStatus) {
     if (runId) {
+      state.publicFetchDiscovery = null;
+      state.publicFetchSources = [];
       loadRun(runId);
+    } else if (fetchStatus?.discovery?.data_mode === 'SYNTHETIC') {
+      state.publicFetchDiscovery = fetchStatus.discovery;
+      state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
+      state.runId = null;
+      state.dataRunId = null;
+      state.run = null;
+      state.offset = 0;
+      renderPublicFetchDiscovery();
+      showView('keywords');
+      loadKeywords();
     }
     scheduleCapabilityRefresh(100);
   },
@@ -240,6 +254,16 @@ function safeEvidenceUrl(value) {
     return url.protocol === 'https:' && !url.username && !url.password && trustedHost.test(url.hostname)
       ? url.href
       : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeExternalEvidenceUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password
+      && !url.port && url.href.length <= 2048 ? url.href : null;
   } catch {
     return null;
   }
@@ -324,6 +348,17 @@ function updateRun(run) {
 function renderSyntheticDiscovery(run) {
   const bundle = run?.mode === 'synthetic' && run.synthetic_discovery?.data_mode === 'SYNTHETIC'
     ? run.synthetic_discovery : null;
+  renderDiscoveryBundle(bundle);
+}
+
+function renderPublicFetchDiscovery() {
+  const bundle = state.publicFetchDiscovery
+    ? { ...state.publicFetchDiscovery, sources: state.publicFetchSources }
+    : null;
+  renderDiscoveryBundle(bundle);
+}
+
+function renderDiscoveryBundle(bundle) {
   const sourcePanel = $('#demo-source-results');
   const panel = $('#demo-discovery');
   sourcePanel.hidden = !bundle;
@@ -339,9 +374,10 @@ function renderSyntheticDiscovery(run) {
     return;
   }
   for (const source of Array.isArray(bundle.sources) ? bundle.sources : []) {
-    const name = ({ google_web_serp: 'Google / SerpApi', bing_web_serp: 'Bing / SerpApi',
-      youtube_video_search: 'YouTube' })[source.source_id] || '—';
-    sourceList.append(element('li', `${name} · SYNTHETIC · ${source.status} · ${source.record_count} · ${source.stop_reason || '—'}`));
+    const name = ({ wikimedia_pageviews_top_per_country: 'Wikimedia',
+      google_web_serp: 'Google / SerpApi', bing_web_serp: 'Bing / SerpApi',
+      youtube_video_search: 'YouTube' })[source.source_id] || source.source_id || '—';
+    sourceList.append(element('li', `${name} · ${source.data_mode || 'SYNTHETIC'} · ${source.status} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
   }
   const category = state.category === 'home_goods' ? 'home_living' : state.category;
   const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -358,12 +394,14 @@ function renderSyntheticDiscovery(run) {
     item.append(element('strong', candidate.keyword));
     const assessments = Array.isArray(candidate.assessments) ? candidate.assessments : [];
     const classifications = [...new Set(assessments.map((assessment) => assessment.classification))];
-    item.append(element('span', ` · SYNTHETIC · ${classifications.join(', ') || '—'}`));
+    const status = classifications.length ? classifications.join(', ')
+      : localizedStatus('keywordstatus.', candidate.status || 'INSUFFICIENT_DATA');
+    item.append(element('span', ` · ${candidate.data_mode || 'SYNTHETIC'} · ${status}`));
     const details = element('details');
     details.append(element('summary', t('demo.evidence')));
     const evidenceList = element('ul');
     for (const evidence of Array.isArray(candidate.evidence) ? candidate.evidence : []) {
-      evidenceList.append(element('li', [evidence.source_id, evidence.data_mode,
+      evidenceList.append(element('li', [evidence.source_id, evidence.market_evidence, evidence.data_mode,
         evidence.delivery_mode, timestamp(evidence.fetched_at), evidence.scope,
         ...(Array.isArray(evidence.query_evidence) ? evidence.query_evidence : [])].join(' · ')));
     }
@@ -384,6 +422,8 @@ async function loadRun(id, { poll = false } = {}) {
     state.pollCount = 0;
     state.runSequence += 1;
     state.detailSequence += 1;
+    state.publicFetchDiscovery = null;
+    state.publicFetchSources = [];
     announce('');
   }
   const sequence = ++state.runSequence;
@@ -468,6 +508,56 @@ function showEmpty(title, detail) {
 }
 
 async function loadKeywords() {
+  if (state.publicFetchDiscovery) {
+    const category = state.category === 'home_goods' ? 'home_living' : state.category;
+    const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
+    let candidates = Array.isArray(state.publicFetchDiscovery.candidates)
+      ? state.publicFetchDiscovery.candidates.filter((candidate) => {
+        const categories = Array.isArray(candidate.categories) ? candidate.categories : [];
+        return (!query || String(candidate.keyword || '').normalize('NFC').toLocaleLowerCase().includes(query))
+          && (category === 'all' || categories.includes(category));
+      })
+      : [];
+    if (state.sort === 'keyword') {
+      candidates = [...candidates].sort((left, right) => String(left.keyword).localeCompare(String(right.keyword)));
+    }
+    const rows = candidates.map((candidate) => {
+      const sources = [...new Set((candidate.evidence || []).map((item) => item.source_id))];
+      const firstEvidence = candidate.evidence?.[0];
+      return {
+        ...candidate,
+        display_keyword: candidate.keyword,
+        canonical_keyword: candidate.keyword,
+        project: sources.join(' · '),
+        observation_date: firstEvidence?.observed_at,
+        score: null,
+        status: candidate.status || 'INSUFFICIENT_DATA',
+        current_views_ceil: null,
+        baseline: null,
+        ratio: null,
+      };
+    });
+    const page = rows.slice(state.offset, state.offset + state.limit);
+    renderRows(page);
+    state.next = state.offset + state.limit < rows.length ? state.offset + state.limit : null;
+    $('#results-count').textContent = number(rows.length);
+    $('#pagination-info').textContent = rows.length
+      ? t('table.range', {
+        start: number(state.offset + 1),
+        end: number(state.offset + page.length),
+        total: number(rows.length),
+      })
+      : t('table.zero-results');
+    $('#prev').disabled = state.offset === 0;
+    $('#next').disabled = state.next == null;
+    if (!page.length) {
+      showEmpty(t('keywords.empty-title'), t('keywords.page-empty'));
+    } else {
+      $('#empty').hidden = true;
+    }
+    setNotice('#keyword-notice', '');
+    return;
+  }
   if (!state.dataRunId) {
     renderRows([]);
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
@@ -533,6 +623,10 @@ function detailField(container, label, value, full = false) {
 }
 
 function renderDetail(detail) {
+  if (detail?.__publicFetchCandidate === true) {
+    renderPublicCandidateDetail(detail);
+    return;
+  }
   const content = $('#detail-content');
   content.replaceChildren();
   $('#detail-title').textContent = detail.display_keyword || detail.canonical_keyword || t('detail.title-fallback');
@@ -588,10 +682,57 @@ function renderDetail(detail) {
   }
 }
 
+function renderPublicCandidateDetail(candidate) {
+  const content = $('#detail-content');
+  content.replaceChildren();
+  $('#detail-title').textContent = candidate.keyword || t('detail.title-fallback');
+  const sources = [...new Set((candidate.evidence || []).map((item) => item.source_id))];
+  $('#detail-subtitle').textContent = [sources.join(' · '), candidate.data_mode || 'SYNTHETIC'].join(' · ');
+  detailField(content, t('detail.score-status'), localizedStatus(
+    'keywordstatus.', candidate.status || 'INSUFFICIENT_DATA'
+  ));
+  detailField(content, t('detail.algorithm'), 'phrase-rules-v1');
+  detailField(content, t('detail.categories'), (candidate.categories || []).join(' · ') || 'unclassified');
+  detailField(content, t('detail.quality-flags'), (candidate.quality_flags || []).join(' · ')
+    || t('detail.no-flags'), true);
+  for (const evidence of candidate.evidence || []) {
+    const entry = element('div', null, 'detail-item detail-item--wide');
+    entry.append(element('small', `${evidence.source_id} · ${evidence.market_evidence || 'UNKNOWN'}`));
+    const details = [evidence.data_mode, evidence.delivery_mode, evidence.scope,
+      evidence.observed_at, evidence.fetched_at, ...(evidence.query_evidence || [])]
+      .filter(Boolean).join(' · ');
+    entry.append(element('div', details));
+    const url = safeExternalEvidenceUrl(evidence.source_url);
+    if (url) {
+      const link = element('a', t('detail.open-evidence'));
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      entry.append(link);
+    }
+    content.append(entry);
+  }
+  for (const assessment of candidate.assessments || []) {
+    detailField(content, assessment.source_id,
+      `${assessment.classification} · ${assessment.reason} · ${(assessment.limitations || []).join(', ')}`,
+      true);
+  }
+}
+
 async function openDetail(id) {
-  if (!state.dataRunId || !/^[a-f0-9]{64}$/i.test(id || '')) {
+  if (!/^[a-f0-9]{64}$/i.test(id || '')) {
     return;
   }
+  if (state.publicFetchDiscovery) {
+    const candidate = state.publicFetchDiscovery.candidates?.find((item) => item.keyword_id === id);
+    if (!candidate) return;
+    const dialog = $('#detail-dialog');
+    state.detail = { ...candidate, __publicFetchCandidate: true };
+    renderDetail(state.detail);
+    if (!dialog.open) dialog.showModal();
+    return;
+  }
+  if (!state.dataRunId) return;
   const runId = state.dataRunId;
   const sequence = ++state.detailSequence;
   const dialog = $('#detail-dialog');
@@ -636,7 +777,7 @@ function showView(name) {
     }
   });
   $('#breadcrumb-current').textContent = t('nav.' + selected);
-  if (selected === 'keywords' && !state.dataRunId) {
+  if (selected === 'keywords' && !state.dataRunId && !state.publicFetchDiscovery) {
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
   }
   closeMobileNav();
@@ -712,7 +853,8 @@ function bindEvents() {
     button.setAttribute('aria-pressed', 'true');
     state.category = button.dataset.category;
     state.offset = 0;
-    if (state.run) renderSyntheticDiscovery(state.run);
+    if (state.publicFetchDiscovery) renderPublicFetchDiscovery();
+    else if (state.run) renderSyntheticDiscovery(state.run);
     loadKeywords();
   }));
   let searchTimer;
@@ -722,7 +864,8 @@ function bindEvents() {
     searchTimer = setTimeout(() => {
       state.query = query;
       state.offset = 0;
-      if (state.run) renderSyntheticDiscovery(state.run);
+      if (state.publicFetchDiscovery) renderPublicFetchDiscovery();
+      else if (state.run) renderSyntheticDiscovery(state.run);
       loadKeywords();
     }, 350);
   });
@@ -757,8 +900,11 @@ function bindEvents() {
     if (state.run) {
       updateRun(state.run);
     }
+    if (state.publicFetchDiscovery) {
+      renderPublicFetchDiscovery();
+    }
     describeComparison();
-    if (state.dataRunId) {
+    if (state.dataRunId || state.publicFetchDiscovery) {
       loadKeywords();
     }
     if ($('#detail-dialog').open && state.detail) {

@@ -47,7 +47,7 @@ window.fetch=(path,options={{}})=>{{
     {{source_id:'google_web_serp',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'CACHED',record_count:1,records:[{{keyword:'Fixture Google'}}]}},
     {{source_id:'bing_web_serp',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'FRESH',record_count:1,records:[{{keyword:'Fixture Bing'}}]}},
     {{source_id:'youtube_video_search',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'CACHED',record_count:1,records:[{{keyword:'Fixture YouTube'}}]}}
-  ]}};}}
+  ],discovery:{{status:'INSUFFICIENT_EVIDENCE',data_mode:'SYNTHETIC',candidate_count:1,shown_count:1,candidates:[{{keyword_id:'f'.repeat(64),keyword:'quiet luxury',categories:['fashion'],status:'INSUFFICIENT_DATA',score:null,data_mode:'SYNTHETIC',quality_flags:['COVERAGE_LIMITED'],evidence:[{{source_id:'google_web_serp',provider_id:'serpapi_google',document_id:'fixture',observed_at:'2026-11-12T12:00:00+00:00',fetched_at:'2026-11-12T12:00:00+00:00',scope:'google_web_serp:fixture:US-filter:en',market_evidence:'US_FILTER_ONLY',data_mode:'SYNTHETIC',delivery_mode:'CACHED',query_evidence:['server-selected query'],source_url:'https://example.org/evidence'}}],assessments:[{{source_id:'google_web_serp',classification:'INSUFFICIENT_EVIDENCE',reason:'No comparable baseline',limitations:['NO_BASELINE']}}]}}]}}}};}}
   else return Promise.resolve(new Response('{{}}',{{status:404,headers:{{'content-type':'application/json'}}}}));
   return Promise.resolve(new Response(JSON.stringify(body),{{status:200,headers:{{'content-type':'application/json','cache-control':'no-store'}}}}));
 }};
@@ -59,6 +59,9 @@ const posts=fetchRequests.filter(request=>request.path==='/api/v1/fetches'&&requ
 check(posts.length===1,'duplicate click submits one POST');check(posts[0]?.body==='{}','empty server-controlled request body');
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'idempotency key is present');check(statusReads===1,'one status poll reaches terminal result');
 check(document.querySelector('#fetch-status').textContent.includes('Google Search · Một phần · SYNTHETIC · CACHED'),'localized source status, origin and cache delivery are visible');
+check(document.querySelector('#rows').textContent.includes('quiet luxury'),'public Fetch populates keyword discovery table');
+check(document.querySelector('#rows').textContent.includes('CHƯA ĐỦ DỮ LIỆU'),'single-snapshot candidate is labeled insufficient');
+document.querySelector('.row-detail')?.click();await wait(100);check(document.querySelector('#detail-content').textContent.includes('US_FILTER_ONLY'),'keyword detail shows source and market evidence');
 check(!fetchRequests.some(request=>request.path.startsWith('/api/runs/')),'distributed result does not require an operator run lookup');
 check(!fetchRequests.some(request=>/token|secret|credential|password/i.test(JSON.stringify(request.headers))),'no credentials sent from browser');
 document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();

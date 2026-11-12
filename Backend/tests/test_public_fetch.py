@@ -382,6 +382,20 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
                                         for row in second_status.json()["sources"]))
                     self.assertTrue(all(row["data_mode"] == "SYNTHETIC"
                                         for row in second_status.json()["sources"]))
+                    discovery = second_status.json()["discovery"]
+                    self.assertEqual(discovery["status"], "INSUFFICIENT_EVIDENCE")
+                    self.assertEqual(discovery["data_mode"], "SYNTHETIC")
+                    self.assertGreater(discovery["candidate_count"], 0)
+                    evidence = [entry for candidate in discovery["candidates"]
+                                for entry in candidate["evidence"]]
+                    self.assertTrue(evidence)
+                    self.assertEqual({entry["data_mode"] for entry in evidence}, {"SYNTHETIC"})
+                    self.assertEqual({entry["delivery_mode"] for entry in evidence}, {"CACHED"})
+                    self.assertTrue(all(
+                        assessment["classification"] == "INSUFFICIENT_EVIDENCE"
+                        for candidate in discovery["candidates"]
+                        for assessment in candidate["assessments"]
+                    ))
                     self.assertEqual(calls, first_calls)
         finally:
             for gateway in gateways:

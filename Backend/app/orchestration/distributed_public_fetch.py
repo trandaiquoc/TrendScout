@@ -6,6 +6,7 @@ are usable only when explicitly injected by backend composition.
 
 from datetime import datetime, timezone
 
+from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
@@ -75,6 +76,20 @@ class DistributedPublicFetch:
                     "error_code": result.get("error_code"),
                     "quality_flags": result.get("quality_flags", []),
                 })
+        discovery = None
+        if terminal:
+            try:
+                discovery = discover_fetch_results(source_results, now=now)
+            except Exception:
+                discovery = {
+                    "status": "UNAVAILABLE",
+                    "data_mode": "SYNTHETIC",
+                    "candidate_count": 0,
+                    "shown_count": 0,
+                    "rejected_record_count": 0,
+                    "candidates": [],
+                    "limitations": ["DISCOVERY_PROCESSING_FAILED"],
+                }
         return {
             "fetch_id": job["job_id"],
             "status": job["state"],
@@ -84,6 +99,7 @@ class DistributedPublicFetch:
                 {"source_id": source_id, "status": job["state"]}
                 for source_id in sorted(self.admission.policy.enabled_sources)
             ],
+            "discovery": discovery,
             "created_at": job["created_at"],
             "updated_at": job.get("updated_at") or job.get("available_at"),
             "finished_at": job.get("finished_at"),
