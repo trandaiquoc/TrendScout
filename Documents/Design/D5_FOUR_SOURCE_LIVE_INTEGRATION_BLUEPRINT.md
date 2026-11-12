@@ -61,7 +61,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 
 | Gate | Bằng chứng bắt buộc | Trạng thái hiện tại |
 |---|---|---|
-| Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | OPEN: ba adapter vẫn chỉ MockTransport |
+| Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | OPEN: gateway/collector riêng cho Google, Bing và YouTube có kiểm thử MockTransport, chưa nối worker hay Wikimedia vào luồng phân tán; live chưa xác minh |
 | Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | OPEN: protocol chung đã tạo, chưa hoàn tất wiring và review |
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | OPEN: port hiện có chưa bao phủ đầy đủ D5 |
 | Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: có model qua Storage Port, fake Firestore adapter và test multi-process một máy; chưa nối worker/deployment hoặc xác minh multi-host |
