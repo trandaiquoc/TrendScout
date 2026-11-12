@@ -174,3 +174,7 @@ The content-decoding fixture raises `httpx.DecodingError` before `get_bounded()`
 | G10 Local commit | PASS after report/code commit | Local commit only; no push. |
 
 D6.2 remains incomplete. `WIKIMEDIA_LIVE_SMOKE_VERIFIED` remains unset. The consumed D6.2 reservation remains in force, and this offline diagnosis does not authorize another attempt or claim live integration success.
+
+## D6.2.2 — Wikimedia re-authorization feasibility (2026-11-12)
+
+The canonical D6.2 reservation remains consumed. The current ledger and local source cap do not support an additive authorization; the prior one-request approval is expired. No provider request, ledger write, quota change, or new approval was made. The review recommends keeping live spending stopped and continuing with synthetic offline fixtures. A future additional attempt would require a separately approved, same-ledger append-only authorization tranche and migration. D6.2.1 diagnostics are sanitized, but the one-shot launcher summary still omits them; the original transport failure remains unknown. See [D6.2.2 Wikimedia re-authorization review](D6_2_2_WIKIMEDIA_REAUTHORIZATION_REVIEW.md) for quota mechanics, options, owner decisions, and verification evidence.
