@@ -10,7 +10,7 @@ import re
 import secrets
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
 
@@ -378,8 +378,28 @@ class PublicAdmission:
             day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
             quota = state["quota"]
             # Never delete a newer window: workers can straddle a UTC boundary.
-            # A full ledger fails closed until retention is implemented safely.
             daily_key, monthly_key = f"{pool}:day:{day}", f"{pool}:month:{month}"
+            # Counters are scoped to UTC calendar windows. Once the server clock
+            # has advanced, older windows can no longer affect admission; prune
+            # only canonical, known-pool keys strictly before the active window.
+            # Unknown/future/malformed entries are retained so corrupt state can
+            # consume capacity and fail closed rather than being silently erased.
+            for key in list(quota):
+                parts = key.split(":") if isinstance(key, str) else ()
+                if len(parts) != 3 or parts[0] not in self._pools:
+                    continue
+                _, window_kind, window_value = parts
+                try:
+                    if window_kind == "day":
+                        parsed = date.fromisoformat(window_value)
+                        if parsed.isoformat() == window_value and window_value < day:
+                            del quota[key]
+                    elif window_kind == "month":
+                        parsed = date.fromisoformat(f"{window_value}-01")
+                        if parsed.strftime("%Y-%m") == window_value and window_value < month:
+                            del quota[key]
+                except ValueError:
+                    continue
             if len(quota) + sum(key not in quota for key in (daily_key, monthly_key)) > self.policy.max_records:
                 raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
             daily = quota.setdefault(daily_key, {"requests": 0, "cost": 0})

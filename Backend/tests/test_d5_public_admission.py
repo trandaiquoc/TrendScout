@@ -291,6 +291,38 @@ class PublicAdmissionTests(unittest.TestCase):
         self.assertEqual(control.reserve_attempt(job, "worker", fence, source_id=GOOGLE_SOURCE_ID,
                          attempt_id="window-attempt-0004", now=december), "NEW")
 
+    def test_old_quota_windows_are_pruned_without_erasing_unknown_or_future_buckets(self):
+        config = policy(pools={"serpapi": PoolLimit(20, 40, 20, 40, 1),
+                               "youtube": PoolLimit(20, 40, 20, 40, 1)})
+        control = coordinator(self.path, config)
+
+        def reserve_at(when, index):
+            job = control.admit(f"ledger-window-request-{index:04d}", now=when)["job_id"]
+            fence = control.claim(job, "worker", now=when)["fence"]
+            control.reserve_attempt(job, "worker", fence, source_id=GOOGLE_SOURCE_ID,
+                                    attempt_id=f"ledger-window-attempt-{index:04d}", now=when)
+            control.finish(job, "worker", fence, now=when)
+
+        reserve_at(NOW, 1)
+
+        def add_untrusted_entries(state):
+            state["quota"]["unknown:day:2020-01-01"] = {"requests": 7, "cost": 7}
+            state["quota"]["serpapi:month:bad-month"] = {"requests": 8, "cost": 8}
+            state["quota"]["serpapi:day:2028-01-01"] = {"requests": 9, "cost": 9}
+            return state, None
+
+        control.store.transact("public", add_untrusted_entries)
+        january = datetime(2027, 1, 2, 12, tzinfo=timezone.utc)
+        reserve_at(january, 2)
+        quota = control.store.transact("public", lambda state: (state, state["quota"]))
+        self.assertNotIn("serpapi:day:2026-11-12", quota)
+        self.assertNotIn("serpapi:month:2026-11", quota)
+        self.assertEqual(quota["serpapi:day:2027-01-02"]["requests"], 1)
+        self.assertEqual(quota["serpapi:month:2027-01"]["requests"], 1)
+        self.assertIn("unknown:day:2020-01-01", quota)
+        self.assertIn("serpapi:month:bad-month", quota)
+        self.assertIn("serpapi:day:2028-01-01", quota)
+
 
 if __name__ == "__main__":
     unittest.main()
