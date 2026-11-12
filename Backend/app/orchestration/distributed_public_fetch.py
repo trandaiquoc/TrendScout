@@ -83,11 +83,12 @@ class DistributedPublicFetch:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
                                           "error_code": "RESULT_UNAVAILABLE"})
                     continue
-                modes.add(result["data_mode"])
+                if result["status"] != "UNAVAILABLE":
+                    modes.add(result["data_mode"])
                 source_results.append({
                     "source_id": source_id,
                     "status": result["status"],
-                    "data_mode": result["data_mode"],
+                    **({"data_mode": result["data_mode"]} if result["status"] != "UNAVAILABLE" else {}),
                     "delivery_state": result.get("delivery_state", "FRESH"),
                     "record_count": result["record_count"],
                     "records": result["records"],

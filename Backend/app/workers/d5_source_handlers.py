@@ -87,12 +87,16 @@ class D5SourceHandlers:
                  observation_date: Callable[[], date] | None = None,
                  shared_cache: SharedCache | None = None,
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
+                 unavailable_mode: str | None = None,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if (set(query_collectors) != _QUERY_SOURCES
-                or any(not isinstance(value, GuardedQueryCollector)
-                       or value.gateway.source_id != source
+                or unavailable_mode not in {None, "LIVE"}
+                or any((value is None and unavailable_mode is None)
+                       or (value is not None and (not isinstance(value, GuardedQueryCollector)
+                           or value.gateway.source_id != source))
                        for source, value in query_collectors.items())
-                or not isinstance(wikimedia, WikimediaTopPageGateway)
+                or (wikimedia is None and unavailable_mode is None)
+                or (wikimedia is not None and not isinstance(wikimedia, WikimediaTopPageGateway))
                 or not isinstance(plan, QueryPlan) or not isinstance(limits, CollectionLimits)
                 or (observation_date is not None and not callable(observation_date))
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
@@ -107,10 +111,12 @@ class D5SourceHandlers:
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
         self.shared_cache = shared_cache
         self.resolve_cache_grant = resolve_cache_grant
+        self.unavailable_mode = unavailable_mode
         self.utcnow = utcnow
 
     def build(self) -> dict[str, Callable[[SourceWorkContext], object]]:
-        handlers = {source: self._query_handler(source) for source in sorted(_QUERY_SOURCES)}
+        handlers = {source: (self._query_handler(source) if self.query_collectors[source] is not None
+                             else self._unavailable_handler()) for source in sorted(_QUERY_SOURCES)}
         async def collect_wikimedia(context):
             observation_date = self.observation_date()
             return await self._with_cache(
@@ -119,11 +125,21 @@ class D5SourceHandlers:
                 query_scope=f"{self.plan.fingerprint}:{observation_date.isoformat()}",
             )
 
-        setattr(collect_wikimedia, "__trendscout_data_mode__", self.wikimedia.data_mode)
-        handlers[WIKIMEDIA_SOURCE_ID] = collect_wikimedia
+        if self.wikimedia is None:
+            handlers[WIKIMEDIA_SOURCE_ID] = self._unavailable_handler()
+        else:
+            setattr(collect_wikimedia, "__trendscout_data_mode__", self.wikimedia.data_mode)
+            handlers[WIKIMEDIA_SOURCE_ID] = collect_wikimedia
         if set(handlers) != _ALL_SOURCES:
             raise ValueError("incomplete guarded source registry")
         return handlers
+
+    def _unavailable_handler(self):
+        async def unavailable(_context):
+            return {"status": "UNAVAILABLE", "data_mode": self.unavailable_mode,
+                    "record_count": 0, "records": [], "error_code": "SOURCE_NOT_APPROVED"}
+        setattr(unavailable, "__trendscout_data_mode__", self.unavailable_mode)
+        return unavailable
 
     def _query_handler(self, source_id):
         collector = self.query_collectors[source_id]

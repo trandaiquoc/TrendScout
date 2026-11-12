@@ -18,7 +18,7 @@ from app.local_smoke_policy import local_smoke_policy
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
-from app.sources.live_gateway import LivePageGateway
+from app.sources.live_gateway import GatewayError, LivePageGateway
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.local_smoke_store import LocalSmokeStore
@@ -64,18 +64,31 @@ async def local_live_composition(*, credentials, approvals, user_agent,
         runner = GuardedAttemptRunner(admission, clock=utcnow)
         collectors = {}
         for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
-            gateway = await LivePageGateway.controlled_network(
-                source, credentials, approvals, runner, clock=utcnow)
+            try:
+                gateway = await LivePageGateway.controlled_network(
+                    source, credentials, approvals, runner, clock=utcnow)
+            except GatewayError as exc:
+                if exc.code != "SOURCE_NOT_APPROVED":
+                    raise
+                collectors[source] = None
+                continue
             stack.push_async_callback(gateway.aclose)
             collectors[source] = GuardedQueryCollector(gateway, utcnow=utcnow)
-        wiki = await WikimediaTopPageGateway.controlled_network(
-            approvals, runner, user_agent=user_agent, clock=utcnow)
-        stack.push_async_callback(wiki.aclose)
+        try:
+            wiki = await WikimediaTopPageGateway.controlled_network(
+                approvals, runner, user_agent=user_agent, clock=utcnow)
+        except GatewayError as exc:
+            if exc.code != "SOURCE_NOT_APPROVED":
+                raise
+            wiki = None
+        if wiki is not None:
+            stack.push_async_callback(wiki.aclose)
         handlers = D5SourceHandlers(query_collectors=collectors, wikimedia=wiki,
             plan=DEFAULT_QUERY_PLAN, limits=CollectionLimits(max_queries=1,
                 max_pages_per_query=1, max_requests=1, max_retries_per_page=0,
                 deadline_seconds=60, max_results=10),
-            observation_date=lambda: (utcnow() - timedelta(days=2)).date(), utcnow=utcnow).build()
+            observation_date=lambda: (utcnow() - timedelta(days=2)).date(),
+            unavailable_mode="LIVE", utcnow=utcnow).build()
         worker = DistributedFetchWorker(admission, handlers=handlers,
             resolve_grant=checkpoint_grant, utcnow=utcnow)
         yield DistributedPublicFetch(admission, worker, resolve_grant=checkpoint_grant,

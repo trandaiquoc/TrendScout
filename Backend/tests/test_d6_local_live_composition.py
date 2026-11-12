@@ -18,7 +18,6 @@ from app.jobs.source_checkpoints import CheckpointGrant
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.local_smoke_policy import local_smoke_policy
 from app.orchestration.local_live_composition import local_live_composition, _bounded_checkpoint_resolver
-from app.sources.live_gateway import GatewayError
 from app.sources.catalog import GOOGLE_SOURCE_ID
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -86,15 +85,17 @@ class LocalLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
             async with local_live_composition(**args):
                 pass
 
-    async def test_missing_approval_and_vercel_fail_closed(self):
+    async def test_missing_approval_is_unavailable_and_vercel_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(local_ledger, "DIRECTORY", Path(directory) / "smoke"):
             args = dict(credentials=NoCredentials(),
                 approvals=FixtureApprovals(denied="bing_web_serp"), user_agent=USER_AGENT,
                 resolve_checkpoint_grant=grant, resolve_processing_grants=lambda _now: (), utcnow=lambda: NOW)
-            with self.assertRaises(GatewayError):
-                async with local_live_composition(**args):
-                    self.fail("missing source approval must reject composition")
+            async with local_live_composition(**args) as facade:
+                denied = await facade.worker.handlers["bing_web_serp"](None)
+                self.assertEqual(denied["status"], "UNAVAILABLE")
+                self.assertEqual(denied["error_code"], "SOURCE_NOT_APPROVED")
+                self.assertEqual(denied["records"], [])
             with patch.dict(os.environ, {"VERCEL": "1"}), self.assertRaises(ValueError):
                 async with local_live_composition(**args):
                     self.fail("Vercel must remain disabled")
