@@ -201,9 +201,14 @@ Chỉ SERP đơn giản nhưng bị seed/query bias và không phát hiện ch�
 
 Giả định 14 seeds × một page × hai SERP engines = tối đa 28 attempt cho một batch không retry; 1/4/24 batch mỗi ngày trong 30 ngày tương ứng 840/3.360/20.160 attempts trước retry, cache và thất bại. YouTube thêm tối đa 14 first-page calls/batch; Wikimedia có quota/rate và cache riêng. Theo [SerpApi pricing](https://serpapi.com/pricing) truy cập 11/11/2026, các gói và hourly throughput thay đổi; successful search tính vào monthly allowance, cached/error có quy tắc riêng. Ví dụ 840 successful searches nằm dưới 1.000/tháng của gói được công bố $25/tháng, nhưng chưa tính thuế, giờ cao điểm, chi phí khác hoặc phê duyệt mua. Dự trù reserve mọi attempt là bảo thủ, không suy ra hóa đơn hay quota tài khoản thực.
 
-## 38. D4–D5–D6–D7 delivery map
+## 38. D4–D5–D6–D7 delivery map — demo first, production later
 
-D4: thiết kế và adapters MockTransport, fixture tests, inventory; không live. D5: xây dựng live-capable code cho bốn nguồn, distributed admission/queue, quota/cache, orchestration, extraction và UI; nghiệm thu bằng offline evidence. D6: tài khoản provider thuộc tổ chức, credential management, admin console riêng và xác minh/kích hoạt live từng nguồn sau phê duyệt. D7: final live E2E, security, data quality, performance và UAT. Mỗi nguồn chỉ `LIVE_VERIFIED` sau bằng chứng riêng. Không có D3C. Xem [D6 plan](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md).
+D4: thiết kế và adapters MockTransport, fixture tests, inventory; không live. D5 có hai acceptance track tách biệt:
+
+- `DEMO_ACCEPTANCE`: dashboard, Fetch một chạm, bốn nguồn synthetic, keyword discovery, UI/UX, regression và demo-scope security chạy local mà không cần account/credential/Firebase cá nhân hoặc hạ tầng công ty.
+- `PRODUCTION_MULTI_HOST_ACCEPTANCE`: shared backing store, hai host độc lập, supervisor, distributed quota và crash recovery phải được kiểm chứng trên môi trường thật. Cùng máy hoặc offline harness không thể PASS gate này. Không thuê VM/provision cloud hoặc dùng Firebase cá nhân nếu chưa được duyệt.
+
+D6: khi công ty cấp/duyệt tài khoản và hạ tầng, thực hiện provider ownership/credential management, admin console riêng, quota/cost approval và kích hoạt live có kiểm soát từng nguồn. D7: nghiệm thu production multi-host, final live E2E, security, data quality, performance và UAT. Mỗi nguồn chỉ `LIVE_VERIFIED` sau bằng chứng riêng. `DEMO_ACCEPTANCE=100%` không đồng nghĩa production readiness hoặc `FOUR_SOURCE_LIVE_VERIFIED`. Không có D3C. Xem [D5 blueprint](D5_FOUR_SOURCE_LIVE_INTEGRATION_BLUEPRINT.md), [D6 plan](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md) và [production multi-host runbook](D5_MULTI_HOST_TEST_AND_DEPLOYMENT_RUNBOOK.md).
 
 ## 39. Acceptance cases
 

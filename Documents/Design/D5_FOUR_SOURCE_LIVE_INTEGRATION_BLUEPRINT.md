@@ -1,6 +1,19 @@
 # D5 — Blueprint tích hợp live bốn nguồn
 
-**Trạng thái:** D5 đang thực hiện; không phải lệnh bật live. Điều chỉnh roadmap 11/11/2026: D5 xây dựng và kiểm chứng offline hạ tầng live-capable; D6 thiết lập tài khoản thuộc tổ chức, quản lý credential và kích hoạt live; D7 nghiệm thu live cuối. Không có D3C. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public Fetch hiện chỉ synthetic/local/test; Vercel hiện read-only. D4 không chứng minh provider, credential, quota thực hay chi phí.
+**Trạng thái (12/11/2026): `DEMO_ACCEPTANCE=100%` cho demo local synthetic; `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; `D5_PRODUCTION_READINESS=PARTIAL`; `FOUR_SOURCE_LIVE_VERIFIED=NOT_ACCEPTED`.** Bối cảnh mới: TrendScout là dự án cá nhân để trình bày demo; các tài khoản phát triển hiện có thuộc cá nhân, công ty chưa cấp tài khoản/hạ tầng. Không dùng các tài nguyên cá nhân đó làm điều kiện hay bằng chứng production. Không có D3C. D5 ưu tiên demo và hoàn thiện code/offline tests; D6 tích hợp tài khoản/credentials do công ty cấp và quy trình kích hoạt live; D7 nghiệm thu multi-host production, live E2E và UAT. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public live Fetch vẫn disabled; Vercel hiện read-only.
+
+## Acceptance tracks — DEMO-FIRST, PRODUCTION-LATER
+
+Hai acceptance độc lập; PASS của demo không phải production readiness. Demo chạy local với fixture synthetic, không cần tài khoản công ty, credential cá nhân, Firebase/Firestore hay dịch vụ trả phí. Không gửi live provider requests.
+
+| Track / gate | Acceptance evidence | Status |
+|---|---|---|
+| `DEMO_ACCEPTANCE` — dashboard, UI/UX, one-click Fetch, four synthetic sources, keyword discovery, regression và demo-scope security | Local loopback launcher/API, một nút Fetch và polling, bốn nguồn `SYNTHETIC`, keyword search/filter/detail/evidence, responsive/theme/locale/keyboard, browser E2E, regression/Golden, không login UI hoặc browser credentials, Fetch inputs/server policy bounded | **PASS — 100%**; local synthetic presentation only |
+| `PRODUCTION_MULTI_HOST_ACCEPTANCE` — shared backing store, hai host độc lập, supervisor, distributed quota và crash recovery | Cùng non-production backing store thực, hai host instance độc lập cùng chạy, quota/queue cạnh tranh, supervisor restart sau crash, recovery evidence và review quyền/chi phí | **BLOCKED**; chưa có company-owned hạ tầng được cấp/duyệt và chưa chạy hai host thực. Same-host tests không thay thế gate này |
+| `D5_PRODUCTION_READINESS` | Production backing, distributed controls, retention/reconciliation, deployment/supervision và independent security review được xác minh | **PARTIAL**; offline implementations/tests không chứng minh deployment behavior |
+| `FOUR_SOURCE_LIVE_VERIFIED` | Mỗi provider có approval, account/credential phù hợp, quota/cost review và dated live evidence | **NOT_ACCEPTED**; toàn bộ live activation disabled; chuyển sang D6/D7 |
+
+Tỷ lệ `DEMO_ACCEPTANCE=100%` chỉ áp dụng checklist demo ở dưới. Không gọi D5 production-ready, `D5_LIVE_CAPABLE_OFFLINE_VERIFIED` hoặc bốn nguồn LIVE_VERIFIED dựa trên tỷ lệ này.
 
 ## 1. Ranh giới và nghiệm thu từng nguồn
 
@@ -59,26 +72,27 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 4. Bàn giao [kế hoạch D6](D6_PROVIDER_ACCOUNT_CREDENTIAL_AND_LIVE_ACTIVATION_PLAN.md): tổ chức sở hữu provider accounts, phê duyệt và cấu hình secrets, admin riêng, kích hoạt và xác minh từng nguồn.
 5. D7 thực hiện final live E2E, security, data quality, performance và UAT. Public live Fetch disabled cho tới quyết định riêng.
 
-### Revised D5 acceptance matrix
+### D5 technical evidence matrix (not the demo score)
 
 | Gate | Bằng chứng bắt buộc | Trạng thái hiện tại |
 |---|---|---|
 | Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | PASS tại code boundary: Google/Bing/YouTube gateway và Wikimedia fixed-date gateway có offline contract tests; `D5SourceHandlers` nối vào worker qua MockTransport. Live vẫn disabled và chưa xác minh |
 | Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | PASS ở code boundary: SerpApi/YouTube lấy credential qua backend port, gateway chỉ resolve server-side, Wikimedia không đòi API key; UI/tests không có trường nhập hoặc token. Secret manager và resolver deployment còn để D6 |
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | PASS ở code boundary: analysis dùng `AnalysisStorage`; D5 admission/quota/cache/checkpoints dùng `AtomicStateStore`; Firestore implementation ở adapter/composition; local demo có `LocalSQLiteAtomicStateStore` chỉ cho local/test synthetic. Không migration database. SQLite hỗ trợ process trên cùng host/local filesystem, không phải backing đa host hoặc production |
-| Distributed Fetch | Multi-process admission, durable lease/fencing, response receipt recovery, hai host và supervisor được kiểm chứng | PARTIAL: cả bốn nguồn ghi receipt (typed provider page cho Google/Bing/YouTube; normalized result cho Wikimedia) trước khi settle attempt; crash-recovery tests cho Google/Bing/YouTube/Wikimedia xác nhận resume không gửi lại provider request sau khi receipt đã commit. Cửa sổ trước receipt commit vẫn không thể atomically giao dịch với provider, nên reservation fail-closed. Harness synthetic dùng Firestore adapter hiện có, queue worker, xác thực hai machine identity và systemd runbook đã chuẩn bị; chưa chạy trên hai host hoặc xác minh supervisor/backing thật. SQLite cùng host và test 8 process không thay thế bằng chứng đó. API demo vẫn chạy worker attempt local/test-only |
-| Quota/cache/queue | Atomic shared quota/cost, durable cache/queue, crash tests và shared backing nhiều host | PARTIAL: offline flow, multi-process quota/in-flight limits, crash reservation, worker claim và grant-scoped synthetic cache PASS trên SQLite cùng host. Harness opt-in và deployment runbook cho Firestore non-production đã có nhưng chưa chạy. Live cache, proactive deletion/reconciliation và backing đa host chưa được xác minh |
+| Distributed Fetch (offline/local track) | Admission, idempotency, lease/fencing, response-receipt crash recovery under offline tests | PASS offline/local: all four paths have receipt recovery tests; eight local worker processes competing for one job produce at most one completion. The provider-response-to-durable-receipt gap remains conservatively charged. This is not production multi-host acceptance |
+| Production multi-host worker/backing/supervisor | Shared store, two actual hosts, supervisor and crash recovery exercised together | BLOCKED: harness and runbook are prepared, but no suitable company resources were provided/approved and no two-host run occurred. SQLite, fake Firestore, or same-machine processes do not pass this gate |
+| Quota/cache/queue | Offline local atomic quota/cache/queue plus production backing, retention and reconciliation evidence | PASS for local synthetic demo behavior, including pruning expired UTC quota windows; PARTIAL/BLOCKED for production: live cache, proactive data deletion, provider usage reconciliation and multi-host backing remain unverified |
 | Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | PASS offline: deterministic extraction, source/scope/mode partitions, coverage-based trend assessment and evidence run through the synthetic demo; no live data-quality claim |
-| Dashboard integration | Workflow offline, status, evidence, accessibility và regression | PASS cho public synthetic flow: one-click Fetch/polling chuyển normalized source results qua discovery vào keyword table/search/filter/detail; source, market evidence, `SYNTHETIC`, delivery `CACHED` và `INSUFFICIENT_EVIDENCE` hiển thị. Responsive/theme/locale và browser E2E PASS. Không có live source result hoặc shared multi-host runtime nào được tuyên bố |
+| Dashboard integration | Workflow offline trên đủ 10 màn hình, status, evidence, accessibility và regression | PASS cho public synthetic flow: one-click Fetch/polling chuyển normalized source results qua discovery vào keyword table/search/filter/detail; source, market evidence, `SYNTHETIC`, delivery `CACHED` và `INSUFFICIENT_EVIDENCE` hiển thị. Browser tests xác minh mọi view ở viewport 768/1024/1280/1440, theme/locale, keyboard và mobile widths. Không có live source result hoặc shared multi-host runtime nào được tuyên bố |
 | Offline integration tests | End-to-end fixture không gọi provider/cloud | PASS: anonymous API Fetch qua quota/admission, queue/worker, bốn guarded MockTransport adapters, cache, readback, keyword discovery và second-fetch cache hit; process-level tests cover multi-worker competition. Chrome test kiểm tra one-click, keyword table/detail và provenance. Không gọi live provider, cloud storage hoặc emulator |
 | Full regression | Readiness script và Golden pass | PASS: `bash Backend/scripts/verify_offline_readiness.sh`; 598 unittest, Golden hai hash seed, 12/12 readiness steps và browser checks PASS ngày 12/11/2026 |
 | D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | PASS sau khi đối chiếu checklist D6: register metadata-only, secret lifecycle, admin authorization riêng, controls, provider approvals, per-source live evidence và rollback được nêu; không tạo account/secret hoặc bật live |
 
-Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VERIFIED`; khi đó vẫn ghi `D6_PROVIDER_ONBOARDING_PENDING` và `LIVE_ACTIVATION_NOT_YET_ACCEPTED`. Không yêu cầu bốn nguồn `LIVE_VERIFIED` cho D5.
+`D5_LIVE_CAPABLE_OFFLINE_VERIFIED` chỉ dùng khi các D5 offline technical gates được định nghĩa trong roadmap hoàn tất; trạng thái này không chứng minh production multi-host. Production multi-host có tên gate riêng và chưa PASS. Provider onboarding/live activation vẫn ở D6, final live/UAT ở D7.
 
 ### Demo-first presentation checklist
 
-`DEMO_READY_FOR_PRESENTATION` là checklist riêng, không đồng nghĩa `FOUR_SOURCE_LIVE_VERIFIED` hoặc hoàn thành các gate D5. Không cần tài khoản công ty, credential cá nhân hoặc Firebase cá nhân để chạy demo. Wikimedia live chỉ dùng sau phép và kiểm chứng riêng; trong khi thiếu credentials, dữ liệu còn lại phải ghi `SYNTHETIC`. Từng nguồn cần phân biệt provenance `LIVE`, `CACHED`, `SYNTHETIC`; `INSUFFICIENT_EVIDENCE` là trạng thái đánh giá, không phải nguồn dữ liệu. Không gán lại cached hay synthetic thành live.
+`DEMO_READY_FOR_PRESENTATION` là acceptance track độc lập. Không cần tài khoản công ty, credential cá nhân hoặc Firebase/Firestore để chạy demo. Wikimedia live chỉ dùng sau phép và kiểm chứng riêng; hiện demo dùng fixtures được gắn `SYNTHETIC`. Từng nguồn cần phân biệt provenance `LIVE`, `CACHED`, `SYNTHETIC`; `INSUFFICIENT_EVIDENCE` là trạng thái đánh giá, không phải nguồn dữ liệu. Không gán lại cached hay synthetic thành live.
 
 | Kiểm tra trình diễn | Trạng thái |
 |---|---|
@@ -86,10 +100,10 @@ Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VE
 | Fetch một nút, kết quả và trạng thái rõ ràng | PASS: Chrome E2E dùng status từ demo API thật; launcher trả bốn source và candidates với nhãn synthetic |
 | Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | PASS phạm vi demo local: bốn handler fixture server-controlled, không provider request, không baseline; tối đa 100 candidates hiển thị |
 | Phân biệt LIVE/CACHED/SYNTHETIC và INSUFFICIENT_EVIDENCE xuyên API, thuật toán, UI | PASS cho flow hiện được bật là synthetic: origin `SYNTHETIC` được giữ trong evidence/candidate, delivery `FRESH`/`CACHED` độc lập, assessment là `INSUFFICIENT_EVIDENCE`; `DistributedPublicFetch` fail-closed với handler LIVE, nên chưa tuyên bố live flow đã được xác minh |
-| Light/dark, VI/EN, responsive và regression | PASS offline regression; Chrome E2E public Fetch/search/filter/detail và responsive/theme/locale/keyboard |
+| Đủ 10 màn hình; light/dark, VI/EN, responsive và regression | PASS offline regression; Chrome kiểm tra tất cả views ở 768/1024/1280/1440 px, mobile 320/375 px, theme/locale/keyboard và public Fetch/search/filter/detail |
 | Dữ liệu không bị nhận nhầm là live; phân biệt presentation với live acceptance | PASS cho fixtures: API, extraction evidence và dashboard giữ `SYNTHETIC`; cached delivery không nâng origin thành LIVE. Four-source live verification vẫn là gate riêng D6/D7 |
 
-Storage tạm là lựa chọn demo local, không chứng minh durable, distributed admission hay an toàn public production. D6 xử lý account/secret của công ty và live activation; D7 nghiệm thu live cuối.
+Storage tạm là lựa chọn demo local, không chứng minh durable, distributed admission hay an toàn public production. D6 xử lý account/secret do công ty cấp và live activation; D7 nghiệm thu production multi-host thực tế, live cuối và UAT. Không dùng Firebase cá nhân để lấp hạ tầng còn thiếu.
 
 ## 5. Open decisions và rollback
 

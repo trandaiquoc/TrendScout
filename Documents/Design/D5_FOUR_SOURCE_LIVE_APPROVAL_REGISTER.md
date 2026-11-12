@@ -1,6 +1,6 @@
 # D5/D6 four-source approval register
 
-Metadata only. No provider secrets or account credentials belong in this register. Status reviewed 2026-11-11; the absence of evidence is not approval.
+Metadata only. No provider secrets or account credentials belong in this register. Status reviewed 2026-11-12; the absence of evidence is not approval. The owner confirms current GitHub/Vercel/Google Cloud/Firebase and development resources are personal and the company has provided no accounts or infrastructure. Those personal resources are excluded from production approval/evidence; DEMO_ACCEPTANCE uses local synthetic fixtures and needs no provider account.
 
 | Provider / source | Organization account owner | Use and derived metrics | Quota, cost and retention | Credential | Live verification |
 |---|---|---|---|---|---|

@@ -1,6 +1,6 @@
 # D5 Multi-host Test and Deployment Runbook
 
-**Status:** Draft for D5 infrastructure verification. No cloud resource has been provisioned or contacted by this change.
+**Status (12/11/2026): Production-only runbook for `PRODUCTION_MULTI_HOST_ACCEPTANCE`; this is not a prerequisite for `DEMO_ACCEPTANCE`.** The owner confirms current cloud/development accounts are personal, while company infrastructure has not been provided. Do not run this against personal Firebase/Google Cloud. No cloud resource has been provisioned or contacted by this work.
 
 **Accessed:** 2026-11-12. Prices and free-tier eligibility can change; recheck the linked official pages before approving spend.
 
@@ -14,13 +14,13 @@
 
 ## 2. Lowest-complexity option
 
-First reuse **already existing, organization-owned, non-production resources** if all of these are true:
+When the owner separately authorizes the production gate, first reuse **already existing, organization-owned, non-production resources** if all of these are true:
 
 1. An approved Google Cloud project already has a Firestore Native default database. Do not reuse a developer-owned project or a production database.
 2. Two independent, organization-managed Linux hosts already exist and can reach that database. Use systemd on each host as the process supervisor.
 3. Each host can use its own attached workload identity or service account through ADC. Do not download or distribute service-account key files.
 
-This option reuses the repository's Firestore adapter and existing Firestore dependency. The automated probe uses fixed `SYNTHETIC` data and does not instantiate provider adapters. If any prerequisite is missing, stop here and request organization approval; do not create a project, database, VM, billing account, or credential as part of D5.
+This option reuses the repository's Firestore adapter and existing Firestore dependency. The automated probe uses fixed `SYNTHETIC` data and does not instantiate provider adapters. If any prerequisite is missing, leave `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; do not create a project, database, VM, billing account, or credential as part of D5. Local demo acceptance does not wait on these resources.
 
 If suitable hosts do not already exist, two small Compute Engine VMs with systemd are the simplest fully controlled fallback. A reference price for `e2-small` in the listed US region is about **$0.01675/hour per VM**, approximately **$24.46/month for two at 730 hours**, before disk, network, tax, and regional differences. The smaller `e2-micro` table rate is about **$12.23/month for two**, before extras, but its 1 GiB memory may be insufficient for the Python runtime. This is an estimate, not approval to provision. A free-tier VM allowance is limited and does not cover two always-on instances.
 
@@ -36,7 +36,7 @@ If suitable hosts do not already exist, two small Compute Engine VMs with system
 
 The D5 service identity only needs the data permissions above. It does not need `roles/owner`, `roles/editor`, Firestore Admin, project creation, billing access, or the ability to create service-account keys. Setup and cleanup remain administrator actions. Firestore server libraries use IAM; Firebase client Security Rules do not constrain this server identity. The linked permission table identifies transaction, read, and write permissions.
 
-### What you need to provide or approve
+### What must be provided or approved to attempt the production gate
 
 To move the real gate, provide or identify:
 
@@ -129,9 +129,9 @@ Review unit compatibility with the host's systemd version before installation. T
 
 ## 6. Acceptance and limits
 
-**PASS for the real multi-host gate requires all of:** two distinct approved host instance IDs; the same organization-owned non-production Firestore database; worker registration from both; one atomic job execution and result with correct synthetic provenance; proof that the other host did not duplicate execution; supervisor restart and subsequent successful work; no provider calls; and reviewed cost/access evidence.
+**PASS for `PRODUCTION_MULTI_HOST_ACCEPTANCE` requires all of:** two distinct approved host instance IDs; the same organization-owned non-production Firestore database; worker registration from both; one atomic job execution and result with correct synthetic provenance; proof that the other host did not duplicate execution; supervisor restart and subsequent successful work; no provider calls; and reviewed cost/access evidence.
 
-Local multi-process SQLite tests, a fake Firestore SDK, source inspection, or two processes on one machine are not multi-host evidence. Until the real run is approved and completed, keep `MULTI_HOST_WORKER_BACKING_SUPERVISOR=PARTIAL` (or `BLOCKED` when no suitable access is available), and keep D5 below 100%.
+Local multi-process SQLite tests, a fake Firestore SDK, source inspection, or two processes on one machine are not multi-host evidence. Until the real run is approved and completed, keep `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED` (or `PARTIAL` only after a real two-host run has produced partial evidence). This does not reduce or alter the separately measured `DEMO_ACCEPTANCE` score, and must never be reported as multi-host PASS.
 
 The probe covers the shared backing, atomic queue claim, and process supervision boundary for synthetic jobs. It does not certify public API deployment, provider credentials, provider live access, rate limits across application regions, production IAM design, or provider-cost controls.
 
