@@ -156,13 +156,15 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
 
 
 def discover_fetch_results(source_results: list[dict], *, now: datetime,
-                           processing_grants: tuple[ProcessingGrant, ...] = ()) -> dict:
+                           processing_grants: tuple[ProcessingGrant, ...] = (),
+                           empty_mode: str = "SYNTHETIC") -> dict:
     """Extract bounded keywords while preserving source, scope, mode and cache state.
 
     Fetches have no historical coverage yet, so classifications intentionally stay
     `INSUFFICIENT_EVIDENCE`; query ranking or one snapshot cannot imply growth.
     """
-    if not isinstance(source_results, list) or len(source_results) > len(_ALLOWED):
+    if (not isinstance(source_results, list) or len(source_results) > len(_ALLOWED)
+            or empty_mode not in {"SYNTHETIC", "LIVE"}):
         raise ValueError("bounded source results required")
     grants = {grant.source_id: grant for grant in processing_grants
               if isinstance(grant, ProcessingGrant)}
@@ -207,7 +209,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
     candidates = prioritize_for_research(extract_candidates(
         tuple(observations), grants=processing_grants, now=now))
     modes = {observation.data_mode for observation in observations}
-    result_mode = next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else "SYNTHETIC"
+    result_mode = next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else empty_mode
     shown = []
     for candidate in candidates[:_MAX_CANDIDATES_SHOWN]:
         assessable = tuple(item for item in candidate.evidence

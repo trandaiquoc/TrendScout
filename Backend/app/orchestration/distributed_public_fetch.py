@@ -5,6 +5,8 @@ are usable only when explicitly injected by backend composition.
 """
 
 from datetime import datetime, timezone
+from dataclasses import replace
+import os
 
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
@@ -14,11 +16,12 @@ from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 
 class DistributedPublicFetch:
     def __init__(self, admission: PublicAdmission, worker: DistributedFetchWorker, *,
-                 resolve_grant, utcnow=lambda: datetime.now(timezone.utc)):
+                 resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
+                 local_live=False, resolve_processing_grants=None):
         if (not isinstance(admission, PublicAdmission)
                 or not isinstance(worker, DistributedFetchWorker)
                 or worker.admission.policy_digest != admission.policy_digest
-                or not callable(resolve_grant) or not callable(utcnow)):
+                or not callable(resolve_grant) or not callable(utcnow) or type(local_live) is not bool):
             raise ValueError("matching admission, worker and grant resolver required")
         self.admission = admission
         self.worker = worker
@@ -26,9 +29,24 @@ class DistributedPublicFetch:
         self.utcnow = utcnow
         self.journal = SourceCheckpointJournal(admission)
         declared_modes = set(worker.source_modes.values())
-        if declared_modes != {"SYNTHETIC"}:
-            raise ValueError("public demo Fetch requires explicitly synthetic source handlers")
-        self.data_mode = "SYNTHETIC"
+        if local_live:
+            from app.local_smoke_policy import local_smoke_policy
+            from app.storage.local_smoke_store import LocalSmokeStore
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
+                    or worker.admission is not admission
+                    or type(admission.store) is not LocalSmokeStore
+                    or type(admission.store.store) is not LocalSQLiteAtomicStateStore
+                    or admission.store.store.data_mode != "LIVE"
+                    or admission.policy != replace(local_smoke_policy(), enabled=True)
+                    or not callable(resolve_processing_grants)):
+                raise ValueError("local live demo requires bounded local policy and processing grants")
+            self.data_mode = "LIVE"
+        else:
+            if declared_modes != {"SYNTHETIC"} or resolve_processing_grants is not None:
+                raise ValueError("public demo Fetch requires explicitly synthetic source handlers")
+            self.data_mode = "SYNTHETIC"
+        self.resolve_processing_grants = resolve_processing_grants
 
     def submit(self, idempotency_key: str) -> dict:
         accepted = self.admission.admit(idempotency_key, now=self.utcnow())
@@ -79,11 +97,13 @@ class DistributedPublicFetch:
         discovery = None
         if terminal:
             try:
-                discovery = discover_fetch_results(source_results, now=now)
+                grants = self.resolve_processing_grants(now) if self.resolve_processing_grants else ()
+                discovery = discover_fetch_results(source_results, now=now, processing_grants=grants,
+                                                   empty_mode=self.data_mode)
             except Exception:
                 discovery = {
                     "status": "UNAVAILABLE",
-                    "data_mode": "SYNTHETIC",
+                    "data_mode": self.data_mode,
                     "candidate_count": 0,
                     "shown_count": 0,
                     "rejected_record_count": 0,
@@ -95,7 +115,9 @@ class DistributedPublicFetch:
             "status": job["state"],
             "stage": job["state"],
             "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else None,
-            "sources": source_results if terminal else [
+            "sources": ([{key: value for key, value in item.items() if key != "records"}
+                         for item in source_results] if self.data_mode == "LIVE" else source_results)
+                       if terminal else [
                 {"source_id": source_id, "status": job["state"]}
                 for source_id in sorted(self.admission.policy.enabled_sources)
             ],
