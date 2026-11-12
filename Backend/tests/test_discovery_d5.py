@@ -32,6 +32,22 @@ def keyword(rows, text):
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_each_topic_has_explicit_rule_and_unmatched_stays_unclassified(self):
+        examples = {
+            "fashion": "clothing", "home_living": "furniture", "technology": "software",
+            "gaming": "esports", "entertainment": "cinema",
+            "celebrity_public_figures": "celebrity", "beauty_personal_care": "skincare",
+            "sports": "basketball", "food_beverage": "coffee", "health_fitness": "fitness",
+            "travel_lifestyle": "travel", "business_finance": "finance", "news_politics": "elections",
+        }
+        for category, word in examples.items():
+            with self.subTest(category=category):
+                candidate = keyword([observation(0, word, category)], word)
+                self.assertIn(category, candidate.categories)
+                self.assertEqual(candidate.classification_version, "topic-terms-v2")
+        self.assertEqual(keyword([observation(0, "quartz", "unknown")], "quartz").categories,
+                         ("unclassified",))
+
     def test_new_phrases_aliases_evidence_and_categories(self):
         rows = (observation(0, "Wide leg linen pants", "1"),
                 observation(0, "Wide leg linen pants", "1", query_evidence=("other",)),

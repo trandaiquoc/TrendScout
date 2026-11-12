@@ -222,6 +222,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
             "keyword_id": candidate.keyword_id,
             "keyword": candidate.keyword,
             "categories": list(candidate.categories),
+            "classification_version": candidate.classification_version,
             "status": "INSUFFICIENT_DATA",
             "score": None,
             "data_mode": (next(iter({item.data_mode for item in candidate.evidence}))

@@ -76,6 +76,7 @@ class Candidate:
     extraction_version: str
     quality_flags: tuple[str, ...]
     evidence: tuple[Evidence, ...]
+    classification_version: str = "topic-terms-v2"
 
 
 @dataclass(frozen=True)

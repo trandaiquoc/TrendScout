@@ -23,6 +23,14 @@ _TOPICS = {
     "technology": frozenset("technology computer software ai robot robotics electronics gadget gadgets glasses".split()),
     "food_beverage": frozenset("food beverage cooking coffee tea recipe recipes".split()),
     "gaming": frozenset("game games gaming esports".split()),
+    "entertainment": frozenset("entertainment film movie movies music television tv anime cinema".split()),
+    "celebrity_public_figures": frozenset("celebrity celebrities actor actors musician musicians creator creators influencer influencers".split()),
+    "beauty_personal_care": frozenset("beauty skincare cosmetics makeup haircare shampoo perfume".split()),
+    "sports": frozenset("sport sports athlete athletes football basketball baseball soccer tennis".split()),
+    "health_fitness": frozenset("health fitness wellness workout exercise yoga".split()),
+    "travel_lifestyle": frozenset("travel tourism vacation destination destinations lifestyle".split()),
+    "business_finance": frozenset("business finance financial economy company companies stocks markets".split()),
+    "news_politics": frozenset("news politics political election elections government policy".split()),
 }
 _MAX_TEXT = 10_000
 _MAX_TOKENS = 100

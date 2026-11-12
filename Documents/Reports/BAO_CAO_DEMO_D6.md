@@ -6,7 +6,7 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 
 | Gate | Trạng thái | Bằng chứng và giới hạn |
 | --- | --- | --- |
-| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 610 unittest, Golden hai hash seed và browser E2E. |
+| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 611 unittest, Golden hai hash seed và browser E2E. |
 | Cấu hình credentials | PRESENT | Hai key hiện diện trong `.env` local được Git bỏ qua và có quyền 600; hiện diện không chứng minh key hợp lệ hoặc quyền/quota. Không ghi giá trị. |
 | LIVE_CONFIGURED | BLOCKED | Gateway và dashboard Fetch live chưa được nối thành runtime local được kiểm thử. |
 | LIVE_SMOKE_VERIFIED | BLOCKED | Chưa có phê duyệt smoke/budget; chưa gửi request tới provider. |
@@ -14,6 +14,10 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 | Company production multi-host | BLOCKED, track riêng | Không phải điều kiện chạy demo local. |
 
 Các adapter và gateway D5 đã có, song Public Fetch, response provenance và discovery hiện chủ ý khóa synthetic. D6 cần tích hợp local có kiểm soát và xác minh chính sách trước khi bật live; không thay đổi Vercel read-only. Discovery hỗ trợ đầu vào live có grant backend theo nguồn và giữ nguồn gốc mixed; không tự cấp grant. Thiếu quyền trích xuất thì loại record khỏi discovery; thiếu quyền metric thì giữ `INSUFFICIENT_EVIDENCE`.
+
+Phân loại `topic-terms-v2` bổ sung từ khóa mẫu cho đủ 13 nhóm chủ đề đang hoạt động; đây là heuristic chưa được đánh giá độ chính xác, có thể gán nhiều nhóm hoặc `unclassified`, không chứng minh hiểu hết mọi chủ đề. Định danh keyword và phiên bản thuật toán trích xuất không đổi; Fashion và Home & Living vẫn được ưu tiên nghiên cứu theo quy tắc hiện có.
+
+Giới hạn còn mở trước khi tích hợp discovery live: bộ trích xuất hiện xử lý như tiếng Anh; `hl=en`, `regionCode=US` hoặc vị trí của Wikimedia không xác minh ngôn ngữ của từng nội dung hay nơi cư trú của tác giả/người xem. Cần cơ chế xác định hoặc gắn nhãn ngôn ngữ chưa xác minh và không gọi đó là nhu cầu của toàn bộ thị trường Mỹ.
 
 ## Cấu hình local
 
