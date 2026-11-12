@@ -14,9 +14,20 @@ from typing import Awaitable, Callable, Mapping
 
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _TERMINAL_STATUSES = frozenset({"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"})
+_TRANSPORT_FAILURE_PHASES = frozenset({
+    "REQUEST_DISPATCH", "RESPONSE_HEADERS", "BODY_STREAM", "JSON_DECODE", "SCHEMA_VALIDATION",
+})
+_TRANSPORT_EXCEPTION_CLASSES = frozenset({
+    "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "RemoteProtocolError",
+    "DecodingError", "WriteError", "WriteTimeout", "PoolTimeout", "CloseError",
+    "RequestError", "TimeoutException", "HttpDeadlineExceeded", "TimeoutError",
+    "JSONDecodeError", "ValueError", "TypeError", "RecursionError",
+})
 
 
 @dataclass(frozen=True)
@@ -181,7 +192,7 @@ class DistributedFetchWorker:
                 raise ValueError("invalid deferred source result")
             return value
         allowed = {"status", "data_mode", "delivery_state", "records", "record_count",
-                   "error_code", "coverage", "quality_flags"}
+                   "error_code", "coverage", "quality_flags", "transport_diagnostic"}
         if set(value) - allowed:
             raise ValueError("source result contains an unsupported field")
         if value.get("data_mode") != expected_mode:
@@ -205,4 +216,31 @@ class DistributedFetchWorker:
             raise ValueError("invalid quality flags")
         if "coverage" in value and not isinstance(value["coverage"], dict):
             raise ValueError("coverage must be a bounded object")
+        if "transport_diagnostic" in value:
+            diagnostic = value["transport_diagnostic"]
+            expected_diagnostic_fields = {
+                "source_id", "failure_phase", "http_status", "exception_class",
+                "bytes_received", "response_size_limit", "attempt_id", "error_code",
+            }
+            if not isinstance(diagnostic, dict) or set(diagnostic) != expected_diagnostic_fields:
+                raise ValueError("invalid transport diagnostic shape")
+            if (diagnostic["source_id"] != WIKIMEDIA_SOURCE_ID
+                    or not isinstance(diagnostic["failure_phase"], str)
+                    or diagnostic["failure_phase"] not in _TRANSPORT_FAILURE_PHASES
+                    or (diagnostic["http_status"] is not None
+                        and (type(diagnostic["http_status"]) is not int
+                             or not 100 <= diagnostic["http_status"] <= 599))
+                    or (diagnostic["exception_class"] is not None
+                        and (not isinstance(diagnostic["exception_class"], str)
+                             or diagnostic["exception_class"] not in _TRANSPORT_EXCEPTION_CLASSES))
+                    or type(diagnostic["bytes_received"]) is not int
+                    or not 0 <= diagnostic["bytes_received"] <= 1_000_000_000
+                    or type(diagnostic["response_size_limit"]) is not int
+                    or not 1 <= diagnostic["response_size_limit"] <= 10_000_000
+                    or not isinstance(diagnostic["attempt_id"], str)
+                    or not _SAFE_ATTEMPT_ID.fullmatch(diagnostic["attempt_id"])
+                    or not isinstance(diagnostic["error_code"], str)
+                    or not _SAFE_CODE.fullmatch(diagnostic["error_code"])
+                    or diagnostic["error_code"] != value.get("error_code")):
+                raise ValueError("invalid transport diagnostic values")
         return value

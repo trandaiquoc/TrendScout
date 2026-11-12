@@ -1,5 +1,6 @@
 """Guarded Wikimedia pageview contract tests; transport stays synthetic."""
 
+import asyncio
 import tempfile
 import unittest
 from dataclasses import replace
@@ -189,7 +190,113 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
                 seen.append(request) or httpx.Response(200, json=body)))
             with self.assertRaisesRegex(GatewayError, "MALFORMED_RESPONSE"):
                 await gateway.fetch_day(**self.args(attempt_id))
+            self.assertEqual(gateway.last_diagnostic.failure_phase, "SCHEMA_VALIDATION")
         self.assertEqual(len(seen), len(cases))
+
+    async def test_body_read_error_after_200_is_sanitized_and_remains_reserved(self):
+        class FailingBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"private-partial-response"
+                raise httpx.ReadError("private transport detail")
+
+            async def aclose(self):
+                return None
+
+        gateway = self.gateway(lambda request: httpx.Response(
+            200, stream=FailingBody(), request=request))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as caught:
+            await gateway.fetch_day(**self.args())
+        diagnostic = caught.exception.diagnostic
+        self.assertEqual(diagnostic.source_id, WIKIMEDIA_SOURCE_ID)
+        self.assertEqual(diagnostic.failure_phase, "BODY_STREAM")
+        self.assertEqual(diagnostic.http_status, 200)
+        self.assertEqual(diagnostic.exception_class, "ReadError")
+        self.assertEqual(diagnostic.bytes_received, len(b"private-partial-response"))
+        self.assertEqual(diagnostic.error_code, "UPSTREAM_ERROR")
+        self.assertEqual(diagnostic.attempt_id, "wikimedia-attempt-0001")
+        self.assertNotIn("private", repr(diagnostic))
+        self.assertNotIn(b"private-partial-response", Path(self.path).read_bytes())
+        with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
+            await gateway.fetch_day(**self.args())
+
+    async def test_remote_protocol_and_timeout_are_distinguished_from_json_errors(self):
+        class ProtocolFailure(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"{"
+                raise httpx.RemoteProtocolError("private protocol detail")
+
+            async def aclose(self):
+                return None
+
+        protocol_gateway = self.gateway(lambda request: httpx.Response(
+            200, stream=ProtocolFailure(), request=request))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as protocol_error:
+            await protocol_gateway.fetch_day(**self.args())
+        self.assertEqual(protocol_error.exception.diagnostic.exception_class, "RemoteProtocolError")
+        self.assertEqual(protocol_error.exception.diagnostic.failure_phase, "BODY_STREAM")
+
+        class TimeoutBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                raise httpx.ReadTimeout("private timeout detail")
+                yield b""
+
+            async def aclose(self):
+                return None
+
+        timeout_gateway = self.gateway(lambda request: httpx.Response(
+            200, stream=TimeoutBody(), request=request))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_TIMEOUT") as timeout_error:
+            await timeout_gateway.fetch_day(**self.args("wikimedia-attempt-timeout-0001"))
+        self.assertEqual(timeout_error.exception.diagnostic.exception_class, "ReadTimeout")
+        self.assertEqual(timeout_error.exception.diagnostic.http_status, 200)
+
+    async def test_complete_invalid_json_is_malformed_not_transport_error(self):
+        gateway = self.gateway(lambda request: httpx.Response(
+            200, content=b"{not-json", request=request))
+        with self.assertRaisesRegex(GatewayError, "MALFORMED_RESPONSE") as caught:
+            await gateway.fetch_day(**self.args())
+        self.assertEqual(caught.exception.diagnostic.failure_phase, "JSON_DECODE")
+        self.assertEqual(caught.exception.diagnostic.http_status, 200)
+        self.assertEqual(caught.exception.diagnostic.exception_class, "JSONDecodeError")
+
+    async def test_dispatch_and_content_decode_failures_have_distinct_sanitized_details(self):
+        dispatch_gateway = self.gateway(lambda request: (_ for _ in ()).throw(
+            httpx.ConnectError("private connection detail", request=request)))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as dispatch_error:
+            await dispatch_gateway.fetch_day(**self.args())
+        self.assertEqual(dispatch_error.exception.diagnostic.failure_phase, "REQUEST_DISPATCH")
+        self.assertIsNone(dispatch_error.exception.diagnostic.http_status)
+        self.assertEqual(dispatch_error.exception.diagnostic.exception_class, "ConnectError")
+
+        decode_gateway = self.gateway(lambda request: httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, content=b"not-gzip", request=request))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as decode_error:
+            await decode_gateway.fetch_day(**self.args("wikimedia-attempt-decode-0001"))
+        self.assertEqual(decode_error.exception.diagnostic.failure_phase, "REQUEST_DISPATCH")
+        self.assertIsNone(decode_error.exception.diagnostic.http_status)
+        self.assertEqual(decode_error.exception.diagnostic.exception_class, "DecodingError")
+
+    async def test_gateway_cancellation_propagates_and_preserves_attempt_reservation(self):
+        started = asyncio.Event()
+
+        class HangingBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+            async def aclose(self):
+                return None
+
+        gateway = self.gateway(lambda request: httpx.Response(
+            200, stream=HangingBody(), request=request))
+        task = asyncio.create_task(gateway.fetch_day(**self.args()))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
+            await gateway.fetch_day(**self.args())
 
     async def test_oversized_response_is_rejected_and_reserved(self):
         seen = []
@@ -197,6 +304,9 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
             seen.append(request) or httpx.Response(200, content=b"x" * 1_000_001)))
         with self.assertRaisesRegex(GatewayError, "RESPONSE_TOO_LARGE"):
             await gateway.fetch_day(**self.args())
+        self.assertEqual(gateway.last_diagnostic.failure_phase, "RESPONSE_HEADERS")
+        self.assertEqual(gateway.last_diagnostic.http_status, 200)
+        self.assertEqual(gateway.last_diagnostic.response_size_limit, 1_000_000)
         self.assertEqual(len(seen), 1)
         with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
             await gateway.fetch_day(**self.args())

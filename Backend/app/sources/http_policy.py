@@ -13,13 +13,54 @@ import httpx
 class HttpDeadlineExceeded(TimeoutError):
     """A request exceeded the policy deadline rather than raising its own timeout."""
 
+    def __init__(self, message: str, *, diagnostic: "HttpFailureDiagnostic | None" = None):
+        self.diagnostic = diagnostic
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class HttpFailureDiagnostic:
+    """Body-free transport facts suitable for bounded internal diagnostics."""
+
+    phase: str
+    http_status: int | None
+    exception_class: str | None
+    bytes_received: int
+    max_response_bytes: int
+
+
+class HttpRequestFailure(httpx.RequestError):
+    """Request error with sanitized phase metadata; never retains response content."""
+
+    def __init__(self, request: httpx.Request, diagnostic: HttpFailureDiagnostic):
+        self.diagnostic = diagnostic
+        super().__init__("HTTP request failed", request=request)
+
 
 class HttpResponseTooLarge(ValueError):
     """A streamed HTTP response exceeded the caller's byte limit."""
 
-    def __init__(self, status_code: int | None = None):
+    def __init__(self, status_code: int | None = None, *, bytes_received: int = 0,
+                 max_response_bytes: int | None = None, phase: str = "BODY_STREAM"):
         self.status_code = status_code
+        self.bytes_received = bytes_received
+        self.max_response_bytes = max_response_bytes
+        self.phase = phase
         super().__init__("HTTP response exceeded configured size limit")
+
+
+_SAFE_HTTPX_EXCEPTION_CLASSES = frozenset({
+    "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "RemoteProtocolError",
+    "DecodingError", "WriteError", "WriteTimeout", "PoolTimeout", "CloseError",
+    "RequestError", "TimeoutException",
+})
+
+
+def _safe_exception_class(exc: BaseException) -> str:
+    name = type(exc).__name__
+    if type(exc).__module__ == "httpx" and name in _SAFE_HTTPX_EXCEPTION_CLASSES:
+        return name
+    return "RequestError"
 
 
 @dataclass(frozen=True)
@@ -102,6 +143,8 @@ class HttpPolicy:
             raise ValueError("HTTP request deadline must be within the configured total timeout")
         deadline = asyncio.timeout(timeout_seconds)
         response_status = None
+        phase = "REQUEST_DISPATCH"
+        bytes_received = 0
         try:
             async with deadline:
                 async with client.stream(
@@ -112,15 +155,21 @@ class HttpPolicy:
                     timeout=self.request_timeout(),
                     follow_redirects=False,
                 ) as response:
+                    phase = "RESPONSE_HEADERS"
                     response_status = response.status_code
                     content_length = response.headers.get("Content-Length")
                     if content_length and content_length.isdigit() and int(content_length) > max_response_bytes:
-                        raise HttpResponseTooLarge(response_status)
+                        raise HttpResponseTooLarge(response_status, bytes_received=0,
+                            max_response_bytes=max_response_bytes, phase="RESPONSE_HEADERS")
                     body = bytearray()
+                    phase = "BODY_STREAM"
                     async for chunk in response.aiter_bytes():
                         if len(body) + len(chunk) > max_response_bytes:
-                            raise HttpResponseTooLarge(response_status)
+                            raise HttpResponseTooLarge(response_status,
+                                bytes_received=len(body) + len(chunk),
+                                max_response_bytes=max_response_bytes)
                         body.extend(chunk)
+                        bytes_received = len(body)
                     return httpx.Response(
                         status_code=response.status_code,
                         headers=response.headers,
@@ -128,9 +177,26 @@ class HttpPolicy:
                         request=response.request,
                         extensions=response.extensions,
                     )
+        except HttpResponseTooLarge:
+            raise
+        except httpx.RequestError as exc:
+            diagnostic = HttpFailureDiagnostic(
+                phase=phase, http_status=response_status,
+                exception_class=_safe_exception_class(exc), bytes_received=bytes_received,
+                max_response_bytes=max_response_bytes,
+            )
+            request = getattr(exc, "request", None)
+            if request is None:
+                request = httpx.Request("GET", url)
+            raise HttpRequestFailure(request, diagnostic) from exc
         except TimeoutError as exc:
             if deadline.expired():
-                raise HttpDeadlineExceeded("HTTP request exceeded total deadline") from exc
+                diagnostic = HttpFailureDiagnostic(
+                    phase=phase, http_status=response_status, exception_class="HttpDeadlineExceeded",
+                    bytes_received=bytes_received, max_response_bytes=max_response_bytes,
+                )
+                raise HttpDeadlineExceeded("HTTP request exceeded total deadline",
+                                           diagnostic=diagnostic) from exc
             raise
 
     @staticmethod

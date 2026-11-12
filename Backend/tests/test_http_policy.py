@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 
 import httpx
 
-from app.sources.http_policy import HttpDeadlineExceeded, HttpPolicy, HttpResponseTooLarge
+from app.sources.http_policy import (
+    HttpDeadlineExceeded,
+    HttpPolicy,
+    HttpRequestFailure,
+    HttpResponseTooLarge,
+)
 
 
 class HttpPolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -117,6 +122,90 @@ class HttpPolicyTests(unittest.IsolatedAsyncioTestCase):
                     max_response_bytes=4,
                 )
             self.assertEqual(raised.exception.status_code, 200)
+            self.assertEqual(raised.exception.phase, "BODY_STREAM")
+            self.assertEqual(raised.exception.bytes_received, 5)
+            self.assertEqual(raised.exception.max_response_bytes, 4)
+        finally:
+            await client.aclose()
+
+    async def test_bounded_get_reports_body_stream_failure_without_message(self):
+        class FailingStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"partial-private-body"
+                raise httpx.ReadError("private exception message")
+
+            async def aclose(self):
+                return None
+
+        async def handler(request):
+            return httpx.Response(200, stream=FailingStream(), request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with self.assertRaises(HttpRequestFailure) as raised:
+                await HttpPolicy(max_retries=0).get_bounded(
+                    client, "https://example.invalid/fixture", headers={}, max_response_bytes=128
+                )
+            self.assertEqual(raised.exception.diagnostic.phase, "BODY_STREAM")
+            self.assertEqual(raised.exception.diagnostic.http_status, 200)
+            self.assertEqual(raised.exception.diagnostic.exception_class, "ReadError")
+            self.assertEqual(raised.exception.diagnostic.bytes_received, len(b"partial-private-body"))
+            self.assertNotIn("private", repr(raised.exception.diagnostic))
+        finally:
+            await client.aclose()
+
+    async def test_bounded_get_propagates_cancellation_during_body_stream(self):
+        started = asyncio.Event()
+
+        class HangingBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+            async def aclose(self):
+                return None
+
+        async def handler(request):
+            return httpx.Response(200, stream=HangingBody(), request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        task = asyncio.create_task(HttpPolicy(max_retries=0).get_bounded(
+            client, "https://example.invalid/fixture", headers={}, max_response_bytes=128
+        ))
+        try:
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        finally:
+            await client.aclose()
+
+    async def test_bounded_get_records_total_deadline_after_headers(self):
+        started = asyncio.Event()
+
+        class HangingBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                started.set()
+                await asyncio.Event().wait()
+                yield b""
+
+            async def aclose(self):
+                return None
+
+        async def handler(request):
+            return httpx.Response(200, stream=HangingBody(), request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with self.assertRaises(HttpDeadlineExceeded) as raised:
+                await HttpPolicy(total_timeout_seconds=0.02, max_retries=0).get_bounded(
+                    client, "https://example.invalid/fixture", headers={}, max_response_bytes=128
+                )
+            self.assertTrue(started.is_set())
+            self.assertEqual(raised.exception.diagnostic.phase, "BODY_STREAM")
+            self.assertEqual(raised.exception.diagnostic.http_status, 200)
+            self.assertEqual(raised.exception.diagnostic.exception_class, "HttpDeadlineExceeded")
         finally:
             await client.aclose()
 

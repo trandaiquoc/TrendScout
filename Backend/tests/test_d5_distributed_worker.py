@@ -144,6 +144,47 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({fence for _, fence in seen}), 1)
         self.assertIsNone(await worker.run_once("worker-two"))
 
+    async def test_sanitized_transport_diagnostic_survives_result_validation_and_status(self):
+        job_id = self.admit()
+        diagnostic = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "failure_phase": "BODY_STREAM",
+            "http_status": 200,
+            "exception_class": "ReadError",
+            "bytes_received": 12,
+            "response_size_limit": 1_000_000,
+            "attempt_id": "a" * 64,
+            "error_code": "UPSTREAM_ERROR",
+        }
+
+        def source_handler(context):
+            if context.source_id == WIKIMEDIA_SOURCE_ID:
+                return {"status": "FAILED", "data_mode": "SYNTHETIC", "records": [],
+                        "record_count": 0, "error_code": "UPSTREAM_ERROR",
+                        "transport_diagnostic": diagnostic}
+            return self.source_result()
+
+        source_handler.__trendscout_data_mode__ = "SYNTHETIC"
+        handlers = {source: source_handler for source in SOURCES}
+        worker = self.worker(handlers)
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        await worker.run_once("diagnostic-worker")
+        result = service.status(job_id)
+        wiki = next(source for source in result["sources"]
+                    if source["source_id"] == WIKIMEDIA_SOURCE_ID)
+        self.assertEqual(wiki["transport_diagnostic"], diagnostic)
+        self.assertNotIn("body", wiki["transport_diagnostic"])
+
+        unsafe = dict(diagnostic, raw_body="private-marker")
+        with self.assertRaisesRegex(ValueError, "diagnostic shape"):
+            DistributedFetchWorker._validate_result({
+                "status": "FAILED", "data_mode": "SYNTHETIC", "records": [],
+                "record_count": 0, "error_code": "UPSTREAM_ERROR",
+                "transport_diagnostic": unsafe,
+            }, expected_mode="SYNTHETIC")
+
     async def test_reclaim_resumes_progress_and_skips_completed_source(self):
         job_id = self.admit()
         calls = {source: 0 for source in SOURCES}

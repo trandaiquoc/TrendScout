@@ -124,3 +124,53 @@ D6.2 reuses `WikimediaTopPageGateway.controlled_network()`, `local_live_composit
 The configured Wikimedia User-Agent environment variable was unset, so the application default is used. Its contact field is the public TrendScout GitHub project URL, which is an HTTPS URL rather than a fabricated email. Wikimedia's current [User-Agent policy](https://foundation.wikimedia.org/wiki/Policy%3AWikimedia_Foundation_User-Agent_Policy/en) accepts a contact path, and the [AQS access policy](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/access-policy.html) requires an informative User-Agent and sequential requests. This policy check does not resolve the pending TrendScout use, attribution, or retention approval. The Wikimedia API's top list is censored; absence from it is not zero, and `views_ceil` is approximate pageviews, not search volume or purchase intent ([country-data documentation](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/concepts/country-data.html)).
 
 The one-shot owner approval has expired after the attempt. The durable quota receipt remains reserved; do not reset or delete the ledger, run another Fetch, or retry this date under D6.2. No API key, unrelated provider credential, paid service, other-provider request, D6.3 work, or push was used. `WIKIMEDIA_LIVE_SMOKE_VERIFIED` is not set. The HTTPS request returned status 200, but the gateway surfaced `UPSTREAM_ERROR` and produced no validated records, so G5/G6 do not pass. D6.3 should wait until a separately authorized follow-up goal addresses the transport/read failure and any remaining Wikimedia budget; it must not bypass this consumed reservation.
+
+
+## D6.2.1 Wikimedia transport failure forensic and offline diagnostics (2026-11-12)
+
+This is an offline-only follow-up to the consumed D6.2 request. No provider request, Fetch, launcher, retry, quota-policy change, ledger mutation, approval extension, or D6.3 implementation was performed.
+
+### Facts from the D6.2 attempt
+
+- Exactly one Wikimedia HTTPS GET was sent for the fixed US/all-access endpoint and observation date 2026-11-10.
+- The activation transport wrapper observed HTTP status 200 when `AsyncHTTPTransport.handle_async_request` returned its response.
+- `WikimediaTopPageGateway` returned `UPSTREAM_ERROR`; zero records were validated.
+- The canonical local ledger remains consumed: read-only inspection found one job, one start, one Wikimedia source count, and one attempt receipt. No reset, write, or alternate namespace was used.
+- The exact exception from the original attempt was not recorded and cannot be reconstructed from the status alone.
+
+### Code findings
+
+`HttpPolicy.get_bounded()` enters `AsyncClient.stream()`, reads response status and `Content-Length` when a response object is available, then consumes `response.aiter_bytes()` and returns a reconstructed response only after the complete bounded body has been read. The activation wrapper observes headers before this body consumption finishes. `WikimediaTopPageGateway` previously caught `httpx.RequestError` around the bounded call and reduced it to `UPSTREAM_ERROR`, dropping the exception subtype, stream phase, status and received-byte count. JSON decoding occurs later, after the bounded body has been reconstructed; it was already a separate operation in code but had no diagnostic classification.
+
+HTTPX is pinned to 0.28.1 in the project dependency manifest. No dependency was installed or changed.
+
+### Offline reproduction and hardening
+
+New `MockTransport` and custom `AsyncByteStream` fixtures reproduce complete valid JSON, body `ReadError` after HTTP 200 headers, `RemoteProtocolError` after HTTP 200, read timeout, total deadline, connection error, malformed content decoding, complete invalid JSON, wrong Wikimedia scope/schema/date, oversized response, and body-stream cancellation. All fixtures are synthetic and use temporary admission databases.
+
+The bounded HTTP policy now carries immutable body-free failure details: phase, available HTTP status, a whitelisted HTTPX exception class, bytes received, and configured response limit. It wraps `httpx.RequestError` without including its message or response body in the diagnostic; oversized-response errors carry the same applicable size facts. The Wikimedia gateway attaches source ID, attempt ID and stable error code to a sanitized in-memory diagnostic on `WikimediaGatewayError` and `last_diagnostic`. The source handler carries this exact diagnostic shape through worker validation to the LIVE source status, where only the sanitized fields are exposed; diagnostic input with extra/raw-body fields is rejected. Read timeouts map to the existing `UPSTREAM_TIMEOUT`; generic read and protocol failures remain `UPSTREAM_ERROR`; complete invalid JSON remains `MALFORMED_RESPONSE` at `JSON_DECODE`; invalid schema/scope/date is `MALFORMED_RESPONSE` at `SCHEMA_VALIDATION`. Cancellation propagates. No retry or public error-code contract was added.
+
+The content-decoding fixture raises `httpx.DecodingError` before `get_bounded()` obtains a response object under the pinned HTTPX/MockTransport path. The diagnostic therefore records `REQUEST_DISPATCH` with no status for that fixture. This illustrates the instrumentation boundary; it does not establish that content decoding caused the original D6.2 failure.
+
+### Confirmed versus unconfirmed
+
+**Confirmed:** one prior request; HTTP 200 observed at the transport boundary; gateway `UPSTREAM_ERROR`; zero validated records; durable attempt reservation consumed; the code boundary that can fail during response streaming; deterministic offline reproduction and diagnostic classification for the tested exception cases.
+
+**Unknown:** the exact original exception; whether the original body was truncated; whether the provider, network connection, HTTP framing, content decoder, or another transport stage caused the original failure. The offline fixtures demonstrate code behavior only and do not identify or resolve the historical live failure.
+
+### D6.2.1 verification
+
+| Gate | Result | Evidence / limitation |
+| --- | --- | --- |
+| G1 Git baseline | PASS | `git fetch origin` completed; starting worktree was clean; `HEAD` and `origin/main` both matched `c736ffcacfb33632fbe98103d8e9cede3204db6f`. |
+| G2 No provider request | PASS | Only local MockTransport fixtures ran; no live launcher or provider request was used. |
+| G3 Failure boundary | PASS | Status capture is at the HTTP transport response; body streaming is in `HttpPolicy.get_bounded()`; gateway previously collapsed `RequestError` subclasses. |
+| G4 Body-stream reproduction | PASS offline | Synthetic `ReadError` and `RemoteProtocolError` after status 200; sanitized diagnostics retain phase/status/class/bytes. |
+| G5 JSON/schema distinction | PASS offline | Complete invalid JSON reports `JSON_DECODE`; valid JSON with invalid scope/schema/date reports `SCHEMA_VALIDATION`. |
+| G6 Diagnostic hardening | PASS | Diagnostics contain no body or exception message; read timeout, total deadline, content decode, oversize, and dispatch failures are classified. Cancellation propagates. |
+| G7 Reservation/checkpoint/redaction | PASS in focused isolated tests | Error attempts remain reserved and duplicate attempts are rejected; raw synthetic body marker is absent from the temporary ledger; local composition/checkpoint regressions pass. The real ledger was inspected read-only and remains at one consumed reservation. |
+| G8 Focused regression | PASS | 66 tests passed across `test_http_policy.py`, `test_d5_wikimedia_gateway.py`, `test_d5_distributed_worker.py`, `test_d6_wikimedia_live_activation.py`, `test_d6_local_live_http.py`, `test_d6_offline_worker_composition.py`, and `test_public_fetch.py` on native Windows Python 3.12.10. |
+| G9 Report | PASS | This D6.2.1 section records facts, code findings, offline behavior, and unknowns. The approval register was not changed or extended. |
+| G10 Local commit | PASS after report/code commit | Local commit only; no push. |
+
+D6.2 remains incomplete. `WIKIMEDIA_LIVE_SMOKE_VERIFIED` remains unset. The consumed D6.2 reservation remains in force, and this offline diagnosis does not authorize another attempt or claim live integration success.

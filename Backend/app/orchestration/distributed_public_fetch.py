@@ -96,6 +96,8 @@ class DistributedPublicFetch:
                     "coverage": result.get("coverage"),
                     "error_code": result.get("error_code"),
                     "quality_flags": result.get("quality_flags", []),
+                    **({"transport_diagnostic": result["transport_diagnostic"]}
+                       if "transport_diagnostic" in result else {}),
                 })
         discovery = None
         if terminal:

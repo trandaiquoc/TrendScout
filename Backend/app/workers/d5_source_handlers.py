@@ -344,8 +344,20 @@ class D5SourceHandlers:
                 raise AdmissionDenied(exc.code) from None
             context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
             status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
-            return {"status": status, "data_mode": self.wikimedia.data_mode,
-                    "records": [], "record_count": 0, "error_code": exc.code}
+            result = {"status": status, "data_mode": self.wikimedia.data_mode,
+                      "records": [], "record_count": 0, "error_code": exc.code}
+            if exc.diagnostic is not None:
+                result["transport_diagnostic"] = {
+                    "source_id": exc.diagnostic.source_id,
+                    "failure_phase": exc.diagnostic.failure_phase,
+                    "http_status": exc.diagnostic.http_status,
+                    "exception_class": exc.diagnostic.exception_class,
+                    "bytes_received": exc.diagnostic.bytes_received,
+                    "response_size_limit": exc.diagnostic.response_size_limit,
+                    "attempt_id": exc.diagnostic.attempt_id,
+                    "error_code": exc.diagnostic.error_code,
+                }
+            return result
         result = result_for(page)
         context.checkpoint({"observation_date": page.observation_date.isoformat(),
                             "records": result["record_count"],
