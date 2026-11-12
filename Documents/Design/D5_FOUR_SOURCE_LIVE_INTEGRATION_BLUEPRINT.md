@@ -68,7 +68,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | PASS ở code boundary: analysis dùng `AnalysisStorage`; D5 admission/quota/cache/checkpoints dùng `AtomicStateStore`; Firestore implementation ở adapter/composition, demo dùng `FakeStorage`. Chưa chứng minh multi-host hoặc bật Firestore runtime; thuộc distributed/deployment gates |
 | Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: có model qua Storage Port, fake Firestore adapter và test multi-process một máy; chưa nối worker/deployment hoặc xác minh multi-host |
 | Quota/cache/queue | Atomic shared quota/cost, durable cache/queue và crash tests | OPEN: ledger/queue/lease/cache có model offline; proactive deletion, worker thật, quota reconciliation và deployment chưa hoàn tất |
-| Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | OPEN: module ban đầu chưa tích hợp |
+| Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | PASS offline: deterministic extraction, source/scope/mode partitions, coverage-based trend assessment and evidence run through the synthetic demo; no live data-quality claim |
 | Dashboard integration | Workflow offline, status, evidence, accessibility và regression | OPEN |
 | Offline integration tests | End-to-end fixture không gọi provider/cloud | OPEN |
 | Full regression | Readiness script và Golden pass | PASS tại D5 source checkpoint: 558 unittest, Golden hai hash seed, browser Fetch E2E offline và benchmark; chạy lại sau thay đổi code tiếp theo |

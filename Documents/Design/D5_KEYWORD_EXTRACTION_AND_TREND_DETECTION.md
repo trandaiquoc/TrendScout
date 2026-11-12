@@ -1,6 +1,6 @@
 # D5 keyword extraction and trend detection
 
-**In progress, offline module only.** The local presentation connects synthetic query-source observations to the module and displays a bounded sample separately from Wikimedia results. It does not establish live provider rights or production quality.
+**D5 offline gate: PASS; live validation remains open.** The local presentation connects synthetic query-source observations to the module and displays a bounded sample separately from Wikimedia results. It does not establish live provider rights or production quality.
 
 `app.discovery` extracts bounded, deterministic 1–4 word candidates directly from English synthetic observations rather than limiting candidates to the fixed query seeds. It records source, provider, document, timestamps, scope, query evidence, content fingerprint, market evidence, parser version and canonical URL; an explicit `tee shirt` alias is the only synonym merge. Simple vocabulary rules assign fashion, home, technology, food and gaming; unmatched candidates remain unclassified. Fashion/home research priority does not filter other categories. All labels are unvalidated heuristics, not claims about US population, demand, revenue or purchase probability.
 
