@@ -7,11 +7,27 @@ from unittest.mock import patch
 
 import httpx
 
-from app.demo_local import create_demo_app
+from app.demo_local import DemoFixtureAdapter, create_demo_app
 from app.main import create_app
 from app.models.observations import CollectionResult, DatasetSnapshot, FetchStatus
+from app.settings import Settings
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.storage.fake import FakeStorage
 from app.synthetic_multisource import collect_synthetic_discovery
+
+
+def legacy_fixture_app(*, adapter_factory=None, synthetic_supplement=collect_synthetic_discovery):
+    settings = Settings.from_environment({
+        "TREND_SCOUT_ENVIRONMENT": "test",
+        "TREND_SCOUT_RUN_MODE": "synthetic",
+        "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+        "TREND_SCOUT_RUN_COOLDOWN_SECONDS": "0",
+    })
+    return create_app(
+        settings=settings, storage=FakeStorage(),
+        adapter_factory=adapter_factory or DemoFixtureAdapter,
+        synthetic_supplement=synthetic_supplement,
+    )
 
 
 class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
@@ -39,35 +55,20 @@ class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.005)
                 self.assertEqual(result["data_mode"], "SYNTHETIC")
-                self.assertEqual(result["status"], "PARTIAL")
+                self.assertEqual(result["status"], "COMPLETED")
                 self.assertEqual(len(result["sources"]), 4)
-                run = (await client.get("/api/runs/" + result["run_id"])).json()
-                self.assertEqual(run["mode"], "synthetic")
-                supplement = run["synthetic_discovery"]
-                self.assertEqual(supplement["data_mode"], "SYNTHETIC")
-                self.assertEqual({s["source_id"] for s in supplement["sources"]},
-                                 {GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID})
-                self.assertTrue(all(s["status"] == "PARTIAL" and not s["complete"]
-                                    for s in supplement["sources"]))
-                self.assertTrue(supplement["candidates"])
-                for candidate in supplement["candidates"]:
-                    self.assertEqual(candidate["data_mode"], "SYNTHETIC")
-                    self.assertNotIn("synthetic", candidate["keyword"])
-                    self.assertTrue(all(a["classification"] == "INSUFFICIENT_EVIDENCE"
-                                        for a in candidate["assessments"]))
-                    self.assertTrue(all(e["data_mode"] == "SYNTHETIC"
-                                        for e in candidate["evidence"]))
-                self.assertNotIn("offline-fixture-placeholder", str(run))
-                keywords = (await client.get("/api/runs/" + result["run_id"] + "/keywords")).json()
-                self.assertGreater(keywords["total"], 0)
+                self.assertNotIn("run_id", result)
+                self.assertEqual(result["discovery"]["status"], "INSUFFICIENT_EVIDENCE")
+                self.assertTrue(result["discovery"]["candidates"])
+                self.assertTrue(all(source["data_mode"] == "SYNTHETIC"
+                                    for source in result["sources"]))
 
     async def test_synthetic_failure_retains_wikimedia_results(self):
         async def fail():
             raise RuntimeError("private provider detail should not leak")
         fail.__trendscout_offline_only__ = True
-        app = create_demo_app()
+        app = legacy_fixture_app(synthetic_supplement=fail)
         async with app.router.lifespan_context(app):
-            app.state.run_service.synthetic_supplement = fail
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url="http://127.0.0.1") as client:
                 accepted = await client.post("/api/v1/fetches", json={}, headers={
@@ -88,6 +89,8 @@ class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wikimedia_failure_preserves_query_source_results(self):
         class UnavailableWikimedia:
+            __trendscout_offline_only__ = True
+
             async def collect(self):
                 snapshot = DatasetSnapshot(
                     source="wikimedia_pageviews_top_per_country", country_scope="US",
@@ -97,9 +100,8 @@ class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
                     item_count=None, request_url="synthetic://unavailable",
                 )
                 return CollectionResult(None, ((snapshot, []),))
-        app = create_demo_app()
+        app = legacy_fixture_app(adapter_factory=UnavailableWikimedia)
         async with app.router.lifespan_context(app):
-            app.state.run_service.adapter_factory = UnavailableWikimedia
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url="http://127.0.0.1") as client:
                 accepted = await client.post("/api/v1/fetches", json={}, headers={

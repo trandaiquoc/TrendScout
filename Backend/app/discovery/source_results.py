@@ -123,8 +123,10 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
     if (not phrase or len(phrase) > 10_000 or len(_WORD.findall(phrase)) > 100
             or not document or len(scope) > 256):
         return ()
-    url = _text(record.get("source_url") or record.get("canonical_url")
-                or record.get("canonical_video_url")) or None
+    url_value = record.get("source_url") if "source_url" in record else (
+        record.get("canonical_url") or record.get("canonical_video_url")
+    )
+    url = _text(url_value) or None
     if url is not None:
         try:
             url = canonical_url(url)

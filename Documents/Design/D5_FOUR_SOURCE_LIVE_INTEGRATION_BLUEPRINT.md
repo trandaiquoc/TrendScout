@@ -82,11 +82,11 @@ Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VE
 
 | Kiểm tra trình diễn | Trạng thái |
 |---|---|
-| Khởi động local, loopback, storage tạm, không yêu cầu secret/account | `bash demo.sh`; kiểm thử API offline và trình duyệt với launcher thật |
-| Fetch một nút, kết quả và trạng thái rõ ràng | PASS thủ công qua trình duyệt local cho Wikimedia và ba nhánh synthetic bổ sung; trạng thái tổng PARTIAL |
-| Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | PASS phạm vi demo local: MockTransport, mỗi nguồn một query, không có baseline; lọc chỉ áp dụng trên tối đa 30 mẫu |
+| Khởi động local, loopback, storage tạm, không yêu cầu secret/account | PASS: `bash demo.sh` được smoke qua loopback; SQLite tạm, không credentials/Firebase/Firestore |
+| Fetch một nút, kết quả và trạng thái rõ ràng | PASS: Chrome E2E dùng status từ demo API thật; launcher trả bốn source và candidates với nhãn synthetic |
+| Fixture Google/Bing/YouTube gắn nhãn rõ và tích hợp dashboard | PASS phạm vi demo local: bốn handler fixture server-controlled, không provider request, không baseline; tối đa 100 candidates hiển thị |
 | Phân biệt LIVE/CACHED/SYNTHETIC và INSUFFICIENT_EVIDENCE xuyên API, thuật toán, UI | PASS cho flow hiện được bật là synthetic: origin `SYNTHETIC` được giữ trong evidence/candidate, delivery `FRESH`/`CACHED` độc lập, assessment là `INSUFFICIENT_EVIDENCE`; `DistributedPublicFetch` fail-closed với handler LIVE, nên chưa tuyên bố live flow đã được xác minh |
-| Light/dark, VI/EN, responsive và regression | Offline regression PASS; browser test đi qua public Fetch tới keyword detail; cần chạy launcher trên máy trình bày và rà soát trực tiếp |
+| Light/dark, VI/EN, responsive và regression | PASS offline regression; Chrome E2E public Fetch/search/filter/detail và responsive/theme/locale/keyboard |
 | Dữ liệu không bị nhận nhầm là live; phân biệt presentation với live acceptance | PASS cho fixtures: API, extraction evidence và dashboard giữ `SYNTHETIC`; cached delivery không nâng origin thành LIVE. Four-source live verification vẫn là gate riêng D6/D7 |
 
 Storage tạm là lựa chọn demo local, không chứng minh durable, distributed admission hay an toàn public production. D6 xử lý account/secret của công ty và live activation; D7 nghiệm thu live cuối.

@@ -1,15 +1,41 @@
-"""Chrome contract check for the injected distributed synthetic Fetch response."""
+"""Chrome check for the local demo's real distributed synthetic API response."""
 
+import asyncio
 import json
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[2]
+BACKEND = ROOT / "Backend"
 PUBLIC = ROOT / "Frontend" / "public"
-FETCH_ID = "a" * 32
+sys.path.insert(0, str(BACKEND))
+
+from app.demo_local import create_demo_app  # noqa: E402
+
+
+async def demo_api_snapshot():
+    application = create_demo_app()
+    async with application.router.lifespan_context(application):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://127.0.0.1"
+        ) as client:
+            capabilities = await client.get("/api/v1/capabilities")
+            accepted = await client.post("/api/v1/fetches", json={}, headers={
+                "Origin": "http://127.0.0.1",
+                "Idempotency-Key": "browser-demo-public-fetch-0001",
+            })
+            if accepted.status_code != 202:
+                raise AssertionError(f"demo Fetch returned {accepted.status_code}")
+            status = await client.get(accepted.json()["status_url"])
+            if status.status_code != 200 or not status.json().get("terminal"):
+                raise AssertionError("demo Fetch did not return a terminal status")
+            return capabilities.json(), status.json()
 
 
 def main():
@@ -24,30 +50,26 @@ def main():
     chrome = shutil.which("google-chrome") or shutil.which("chromium")
     if not chrome:
         raise SystemExit("Chrome unavailable")
+    capabilities, status = asyncio.run(demo_api_snapshot())
+    fetch_id = status["fetch_id"]
+    capability_payload = json.dumps(capabilities, ensure_ascii=True, separators=(",", ":"))
+    status_payload = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
     html = (PUBLIC / "index.html").read_text()
     css = (PUBLIC / "styles.css").read_text()
     html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
 const fetchRequests=[];let statusReads=0;
+const demoCapabilities={capability_payload};
+const demoStatus={status_payload};
 window.fetch=(path,options={{}})=>{{
   const value=String(path).split('?')[0];const requestOptions=options||{{}};
   fetchRequests.push({{path:value,method:requestOptions.method||'GET',headers:requestOptions.headers||{{}},body:requestOptions.body||null}});
   let body={{}};
   if(value==='/api/health') body={{status:'ok'}};
-  else if(value==='/api/v1/capabilities') body={{contract_version:'1.0',authentication_required:false,public_fetch_enabled:true,fetch_enabled:true,data_mode:'SYNTHETIC',fetch_block_reason:null,sources:[
-    {{source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',live_verification_status:'UNVERIFIED',enabled_for_current_operation:true}},
-    {{source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:true}},
-    {{source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:true}},
-    {{source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:true}}
-  ]}};
-  else if(value==='/api/v1/fetches'&&requestOptions.method==='POST') body={{fetch_id:{json.dumps(FETCH_ID)},status:'QUEUED',data_mode:'SYNTHETIC'}};
-  else if(value==='/api/v1/fetches/{FETCH_ID}'){{statusReads+=1;body={{fetch_id:{json.dumps(FETCH_ID)},status:'PARTIAL',stage:'PARTIAL',data_mode:'SYNTHETIC',terminal:true,sources:[
-    {{source_id:'wikimedia_pageviews_top_per_country',status:'SUCCESS',data_mode:'SYNTHETIC',delivery_state:'CACHED',record_count:1,records:[{{keyword:'Fixture Wikimedia'}}]}},
-    {{source_id:'google_web_serp',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'CACHED',record_count:1,records:[{{keyword:'Fixture Google'}}]}},
-    {{source_id:'bing_web_serp',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'FRESH',record_count:1,records:[{{keyword:'Fixture Bing'}}]}},
-    {{source_id:'youtube_video_search',status:'PARTIAL',data_mode:'SYNTHETIC',delivery_state:'CACHED',record_count:1,records:[{{keyword:'Fixture YouTube'}}]}}
-  ],discovery:{{status:'INSUFFICIENT_EVIDENCE',data_mode:'SYNTHETIC',candidate_count:1,shown_count:1,candidates:[{{keyword_id:'f'.repeat(64),keyword:'quiet luxury',categories:['fashion'],status:'INSUFFICIENT_DATA',score:null,data_mode:'SYNTHETIC',quality_flags:['COVERAGE_LIMITED'],evidence:[{{source_id:'google_web_serp',provider_id:'serpapi_google',document_id:'fixture',observed_at:'2026-11-12T12:00:00+00:00',fetched_at:'2026-11-12T12:00:00+00:00',scope:'google_web_serp:fixture:US-filter:en',market_evidence:'US_FILTER_ONLY',data_mode:'SYNTHETIC',delivery_mode:'CACHED',query_evidence:['server-selected query'],source_url:'https://example.org/evidence'}}],assessments:[{{source_id:'google_web_serp',classification:'INSUFFICIENT_EVIDENCE',reason:'No comparable baseline',limitations:['NO_BASELINE']}}]}}]}}}};}}
+  else if(value==='/api/v1/capabilities') body=demoCapabilities;
+  else if(value==='/api/v1/fetches'&&requestOptions.method==='POST') body={{fetch_id:{json.dumps(fetch_id)},status:'QUEUED',data_mode:'SYNTHETIC'}};
+  else if(value==='/api/v1/fetches/{fetch_id}'){{statusReads+=1;body=demoStatus;}}
   else return Promise.resolve(new Response('{{}}',{{status:404,headers:{{'content-type':'application/json'}}}}));
   return Promise.resolve(new Response(JSON.stringify(body),{{status:200,headers:{{'content-type':'application/json','cache-control':'no-store'}}}}));
 }};
@@ -58,12 +80,20 @@ await wait(200);const button=document.querySelector('#open-fetch');check(!button
 const posts=fetchRequests.filter(request=>request.path==='/api/v1/fetches'&&request.method==='POST');
 check(posts.length===1,'duplicate click submits one POST');check(posts[0]?.body==='{}','empty server-controlled request body');
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'idempotency key is present');check(statusReads===1,'one status poll reaches terminal result');
-check(document.querySelector('#fetch-status').textContent.includes('Google Search · Một phần · SYNTHETIC · CACHED'),'localized source status, origin and cache delivery are visible');
+check(document.querySelector('#fetch-status').textContent.includes('Google Search'),'localized source status is visible');
+check(document.querySelector('#fetch-status').textContent.includes('SYNTHETIC'),'synthetic origin is visible');
+check(document.querySelector('#fetch-status').textContent.includes('FRESH'),'fresh delivery is visible');
 check(document.querySelector('#rows').textContent.includes('quiet luxury'),'public Fetch populates keyword discovery table');
 check(document.querySelector('#rows').textContent.includes('CHƯA ĐỦ DỮ LIỆU'),'single-snapshot candidate is labeled insufficient');
+check(!document.querySelector('input[type="password"]'),'no password input is present');
+check(![...document.querySelectorAll('button,a')].some(item=>/\b(login|log in|register|logout|sign up)\b/i.test(item.textContent)),'no login or account controls are present');
+const search=document.querySelector('#search');search.value='quiet luxury';search.dispatchEvent(new Event('input',{bubbles:true}));await wait(450);
+check(document.querySelector('#rows').textContent.includes('quiet luxury'),'keyword search filters public Fetch candidates');
+document.querySelector('[data-category="fashion"]')?.click();await wait(50);
+check(document.querySelector('#rows').textContent.includes('quiet luxury'),'category filter retains matching candidate');
 document.querySelector('.row-detail')?.click();await wait(100);check(document.querySelector('#detail-content').textContent.includes('US_FILTER_ONLY'),'keyword detail shows source and market evidence');
 check(!fetchRequests.some(request=>request.path.startsWith('/api/runs/')),'distributed result does not require an operator run lookup');
-check(!fetchRequests.some(request=>/token|secret|credential|password/i.test(JSON.stringify(request.headers))),'no credentials sent from browser');
+check(!/token|secret|credential|password|api_key/i.test(JSON.stringify(fetchRequests)),'no credentials sent from browser');
 document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>"""
     html = html.replace("</body>", bridge + check + "</body>")
@@ -83,7 +113,7 @@ document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: 
             raise SystemExit(
                 f"Distributed Fetch Chrome E2E failed: {marker}; browser stderr={result.stderr[-700:]}"
             )
-    print("Chrome distributed synthetic Fetch status, provenance, cache and one-click UX: PASS")
+    print("Chrome demo API → distributed synthetic Fetch → keyword detail: PASS")
 
 
 if __name__ == "__main__":
