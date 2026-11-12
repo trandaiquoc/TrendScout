@@ -65,7 +65,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | OPEN: protocol chung đã tạo, chưa hoàn tất wiring và review |
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | OPEN: port hiện có chưa bao phủ đầy đủ D5 |
 | Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: có model qua Storage Port, fake Firestore adapter và test multi-process một máy; chưa nối worker/deployment hoặc xác minh multi-host |
-| Quota/cache/queue | Atomic shared quota/cost, durable cache/queue và crash tests | OPEN: ledger/queue/lease có model offline; cache, worker thật, quota reconciliation và deployment chưa hoàn tất |
+| Quota/cache/queue | Atomic shared quota/cost, durable cache/queue và crash tests | OPEN: ledger/queue/lease/cache có model offline; proactive deletion, worker thật, quota reconciliation và deployment chưa hoàn tất |
 | Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | OPEN: module ban đầu chưa tích hợp |
 | Dashboard integration | Workflow offline, status, evidence, accessibility và regression | OPEN |
 | Offline integration tests | End-to-end fixture không gọi provider/cloud | OPEN |
