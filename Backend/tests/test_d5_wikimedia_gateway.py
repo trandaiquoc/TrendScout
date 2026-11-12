@@ -156,6 +156,52 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(caught.exception.retry_after_seconds, 17)
         self.assertEqual(len(seen), 1)
 
+    async def test_not_found_does_not_fall_back_to_another_date(self):
+        seen = []
+        gateway = self.gateway(lambda request: (
+            seen.append(request) or httpx.Response(404)))
+        with self.assertRaisesRegex(GatewayError, "DAY_UNAVAILABLE"):
+            await gateway.fetch_day(**self.args())
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].url.path.endswith("/2026/11/12"))
+        with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
+            await gateway.fetch_day(**self.args())
+        self.assertEqual(len(seen), 1)
+
+    async def test_wrong_scope_or_date_is_rejected_without_retry(self):
+        seen = []
+        cases = []
+        wrong_country = response(self.request.observation_date)
+        wrong_country["items"][0]["country"] = "CA"
+        cases.append(wrong_country)
+        wrong_access = response(self.request.observation_date)
+        wrong_access["items"][0]["access"] = "desktop"
+        cases.append(wrong_access)
+        wrong_date = response(self.request.observation_date)
+        wrong_date["items"][0]["day"] = "11"
+        cases.append(wrong_date)
+        malformed_schema = {"items": [{"country": "US"}]}
+        cases.append(malformed_schema)
+
+        for payload in cases:
+            attempt_id = f"wikimedia-schema-attempt-{len(seen) + 1:04d}"
+            gateway = self.gateway(lambda request, body=payload: (
+                seen.append(request) or httpx.Response(200, json=body)))
+            with self.assertRaisesRegex(GatewayError, "MALFORMED_RESPONSE"):
+                await gateway.fetch_day(**self.args(attempt_id))
+        self.assertEqual(len(seen), len(cases))
+
+    async def test_oversized_response_is_rejected_and_reserved(self):
+        seen = []
+        gateway = self.gateway(lambda request: (
+            seen.append(request) or httpx.Response(200, content=b"x" * 1_000_001)))
+        with self.assertRaisesRegex(GatewayError, "RESPONSE_TOO_LARGE"):
+            await gateway.fetch_day(**self.args())
+        self.assertEqual(len(seen), 1)
+        with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
+            await gateway.fetch_day(**self.args())
+        self.assertEqual(len(seen), 1)
+
     async def test_long_retry_after_is_preserved_for_durable_deferral(self):
         gateway = self.gateway(lambda _req: httpx.Response(
             429, headers={"Retry-After": "91"}))

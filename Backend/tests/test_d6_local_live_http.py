@@ -19,9 +19,16 @@ from app.main import create_app, create_local_live_app
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.orchestration.local_live_composition import local_live_composition
 from app.settings import Settings
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
+from test_d5_live_gateway import Approvals
 from test_d6_local_live_composition import FixtureApprovals
 from local_security_helpers import private_test_directory
 from test_d5_wikimedia_gateway import USER_AGENT
@@ -72,6 +79,95 @@ def _live_facade(directory):
 
 
 class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wikimedia_only_http_flow_uses_one_provider_request(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(local_ledger, "DIRECTORY", Path(directory) / "local-live"), \
+                patch.object(httpx.AsyncHTTPTransport, "handle_async_request") as send:
+            calls = []
+
+            async def wikimedia_response(*args):
+                request = args[-1]
+                self.assertEqual(request.method, "GET")
+                self.assertEqual(request.url.host, "wikimedia.org")
+                self.assertEqual(request.url.path,
+                    "/api/rest_v1/metrics/pageviews/top-per-country/US/all-access/2026/11/10")
+                self.assertEqual(request.url.query, b"")
+                calls.append(request)
+                return httpx.Response(200, json={"items": [{
+                    "country": "US", "access": "all-access",
+                    "year": "2026", "month": "11", "day": "10",
+                    "articles": [{"article": "Fixture_topic", "project": "en.wikipedia",
+                                  "views_ceil": 100, "rank": 1,
+                                  "fixture_raw_marker": "raw-provider-body-marker"}],
+                }]}, request=request)
+
+            send.side_effect = wikimedia_response
+
+            class WikimediaOnlyApprovals:
+                def current(self, source):
+                    if source != WIKIMEDIA_SOURCE_ID:
+                        return None
+                    approval = Approvals(WIKIMEDIA_SOURCE_ID).value
+                    return replace(approval, scope="LOCAL_SMOKE", local_controls_verified=True)
+
+            class NoCredentials:
+                def resolve(self, reference):
+                    raise AssertionError(f"unrelated credential resolved: {reference}")
+
+            def retention_grant(source, now):
+                return CheckpointGrant(source, "LIVE", "fixture-retention",
+                                       now + timedelta(minutes=1), 30, True)
+
+            approvals = WikimediaOnlyApprovals()
+            self.assertIsNotNone(approvals.current(WIKIMEDIA_SOURCE_ID))
+            self.assertIsNone(approvals.current(GOOGLE_SOURCE_ID))
+            self.assertIsNone(approvals.current(BING_SOURCE_ID))
+            self.assertIsNone(approvals.current(YOUTUBE_SOURCE_ID))
+
+            def composition_factory():
+                return local_live_composition(
+                    credentials=NoCredentials(), approvals=approvals, user_agent=USER_AGENT,
+                    resolve_checkpoint_grant=retention_grant,
+                    resolve_processing_grants=lambda _now: (), utcnow=lambda: NOW,
+                )
+
+            app = create_local_live_app(
+                enabled=True,
+                composition_factory=composition_factory,
+                settings=Settings.from_environment({"TREND_SCOUT_ENVIRONMENT": "local"}),
+            )
+            inner = app.app
+            async with inner.router.lifespan_context(inner):
+                self.assertEqual(calls, [])
+                transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+                async with httpx.AsyncClient(transport=transport,
+                                             base_url="http://127.0.0.1") as client:
+                    headers = {"Idempotency-Key": "wikimedia-only-request-0001"}
+                    accepted = await client.post("/api/v1/fetches", json={}, headers=headers)
+                    self.assertEqual(accepted.status_code, 202, accepted.text)
+                    status = await client.get(accepted.json()["status_url"])
+                    self.assertEqual(status.status_code, 200)
+                    body = status.json()
+                    self.assertEqual(body["data_mode"], "LIVE")
+                    self.assertEqual(body["discovery"]["candidate_count"], 0)
+                    sources = {row["source_id"]: row for row in body["sources"]}
+                    self.assertEqual(len(sources), 4)
+                    self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["record_count"], 1)
+                    for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
+                        self.assertEqual(sources[source]["error_code"], "SOURCE_NOT_APPROVED")
+                    self.assertNotIn("Fixture_topic", status.text)
+                    self.assertNotIn("raw-provider-body-marker", status.text)
+
+                    replay = await client.post("/api/v1/fetches", json={}, headers=headers)
+                    self.assertEqual(replay.json()["fetch_id"], accepted.json()["fetch_id"])
+                    await client.get(accepted.json()["status_url"])
+                    self.assertEqual(len(calls), 1)
+                    self.assertNotIn("Fixture_topic", status.text)
+                    self.assertNotIn("raw-provider-body-marker", status.text)
+            ledger_files = (Path(directory) / "local-live").glob("ledger.sqlite*")
+            for ledger_file in ledger_files:
+                self.assertNotIn(b"raw-provider-body-marker", ledger_file.read_bytes())
+
     async def test_http_fetch_runs_actual_local_composition_over_mock_transports(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(local_ledger, "DIRECTORY", Path(directory) / "local-live"), \
