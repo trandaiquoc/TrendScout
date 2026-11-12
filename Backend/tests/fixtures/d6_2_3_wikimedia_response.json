@@ -1,0 +1,28 @@
+{
+  "fixture_marker": "D6_2_3_RAW_BODY_MUST_NOT_PERSIST",
+  "items": [
+    {
+      "country": "US",
+      "access": "all-access",
+      "year": "2026",
+      "month": "11",
+      "day": "10",
+      "articles": [
+        {"article": "Linen_Pants", "project": "en.wikipedia", "views_ceil": 512, "rank": 1},
+        {"article": "Vintage_Denim", "project": "en.wikipedia", "views_ceil": 448, "rank": 2},
+        {"article": "Fashion_Design", "project": "en.wikipedia", "views_ceil": 390, "rank": 3},
+        {"article": "Kitchen_Organizer", "project": "en.wikipedia", "views_ceil": 352, "rank": 4},
+        {"article": "Interior_Design", "project": "en.wikipedia", "views_ceil": 319, "rank": 5},
+        {"article": "Furniture_Design", "project": "en.wikipedia", "views_ceil": 286, "rank": 6},
+        {"article": "Robotics", "project": "en.wikipedia", "views_ceil": 244, "rank": 7},
+        {"article": "Artificial_Intelligence", "project": "en.wikipedia", "views_ceil": 201, "rank": 8},
+        {"article": "Linen_Pants", "project": "en.wikipedia", "views_ceil": 177, "rank": 9},
+        {"article": "<img src=x onerror=alert(1)>", "project": "en.wikipedia", "views_ceil": 90, "rank": 10},
+        {"article": "", "project": "en.wikipedia", "views_ceil": 10, "rank": 11},
+        {"article": "Bad_Project", "project": "not a project", "views_ceil": 10, "rank": 12},
+        {"article": "Bad_Rank", "project": "en.wikipedia", "views_ceil": 10, "rank": 0},
+        {"article": "Bad_Views", "project": "en.wikipedia", "views_ceil": -1, "rank": 13}
+      ]
+    }
+  ]
+}

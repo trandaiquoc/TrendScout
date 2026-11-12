@@ -398,8 +398,10 @@ function renderDiscoveryBundle(bundle) {
     details.append(element('summary', t('demo.evidence')));
     const evidenceList = element('ul');
     for (const evidence of Array.isArray(candidate.evidence) ? candidate.evidence : []) {
+      const observedDate = typeof evidence.observed_at === 'string'
+        ? evidence.observed_at.slice(0, 10) : evidence.observed_at;
       evidenceList.append(element('li', [evidence.source_id, evidence.market_evidence, evidence.data_mode,
-        evidence.delivery_mode, timestamp(evidence.fetched_at), evidence.scope,
+        evidence.delivery_mode, date(observedDate), timestamp(evidence.fetched_at), evidence.scope,
         ...(Array.isArray(evidence.query_evidence) ? evidence.query_evidence : [])].join(' · ')));
     }
     details.append(evidenceList);

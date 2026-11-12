@@ -66,6 +66,9 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["status"], "INSUFFICIENT_EVIDENCE")
         self.assertEqual(candidate["status"], "INSUFFICIENT_DATA")
         self.assertEqual(candidate["data_mode"], "SYNTHETIC")
+        self.assertTrue(candidate["taxonomy_version"])
+        self.assertTrue(candidate["extraction_version"])
+        self.assertTrue(candidate["classification_version"])
         self.assertEqual({item["source_id"] for item in candidate["evidence"]}, {
             WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
         })
@@ -77,6 +80,9 @@ class DistributedDiscoveryTests(unittest.TestCase):
         })
         self.assertTrue(all(item["source_url"].startswith("https://")
                             for item in candidate["evidence"] if item["source_url"]))
+        self.assertEqual({item["parser_version"] for item in candidate["evidence"]}, {"source-v1"})
+        self.assertEqual({item["algorithm_version"] for item in candidate["assessments"]},
+                         {"sample-presence-v1"})
 
     def test_invalid_record_is_reported_without_erasing_other_evidence(self):
         sources = four_source_results()

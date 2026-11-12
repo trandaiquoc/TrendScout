@@ -90,7 +90,7 @@ class D5SourceHandlers:
                  unavailable_mode: str | None = None,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if (set(query_collectors) != _QUERY_SOURCES
-                or unavailable_mode not in {None, "LIVE"}
+                or unavailable_mode not in {None, "LIVE", "SYNTHETIC"}
                 or any((value is None and unavailable_mode is None)
                        or (value is not None and (not isinstance(value, GuardedQueryCollector)
                            or value.gateway.source_id != source))
