@@ -69,8 +69,8 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | OPEN: module ban đầu chưa tích hợp |
 | Dashboard integration | Workflow offline, status, evidence, accessibility và regression | OPEN |
 | Offline integration tests | End-to-end fixture không gọi provider/cloud | OPEN |
-| Full regression | Readiness script và Golden pass | OPEN cho thay đổi D5 hiện tại |
-| D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | OPEN cho đến khi review hoàn tất |
+| Full regression | Readiness script và Golden pass | PASS tại checkpoint `a1f345a`: 550 unittest, Golden hai hash seed, browser Fetch E2E offline và benchmark; chạy lại sau thay đổi code tiếp theo |
+| D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | PASS sau khi đối chiếu checklist D6: register metadata-only, secret lifecycle, admin authorization riêng, controls, provider approvals, per-source live evidence và rollback được nêu; không tạo account/secret hoặc bật live |
 
 Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VERIFIED`; khi đó vẫn ghi `D6_PROVIDER_ONBOARDING_PENDING` và `LIVE_ACTIVATION_NOT_YET_ACCEPTED`. Không yêu cầu bốn nguồn `LIVE_VERIFIED` cho D5.
 
