@@ -7,7 +7,11 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
+import httpx
+from test_d5_live_gateway import Approvals, Credentials
 from test_d5_public_admission import NOW, coordinator, policy
+from test_d5_wikimedia_gateway import USER_AGENT
+from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PoolLimit
@@ -18,6 +22,12 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
+from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
+from app.sources.live_gateway import LivePageGateway
+from app.sources.query_plan import DEFAULT_QUERY_PLAN
+from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
+from app.workers.d5_source_handlers import D5SourceHandlers, _bounded_records
+from app.workers.guarded_attempt import GuardedAttemptRunner
 
 SOURCES = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
 
@@ -51,6 +61,8 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.admission = coordinator(self.path, self.config)
 
     async def asyncTearDown(self):
+        for gateway in getattr(self, "gateways", []):
+            await gateway.aclose()
         self.directory.cleanup()
 
     def grant(self, source_id, now):
@@ -71,6 +83,13 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         return {"status": status, "data_mode": "SYNTHETIC",
                 "records": [{"evidence_id": f"fixture-{index}"} for index in range(count)],
                 "record_count": count}
+
+    def test_normalized_record_budget_reports_omitted_rows(self):
+        selected, omitted = _bounded_records([
+            {"title": "kept"}, {"snippet": "x" * 110_000}, {"title": "kept after cap"},
+        ])
+        self.assertEqual([row["title"] for row in selected], ["kept", "kept after cap"])
+        self.assertEqual(omitted, 1)
 
     async def test_sources_run_under_fenced_queue_and_finish_with_source_status(self):
         self.admit()
@@ -150,6 +169,21 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         result = await worker.run_once("worker-two")
         self.assertEqual(result["state"], "COMPLETED")
 
+    async def test_retry_beyond_job_expiry_becomes_partial_instead_of_stranding_lease(self):
+        self.admit()
+        retry_at = NOW + timedelta(seconds=self.config.max_job_seconds + 1)
+
+        async def deferred(context):
+            if context.source_id == BING_SOURCE_ID:
+                return {"status": "DEFERRED", "retry_at": retry_at}
+            return self.source_result()
+
+        worker = self.worker({source: deferred for source in SOURCES})
+        result = await worker.run_once("worker-one")
+        self.assertEqual(result["state"], "PARTIAL")
+        self.assertEqual(result["sources"][BING_SOURCE_ID]["error_code"],
+                         "RETRY_OUTSIDE_DEADLINE")
+
     async def test_concurrent_worker_delivery_cannot_claim_same_live_lease(self):
         self.admit()
         entered = asyncio.Event()
@@ -181,6 +215,64 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                     "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED"}
         self.assertTrue(all(item == expected
                             for item in result["sources"].values()))
+
+    async def test_all_four_guarded_fixture_adapters_run_through_worker(self):
+        self.gateways = []
+        query_config = policy(
+            enabled_sources=frozenset(SOURCES),
+            pools=self.config.pools,
+            lease_seconds=10, cooldown_seconds=0,
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+        )
+        admission = coordinator(self.path, query_config)
+        admission.admit("four-source-worker-fixture-key", now=self.clock())
+        runner = GuardedAttemptRunner(admission, clock=self.clock)
+        collectors = {}
+
+        def search_handler(request):
+            return httpx.Response(200, json={
+                "search_metadata": {"status": "Success"},
+                "organic_results": [{"position": 1, "link": "https://example.org/fixture",
+                                     "title": "synthetic fixture result"}],
+            })
+
+        def youtube_handler(_request):
+            return httpx.Response(200, json={
+                "kind": "youtube#searchListResponse",
+                "items": [{"kind": "youtube#searchResult",
+                           "id": {"kind": "youtube#video", "videoId": "AbCdEf12345"},
+                           "snippet": {"title": "synthetic video", "publishedAt": "2026-11-11T00:00:00Z"}}],
+            })
+
+        for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
+            handler = youtube_handler if source == YOUTUBE_SOURCE_ID else search_handler
+            gateway = LivePageGateway.offline_fixture(
+                source, Credentials(), Approvals(source), runner,
+                transport=httpx.MockTransport(handler), clock=self.clock,
+            )
+            self.gateways.append(gateway)
+            collectors[source] = GuardedQueryCollector(gateway, utcnow=self.clock)
+
+        wikimedia = WikimediaTopPageGateway.offline_fixture(
+            Approvals(WIKIMEDIA_SOURCE_ID), runner, user_agent=USER_AGENT,
+            transport=httpx.MockTransport(lambda _request: httpx.Response(
+                200, json=wikimedia_response(NOW.date()))), clock=self.clock,
+        )
+        self.gateways.append(wikimedia)
+        registry = D5SourceHandlers(
+            query_collectors=collectors, wikimedia=wikimedia, plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+            observation_date=lambda: NOW.date(),
+        ).build()
+        worker = DistributedFetchWorker(admission, handlers=registry,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        result = await worker.run_once("fixture-worker")
+
+        self.assertEqual(set(result["sources"]), set(SOURCES))
+        for source_result in result["sources"].values():
+            self.assertEqual(source_result["data_mode"], "SYNTHETIC")
+            self.assertGreater(source_result["record_count"], 0)
+        self.assertNotIn("raw_record", repr(result))
 
 
 if __name__ == "__main__":

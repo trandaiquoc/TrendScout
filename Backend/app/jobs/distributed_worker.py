@@ -25,6 +25,8 @@ class SourceWorkContext:
     owner: str
     fence: int
     source_id: str
+    plan_fingerprint: str
+    job_expires_at: datetime
     resume_snapshot: dict | None
     checkpoint: Callable[[dict], int]
     heartbeat: Callable[[], str]
@@ -65,6 +67,7 @@ class DistributedFetchWorker:
         if claim is None:
             return None
         job_id, fence = claim["job_id"], claim["fence"]
+        job_expires_at = datetime.fromisoformat(claim["expires_at"])
         outcomes = {}
         deferred_until = None
         for source_id in sorted(self.handlers):
@@ -105,7 +108,8 @@ class DistributedFetchWorker:
             def heartbeat():
                 return self.admission.heartbeat(job_id, owner, fence, now=self.utcnow())
 
-            context = SourceWorkContext(job_id, owner, fence, source_id, resume,
+            context = SourceWorkContext(job_id, owner, fence, source_id,
+                                        self.admission.policy.plan_fingerprint, job_expires_at, resume,
                                         checkpoint, heartbeat)
             try:
                 result = self.handlers[source_id](context)
@@ -126,9 +130,14 @@ class DistributedFetchWorker:
                 if (not isinstance(retry_at, datetime) or retry_at.tzinfo is None
                         or retry_at.utcoffset() is None):
                     raise ValueError("deferred result requires timezone-aware retry_at")
-                deferred_until = retry_at if deferred_until is None else max(deferred_until, retry_at)
-                outcomes[source_id] = {"status": "DEFERRED"}
-                break
+                if retry_at.astimezone(timezone.utc) >= job_expires_at.astimezone(timezone.utc):
+                    result = {"status": "PARTIAL", "data_mode": grant.data_mode,
+                              "records": [], "record_count": 0,
+                              "error_code": "RETRY_OUTSIDE_DEADLINE"}
+                else:
+                    deferred_until = retry_at if deferred_until is None else max(deferred_until, retry_at)
+                    outcomes[source_id] = {"status": "DEFERRED"}
+                    break
 
             snapshot = {
                 "schema": 1,

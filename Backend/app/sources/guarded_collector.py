@@ -79,12 +79,13 @@ class GuardedQueryCollector:
         self.gateway, self.utcnow, self.monotonic, self.sleep = gateway, utcnow, monotonic, sleep
 
     async def collect(self, *, plan: QueryPlan, limits: CollectionLimits,
-                      job_id: str, owner: str, fence: int) -> CollectionResult:
+                      job_id: str, owner: str, fence: int,
+                      heartbeat=lambda: None) -> CollectionResult:
         if not isinstance(plan, QueryPlan) or get_query_plan(plan.plan_id, plan.version) != plan:
             raise ValueError("registered server plan required")
         if plan.fingerprint != self.gateway.runner.admission.policy.plan_fingerprint:
             raise ValueError("plan differs from admission policy")
-        if not isinstance(limits, CollectionLimits):
+        if not isinstance(limits, CollectionLimits) or not callable(heartbeat):
             raise ValueError("validated limits required")
         limits.validate(plan)
         source = self.gateway.source_id
@@ -114,6 +115,7 @@ class GuardedQueryCollector:
                     if attempted >= limits.max_requests:
                         reason = global_stop = "REQUEST_BUDGET_EXHAUSTED"
                         break
+                    heartbeat()
                     attempt_id = hashlib.sha256(
                         f"{job_id}:{source}:{context.query_fingerprint}:{page_number}:{retry}".encode()
                     ).hexdigest()

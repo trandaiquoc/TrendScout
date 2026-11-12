@@ -243,7 +243,7 @@ class PublicAdmission:
                    lease_until=min(now + timedelta(seconds=self.policy.lease_seconds),
                                    _parse(job["expires_at"])).isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
-                "lease_until": job["lease_until"]}
+                "lease_until": job["lease_until"], "expires_at": job["expires_at"]}
 
     def claim_next(self, owner: str, *, now: datetime) -> dict | None:
         """Claim one due job or reclaim an expired lease, in the same transaction."""
