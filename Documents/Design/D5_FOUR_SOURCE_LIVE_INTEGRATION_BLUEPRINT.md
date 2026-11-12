@@ -13,7 +13,9 @@
 
 Mỗi hàng cần checklist có bằng chứng: (1) access/use case phê duyệt; (2) secret server được cấu hình nếu cần; (3) endpoint và schema xác minh; (4) quota, throughput, giá và budget xác nhận trên tài khoản; (5) allowed use; (6) retention/deletion/attribution; (7) live network test có kiểm soát; (8) pagination và result cap; (9) rate, Retry-After và bounded retry; (10) diễn giải US scope; (11) freshness/cache; (12) lỗi từng phần; (13) evidence/provenance; (14) metrics/alerts và kill switch. Mọi mục chưa có bằng chứng là **chưa đạt**. `LIVE_CONFIGURED` không đồng nghĩa `LIVE_VERIFIED`.
 
-Nguồn tham khảo: [Wikimedia Pageviews](https://wikitech.wikimedia.org/wiki/Analytics/AQS/Pageviews), [SerpApi Google](https://serpapi.com/search-api), [SerpApi Bing](https://serpapi.com/bing-search-api), [SerpApi errors](https://serpapi.com/api-status-and-error-codes), [SerpApi pricing](https://serpapi.com/pricing), [SerpApi legal](https://serpapi.com/legal), [YouTube search.list](https://developers.google.com/youtube/data/reference/rest/v3/search/list), [YouTube policies](https://developers.google.com/youtube/terms/developer-policies). Provider có thể thay đổi; kiểm tra lại trước khi cấu hình.
+Nguồn tham khảo: [Wikimedia Pageviews API reference](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/reference/page-views.html), [Wikimedia User-Agent policy](https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy/en), [Wikimedia API Usage Guidelines](https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_API_Usage_Guidelines), [SerpApi Google](https://serpapi.com/search-api), [SerpApi Bing](https://serpapi.com/bing-search-api), [SerpApi errors](https://serpapi.com/api-status-and-error-codes), [SerpApi pricing](https://serpapi.com/pricing), [SerpApi legal](https://serpapi.com/legal), [YouTube search.list](https://developers.google.com/youtube/data/reference/rest/v3/search/list), [YouTube policies](https://developers.google.com/youtube/terms/developer-policies). Provider có thể thay đổi; kiểm tra lại trước khi cấu hình. Tài liệu Wikimedia được kiểm tra ngày 12/11/2026.
+
+Wikimedia yêu cầu User-Agent mô tả ứng dụng và contact của operator; API guidelines yêu cầu tuân theo rate/throttling, không gây tải có hại và không chia User-Agent để né giới hạn. Guidelines nói không cần xin phép trước cho cách dùng tuân thủ policy, nhưng TrendScout vẫn cần approval nội bộ về use case, retention, attribution, contact thuộc tổ chức và budget vận hành trước khi bật live. D5 gateway từ chối User-Agent không có contact và gửi tối đa một request đã reserve mỗi attempt.
 
 ## 2. Execution boundary và admission
 
@@ -61,7 +63,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 
 | Gate | Bằng chứng bắt buộc | Trạng thái hiện tại |
 |---|---|---|
-| Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | OPEN: gateway/collector riêng cho Google, Bing và YouTube có kiểm thử MockTransport, chưa nối worker hay Wikimedia vào luồng phân tán; live chưa xác minh |
+| Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | PASS tại code boundary: Google/Bing/YouTube gateway và Wikimedia fixed-date gateway có offline contract tests; chưa nối worker/Public Fetch, live disabled và chưa xác minh |
 | Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | OPEN: protocol chung đã tạo, chưa hoàn tất wiring và review |
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | OPEN: port hiện có chưa bao phủ đầy đủ D5 |
 | Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: có model qua Storage Port, fake Firestore adapter và test multi-process một máy; chưa nối worker/deployment hoặc xác minh multi-host |
@@ -69,7 +71,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Keyword discovery | Extraction, source-scoped trend, evidence và kiểm thử | OPEN: module ban đầu chưa tích hợp |
 | Dashboard integration | Workflow offline, status, evidence, accessibility và regression | OPEN |
 | Offline integration tests | End-to-end fixture không gọi provider/cloud | OPEN |
-| Full regression | Readiness script và Golden pass | PASS tại checkpoint `a1f345a`: 550 unittest, Golden hai hash seed, browser Fetch E2E offline và benchmark; chạy lại sau thay đổi code tiếp theo |
+| Full regression | Readiness script và Golden pass | PASS tại D5 source checkpoint: 558 unittest, Golden hai hash seed, browser Fetch E2E offline và benchmark; chạy lại sau thay đổi code tiếp theo |
 | D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | PASS sau khi đối chiếu checklist D6: register metadata-only, secret lifecycle, admin authorization riêng, controls, provider approvals, per-source live evidence và rollback được nêu; không tạo account/secret hoặc bật live |
 
 Chỉ sau khi toàn bộ gate trên PASS mới dùng `D5_LIVE_CAPABLE_OFFLINE_VERIFIED`; khi đó vẫn ghi `D6_PROVIDER_ONBOARDING_PENDING` và `LIVE_ACTIVATION_NOT_YET_ACCEPTED`. Không yêu cầu bốn nguồn `LIVE_VERIFIED` cho D5.

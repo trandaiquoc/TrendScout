@@ -56,6 +56,30 @@ class GatewayError(Exception):
         super().__init__(code)
 
 
+def checked_source_approval(approvals, source_id, plan_fingerprint, clock):
+    """Validate a current server-owned source approval without leaking provider detail."""
+    try:
+        approval = approvals.current(source_id)
+        now = clock()
+        valid = (isinstance(approval, SourceApproval) and approval.source_id == source_id
+                 and approval.plan_fingerprint == plan_fingerprint
+                 and isinstance(now, datetime) and now.tzinfo is not None and now.utcoffset() is not None
+                 and isinstance(approval.expires_at, datetime) and approval.expires_at.tzinfo is not None
+                 and approval.expires_at.utcoffset() is not None and approval.expires_at > now
+                 and isinstance(approval.policy_version, str) and bool(approval.policy_version.strip())
+                 and isinstance(approval.approval_id, str) and bool(approval.approval_id.strip())
+                 and all(value is True for value in (approval.source_enabled, approval.global_enabled,
+                     approval.usage_approved, approval.retention_approved, approval.quota_approved,
+                     approval.cost_approved, approval.security_approved,
+                     approval.distributed_controls_verified, approval.egress_controls_verified,
+                     approval.telemetry_controls_verified)))
+    except Exception:
+        valid = False
+    if not valid:
+        raise GatewayError("SOURCE_NOT_APPROVED")
+    return approval
+
+
 @dataclass(frozen=True)
 class SourceApproval:
     source_id: str
@@ -169,26 +193,8 @@ class LivePageGateway:
             raise
 
     def _check_approval(self):
-        try:
-            approval = self.approvals.current(self.source_id)
-            now = self.clock()
-            valid = (isinstance(approval, SourceApproval) and approval.source_id == self.source_id
-                     and approval.plan_fingerprint == self.runner.admission.policy.plan_fingerprint
-                     and isinstance(now, datetime) and now.tzinfo is not None and now.utcoffset() is not None
-                     and isinstance(approval.expires_at, datetime) and approval.expires_at.tzinfo is not None
-                     and approval.expires_at.utcoffset() is not None and approval.expires_at > now
-                     and isinstance(approval.policy_version, str) and bool(approval.policy_version.strip())
-                     and isinstance(approval.approval_id, str) and bool(approval.approval_id.strip())
-                     and all(value is True for value in (approval.source_enabled, approval.global_enabled,
-                         approval.usage_approved, approval.retention_approved, approval.quota_approved,
-                         approval.cost_approved, approval.security_approved,
-                         approval.distributed_controls_verified, approval.egress_controls_verified,
-                         approval.telemetry_controls_verified)))
-        except Exception:
-            valid = False
-        if not valid:
-            raise GatewayError("SOURCE_NOT_APPROVED")
-        return approval
+        return checked_source_approval(self.approvals, self.source_id,
+            self.runner.admission.policy.plan_fingerprint, self.clock)
 
     def _credential(self):
         reference = source_capability(self.source_id).credential_reference

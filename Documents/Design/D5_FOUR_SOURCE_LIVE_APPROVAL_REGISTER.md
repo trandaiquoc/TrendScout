@@ -4,7 +4,7 @@ Metadata only. No provider secrets or account credentials belong in this registe
 
 | Provider / source | Organization account owner | Use and derived metrics | Quota, cost and retention | Credential | Live verification |
 |---|---|---|---|---|---|
-| Wikimedia Pageviews | Unassigned | Pending | Pending | No key assumed; user-agent approval pending | NOT_VERIFIED |
+| Wikimedia Pageviews | Unassigned | Pending | Pending | No key assumed; organization contact for informative User-Agent pending | NOT_VERIFIED |
 | Google via SerpApi | Unassigned | Pending | Pending; shared SerpApi pool | NOT_CONFIGURED | NOT_VERIFIED |
 | Bing via SerpApi | Unassigned | Pending | Pending; shared SerpApi pool | NOT_CONFIGURED | NOT_VERIFIED |
 | YouTube Data API v3 | Unassigned | Pending | Pending | NOT_CONFIGURED | NOT_VERIFIED |
