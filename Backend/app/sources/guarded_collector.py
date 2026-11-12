@@ -209,7 +209,7 @@ class GuardedQueryCollector:
                 accepted += len(normalized)
                 rejected += len(invalid)
                 if next_cursor is None:
-                    reason = "END_OF_PAGES" if not invalid else "REJECTED_RECORDS"
+                    reason = "END_OF_PAGES" if not rejected else "REJECTED_RECORDS"
                     break
                 cursor_key = next_cursor.value
                 if cursor_key in seen_cursors:

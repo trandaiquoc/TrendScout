@@ -165,6 +165,22 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "PARTIAL")
         self.assertEqual(result.stop_reason, "REPEATED_PAGE")
 
+    async def test_rejection_on_earlier_page_keeps_query_partial(self):
+        def handler(request):
+            first = request.url.params["start"] == "0"
+            items = ([{"position": 1, "link": "javascript:alert(1)"}]
+                     if first else [{"position": 1, "link": "https://example.org/item"}])
+            result = {"search_metadata": {"status": "Success"}, "organic_results": items}
+            if first:
+                result["serpapi_pagination"] = {"next": "https://serpapi.com/search.json?" + urlencode({
+                    "engine": "google", "q": request.url.params["q"], "start": 10})}
+            return httpx.Response(200, json=result)
+        result = await self.collect(self.collector(GOOGLE_SOURCE_ID, handler), max_queries=1,
+                                    max_pages_per_query=2, max_requests=2)
+        self.assertEqual(result.status, "PARTIAL")
+        self.assertEqual(result.queries[0].reason, "REJECTED_RECORDS")
+        self.assertEqual(result.queries[0].rejected, 1)
+
     async def test_retry_spends_new_reservation_and_is_bounded(self):
         calls, delays = [], []
         def handler(request):
