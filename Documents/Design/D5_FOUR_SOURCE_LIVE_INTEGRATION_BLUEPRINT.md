@@ -64,7 +64,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Gate | Bằng chứng bắt buộc | Trạng thái hiện tại |
 |---|---|---|
 | Live-capable code | Bốn adapters có transport giới hạn và contract tests offline | PASS tại code boundary: Google/Bing/YouTube gateway và Wikimedia fixed-date gateway có offline contract tests; chưa nối worker/Public Fetch, live disabled và chưa xác minh |
-| Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | OPEN: protocol chung đã tạo, chưa hoàn tất wiring và review |
+| Credential boundary | Provider dùng CredentialProvider backend; không secret trong browser | PASS ở code boundary: SerpApi/YouTube lấy credential qua backend port, gateway chỉ resolve server-side, Wikimedia không đòi API key; UI/tests không có trường nhập hoặc token. Secret manager và resolver deployment còn để D6 |
 | Storage abstraction | Business logic dùng port, Firestore ở adapter | OPEN: port hiện có chưa bao phủ đầy đủ D5 |
 | Distributed Fetch | Multi-process admission, durable lease/fencing, recovery được kiểm chứng | OPEN: có model qua Storage Port, fake Firestore adapter và test multi-process một máy; chưa nối worker/deployment hoặc xác minh multi-host |
 | Quota/cache/queue | Atomic shared quota/cost, durable cache/queue và crash tests | OPEN: ledger/queue/lease/cache có model offline; proactive deletion, worker thật, quota reconciliation và deployment chưa hoàn tất |
