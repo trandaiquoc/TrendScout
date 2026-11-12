@@ -118,9 +118,12 @@ class WikimediaTopPageGateway:
             raise GatewayError("INVALID_SERVER_QUERY")
         return request.observation_date
 
-    async def fetch_day(self, *, request, job_id, owner, fence, attempt_id, timeout_seconds=15):
+    async def fetch_day(self, *, request, job_id, owner, fence, attempt_id, timeout_seconds=15,
+                        on_page_receipt=None):
         if self._closed:
             raise GatewayError("GATEWAY_CLOSED")
+        if on_page_receipt is not None and not callable(on_page_receipt):
+            raise GatewayError("INVALID_RECEIPT_CALLBACK")
         approved = self._check_approval()
         day = self._validate_request(request)
         maximum = min(self.policy.total_timeout_seconds,
@@ -165,13 +168,19 @@ class WikimediaTopPageGateway:
             except (ValueError, TypeError, RecursionError):
                 return ("MALFORMED_RESPONSE", None, None)
 
+        def before_settle(value):
+            code, page, _ = value
+            if code == "PAGE":
+                return on_page_receipt(page)
+
         outcome = await self.runner.run(job_id=job_id, owner=owner, fence=fence,
             source_id=WIKIMEDIA_SOURCE_ID, attempt_id=attempt_id,
-            timeout_seconds=timeout_seconds, request=send)
+            timeout_seconds=timeout_seconds, request=send,
+            before_settle=before_settle if on_page_receipt is not None else None)
         if outcome.status != "COMPLETED":
-            raise GatewayError(outcome.status)
+            raise WikimediaGatewayError(outcome.status)
         if outcome.settlement_pending:
-            raise GatewayError("SETTLEMENT_PENDING")
+            raise WikimediaGatewayError("SETTLEMENT_PENDING")
         code, value, unbounded_delay = outcome.value
         if code == "PAGE":
             return value

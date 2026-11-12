@@ -7,6 +7,7 @@ guarded attempt runner. Deployment-wide logging/egress review remains required.
 
 import asyncio
 import html
+import inspect
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,9 +26,11 @@ from app.sources.catalog import (
 from app.sources.http_policy import HttpPolicy
 from app.sources.query_plan import get_query_plan
 from app.sources.serpapi.client import SerpApiClient, build_request_params
+from app.sources.serpapi.errors import SerpApiError
 from app.sources.serpapi.models import QueryContext as SerpContext
 from app.sources.serpapi.quota import SharedQuotaPool
 from app.sources.youtube.client import YouTubeSearchClient, build_search_params
+from app.sources.youtube.errors import YouTubeSourceError
 from app.sources.youtube.models import QueryContext as YouTubeContext
 from app.sources.youtube.pagination import build_execution_plan
 from app.workers.guarded_attempt import GuardedAttemptRunner
@@ -227,9 +230,11 @@ class LivePageGateway:
             raise GatewayError("INVALID_SERVER_QUERY") from None
 
     async def fetch_page(self, *, context, cursor, job_id, owner, fence, attempt_id,
-                         max_results=50, timeout_seconds=15) -> GatewayPage:
+                         max_results=50, timeout_seconds=15, on_page_receipt=None) -> GatewayPage:
         if self._closed:
             raise GatewayError("GATEWAY_CLOSED")
+        if on_page_receipt is not None and not callable(on_page_receipt):
+            raise GatewayError("INVALID_RECEIPT_CALLBACK")
         approved = self._check_approval()
         params = self._params(context, cursor, max_results)
         if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds
@@ -237,6 +242,40 @@ class LivePageGateway:
             raise GatewayError("INVALID_TIMEOUT")
         key = self._credential()
         endpoint = source_capability(self.source_id).endpoint
+        parsed_receipt = []
+
+        async def parse_response(response):
+            dummy = httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda _request: httpx.Response(500))
+            )
+            try:
+                if self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+                    parser = SerpApiClient(dummy, None, SharedQuotaPool(1, 1),
+                                           self.policy, utcnow=self.clock)
+                    page = parser.parse_response(response, context=context, cursor=cursor,
+                                                 sensitive_key=key)
+                else:
+                    parser = YouTubeSearchClient(client=dummy, credential_resolver=None,
+                                                 http_policy=self.policy, utcnow=self.clock)
+                    page = parser.parse_response(response, context=context,
+                                                 max_results=max_results)
+            finally:
+                await dummy.aclose()
+            return GatewayPage(self.source_id, self.data_mode, page)
+
+        async def before_settle(value):
+            code, response = value
+            if code != "RESPONSE":
+                return
+            try:
+                receipt = await parse_response(response)
+            except (SerpApiError, YouTubeSourceError) as exc:
+                parsed_receipt.append((None, exc))
+                return
+            parsed_receipt.append((receipt, None))
+            callback_result = await asyncio.to_thread(on_page_receipt, receipt)
+            if inspect.isawaitable(callback_result):
+                await callback_result
 
         async def request():
             try:
@@ -282,26 +321,21 @@ class LivePageGateway:
 
         outcome = await self.runner.run(job_id=job_id, owner=owner, fence=fence,
             source_id=self.source_id, attempt_id=attempt_id, timeout_seconds=timeout_seconds,
-            request=request)
+            request=request,
+            before_settle=before_settle if on_page_receipt is not None else None)
         if outcome.status != "COMPLETED":
             raise GatewayError(outcome.status)
-        if outcome.settlement_pending:
+        if outcome.settlement_pending and not parsed_receipt:
             raise GatewayError("SETTLEMENT_PENDING")
         code, response = outcome.value
         if code != "RESPONSE":
             raise GatewayError(code)
-        dummy = httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(500)))
-        try:
-            if self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
-                parser = SerpApiClient(dummy, None, SharedQuotaPool(1, 1), self.policy, utcnow=self.clock)
-                page = parser.parse_response(response, context=context, cursor=cursor, sensitive_key=key)
-            else:
-                parser = YouTubeSearchClient(client=dummy, credential_resolver=None,
-                                             http_policy=self.policy, utcnow=self.clock)
-                page = parser.parse_response(response, context=context, max_results=max_results)
-        finally:
-            await dummy.aclose()
-        return GatewayPage(self.source_id, "SYNTHETIC" if self._offline else "LIVE", page)
+        if parsed_receipt:
+            receipt, error = parsed_receipt[0]
+            if error is not None:
+                raise error
+            return receipt
+        return await parse_response(response)
 
     async def aclose(self):
         if not self._closed:

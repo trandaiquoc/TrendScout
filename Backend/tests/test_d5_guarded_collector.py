@@ -11,6 +11,7 @@ import httpx
 from test_d5_live_gateway import FAKE_SECRET, Approvals, Credentials
 from test_d5_public_admission import NOW, coordinator, policy
 
+from app.jobs.public_admission import AdmissionDenied
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.sources.guarded_collector import (
@@ -90,7 +91,8 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
                           "data_mode": "SYNTHETIC", "plan_fingerprint": DEFAULT_QUERY_PLAN.fingerprint,
                           "phase": "RUNNING", "progress": {"collector": snapshot}},
             )
-            raise RuntimeError("simulated worker interruption")
+            if snapshot.get("pending_page") is None:
+                raise RuntimeError("simulated worker interruption")
         with self.assertRaisesRegex(RuntimeError, "simulated worker interruption"):
             await collector.collect(
                 plan=DEFAULT_QUERY_PLAN,
@@ -101,7 +103,7 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["0"])
         saved = journal.load(self.job, "worker", self.fence, source_id=GOOGLE_SOURCE_ID,
                              grant=grant, now=NOW)
-        self.assertEqual(saved["revision"], 1)
+        self.assertEqual(saved["revision"], 2)
         with self.assertRaisesRegex(ValueError, "checkpoint scope mismatch"):
             await collector.collect(
                 plan=DEFAULT_QUERY_PLAN,
@@ -119,6 +121,76 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.queries[0].pages, 2)
         self.assertEqual(len(resumed.records), 1)
         self.assertEqual(len(resumed.records[0].evidence), 2)
+
+    async def test_receipt_is_durable_before_settlement_and_resume_skips_duplicate_request(self):
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        calls = []
+        def handler(request):
+            calls.append(request.url.params["start"])
+            return self.search_handler(request)
+
+        collector = self.collector(GOOGLE_SOURCE_ID, handler)
+        journal = SourceCheckpointJournal(self.control)
+        grant = CheckpointGrant(GOOGLE_SOURCE_ID, "SYNTHETIC", "collector-resume-v1",
+                                NOW + timedelta(minutes=5), 300, True)
+        revision = [0]
+
+        def crash_after_receipt(snapshot):
+            revision[0] = journal.save(
+                self.job, "worker", self.fence, source_id=GOOGLE_SOURCE_ID, grant=grant,
+                now=NOW, expected_revision=revision[0],
+                snapshot={"schema": 1, "source_id": GOOGLE_SOURCE_ID,
+                          "data_mode": "SYNTHETIC", "plan_fingerprint": DEFAULT_QUERY_PLAN.fingerprint,
+                          "phase": "RUNNING", "progress": {"collector": snapshot}},
+            )
+            if snapshot.get("pending_page") is not None:
+                raise SimulatedProcessCrash()
+
+        limits = CollectionLimits(max_queries=1, max_pages_per_query=2, max_requests=2)
+        with self.assertRaises(SimulatedProcessCrash):
+            await collector.collect(plan=DEFAULT_QUERY_PLAN, limits=limits,
+                                    job_id=self.job, owner="worker", fence=self.fence,
+                                    checkpoint=crash_after_receipt)
+
+        saved = journal.load(self.job, "worker", self.fence, source_id=GOOGLE_SOURCE_ID,
+                             grant=grant, now=NOW)
+        pending = saved["snapshot"]["progress"]["collector"]["pending_page"]
+        self.assertEqual(calls, ["0"])
+        self.control.check_attempt(self.job, "worker", self.fence,
+                                   source_id=GOOGLE_SOURCE_ID,
+                                   attempt_id=pending["attempt_id"], now=NOW)
+
+        resumed = await collector.collect(
+            plan=DEFAULT_QUERY_PLAN, limits=limits, job_id=self.job, owner="worker",
+            fence=self.fence, resume_snapshot=saved["snapshot"]["progress"]["collector"],
+        )
+        self.assertEqual(calls, ["0", "10"])
+        self.assertEqual(resumed.queries[0].pages, 2)
+        self.assertEqual(len(resumed.records), 1)
+
+    async def test_receipt_persistence_failure_leaves_job_reclaimable(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.params["start"])
+            return self.search_handler(request)
+
+        def reject_receipt(_snapshot):
+            raise OSError("synthetic checkpoint failure")
+
+        collector = self.collector(GOOGLE_SOURCE_ID, handler)
+        with self.assertRaises(AdmissionDenied) as raised:
+            await collector.collect(
+                plan=DEFAULT_QUERY_PLAN,
+                limits=CollectionLimits(max_queries=1, max_pages_per_query=2, max_requests=2),
+                job_id=self.job, owner="worker", fence=self.fence,
+                checkpoint=reject_receipt,
+            )
+        self.assertEqual(raised.exception.code, "RESULT_PERSISTENCE_FAILED")
+        self.assertEqual(calls, ["0"])
+        self.assertEqual(self.control.read_job(self.job, now=NOW)["state"], "RUNNING")
 
     def test_checkpoint_record_budget_reports_omitted_rows(self):
         selected, omitted = _bounded_checkpoint_records([
@@ -170,17 +242,18 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         saved = []
         def interrupt_after_checkpoint(snapshot):
             saved.append(snapshot)
-            raise RuntimeError("simulated YouTube worker interruption")
+            if snapshot.get("pending_page") is None:
+                raise RuntimeError("simulated YouTube worker interruption")
         with self.assertRaisesRegex(RuntimeError, "simulated YouTube worker interruption"):
             await collector.collect(plan=DEFAULT_QUERY_PLAN, limits=limits,
                                     job_id=self.job, owner="worker", fence=self.fence,
                                     checkpoint=interrupt_after_checkpoint)
-        self.assertEqual(saved[0]["queries"][0]["cursor"], "page-two")
-        self.assertEqual(saved[0]["source_id"], YOUTUBE_SOURCE_ID)
-        self.assertFalse(saved[0]["queries"][0]["done"])
+        self.assertEqual(saved[-1]["queries"][0]["cursor"], "page-two")
+        self.assertEqual(saved[-1]["source_id"], YOUTUBE_SOURCE_ID)
+        self.assertFalse(saved[-1]["queries"][0]["done"])
         result = await collector.collect(plan=DEFAULT_QUERY_PLAN, limits=limits,
                                          job_id=self.job, owner="worker", fence=self.fence,
-                                         resume_snapshot=saved[0])
+                                         resume_snapshot=saved[-1])
         self.assertEqual(tokens, [None, "page-two"])
         self.assertEqual(result.queries[0].reason, "END_OF_PAGES")
         self.assertEqual(len(result.records), 1)

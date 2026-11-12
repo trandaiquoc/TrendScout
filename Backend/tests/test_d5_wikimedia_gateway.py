@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from test_d5_live_gateway import Approvals
@@ -102,6 +103,39 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
             await gateway.fetch_day(**self.args())
         self.assertEqual(len(seen), 1)
+
+    async def test_durable_page_receipt_callback_runs_before_settlement(self):
+        events = []
+        gateway = self.gateway(lambda _req: httpx.Response(
+            200, json=response(self.request.observation_date)))
+        original_settle = self.admission.settle_attempt
+
+        def settle(*args, **kwargs):
+            events.append("settle")
+            return original_settle(*args, **kwargs)
+
+        def persist(page):
+            self.assertEqual(page.observations[0].canonical_keyword, "Coffee")
+            events.append("receipt")
+
+        with patch.object(self.admission, "settle_attempt", settle):
+            await gateway.fetch_day(**self.args(on_page_receipt=persist))
+        self.assertEqual(events, ["receipt", "settle"])
+
+    async def test_receipt_write_failure_keeps_wikimedia_attempt_reserved(self):
+        requests = []
+        gateway = self.gateway(lambda request: (
+            requests.append(request) or httpx.Response(
+                200, json=response(self.request.observation_date))))
+
+        def fail_receipt(_page):
+            raise OSError("synthetic checkpoint unavailable")
+
+        with self.assertRaisesRegex(GatewayError, "RESULT_PERSISTENCE_FAILED"):
+            await gateway.fetch_day(**self.args(on_page_receipt=fail_receipt))
+        with self.assertRaisesRegex(GatewayError, "ALREADY_RESERVED"):
+            await gateway.fetch_day(**self.args(on_page_receipt=lambda _page: None))
+        self.assertEqual(len(requests), 1)
 
     async def test_shared_transport_remains_open_for_a_later_attempt(self):
         seen = []

@@ -43,6 +43,35 @@ class GuardedAttemptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.runner.run(**self.args())).status, "ALREADY_RESERVED")
         self.assertEqual(self.calls, 1)
 
+    async def test_result_receipt_is_durable_before_attempt_settlement(self):
+        events = []
+        original_settle = self.control.settle_attempt
+
+        def record_settlement(*args, **kwargs):
+            events.append("settle")
+            return original_settle(*args, **kwargs)
+
+        def persist_receipt(value):
+            self.assertEqual(value, {"synthetic": True})
+            events.append("receipt")
+
+        with patch.object(self.control, "settle_attempt", record_settlement):
+            outcome = await self.runner.run(**self.args(), before_settle=persist_receipt)
+
+        self.assertEqual(outcome.status, "COMPLETED")
+        self.assertEqual(events, ["receipt", "settle"])
+
+    async def test_receipt_failure_keeps_attempt_reserved_and_fails_closed(self):
+        def fail_persistence(_value):
+            raise OSError("synthetic checkpoint unavailable")
+
+        outcome = await self.runner.run(**self.args(), before_settle=fail_persistence)
+        self.assertEqual(outcome.status, "RESULT_PERSISTENCE_FAILED")
+        self.assertTrue(outcome.settlement_pending)
+        self.assertEqual(self.calls, 1)
+        self.assertEqual((await self.runner.run(**self.args())).status, "ALREADY_RESERVED")
+        self.assertEqual(self.calls, 1)
+
     async def test_unknown_commit_never_creates_request(self):
         underlying = self.control.store
         class AmbiguousStore:

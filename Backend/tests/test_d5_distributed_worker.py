@@ -1,11 +1,12 @@
 """Offline worker integration over the atomic admission and checkpoint ports."""
 
 import asyncio
+import hashlib
 import multiprocessing
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -14,10 +15,10 @@ from test_d5_public_admission import NOW, SqliteTestStore, coordinator, policy
 from test_d5_wikimedia_gateway import USER_AGENT
 from test_d5_wikimedia_gateway import response as wikimedia_response
 
-from app.jobs.distributed_worker import DistributedFetchWorker
+from app.jobs.distributed_worker import DistributedFetchWorker, SourceWorkContext
 from app.jobs.public_admission import AdmissionDenied, PoolLimit
 from app.jobs.shared_cache import CacheGrant, SharedCache
-from app.jobs.source_checkpoints import CheckpointGrant
+from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -94,6 +95,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             lease_seconds=10, cooldown_seconds=0, plan_fingerprint="a" * 64,
         )
         self.admission = coordinator(self.path, self.config)
+        self.gateways = []
 
     async def asyncTearDown(self):
         for gateway in getattr(self, "gateways", []):
@@ -262,6 +264,94 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                     "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED"}
         self.assertTrue(all(item == expected
                             for item in result["sources"].values()))
+
+    async def test_wikimedia_page_receipt_recovers_after_crash_before_settlement(self):
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        config = policy(
+            enabled_sources=frozenset(SOURCES),
+            pools={"wikimedia": PoolLimit(2, 5, 2, 5, 1),
+                   "serpapi": PoolLimit(2, 5, 2, 5, 1),
+                   "youtube": PoolLimit(1, 3, 1, 3, 1)},
+            lease_seconds=10, cooldown_seconds=0,
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+        )
+        admission = coordinator(self.path, config)
+        self.admission = admission
+        plan = DEFAULT_QUERY_PLAN
+        job_id = admission.admit("wikimedia-receipt-crash-idempotency", now=self.clock())["job_id"]
+        first_claim = admission.claim(job_id, "worker-a", now=self.clock())
+        runner = GuardedAttemptRunner(admission, clock=self.clock)
+        request_count = [0]
+
+        def wikimedia_handler(_request):
+            request_count[0] += 1
+            return httpx.Response(200, json=wikimedia_response(NOW.date()))
+
+        wikimedia = WikimediaTopPageGateway.offline_fixture(
+            Approvals(WIKIMEDIA_SOURCE_ID), runner, user_agent=USER_AGENT,
+            transport=httpx.MockTransport(wikimedia_handler), clock=self.clock,
+        )
+        self.gateways.append(wikimedia)
+        collectors = {}
+        for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
+            gateway = LivePageGateway.offline_fixture(
+                source, Credentials(), Approvals(source), runner,
+                transport=httpx.MockTransport(lambda _request: httpx.Response(500)),
+                clock=self.clock,
+            )
+            self.gateways.append(gateway)
+            collectors[source] = GuardedQueryCollector(gateway, utcnow=self.clock)
+        handlers = D5SourceHandlers(
+            query_collectors=collectors, wikimedia=wikimedia, plan=plan,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+            observation_date=lambda: NOW.date(), utcnow=self.clock,
+        ).build()
+        handler = handlers[WIKIMEDIA_SOURCE_ID]
+        grant = self.grant(WIKIMEDIA_SOURCE_ID, self.clock())
+        journal = SourceCheckpointJournal(admission)
+        revision = [0]
+
+        def make_context(claim, owner, resume_snapshot, *, crash=False):
+            def checkpoint(progress):
+                revision[0] = journal.save(
+                    job_id, owner, claim["fence"], source_id=WIKIMEDIA_SOURCE_ID,
+                    grant=grant, now=self.clock(), expected_revision=revision[0],
+                    snapshot={"schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
+                              "data_mode": "SYNTHETIC", "plan_fingerprint": plan.fingerprint,
+                              "phase": "RUNNING", "progress": progress},
+                )
+                if crash and "wikimedia_receipt" in progress:
+                    raise SimulatedProcessCrash()
+                return revision[0]
+
+            return SourceWorkContext(
+                job_id, owner, claim["fence"], WIKIMEDIA_SOURCE_ID, plan.fingerprint,
+                datetime.fromisoformat(claim["expires_at"]), resume_snapshot,
+                checkpoint, lambda: "OK",
+            )
+
+        with self.assertRaises(SimulatedProcessCrash):
+            await handler(make_context(first_claim, "worker-a", None, crash=True))
+        self.assertEqual(request_count[0], 1)
+
+        self.clock.value += timedelta(seconds=11)
+        second_claim = admission.claim_next("worker-b", now=self.clock())
+        self.assertIsNotNone(second_claim)
+        saved = journal.load(job_id, "worker-b", second_claim["fence"],
+                             source_id=WIKIMEDIA_SOURCE_ID, grant=grant, now=self.clock())
+        result = await handler(make_context(second_claim, "worker-b", saved["snapshot"]))
+
+        self.assertEqual(request_count[0], 1)
+        self.assertEqual(result["data_mode"], "SYNTHETIC")
+        self.assertEqual(result["records"][0]["canonical_keyword"], "Coffee")
+        self.assertFalse(admission.settle_attempt(
+            job_id, "worker-b", second_claim["fence"],
+            attempt_id=hashlib.sha256(
+                f"{job_id}:{WIKIMEDIA_SOURCE_ID}:{NOW.date().isoformat()}:page-1".encode()
+            ).hexdigest(), now=self.clock(),
+        ))
 
     async def test_all_four_guarded_fixture_adapters_run_through_worker(self):
         self.gateways = []

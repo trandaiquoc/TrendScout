@@ -15,12 +15,22 @@ from datetime import datetime, timedelta, timezone
 
 from app.jobs.public_admission import AdmissionDenied
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
-from app.sources.live_gateway import GatewayError, LivePageGateway
+from app.sources.live_gateway import GatewayError, GatewayPage, LivePageGateway
 from app.sources.query_plan import QueryPlan, get_query_plan
 from app.sources.serpapi.errors import SerpApiError
-from app.sources.serpapi.models import QueryContext as SerpQueryContext
-from app.sources.serpapi.models import QueryEvidence as SerpQueryEvidence
-from app.sources.serpapi.models import ScopedOffset, SearchRecord
+from app.sources.serpapi.models import (
+    ProviderPage as SerpProviderPage,
+)
+from app.sources.serpapi.models import (
+    QueryContext as SerpQueryContext,
+)
+from app.sources.serpapi.models import (
+    QueryEvidence as SerpQueryEvidence,
+)
+from app.sources.serpapi.models import (
+    ScopedOffset,
+    SearchRecord,
+)
 from app.sources.serpapi.normalization import merge_record
 from app.sources.serpapi.normalization import normalize_items as normalize_search
 from app.sources.serpapi.pagination import build_contexts, initial_offset, validate_offset
@@ -30,6 +40,9 @@ from app.sources.youtube.models import (
     MetricDescriptor,
     ScopedPageToken,
     YouTubeSearchRecord,
+)
+from app.sources.youtube.models import (
+    ProviderPage as YouTubeProviderPage,
 )
 from app.sources.youtube.models import (
     QueryEvidence as YouTubeQueryEvidence,
@@ -159,6 +172,65 @@ def _restore_record(source, value):
     raise ValueError("unsupported checkpoint source")
 
 
+def _receipt_page(source, value, context):
+    """Restore one provider page durably received before attempt settlement."""
+    if (not isinstance(value, dict) or value.get("source_id") != source
+            or value.get("data_mode") not in {"SYNTHETIC", "LIVE"}
+            or value.get("kind") != ("serp" if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
+                                       else "youtube")):
+        raise ValueError("invalid pending page receipt")
+    items = value.get("items")
+    if not isinstance(items, list) or len(items) > 50:
+        raise ValueError("invalid pending page items")
+    if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+        next_offset = value.get("next_offset")
+        if next_offset is not None:
+            if type(next_offset) is not int:
+                raise ValueError("invalid pending page offset")
+            next_offset = ScopedOffset(next_offset, context.query_fingerprint)
+            validate_offset(context, next_offset)
+        page = SerpProviderPage(
+            items=tuple(items), next_offset=next_offset,
+            http_status=value.get("http_status"), cache_state=value.get("cache_state"),
+            provider_created_at=_parse_datetime(value.get("provider_created_at"), optional=True),
+            pagination_error=value.get("pagination_error"),
+        )
+    elif source == YOUTUBE_SOURCE_ID:
+        token = value.get("next_page_token")
+        if token is not None and (not isinstance(token, str)
+                                  or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{1,2048}", token)):
+            raise ValueError("invalid pending page token")
+        total = value.get("estimated_total_results")
+        if total is not None and (type(total) is not int or total < 0):
+            raise ValueError("invalid pending page total")
+        page = YouTubeProviderPage(tuple(items), token, total, value.get("response_status"))
+    else:
+        raise ValueError("unsupported pending page source")
+    return GatewayPage(source, value.get("data_mode"), page)
+
+
+def _serialize_receipt(result):
+    page = result.page
+    if isinstance(page, SerpProviderPage):
+        serialized = {
+            "kind": "serp", "items": _checkpoint_json(page.items),
+            "next_offset": page.next_offset.value if page.next_offset else None,
+            "http_status": page.http_status, "cache_state": page.cache_state,
+            "provider_created_at": _checkpoint_json(page.provider_created_at),
+            "pagination_error": page.pagination_error,
+        }
+    elif isinstance(page, YouTubeProviderPage):
+        serialized = {
+            "kind": "youtube", "items": _checkpoint_json(page.items),
+            "next_page_token": page.next_page_token,
+            "estimated_total_results": page.estimated_total_results,
+            "response_status": page.response_status,
+        }
+    else:
+        raise ValueError("unsupported pending page receipt")
+    return {"source_id": result.source_id, "data_mode": result.data_mode, **serialized}
+
+
 def _restore_checkpoint(source, data_mode, plan, limits, contexts, snapshot):
     if snapshot is None:
         return None
@@ -231,8 +303,32 @@ def _restore_checkpoint(source, data_mode, plan, limits, contexts, snapshot):
             raise ValueError("incomplete collector checkpoint has no cursor")
         restored.append({**item, "cursor": cursor,
                          "retry_at": _parse_datetime(item.get("retry_at"), optional=True)})
+    pending_page = snapshot.get("pending_page")
+    if pending_page is not None:
+        if (not isinstance(pending_page, dict)
+                or type(pending_page.get("query_index")) is not int
+                or not 0 <= pending_page["query_index"] < len(contexts)
+                or pending_page.get("query_fingerprint") != contexts[pending_page["query_index"]].query_fingerprint
+                or type(pending_page.get("page_number")) is not int
+                or pending_page["page_number"] < 1
+                or type(pending_page.get("retry")) is not int
+                or not 0 <= pending_page["retry"] <= limits.max_retries_per_page
+                or not isinstance(pending_page.get("attempt_id"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", pending_page["attempt_id"])
+                or type(pending_page.get("cursor")) not in (int, str, type(None))
+                or not isinstance(pending_page.get("page"), dict)
+                or pending_page["page"].get("data_mode") != data_mode):
+            raise ValueError("invalid pending page receipt")
+        index = pending_page["query_index"]
+        cursor = pending_page["cursor"]
+        current = restored[index]
+        expected_cursor = current["cursor"].value if current["cursor"] is not None else None
+        if (current["done"] or current["page_number"] != pending_page["page_number"]
+                or cursor != expected_cursor):
+            raise ValueError("pending page receipt scope mismatch")
+        pending_page["restored"] = _receipt_page(source, pending_page["page"], contexts[index])
     records = [_restore_record(source, item) for item in snapshot["records"]]
-    return started, restored, records, snapshot["records_omitted"]
+    return started, restored, records, snapshot["records_omitted"], pending_page
 
 
 class GuardedQueryCollector:
@@ -261,12 +357,12 @@ class GuardedQueryCollector:
         restored = _restore_checkpoint(source, self.gateway.data_mode, plan, limits, contexts,
                                        resume_snapshot)
         if restored is not None:
-            started, query_states, restored_records, checkpoint_records_omitted = restored
+            started, query_states, restored_records, checkpoint_records_omitted, pending_page = restored
             contexts = (build_contexts(plan, source, started)
                         if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
                         else build_execution_plan(plan, started).queries)
         else:
-            query_states, restored_records, checkpoint_records_omitted = [], [], 0
+            query_states, restored_records, checkpoint_records_omitted, pending_page = [], [], 0, None
             for context in contexts:
                 cursor = initial_offset(context) if source != YOUTUBE_SOURCE_ID else None
                 query_states.append({
@@ -283,6 +379,36 @@ class GuardedQueryCollector:
                    else (record.provider_id, record.provider_video_id))
             records[key] = record
         global_stop = None
+
+        def save_checkpoint(*, pending=None):
+            if checkpoint is None:
+                return
+            checkpoint_records, newly_omitted = _bounded_checkpoint_records(records.values())
+            snapshot = {
+                "schema": 1,
+                "source_id": source,
+                "data_mode": self.gateway.data_mode,
+                "plan_fingerprint": plan.fingerprint,
+                "limits": {
+                    "max_queries": limits.max_queries,
+                    "max_pages_per_query": limits.max_pages_per_query,
+                    "max_requests": limits.max_requests,
+                    "max_retries_per_page": limits.max_retries_per_page,
+                    "deadline_seconds": limits.deadline_seconds,
+                    "max_results": limits.max_results,
+                },
+                "started_at": started,
+                "queries": [{**entry,
+                             "cursor": (entry["cursor"].value
+                                        if entry["cursor"] is not None else None)}
+                            for entry in query_states],
+                "records": checkpoint_records,
+                "records_omitted": checkpoint_records_omitted + newly_omitted,
+            }
+            if pending is not None:
+                snapshot["pending_page"] = pending
+            checkpoint(_checkpoint_json(snapshot))
+
         for query_index, context in enumerate(contexts[:limits.max_queries]):
             state = query_states[query_index]
             if global_stop:
@@ -312,13 +438,43 @@ class GuardedQueryCollector:
                     attempt_id = hashlib.sha256(
                         f"{job_id}:{source}:{context.query_fingerprint}:{page_number}:{retry}".encode()
                     ).hexdigest()
+                    if (pending_page is not None
+                            and pending_page["query_index"] == query_index
+                            and pending_page["page_number"] == page_number
+                            and pending_page["retry"] == retry
+                            and pending_page["attempt_id"] == attempt_id
+                            and pending_page["cursor"] == (cursor.value if cursor is not None else None)):
+                        try:
+                            await asyncio.to_thread(self.gateway.runner.admission.settle_attempt,
+                                job_id, owner, fence, attempt_id=attempt_id, now=self.utcnow())
+                        except Exception:
+                            raise AdmissionDenied("SETTLEMENT_PENDING") from None
+                        result = pending_page["restored"]
+                        pending_page = None
+                        attempted += 1
+                        page = result.page
+                        break
                     attempted += 1
                     try:
+                        def persist_receipt(receipt):
+                            if checkpoint is None:
+                                return
+                            raw_cursor = cursor.value if cursor is not None else None
+                            save_checkpoint(pending={
+                                "query_index": query_index,
+                                "query_fingerprint": context.query_fingerprint,
+                                "page_number": page_number,
+                                "cursor": raw_cursor,
+                                "retry": retry,
+                                "attempt_id": attempt_id,
+                                "page": _serialize_receipt(receipt),
+                            })
                         result = await self.gateway.fetch_page(
                             context=context, cursor=cursor, job_id=job_id, owner=owner,
                             fence=fence, attempt_id=attempt_id, max_results=limits.max_results,
                             timeout_seconds=min(remaining, self.gateway.policy.total_timeout_seconds,
                                 self.gateway.runner.admission.max_attempt_seconds(source)),
+                            on_page_receipt=persist_receipt if checkpoint is not None else None,
                         )
                         if result.data_mode != self.gateway.data_mode or result.source_id != source:
                             raise GatewayError("PROVENANCE_MISMATCH")
@@ -326,6 +482,11 @@ class GuardedQueryCollector:
                         break
                     except (GatewayError, SerpApiError, YouTubeSourceError, AdmissionDenied) as exc:
                         code = exc.code.value if isinstance(exc, YouTubeSourceError) else exc.code
+                        if code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
+                            # Keep the job reclaimable while the durable receipt
+                            # outcome is uncertain; do not publish a terminal
+                            # result that could hide a late checkpoint commit.
+                            raise AdmissionDenied(code) from None
                         retryable = (bool(getattr(exc, "retryable", False))
                                      or isinstance(exc, GatewayError) and code in {
                                          "UPSTREAM_TIMEOUT", "UPSTREAM_ERROR"})
@@ -355,7 +516,7 @@ class GuardedQueryCollector:
                             if code in {"SOURCE_NOT_APPROVED", "ALREADY_RESERVED", "QUOTA_EXHAUSTED",
                                         "RATE_LIMITED", "CREDENTIAL_UNAVAILABLE", "ADMISSION_REVOKED",
                                         "LEASE_LOST", "FEATURE_DISABLED", "PROVIDER_CONCURRENCY_LIMIT",
-                                        "SETTLEMENT_PENDING"}:
+                                        "SETTLEMENT_PENDING", "RESULT_PERSISTENCE_FAILED"}:
                                 global_stop = reason
                             break
                         if delay:
@@ -433,28 +594,7 @@ class GuardedQueryCollector:
                     "done": page_done,
                 })
                 if checkpoint is not None:
-                    checkpoint_records, newly_omitted = _bounded_checkpoint_records(records.values())
-                    checkpoint(_checkpoint_json({
-                        "schema": 1,
-                        "source_id": source,
-                        "data_mode": self.gateway.data_mode,
-                        "plan_fingerprint": plan.fingerprint,
-                        "limits": {
-                            "max_queries": limits.max_queries,
-                            "max_pages_per_query": limits.max_pages_per_query,
-                            "max_requests": limits.max_requests,
-                            "max_retries_per_page": limits.max_retries_per_page,
-                            "deadline_seconds": limits.deadline_seconds,
-                            "max_results": limits.max_results,
-                        },
-                        "started_at": started,
-                        "queries": [{**entry,
-                                     "cursor": (entry["cursor"].value
-                                                if entry["cursor"] is not None else None)}
-                                    for entry in query_states],
-                        "records": checkpoint_records,
-                        "records_omitted": checkpoint_records_omitted + newly_omitted,
-                    }))
+                    save_checkpoint()
                 if page_done:
                     break
             progress.append(QueryProgress(context.query_fingerprint, pages, accepted, rejected, reason, retry_at))

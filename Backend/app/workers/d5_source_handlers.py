@@ -4,6 +4,7 @@ This module creates no transports or credentials. The caller must supply already
 constructed guarded gateways; live constructors remain approval-gated.
 """
 
+import asyncio
 import hashlib
 import json
 import math
@@ -13,6 +14,7 @@ from enum import Enum
 from typing import Callable, Mapping
 
 from app.jobs.distributed_worker import SourceWorkContext
+from app.jobs.public_admission import AdmissionDenied
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -236,6 +238,72 @@ class D5SourceHandlers:
         attempt_id = hashlib.sha256(
             f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{date_value.isoformat()}:page-1".encode()
         ).hexdigest()
+
+        def result_for(page):
+            records, omitted = _bounded_records([{
+                "source": row.source,
+                "country_scope": row.country_scope,
+                "access": row.access,
+                "observation_date": _jsonable(row.observation_date),
+                "project": row.project,
+                "article_original": row.article_original,
+                "article_display": row.article_display,
+                "views_ceil": row.views_ceil,
+                "provider_rank": row.provider_rank,
+                "quality_flags": list(row.quality_flags),
+                "canonical_keyword": row.canonical_keyword,
+                "fetched_at": _jsonable(row.fetched_at),
+                "source_url": row.source_url,
+            } for row in page.observations])
+            return {"status": "PARTIAL" if page.rejected_count or omitted else "SUCCESS",
+                    "data_mode": page.data_mode, "records": records,
+                    "record_count": len(records),
+                    "coverage": {"observation_date": page.observation_date.isoformat(),
+                                 "rejected": page.rejected_count,
+                                 "records_omitted_storage_limit": omitted,
+                                 "item_count": page.item_count}}
+
+        saved_progress = (context.resume_snapshot or {}).get("progress", {})
+        saved_receipt = (saved_progress.get("wikimedia_receipt")
+                         if isinstance(saved_progress, dict) else None)
+        if saved_receipt is not None:
+            result = saved_receipt.get("result") if isinstance(saved_receipt, dict) else None
+            if (not isinstance(saved_receipt, dict)
+                    or saved_receipt.get("schema") != 1
+                    or saved_receipt.get("source_id") != WIKIMEDIA_SOURCE_ID
+                    or saved_receipt.get("plan_fingerprint") != context.plan_fingerprint
+                    or saved_receipt.get("observation_date") != date_value.isoformat()
+                    or saved_receipt.get("attempt_id") != attempt_id
+                    or saved_receipt.get("data_mode") != self.wikimedia.data_mode
+                    or not isinstance(result, dict)
+                    or result.get("data_mode") != self.wikimedia.data_mode
+                    or result.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or not isinstance(result.get("records"), list)
+                    or type(result.get("record_count")) is not int
+                    or result["record_count"] != len(result["records"])):
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            try:
+                await asyncio.to_thread(
+                    self.wikimedia.runner.admission.settle_attempt,
+                    context.job_id, context.owner, context.fence,
+                    attempt_id=attempt_id, now=self.utcnow(),
+                )
+            except Exception:
+                raise AdmissionDenied("SETTLEMENT_PENDING") from None
+            return result
+
+        def persist_page_receipt(page):
+            result = result_for(page)
+            context.checkpoint({"wikimedia_receipt": {
+                "schema": 1,
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "plan_fingerprint": context.plan_fingerprint,
+                "observation_date": date_value.isoformat(),
+                "attempt_id": attempt_id,
+                "data_mode": page.data_mode,
+                "result": result,
+            }})
+
         try:
             page = await self.wikimedia.fetch_day(
                 request=request,
@@ -245,36 +313,20 @@ class D5SourceHandlers:
                 attempt_id=attempt_id,
                 timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
                     WIKIMEDIA_SOURCE_ID)),
+                on_page_receipt=persist_page_receipt,
             )
         except WikimediaGatewayError as exc:
+            if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
+                raise AdmissionDenied(exc.code) from None
             context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
             status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
             return {"status": status, "data_mode": self.wikimedia.data_mode,
                     "records": [], "record_count": 0, "error_code": exc.code}
-        records, omitted = _bounded_records([{
-            "source": row.source,
-            "country_scope": row.country_scope,
-            "access": row.access,
-            "observation_date": _jsonable(row.observation_date),
-            "project": row.project,
-            "article_original": row.article_original,
-            "article_display": row.article_display,
-            "views_ceil": row.views_ceil,
-            "provider_rank": row.provider_rank,
-            "quality_flags": list(row.quality_flags),
-            "canonical_keyword": row.canonical_keyword,
-            "fetched_at": _jsonable(row.fetched_at),
-            "source_url": row.source_url,
-        } for row in page.observations])
+        result = result_for(page)
         context.checkpoint({"observation_date": page.observation_date.isoformat(),
-                            "records": len(records), "rejected": page.rejected_count})
-        return {"status": "PARTIAL" if page.rejected_count or omitted else "SUCCESS",
-                "data_mode": page.data_mode, "records": records,
-                "record_count": len(records),
-                "coverage": {"observation_date": page.observation_date.isoformat(),
-                             "rejected": page.rejected_count,
-                             "records_omitted_storage_limit": omitted,
-                             "item_count": page.item_count}}
+                            "records": result["record_count"],
+                            "rejected": page.rejected_count})
+        return result
 
 
 class CacheUnavailable(Exception):

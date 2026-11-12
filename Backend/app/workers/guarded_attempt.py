@@ -5,6 +5,7 @@ Its timeout guarantee requires a cancellation-cooperative transport.
 """
 
 import asyncio
+import inspect
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,9 +29,12 @@ class GuardedAttemptRunner:
 
     async def run(self, *, job_id: str, owner: str, fence: int, source_id: str,
                   attempt_id: str, timeout_seconds: float,
-                  request: Callable[[], Awaitable[Any]]) -> AttemptOutcome:
+                  request: Callable[[], Awaitable[Any]],
+                  before_settle: Callable[[Any], Any] | None = None) -> AttemptOutcome:
         if source_id not in self.admission.policy.enabled_sources or not callable(request):
             raise ValueError("server-approved source and request factory required")
+        if before_settle is not None and not callable(before_settle):
+            raise ValueError("result receipt callback must be callable")
         maximum = self.admission.max_attempt_seconds(source_id)
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 0 < timeout_seconds <= maximum):
@@ -64,6 +68,23 @@ class GuardedAttemptRunner:
         except Exception:
             # Do not propagate provider exception text, URLs or credentials.
             return AttemptOutcome("UPSTREAM_ERROR", settlement_pending=True)
+        if before_settle is not None:
+            try:
+                persist_remaining = (deadline - self.clock()).total_seconds()
+                if persist_remaining <= 0:
+                    return AttemptOutcome("RESULT_PERSISTENCE_FAILED", settlement_pending=True)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(before_settle, value), timeout=persist_remaining
+                )
+                if inspect.isawaitable(result):
+                    persist_remaining = (deadline - self.clock()).total_seconds()
+                    if persist_remaining <= 0:
+                        return AttemptOutcome("RESULT_PERSISTENCE_FAILED", settlement_pending=True)
+                    await asyncio.wait_for(result, timeout=persist_remaining)
+            except Exception:
+                # No settlement acknowledgement is allowed until the bounded
+                # result receipt has definitely crossed its durable boundary.
+                return AttemptOutcome("RESULT_PERSISTENCE_FAILED", settlement_pending=True)
         try:
             await asyncio.to_thread(self.admission.settle_attempt, job_id, owner, fence,
                                     attempt_id=attempt_id, now=self.clock())
