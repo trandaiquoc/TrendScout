@@ -1,5 +1,7 @@
 # Báo cáo D5 — đang thực hiện
 
+> Cập nhật roadmap 12/11/2026: D6 là personal local live demo với credentials hiện có; D7 nghiệm thu live demo E2E. Company production và multi-host thực chuyển thành track riêng. Các phát biểu roadmap cũ bên dưới mang tính lịch sử.
+
 **Trạng thái (12/11/2026): `DEMO_ACCEPTANCE=100%` — PASS cho local synthetic presentation; `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS`; `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; `D5_PRODUCTION_READINESS=PARTIAL`; `D6_PROVIDER_ONBOARDING_PENDING`; `LIVE_ACTIVATION_NOT_YET_ACCEPTED`; `FOUR_SOURCE_LIVE_VERIFIED=NOT_ACCEPTED`.** Chủ dự án xác nhận toàn bộ GitHub, Vercel, Google Cloud/Firebase và tài nguyên phát triển hiện tại thuộc tài khoản cá nhân; công ty chưa cấp hạ tầng. Không dùng tài nguyên hay credential cá nhân làm production evidence hoặc lấp shared backing. D5 demo-first/offline; D6 nhận account/credential do công ty cấp và kích hoạt live; D7 kiểm chứng production multi-host, live E2E và UAT. Không có D3C. Demo PASS và D5 offline foundation PASS không đồng nghĩa production readiness hoặc live bốn nguồn.
 
 ## Acceptance matrix — hai track độc lập

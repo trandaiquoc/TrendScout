@@ -1,5 +1,7 @@
 # D5 — Blueprint tích hợp live bốn nguồn
 
+> **Roadmap update 12/11/2026:** D6 is personal local live integration using the owner's existing credentials; D7 is live demo E2E acceptance. Company production and real multi-host acceptance form a separate later track. Earlier roadmap references below are historical and superseded where inconsistent.
+
 **Trạng thái (12/11/2026): `DEMO_ACCEPTANCE=100%`; `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS`; `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; `D5_PRODUCTION_READINESS=PARTIAL`; `FOUR_SOURCE_LIVE_VERIFIED=NOT_ACCEPTED`.** Bối cảnh mới: TrendScout là dự án cá nhân để trình bày demo; các tài khoản phát triển hiện có thuộc cá nhân, công ty chưa cấp tài khoản/hạ tầng. Không dùng các tài nguyên cá nhân đó làm điều kiện hay bằng chứng production. Không có D3C. D5 demo-first và hoàn thiện code/offline tests; D6 tích hợp tài khoản/credentials do công ty cấp và quy trình kích hoạt live; D7 nghiệm thu multi-host production, live E2E và UAT. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public live Fetch vẫn disabled; Vercel hiện read-only.
 
 ## Acceptance tracks — DEMO-FIRST, PRODUCTION-LATER

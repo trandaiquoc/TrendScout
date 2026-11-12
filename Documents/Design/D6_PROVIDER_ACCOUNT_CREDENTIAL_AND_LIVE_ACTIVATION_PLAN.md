@@ -1,5 +1,7 @@
 # D6 — Organization-Owned Provider Accounts, Credentials and Live Activation
 
+> **Roadmap superseded 12/11/2026:** D6 now targets a bounded personal local live demo using the owner's existing credentials. D7 is live demo end-to-end acceptance. Company production onboarding, organization ownership, administration and real multi-host acceptance are a separate later track. The remainder of this document is retained as a proposed company-production blueprint; it is not a prerequisite for the personal demo.
+
 **Status: blueprint; no accounts, secrets, live activation or production changes authorized.** DEMO_FIRST decision (12/11/2026): D5 `DEMO_ACCEPTANCE` is local synthetic presentation and does not require company infrastructure; `PRODUCTION_MULTI_HOST_ACCEPTANCE` is a separate blocked gate. D6 starts only when the company provides/approves its identities and resources, and owns provider onboarding, credential management, a separate secure admin console and controlled actual four-source live activation. D7 verifies real production multi-host operation, final live E2E, security, data quality, performance and UAT. There is no D3C. No personal account or credential is an acceptable substitute for company-owned production identity.
 
 ## Identity and boundaries
