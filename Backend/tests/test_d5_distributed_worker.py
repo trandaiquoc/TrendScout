@@ -14,8 +14,9 @@ from test_d5_wikimedia_gateway import USER_AGENT
 from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker
-from app.jobs.public_admission import PoolLimit
+from app.jobs.public_admission import AdmissionDenied, PoolLimit
 from app.jobs.source_checkpoints import CheckpointGrant
+from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -273,6 +274,68 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source_result["data_mode"], "SYNTHETIC")
             self.assertGreater(source_result["record_count"], 0)
         self.assertNotIn("raw_record", repr(result))
+
+    async def test_public_fetch_facade_reads_retained_worker_results(self):
+        results = {source: self.source_result(1) for source in SOURCES}
+        handlers = {}
+        for source, result in results.items():
+            def handler(_context, value=result):
+                return value
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+            handlers[source] = handler
+        admission = coordinator(self.path, self.config)
+        worker = DistributedFetchWorker(admission, handlers=handlers,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        public = DistributedPublicFetch(admission, worker,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        accepted = public.submit("public-facade-idempotency-key")
+        self.assertEqual(accepted["status"], "QUEUED")
+        completed = await public.run_once("public-worker")
+        self.assertEqual(completed["state"], "COMPLETED")
+        status = public.status(accepted["job_id"])
+        self.assertEqual(status["status"], "COMPLETED")
+        self.assertEqual(status["data_mode"], "SYNTHETIC")
+        self.assertEqual({row["source_id"] for row in status["sources"]}, set(SOURCES))
+        self.assertTrue(all(row["delivery_state"] == "FRESH" for row in status["sources"]))
+        self.assertTrue(all(row["records"] for row in status["sources"]))
+
+    async def test_public_poll_budget_is_shared_and_atomic(self):
+        config = policy(
+            enabled_sources=frozenset(SOURCES), pools=self.config.pools,
+            lease_seconds=10, cooldown_seconds=0, max_status_polls=1,
+            plan_fingerprint="a" * 64,
+        )
+        admission = coordinator(self.path, config)
+        handlers = {}
+        for source in SOURCES:
+            def handler(_context):
+                return self.source_result()
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+            handlers[source] = handler
+        worker = DistributedFetchWorker(admission, handlers=handlers,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        public = DistributedPublicFetch(admission, worker,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        accepted = public.submit("public-poll-limit-idempotency-key")
+        self.assertIsNotNone(public.status(accepted["job_id"]))
+        with self.assertRaisesRegex(AdmissionDenied, "STATUS_POLL_LIMIT"):
+            public.status(accepted["job_id"])
+
+    async def test_public_fetch_facade_rejects_undeclared_or_live_handlers(self):
+        admission = coordinator(self.path, self.config)
+        for mode in (None, "LIVE"):
+            handlers = {}
+            for source in SOURCES:
+                def handler(_context):
+                    return self.source_result()
+                if mode is not None:
+                    handler.__trendscout_data_mode__ = mode
+                handlers[source] = handler
+            worker = DistributedFetchWorker(admission, handlers=handlers,
+                                            resolve_grant=self.grant, utcnow=self.clock)
+            with self.assertRaisesRegex(ValueError, "explicitly synthetic"):
+                DistributedPublicFetch(admission, worker,
+                                       resolve_grant=self.grant, utcnow=self.clock)
 
 
 if __name__ == "__main__":

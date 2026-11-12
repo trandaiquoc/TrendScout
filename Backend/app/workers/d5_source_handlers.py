@@ -97,7 +97,11 @@ class D5SourceHandlers:
 
     def build(self) -> dict[str, Callable[[SourceWorkContext], object]]:
         handlers = {source: self._query_handler(source) for source in sorted(_QUERY_SOURCES)}
-        handlers[WIKIMEDIA_SOURCE_ID] = self._wikimedia_handler
+        async def collect_wikimedia(context):
+            return await self._wikimedia_handler(context)
+
+        setattr(collect_wikimedia, "__trendscout_data_mode__", self.wikimedia.data_mode)
+        handlers[WIKIMEDIA_SOURCE_ID] = collect_wikimedia
         if set(handlers) != _ALL_SOURCES:
             raise ValueError("incomplete guarded source registry")
         return handlers
@@ -144,6 +148,7 @@ class D5SourceHandlers:
                              "retry_at": _jsonable(max(retry_times)) if should_defer else None},
             }
 
+        setattr(collect, "__trendscout_data_mode__", collector.gateway.data_mode)
         return collect
 
     async def _wikimedia_handler(self, context: SourceWorkContext):

@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import secrets
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -29,6 +30,7 @@ SOURCE_POOLS = {
 }
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
+_JOB_ID = re.compile(r"^[a-f0-9]{32}$")
 
 
 class AdmissionDenied(Exception):
@@ -70,6 +72,7 @@ class AdmissionPolicy:
     max_job_seconds: int = 300
     receipt_seconds: int = 3600
     max_records: int = 512
+    max_status_polls: int = 120
     enabled: bool = False
 
     def __post_init__(self):
@@ -86,7 +89,8 @@ class AdmissionPolicy:
                                     (self.max_attempts, 1, 10),
                                     (self.max_job_seconds, 1, 3600),
                                     (self.receipt_seconds, 1, 86400),
-                                    (self.max_records, 1, 1000)):
+                                    (self.max_records, 1, 1000),
+                                    (self.max_status_polls, 1, 1000)):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError("invalid bounded admission limit")
         if self.receipt_seconds < self.max_job_seconds:
@@ -208,13 +212,41 @@ class PublicAdmission:
                                 "created_at": now.isoformat(),
                                 "available_at": now.isoformat(),
                                 "expires_at": (now + timedelta(seconds=self.policy.max_job_seconds)).isoformat(),
-                                "plan_fingerprint": self.policy.plan_fingerprint,
+                                "plan_fingerprint": self.policy.plan_fingerprint, "status_polls": 0,
                                 "receipts": {}}
                 starts.append(now.isoformat())
             keys[digest] = {"job_id": job_id,
                             "expires_at": (now + timedelta(seconds=self.policy.receipt_seconds)).isoformat()}
             return {"job_id": job_id, "result": result}
         return self._transaction(op)
+
+    def read_job(self, job_id: str, *, now: datetime) -> dict | None:
+        """Read a job and charge a bounded shared status-poll allowance.
+
+        Reads remain available after the operational kill switch is set so a
+        caller can observe already-admitted work. The allowance and clock guard
+        remain atomic across all processes sharing the store.
+        """
+        now = _utc(now)
+        if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id):
+            return None
+
+        def operation(state):
+            if (not state or state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+            self._guard_clock(state, now)
+            job = state["jobs"].get(job_id)
+            if not isinstance(job, dict):
+                return state, None
+            polls = job.get("status_polls", 0)
+            if type(polls) is not int or polls < 0:
+                raise AdmissionDenied("JOB_STATE_INVALID")
+            if polls >= self.policy.max_status_polls:
+                raise AdmissionDenied("STATUS_POLL_LIMIT")
+            job["status_polls"] = polls + 1
+            return state, deepcopy(job)
+        return self.store.transact(self.state_key, operation)
 
     def claim(self, job_id: str, owner: str, *, now: datetime) -> dict:
         now = _utc(now)
@@ -241,7 +273,8 @@ class PublicAdmission:
         job.update(state="RUNNING", owner=owner, fence=job["fence"] + 1,
                    attempts=job["attempts"] + 1,
                    lease_until=min(now + timedelta(seconds=self.policy.lease_seconds),
-                                   _parse(job["expires_at"])).isoformat())
+                                   _parse(job["expires_at"])).isoformat(),
+                   updated_at=now.isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
                 "lease_until": job["lease_until"], "expires_at": job["expires_at"]}
 
@@ -281,7 +314,7 @@ class PublicAdmission:
             if not now < not_before < _parse(job["expires_at"]):
                 raise AdmissionDenied("RETRY_OUTSIDE_DEADLINE")
             job.update(state="QUEUED", owner=None, lease_until=None,
-                       available_at=not_before.isoformat())
+                       available_at=not_before.isoformat(), updated_at=now.isoformat())
         self._transaction(op)
 
     def heartbeat(self, job_id: str, owner: str, fence: int, *, now: datetime) -> str:
@@ -293,6 +326,7 @@ class PublicAdmission:
             self._require_lease(job, owner, fence, now)
             job["lease_until"] = min(now + timedelta(seconds=self.policy.lease_seconds),
                                      _parse(job["expires_at"])).isoformat()
+            job["updated_at"] = now.isoformat()
             return job["lease_until"]
         return self._transaction(op)
 
@@ -403,7 +437,8 @@ class PublicAdmission:
             self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
-            job.update(state="PARTIAL" if partial else "COMPLETED", owner=None, lease_until=None)
+            job.update(state="PARTIAL" if partial else "COMPLETED", owner=None,
+                       lease_until=None, updated_at=now.isoformat(), finished_at=now.isoformat())
         self._transaction(op)
 
     def disable(self) -> None:

@@ -57,6 +57,13 @@ class DistributedFetchWorker:
             raise ValueError("complete server-owned handler and grant registries required")
         self.admission = admission
         self.handlers = dict(handlers)
+        self.source_modes = {
+            source_id: getattr(handler, "__trendscout_data_mode__", None)
+            for source_id, handler in self.handlers.items()
+        }
+        if any(mode is not None and mode not in {"SYNTHETIC", "LIVE"}
+               for mode in self.source_modes.values()):
+            raise ValueError("invalid server-owned source mode declaration")
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
         self.journal = SourceCheckpointJournal(admission)
@@ -78,6 +85,9 @@ class DistributedFetchWorker:
                 raise AdmissionDenied("CHECKPOINT_POLICY_UNAVAILABLE") from None
             if not isinstance(grant, CheckpointGrant) or grant.source_id != source_id:
                 raise AdmissionDenied("CHECKPOINT_POLICY_UNAVAILABLE")
+            declared_mode = self.source_modes[source_id]
+            if declared_mode is not None and declared_mode != grant.data_mode:
+                raise AdmissionDenied("SOURCE_MODE_POLICY_MISMATCH")
             saved = self.journal.load(job_id, owner, fence, source_id=source_id,
                                       grant=grant, now=now)
             if saved and saved["snapshot"].get("phase") == "COMPLETE":

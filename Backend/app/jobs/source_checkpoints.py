@@ -92,6 +92,49 @@ class SourceCheckpointJournal:
                     "retain_until": expiry.isoformat()}
         return self.admission.transact_owned(job_id, owner, fence, now=now, operation=operation)
 
+    def completed_result(self, job, *, source_id, grant, now):
+        """Validate a terminal job's retained source result before public readback."""
+        now = _utc(now)
+        self._authorize(source_id, grant, now)
+        if (not isinstance(job, dict) or job.get("state") not in {"COMPLETED", "PARTIAL"}
+                or job.get("plan_fingerprint") != self.admission.policy.plan_fingerprint):
+            return None
+        entry = job.get("source_checkpoints", {}).get(source_id)
+        if not isinstance(entry, dict):
+            return None
+        try:
+            snapshot = entry.get("snapshot")
+            if (entry.get("policy_version") != grant.policy_version
+                    or entry.get("data_mode") != grant.data_mode
+                    or not isinstance(snapshot, dict)
+                    or snapshot.get("schema") != 1
+                    or snapshot.get("source_id") != source_id
+                    or snapshot.get("data_mode") != grant.data_mode
+                    or snapshot.get("plan_fingerprint") != self.admission.policy.plan_fingerprint
+                    or snapshot.get("phase") != "COMPLETE"
+                    or not isinstance(snapshot.get("result"), dict)
+                    or snapshot["result"].get("data_mode") != grant.data_mode
+                    or not isinstance(snapshot["result"].get("records"), list)
+                    or type(snapshot["result"].get("record_count")) is not int
+                    or snapshot["result"]["record_count"] != len(snapshot["result"]["records"])):
+                raise ValueError("invalid completed result scope")
+            _safe_payload(snapshot)
+            serialized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False,
+                                    allow_nan=False, separators=(",", ":")).encode("utf-8")
+            created_at = _utc(datetime.fromisoformat(entry["created_at"]))
+            expiry = min(_utc(datetime.fromisoformat(entry["retain_until"])),
+                         created_at + timedelta(seconds=grant.max_retention_seconds),
+                         _utc(grant.expires_at))
+            revision = entry.get("revision")
+            if (type(revision) is not int or revision < 1 or len(serialized) > _MAX_CHECKPOINT_BYTES
+                    or hashlib.sha256(serialized).hexdigest() != entry.get("digest")):
+                raise ValueError("invalid completed result integrity")
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            raise AdmissionDenied("CHECKPOINT_INVALID") from None
+        if now >= expiry:
+            return None
+        return deepcopy(snapshot["result"])
+
     def save(self, job_id, owner, fence, *, source_id, grant, now,
              expected_revision, snapshot):
         now = _utc(now)
