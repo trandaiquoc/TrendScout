@@ -1,9 +1,7 @@
-"""Multi-process offline model for the admission port; SQLite is test-only."""
+"""Multi-process offline admission tests over the local SQLite state store."""
 
-import json
 import multiprocessing
 import os
-import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
@@ -12,26 +10,19 @@ from pathlib import Path
 
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 
 
 class SqliteTestStore:
-    """One-host serializable test harness, never a production store."""
+    """Test profile over the real local atomic-store implementation."""
 
     def __init__(self, path):
-        self.path = path
+        self.store = LocalSQLiteAtomicStateStore(path, environment_profile="test")
 
     def transact(self, key, operation):
-        with sqlite3.connect(self.path, timeout=10, isolation_level=None) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
-            state = json.loads(row[0]) if row else {}
-            updated, result = operation(state)
-            connection.execute("INSERT OR REPLACE INTO state(key,value) VALUES (?,?)",
-                               (key, json.dumps(updated, sort_keys=True)))
-            connection.commit()
-            return result
+        return self.store.transact(key, operation)
 
 
 def policy(**changes):
@@ -85,8 +76,6 @@ class PublicAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = str(Path(self.directory.name) / "coordinator.sqlite")
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.control = coordinator(self.path)
 
     def tearDown(self):
@@ -105,6 +94,31 @@ class PublicAdmissionTests(unittest.TestCase):
                            [(self.path, job_id, fence, i) for i in range(20)]))
         self.assertEqual(results.count("NEW"), 2)
         self.assertEqual(results.count("QUOTA_EXHAUSTED"), 18)
+
+    def test_reopened_store_keeps_committed_state_and_rolls_back_failed_transform(self):
+        self.control.store.transact("durable-check", lambda _state: ({"count": 1}, None))
+        reopened = SqliteTestStore(self.path)
+
+        def abort(_state):
+            raise RuntimeError("abort transaction")
+
+        with self.assertRaisesRegex(RuntimeError, "abort transaction"):
+            reopened.transact("durable-check", abort)
+        self.assertEqual(
+            reopened.transact("durable-check", lambda state: (state, state["count"])), 1
+        )
+
+    def test_local_store_refuses_live_or_ephemeral_composition(self):
+        for kwargs in (
+            {"path": self.path, "environment_profile": "production"},
+            {"path": self.path, "environment_profile": "local", "data_mode": "LIVE"},
+            {"path": ":memory:", "environment_profile": "test"},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                LocalSQLiteAtomicStateStore(**kwargs)
+
+    def test_local_database_file_is_owner_only(self):
+        self.assertEqual(self.control.store.store.path.stat().st_mode & 0o077, 0)
 
     def test_independent_processes_share_inflight_limit(self):
         config = policy(pools={"serpapi": PoolLimit(100, 100, 100, 100, 1, 2, 30),

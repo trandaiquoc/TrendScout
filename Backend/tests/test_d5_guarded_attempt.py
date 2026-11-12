@@ -1,7 +1,6 @@
 """No real network: prove quota reservation precedes creation of each request."""
 
 import asyncio
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,8 +17,6 @@ class GuardedAttemptTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        with sqlite3.connect(path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.control = coordinator(path)
         self.job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
         self.fence = self.control.claim(self.job, "worker", now=NOW)["fence"]

@@ -1,6 +1,5 @@
 """Offline tests for fenced, policy-scoped source checkpoints."""
 
-import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
@@ -22,8 +21,6 @@ class SourceCheckpointTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = str(Path(self.directory.name) / "coordinator.sqlite")
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.admission = coordinator(self.path)
         self.job = self.admission.admit("checkpoint-idempotency-key", now=NOW)["job_id"]
         self.owner = "worker"

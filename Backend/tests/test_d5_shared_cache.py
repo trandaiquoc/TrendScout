@@ -1,7 +1,6 @@
-"""Policy and provenance checks against the one-host SQLite test store."""
+"""Policy and provenance checks against the one-host local SQLite store."""
 
 import multiprocessing
-import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
@@ -37,8 +36,6 @@ class SharedCacheTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = str(Path(self.directory.name) / "cache.sqlite")
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.cache = SharedCache(SqliteTestStore(self.path))
 
     def tearDown(self):

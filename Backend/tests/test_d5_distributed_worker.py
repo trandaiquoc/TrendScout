@@ -1,9 +1,10 @@
 """Offline worker integration over the atomic admission and checkpoint ports."""
 
 import asyncio
-import sqlite3
+import multiprocessing
 import tempfile
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 
@@ -34,6 +35,40 @@ from app.workers.guarded_attempt import GuardedAttemptRunner
 SOURCES = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
 
 
+def run_worker_process(args):
+    path, index = args
+    config = policy(
+        enabled_sources=frozenset(SOURCES),
+        pools={"wikimedia": PoolLimit(2, 5, 2, 5, 1),
+               "serpapi": PoolLimit(2, 5, 2, 5, 1),
+               "youtube": PoolLimit(1, 3, 1, 3, 1)},
+        lease_seconds=10, cooldown_seconds=0, plan_fingerprint="a" * 64,
+    )
+    admission = coordinator(path, config)
+
+    def handler(context):
+        return {"status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "records": [{"source_id": context.source_id}], "record_count": 1}
+
+    handlers = {}
+    for source in SOURCES:
+        def source_handler(context, expected=source):
+            if context.source_id != expected:
+                raise AssertionError("handler source mismatch")
+            return handler(context)
+        source_handler.__trendscout_data_mode__ = "SYNTHETIC"
+        handlers[source] = source_handler
+
+    def grant(source_id, now):
+        return CheckpointGrant(source_id, "SYNTHETIC", "worker-process-policy",
+                               now + timedelta(minutes=10), 300, True)
+
+    worker = DistributedFetchWorker(
+        admission, handlers=handlers, resolve_grant=grant, utcnow=lambda: NOW
+    )
+    return asyncio.run(worker.run_once(f"offline-worker-{index}"))
+
+
 class SimulatedProcessCrash(BaseException):
     pass
 
@@ -50,8 +85,6 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = str(Path(self.directory.name) / "worker.sqlite")
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.clock = MutableClock()
         self.config = policy(
             enabled_sources=frozenset(SOURCES),
@@ -203,6 +236,18 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await worker.run_once("worker-two"))
         release.set()
         self.assertEqual((await first_task)["state"], "COMPLETED")
+
+    async def test_independent_worker_processes_execute_one_durable_job_once(self):
+        self.admit()
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=8, mp_context=context) as processes:
+            results = list(processes.map(
+                run_worker_process, [(self.path, index) for index in range(8)]
+            ))
+        completed = [result for result in results if result is not None]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["state"], "COMPLETED")
+        self.assertEqual(set(completed[0]["sources"]), set(SOURCES))
 
     async def test_invalid_or_secret_bearing_results_fail_as_source_errors(self):
         self.admit()

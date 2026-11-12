@@ -1,6 +1,5 @@
 """Offline integration of source pagination, budget and normalized evidence."""
 
-import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
@@ -23,8 +22,6 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        with sqlite3.connect(path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.control = coordinator(path, policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint))
         self.job = self.control.admit("public-fetch-idempotency", now=NOW)["job_id"]
         self.fence = self.control.claim(self.job, "worker", now=NOW)["fence"]
@@ -97,8 +94,6 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        with sqlite3.connect(path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         config = policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
                         pools={"serpapi": PoolLimit(2, 5, 2, 5, 1),
                                "youtube": PoolLimit(2, 5, 2, 5, 1)})
@@ -257,8 +252,6 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        with sqlite3.connect(path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         config = policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
                         pools={"serpapi": PoolLimit(14, 14, 14, 14, 1),
                                "youtube": PoolLimit(2, 5, 2, 5, 1)})

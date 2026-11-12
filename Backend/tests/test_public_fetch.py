@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta
@@ -10,11 +9,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from test_d5_public_admission import coordinator, policy
+from test_d5_live_gateway import Approvals, Credentials
+from test_d5_public_admission import NOW, coordinator, policy
+from test_d5_wikimedia_gateway import USER_AGENT
+from test_d5_wikimedia_gateway import response as wikimedia_fixture
 from test_runs import fixture
 
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PoolLimit
+from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.main import create_app
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
@@ -25,8 +28,14 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
+from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
+from app.sources.live_gateway import LivePageGateway
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
+from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.fake import FakeStorage
+from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.workers.d5_source_handlers import D5SourceHandlers
+from app.workers.guarded_attempt import GuardedAttemptRunner
 
 TEST_ENV = {
     "TREND_SCOUT_ENVIRONMENT": "test",
@@ -41,8 +50,6 @@ _DISTRIBUTED_SOURCES = {
 
 
 def distributed_fixture_service(state_path):
-    with sqlite3.connect(state_path) as connection:
-        connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     config = policy(
         enabled_sources=frozenset(_DISTRIBUTED_SOURCES),
         pools={"wikimedia": PoolLimit(2, 5, 2, 5, 1),
@@ -69,6 +76,86 @@ def distributed_fixture_service(state_path):
     worker = DistributedFetchWorker(admission, handlers=handlers,
                                     resolve_grant=resolve_grant)
     return DistributedPublicFetch(admission, worker, resolve_grant=resolve_grant)
+
+
+def distributed_cached_fixture_service(state_path):
+    """Compose public API services over one local atomic file, fixtures only."""
+    config = policy(
+        enabled_sources=frozenset(_DISTRIBUTED_SOURCES),
+        pools={"wikimedia": PoolLimit(2, 5, 2, 5, 1),
+               "serpapi": PoolLimit(2, 5, 2, 5, 1),
+               "youtube": PoolLimit(1, 3, 1, 3, 1)},
+        plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+        cooldown_seconds=0,
+    )
+    store = LocalSQLiteAtomicStateStore(state_path, environment_profile="test")
+    admission = coordinator(state_path, config)
+    runner = GuardedAttemptRunner(admission, clock=lambda: NOW)
+    calls = {source_id: 0 for source_id in _DISTRIBUTED_SOURCES}
+    gateways = []
+
+    def search_handler(source_id):
+        def handle(_request):
+            calls[source_id] += 1
+            return httpx.Response(200, json={
+                "search_metadata": {"status": "Success"},
+                "organic_results": [{"position": 1, "link": "https://example.org/fixture",
+                                     "title": "synthetic fixture result"}],
+            })
+        return handle
+
+    def youtube_handler(_request):
+        calls[YOUTUBE_SOURCE_ID] += 1
+        return httpx.Response(200, json={
+            "kind": "youtube#searchListResponse",
+            "items": [{"kind": "youtube#searchResult",
+                       "id": {"kind": "youtube#video", "videoId": "AbCdEf12345"},
+                       "snippet": {"title": "synthetic video",
+                                   "publishedAt": "2026-11-11T00:00:00Z"}}],
+        })
+
+    collectors = {}
+    for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
+        handler = youtube_handler if source_id == YOUTUBE_SOURCE_ID else search_handler(source_id)
+        gateway = LivePageGateway.offline_fixture(
+            source_id, Credentials(), Approvals(source_id), runner,
+            transport=httpx.MockTransport(handler), clock=lambda: NOW,
+        )
+        gateways.append(gateway)
+        collectors[source_id] = GuardedQueryCollector(gateway, utcnow=lambda: NOW)
+
+    def wikimedia_handler(_request):
+        calls[WIKIMEDIA_SOURCE_ID] += 1
+        return httpx.Response(200, json=wikimedia_fixture(NOW.date()))
+
+    wikimedia = WikimediaTopPageGateway.offline_fixture(
+        Approvals(WIKIMEDIA_SOURCE_ID), runner, user_agent=USER_AGENT,
+        transport=httpx.MockTransport(wikimedia_handler), clock=lambda: NOW,
+    )
+    gateways.append(wikimedia)
+
+    def cache_grant(source_id, now):
+        return CacheGrant(source_id, "offline-fixture-cache-v1", now + timedelta(hours=1),
+                          max_fresh_seconds=600, max_stale_seconds=1200,
+                          max_retention_seconds=1800, allowed=True)
+
+    handlers = D5SourceHandlers(
+        query_collectors=collectors, wikimedia=wikimedia, plan=DEFAULT_QUERY_PLAN,
+        limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+        observation_date=lambda: NOW.date(), shared_cache=SharedCache(store),
+        resolve_cache_grant=cache_grant, utcnow=lambda: NOW,
+    ).build()
+
+    def checkpoint_grant(source_id, now):
+        return CheckpointGrant(source_id, "SYNTHETIC", "offline-fixture-v1",
+                               now + timedelta(hours=1), 300, True)
+
+    worker = DistributedFetchWorker(
+        admission, handlers=handlers, resolve_grant=checkpoint_grant, utcnow=lambda: NOW
+    )
+    service = DistributedPublicFetch(admission, worker, resolve_grant=checkpoint_grant,
+                                    utcnow=lambda: NOW)
+    return service, gateways, calls
 
 
 class OfflineFixtureAdapter:
@@ -252,6 +339,53 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained_status.status_code, 200)
         self.assertNotIn("api_key", status.text.lower())
         self.assertNotIn("Authorization", capabilities.text)
+
+    async def test_public_api_worker_quota_queue_and_shared_cache_run_together(self):
+        state_path = str(Path(self.tmp.name) / "distributed-cache.sqlite")
+        service, gateways, calls = distributed_cached_fixture_service(state_path)
+        app = create_app(
+            settings=Settings.from_environment(TEST_ENV),
+            storage=FakeStorage(), adapter_factory=OfflineFixtureAdapter,
+            lock_path=str(Path(self.tmp.name) / "distributed-cache.lock"),
+            distributed_public_fetch=service,
+        )
+        try:
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+                ) as client:
+                    first = await client.post(
+                        "/api/v1/fetches", content="{}", headers={
+                            "Content-Type": "application/json", "Origin": "http://127.0.0.1",
+                            "Idempotency-Key": "combined-api-cache-fetch-0001",
+                        },
+                    )
+                    self.assertEqual(first.status_code, 202)
+                    first_status = await client.get(first.json()["status_url"])
+                    self.assertEqual(first_status.status_code, 200, first_status.text)
+                    self.assertEqual(first_status.json()["status"], "PARTIAL")
+                    self.assertTrue(all(row["status"] in {"SUCCESS", "PARTIAL"}
+                                        for row in first_status.json()["sources"]))
+                    first_calls = dict(calls)
+                    self.assertEqual(set(first_calls.values()), {1})
+
+                    second = await client.post(
+                        "/api/v1/fetches", content="{}", headers={
+                            "Content-Type": "application/json", "Origin": "http://127.0.0.1",
+                            "Idempotency-Key": "combined-api-cache-fetch-0002",
+                        },
+                    )
+                    self.assertEqual(second.status_code, 202)
+                    second_status = await client.get(second.json()["status_url"])
+                    self.assertEqual(second_status.status_code, 200)
+                    self.assertTrue(all(row["delivery_state"] == "CACHED"
+                                        for row in second_status.json()["sources"]))
+                    self.assertTrue(all(row["data_mode"] == "SYNTHETIC"
+                                        for row in second_status.json()["sources"]))
+                    self.assertEqual(calls, first_calls)
+        finally:
+            for gateway in gateways:
+                await gateway.aclose()
 
     async def test_distributed_fetch_injection_cannot_enable_read_only_or_live(self):
         state_path = str(Path(self.tmp.name) / "read-only-distributed.sqlite")

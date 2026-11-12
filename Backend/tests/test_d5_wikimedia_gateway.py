@@ -1,6 +1,5 @@
 """Guarded Wikimedia pageview contract tests; transport stays synthetic."""
 
-import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -45,8 +44,6 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.path = str(Path(self.directory.name) / "state.sqlite")
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.admission = coordinator(self.path, enabled_policy())
         self.job = self.admission.admit("wikimedia-fetch-idempotency", now=NOW)["job_id"]
         self.fence = self.admission.claim(self.job, "worker", now=NOW)["fence"]

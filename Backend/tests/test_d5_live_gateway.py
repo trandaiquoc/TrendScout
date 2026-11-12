@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
@@ -53,8 +52,6 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        with sqlite3.connect(path) as connection:
-            connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.control = coordinator(path, policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint))
         self.job = self.control.admit("public-fetch-idempotency", now=NOW)["job_id"]
         self.fence = self.control.claim(self.job, "worker", now=NOW)["fence"]
