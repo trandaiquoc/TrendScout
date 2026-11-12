@@ -1,6 +1,6 @@
 # YouTube API audit — upload checklist
 
-**Status: LOCAL DRAFT / NOT YET PUBLIC.** The files below exist as local evidence of the synthetic demo and the proposed integration. They are **not** proof of YouTube approval, live API access, policy compliance, or a publicly accessible privacy policy. The owner has confirmed that no special YouTube permission for derived analysis has been granted. Do not represent synthetic data as live.
+**Status: BLOCKED FOR SUBMISSION.** An earlier policy draft is publicly accessible on Vercel; the revised policy pages in this worktree are local and not yet published. Screenshots and the Terms PDF below predate the revisions and are stale. The owner confirmed policy review but has not approved publication. The files are not proof of YouTube approval, live API access or policy compliance. No special YouTube permission for derived analysis has been granted. Do not represent synthetic data as live.
 
 Form checked 12 Nov 2026: [YouTube API Services — Audit and Quota Extension Form](https://support.google.com/youtube/contact/yt_api_form?hl=en-GB). Field labels and conditional requirements can change; recheck the signed-in form. The public form text says uploads are simulated and says to upload one file under 10 MB; actual upload behavior and whether that restriction is per field remain unverified. Do not assume a combined upload will work; check each field and seek YouTube support if the form refuses the files.
 
@@ -10,12 +10,12 @@ Form checked 12 Nov 2026: [YouTube API Services — Audit and Quota Extension Fo
 
 | Form field | Select this file | Status and disclosure |
 | --- | --- | --- |
-| Section 5, Project 1 → **Privacy policy screenshots (showing YouTube sections, the Google Privacy Policy link, deletion policies, etc.)** | `01-privacy-policy.png` | READY (file); BLOCKED (submission): local URL and placeholders for identity, contact, effective date, retention and deletion. Update page and recapture after owner review and publication. |
-| Section 5, Project 1 → **Homepage screenshot – showing where the Privacy Policy link is located, with YouTube branding visible** | `02-homepage.png` | READY (file); BLOCKED (submission): local URL, draft links and text-only notice that YouTube is pending. No YouTube content is live; check official branding requirements when an approved YouTube feature displays content and recapture the actual state. |
-| Section 5, Project 1 → **Terms of Service documentation** | `03-terms-of-service.pdf` | READY (file); BLOCKED (submission): English draft has owner, contact, date and legal placeholders; owner must review and finalize. |
-| Section 5, Project 1 → **CONDITIONAL EVIDENCE: Dashboard/Feature screenshots — Internal company tool / Analytics and reporting**, if applicable to the selected category | `04-analytics-dashboard.png` | READY (file); synthetic data and pending YouTube approval are visible. It does not prove a working YouTube analytics feature or live data. This is a personal demo, not an internal company tool. Select the use-case category truthfully. |
-| Section 6 → **Architecture diagram** | `05-architecture.pdf` | READY (file) for review: active synthetic execution and proposed guarded YouTube path are distinguished. Update if implementation changes. |
-| Section 6 → **User flow diagrams** | `06-user-flow.pdf` | READY (file) for review: anonymous, synthetic local flow; future live path marked pending. Update if implementation changes. |
+| Section 5, Project 1 → **Privacy policy screenshots (showing YouTube sections, the Google Privacy Policy link, deletion policies, etc.)** | `01-privacy-policy.png` | BLOCKED: stale local screenshot, owner review and published final policy needed; deletion and hosting retention are not verified. |
+| Section 5, Project 1 → **Homepage screenshot – showing where the Privacy Policy link is located, with YouTube branding visible** | `02-homepage.png` | BLOCKED: local screenshot; capture actual HTTPS homepage after publication. YouTube branding/feature applicability requires review and no live YouTube feature is proven. |
+| Section 5, Project 1 → **Terms of Service documentation** | `03-terms-of-service.pdf` | BLOCKED: existing PDF predates revised local terms; regenerate after owner review and publication. |
+| Section 5, Project 1 → **CONDITIONAL EVIDENCE: Dashboard/Feature screenshots — Internal company tool / Analytics and reporting**, if applicable to the selected category | `04-analytics-dashboard.png` | BLOCKED pending applicable use-case determination and updated actual HTTPS evidence. The existing screenshot is synthetic and does not prove a working YouTube analytics feature. This is a personal demo. |
+| Section 6 → **Architecture diagram** | `05-architecture.pdf` | READY for review as local-architecture evidence: updated for the uncommitted D6 composition and marks the live path pending. BLOCKED for final submission until the owner confirms it matches the submitted use case and deployed state. |
+| Section 6 → **User flow diagrams** | `06-user-flow.pdf` | BLOCKED pending review against final published flow and any policy acceptance mechanism. |
 
 Each screenshot includes the actual browser address bar at `http://127.0.0.1:8765/...`, rather than an invented public URL. Screenshots are 1600×1000. Each requested file is below 10 MB. The three PDFs have been rendered and reviewed. No provider request or real API key was used to create this package.
 
@@ -31,7 +31,8 @@ Each screenshot includes the actual browser address bar at `http://127.0.0.1:876
 
 ## Before publishing or submitting
 
-- Replace every placeholder in both policy pages with owner-confirmed facts: legal identity, effective date, contact method, response procedure, actual retention/deletion mechanism, hosting/logs and governing law where applicable. Verify deletion and crash/backup behavior rather than promising an unimplemented process.
+- Read `POLICY_REVIEW_AND_OWNER_DECISIONS.md`; implement and verify the required privacy-policy acceptance flow and applicable user-data deletion procedure. Where YouTube's user deletion requirement applies, deletion is due as soon as possible and within seven calendar days; the general 30-day storage rule is not a substitute.
+- The owner supplied operator name, contact, URLs and proposed targets, and confirmed policy review. Confirm the actual effective date, deletion response procedure, project log retention and any chosen legal terms. Verify deletion and crash/backup behavior rather than promising an unimplemented process. The two-business-day and seven-calendar-day targets are not yet implemented commitments.
 - Review privacy-policy acceptance requirements, terms, source attribution/branding and the proposed YouTube use case against current provider policies. A draft policy page and text attribution alone do not establish compliance.
 - Publish only after separate approval. Record the actual HTTPS dashboard, policy and terms URLs; confirm Google can access them, then recapture screenshots with the genuine address bar and current feature state.
 - Ensure requested additional quota and scope are justified by the actual approved functionality. Verify YouTube permits the proposed handling of API data; retain the current block on derived keyword processing until permission is resolved.

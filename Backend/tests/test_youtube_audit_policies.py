@@ -21,12 +21,13 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('/dashboard/terms.html', homepage.text)
         self.assertIn('PENDING APPROVAL', homepage.text)
         for response in (privacy, terms):
-            self.assertIn('LOCAL DRAFT / NOT YET PUBLIC', response.text)
-            self.assertIn('[CONTACT METHOD TO BE PROVIDED]', response.text)
+            self.assertIn('DRAFT — LOCAL CHANGES NOT YET PUBLISHED', response.text)
+            self.assertIn('mailto:tdquoc02@gmail.com', response.text)
             self.assertIn('https://policies.google.com/privacy', response.text)
             self.assertIn('https://www.youtube.com/t/terms', response.text)
-        self.assertIn('[RETENTION PERIOD AND DELETION PROCESS TO BE PROVIDED]', privacy.text)
-        self.assertIn('no YouTube-derived metrics are approved', privacy.text)
+        self.assertIn('procedure must be implemented and tested', privacy.text)
+        self.assertIn('two business days', privacy.text)
+        self.assertIn('No YouTube-derived metrics or keyword processing are claimed to be approved', privacy.text)
 
     async def test_read_only_dashboard_serves_policy_without_enable_fetch(self):
         app = create_app(read_only=True)
@@ -35,7 +36,7 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
             policy = await client.get("/dashboard/privacy.html")
             blocked = await client.post("/api/v1/fetches", json={})
         self.assertEqual(policy.status_code, 200)
-        self.assertIn('LOCAL DRAFT / NOT YET PUBLIC', policy.text)
+        self.assertIn('DRAFT — LOCAL CHANGES NOT YET PUBLISHED', policy.text)
         self.assertEqual(blocked.status_code, 405)
 
 
