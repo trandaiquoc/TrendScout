@@ -170,6 +170,79 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed.queries[0].pages, 2)
         self.assertEqual(len(resumed.records), 1)
 
+    async def test_receipt_crash_recovery_covers_bing_google_and_youtube_pages(self):
+        class SimulatedProcessCrash(BaseException):
+            pass
+
+        sources = (BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        journal = SourceCheckpointJournal(self.control)
+        limits = CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1)
+        for source in sources:
+            with self.subTest(source=source):
+                calls = []
+
+                def handler(request):
+                    calls.append(source)
+                    if source == YOUTUBE_SOURCE_ID:
+                        return httpx.Response(200, json={
+                            "kind": "youtube#searchListResponse",
+                            "items": [{
+                                "kind": "youtube#searchResult",
+                                "id": {"kind": "youtube#video", "videoId": "abcdefghijk"},
+                                "snippet": {
+                                    "title": "Offline receipt recovery",
+                                    "channelId": "channel-1",
+                                    "channelTitle": "Synthetic channel",
+                                    "publishedAt": "2026-11-12T11:00:00Z",
+                                },
+                            }],
+                        })
+                    return httpx.Response(200, json={
+                        "search_metadata": {"status": "Success"},
+                        "organic_results": [{
+                            "position": 1,
+                            "link": "https://example.org/receipt-recovery",
+                            "title": "Offline receipt recovery",
+                        }],
+                    })
+
+                collector = self.collector(source, handler)
+                grant = CheckpointGrant(source, "SYNTHETIC", f"receipt-{source}",
+                                        NOW + timedelta(minutes=5), 300, True)
+                revision = [0]
+
+                def checkpoint(snapshot):
+                    revision[0] = journal.save(
+                        self.job, "worker", self.fence, source_id=source, grant=grant,
+                        now=NOW, expected_revision=revision[0],
+                        snapshot={"schema": 1, "source_id": source,
+                                  "data_mode": "SYNTHETIC",
+                                  "plan_fingerprint": DEFAULT_QUERY_PLAN.fingerprint,
+                                  "phase": "RUNNING", "progress": {"collector": snapshot}},
+                    )
+                    if snapshot.get("pending_page") is not None:
+                        raise SimulatedProcessCrash()
+
+                with self.assertRaises(SimulatedProcessCrash):
+                    await collector.collect(plan=DEFAULT_QUERY_PLAN, limits=limits,
+                                            job_id=self.job, owner="worker", fence=self.fence,
+                                            checkpoint=checkpoint)
+                saved = journal.load(self.job, "worker", self.fence, source_id=source,
+                                     grant=grant, now=NOW)
+                pending = saved["snapshot"]["progress"]["collector"]["pending_page"]
+                self.assertIsNotNone(pending)
+                self.assertEqual(calls, [source])
+
+                resumed = await collector.collect(
+                    plan=DEFAULT_QUERY_PLAN, limits=limits, job_id=self.job, owner="worker",
+                    fence=self.fence,
+                    resume_snapshot=saved["snapshot"]["progress"]["collector"],
+                )
+                self.assertEqual(calls, [source])
+                self.assertEqual(resumed.data_mode, "SYNTHETIC")
+                self.assertEqual(resumed.status, "PARTIAL")
+                self.assertEqual(len(resumed.records), 1)
+
     async def test_receipt_persistence_failure_leaves_job_reclaimable(self):
         calls = []
 
