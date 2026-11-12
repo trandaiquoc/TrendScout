@@ -95,6 +95,44 @@ Poll the returned job ID:
 
 The job must reach `COMPLETED` with `data_mode=SYNTHETIC`, one `D5_MULTIHOST_PROBE` record, and exactly one recorded `worker_host_id` matching one of the two registered hosts. Check both host logs to confirm the non-owner remained available and did not execute the same job. Then stop each process cleanly. To verify automatic supervisor recovery, send `SIGKILL` to one unit with `systemctl kill --signal=SIGKILL trendscout-d5-probe.service`; confirm systemd restarts it and the same host returns to `worker_ready`, then run a fresh probe job. Save the two cloud instance IDs, host logs, job ID, result, and restart evidence with the D5 approval record.
 
+### Distributed quota race
+
+The harness exposes an isolated one-unit SerpApi account-pool quota probe. The two hosts reserve under the Google and Bing source IDs, which must share that pool; it accounts only internal synthetic budget and never constructs a provider adapter or sends a network request. Use a fresh `run-id` and run `quota-start` once from an operator shell:
+
+```bash
+.venv/bin/python scripts/multihost_gate_probe.py \
+  --project-id ORGANIZATION_NONPROD_PROJECT \
+  --confirm-nonproduction-project ORGANIZATION_NONPROD_PROJECT \
+  --run-id b2c3d4e5 \
+  --acknowledge-nonproduction-writes \
+  quota-start
+```
+
+It returns a `job_id` and fencing token. On each of the two already registered hosts, start `quota-reserve` with the same `job_id`, fence, and expected host pair, but that host's own ID. Both commands wait at a shared barrier before attempting the same one-unit daily/monthly budget:
+
+```bash
+.venv/bin/python scripts/multihost_gate_probe.py \
+  --project-id ORGANIZATION_NONPROD_PROJECT \
+  --confirm-nonproduction-project ORGANIZATION_NONPROD_PROJECT \
+  --run-id b2c3d4e5 \
+  --acknowledge-nonproduction-writes \
+  quota-reserve --host-id worker-a --expected-hosts worker-a,worker-b \
+  --job-id RETURNED_JOB_ID --fence RETURNED_FENCE
+```
+
+Use `worker-b` on the other host. Then inspect the shared result:
+
+```bash
+.venv/bin/python scripts/multihost_gate_probe.py \
+  --project-id ORGANIZATION_NONPROD_PROJECT \
+  --confirm-nonproduction-project ORGANIZATION_NONPROD_PROJECT \
+  --run-id b2c3d4e5 \
+  --acknowledge-nonproduction-writes \
+  quota-inspect --job-id RETURNED_JOB_ID
+```
+
+Acceptance requires one host result `NEW`, one `QUOTA_EXHAUSTED`, both with `provider_calls=0`, and `quota-inspect` reporting `quota_race_pass=true` plus exactly one daily and monthly reservation. The synthetic IDs and host fingerprints are stored only as bounded coordination metadata; retain both host logs and quota summary as evidence. This real-host exercise is required for the distributed-quota portion of `PRODUCTION_MULTI_HOST_ACCEPTANCE`; the offline process test alone does not satisfy it.
+
 The harness writes a small persistent coordination document and job receipt to `_ts_d5_coordination`. This is a dedicated test run ID, not an automatic cleanup mechanism. After evidence is reviewed, the project administrator removes only documents with the recorded probe run ID using an administrator account; do not grant the runtime identity delete access. Never point the harness at production. The harness and runbook do not create accounts, databases, VMs, billing, or credentials.
 
 ## 5. systemd supervisor template
