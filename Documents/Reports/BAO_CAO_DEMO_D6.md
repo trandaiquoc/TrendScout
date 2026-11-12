@@ -70,7 +70,7 @@ Chủ dự án đã phê duyệt smoke tối đa **một request mỗi nguồn**
 | Gate | Current result | Evidence / limitation |
 | --- | --- | --- |
 | G1 Git baseline | PASS | `origin/main` fetched; clean local tree at `2485281497813e1d82106ebc0b716c22d72572b1`; no divergence. |
-| G2 HTTP integration | IMPLEMENTED, pending execution | Focused fixture test added for capabilities, POST/status/replay, startup with zero handler calls, source isolation, redaction, and context cleanup. Python test import is blocked by missing `httpx`. |
+| G2 HTTP integration | IMPLEMENTED, pending execution | Focused fixture test covers capabilities, POST/status/replay, startup with zero handler calls, source isolation, redaction, and context cleanup. A new end-to-end test composes the actual local D6 gateways and worker while replacing `AsyncHTTPTransport.handle_async_request` with fixture responses. Python test import is blocked by missing `httpx`. |
 | G3 Security | IMPLEMENTED, pending execution | Factory/ASGI checks cover opt-in, local-only profile, Vercel, one-worker configuration, loopback peer, Host, proxy/origin/scheme and allowed methods/routes. HTTP cases are written but not run. |
 | G4 Quota and idempotency | PARTIAL | Existing D6 code keeps admission/quota receipts in the SQLite ledger and volatile checkpoints in process memory. New HTTP replay case and relevant regressions could not run here. |
 | G5 Provenance and data | PARTIAL | Existing facade keeps LIVE/source status and removes raw records from LIVE HTTP results; processing grants are still caller-supplied. New HTTP redaction and isolated-source cases could not run here. |

@@ -10,16 +10,20 @@ from unittest.mock import patch
 
 import httpx
 
+from app import local_ledger
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.local_smoke_policy import local_smoke_policy
 from app.main import create_local_live_app
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
+from app.orchestration.local_live_composition import local_live_composition
 from app.settings import Settings
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
+from test_d6_local_live_composition import FixtureApprovals
+from test_d5_wikimedia_gateway import USER_AGENT
 
 
 NOW = datetime(2026, 11, 12, tzinfo=timezone.utc)
@@ -66,6 +70,96 @@ def _live_facade(directory):
 
 
 class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_fetch_runs_actual_local_composition_over_mock_transports(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(local_ledger, "DIRECTORY", Path(directory) / "local-live"), \
+                patch.object(httpx.AsyncHTTPTransport, "handle_async_request") as send:
+            counts = {}
+
+            async def fixture_response(*args):
+                request = args[-1]
+                host = request.url.host
+                counts[host] = counts.get(host, 0) + 1
+                if host == "wikimedia.org":
+                    observed = NOW.date() - timedelta(days=2)
+                    payload = {"items": [{
+                        "country": "US", "access": "all-access",
+                        "year": observed.strftime("%Y"),
+                        "month": observed.strftime("%m"),
+                        "day": observed.strftime("%d"),
+                        "articles": [{"article": "Fixture_topic", "project": "en.wikipedia",
+                                      "views_ceil": 100, "rank": 1}],
+                    }]}
+                elif host == "serpapi.com":
+                    payload = {"search_metadata": {"status": "Success"},
+                               "organic_results": [{
+                                   "position": 1,
+                                   "link": "https://example.org/fixture",
+                                   "title": "fixture-private-marker",
+                               }]}
+                elif host == "www.googleapis.com":
+                    payload = {"kind": "youtube#searchListResponse", "items": []}
+                else:
+                    raise AssertionError(f"unexpected fixture host: {host}")
+                return httpx.Response(200, json=payload, request=request)
+
+            send.side_effect = fixture_response
+
+            class FixtureCredentials:
+                def resolve(self, reference):
+                    if reference not in {"SERPAPI_API_KEY", "YOUTUBE_API_KEY"}:
+                        return None
+                    return "fixture-secret-never-real"
+
+            def retention_grant(source, now):
+                return CheckpointGrant(source, "LIVE", "fixture-retention",
+                                       now + timedelta(minutes=1), 30, True)
+
+            def composition_factory():
+                return local_live_composition(
+                    credentials=FixtureCredentials(),
+                    approvals=FixtureApprovals(),
+                    user_agent=USER_AGENT,
+                    resolve_checkpoint_grant=retention_grant,
+                    resolve_processing_grants=lambda _now: (),
+                    utcnow=lambda: NOW,
+                )
+
+            app = create_local_live_app(
+                enabled=True,
+                composition_factory=composition_factory,
+                settings=Settings.from_environment({"TREND_SCOUT_ENVIRONMENT": "local"}),
+            )
+            inner = app.app
+            async with inner.router.lifespan_context(inner):
+                self.assertEqual(counts, {})
+                transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+                async with httpx.AsyncClient(transport=transport,
+                                             base_url="http://127.0.0.1") as client:
+                    accepted = await client.post(
+                        "/api/v1/fetches", json={},
+                        headers={"Idempotency-Key": "actual-local-composition-0001"},
+                    )
+                    self.assertEqual(accepted.status_code, 202)
+                    result = await client.get(accepted.json()["status_url"])
+                    self.assertEqual(result.status_code, 200)
+                    self.assertEqual(result.json()["status"], "COMPLETED")
+                    self.assertEqual(result.json()["data_mode"], "LIVE")
+                    self.assertEqual(result.json()["discovery"]["candidate_count"], 0)
+                    self.assertEqual(len(result.json()["sources"]), 4)
+                    self.assertNotIn("fixture-private-marker", result.text)
+                    self.assertNotIn("fixture-secret-never-real", result.text)
+                    self.assertEqual(sum(counts.values()), 4)
+
+                    replay = await client.post(
+                        "/api/v1/fetches", json={},
+                        headers={"Idempotency-Key": "actual-local-composition-0001"},
+                    )
+                    self.assertEqual(replay.json()["fetch_id"], accepted.json()["fetch_id"])
+                    self.assertEqual(replay.json()["status"], "COMPLETED")
+                    await client.get(accepted.json()["status_url"])
+                    self.assertEqual(sum(counts.values()), 4)
+
     async def test_guarded_http_contract_idempotency_status_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             facade, checkpoints, attempts = _live_facade(directory)
