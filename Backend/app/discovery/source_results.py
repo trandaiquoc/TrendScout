@@ -145,6 +145,7 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         observed_at=observed, fetched_at=fetched, scope=scope,
         query_evidence=query_evidence, market_evidence=market,
         data_mode=mode, parser_version=version,
+        language="und" if mode == "LIVE" else "en",
         source_url=url, delivery_mode=delivery,
     )
     if not query_evidence:
@@ -254,6 +255,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                 "market_evidence": item.market_evidence,
                 "data_mode": item.data_mode,
                 "delivery_mode": item.delivery_mode,
+                "language": item.language,
                 "source_url": item.source_url,
             } for item in candidate.evidence],
         })

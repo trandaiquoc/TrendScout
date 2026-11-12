@@ -302,6 +302,7 @@ class PublicAdmission:
             if existing:
                 job = jobs.get(existing["job_id"], {})
                 return {"job_id": existing["job_id"], "result": "REPLAY",
+                        "status": job.get("state", "EXPIRED"),
                         "created_at": job.get("created_at")}
             active = next((job for job in jobs.values()
                            if job["state"] in {"QUEUED", "RUNNING"}
@@ -334,6 +335,7 @@ class PublicAdmission:
             keys[digest] = {"job_id": job_id,
                             "expires_at": (now + timedelta(seconds=self.policy.receipt_seconds)).isoformat()}
             return {"job_id": job_id, "result": result,
+                    "status": jobs[job_id]["state"],
                     "created_at": jobs.get(job_id, {}).get("created_at")}
         return self._transaction(op)
 

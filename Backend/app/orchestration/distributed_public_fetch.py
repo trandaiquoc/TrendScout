@@ -33,11 +33,13 @@ class DistributedPublicFetch:
             from app.local_smoke_policy import local_smoke_policy
             from app.storage.local_smoke_store import LocalSmokeStore
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
             if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
                     or worker.admission is not admission
                     or type(admission.store) is not LocalSmokeStore
-                    or type(admission.store.store) is not LocalSQLiteAtomicStateStore
-                    or admission.store.store.data_mode != "LIVE"
+                    or type(admission.store.store) is not LocalVolatileCheckpoints
+                    or type(admission.store.store.store) is not LocalSQLiteAtomicStateStore
+                    or admission.store.store.store.data_mode != "LIVE"
                     or admission.policy != replace(local_smoke_policy(), enabled=True)
                     or not callable(resolve_processing_grants)):
                 raise ValueError("local live demo requires bounded local policy and processing grants")
@@ -51,7 +53,7 @@ class DistributedPublicFetch:
     def submit(self, idempotency_key: str) -> dict:
         accepted = self.admission.admit(idempotency_key, now=self.utcnow())
         return {"job_id": accepted["job_id"], "result": accepted["result"],
-                "status": "QUEUED", "created_at": accepted.get("created_at")}
+                "status": accepted["status"], "created_at": accepted.get("created_at")}
 
     def status(self, job_id: str) -> dict | None:
         now = self.utcnow()
@@ -71,7 +73,6 @@ class DistributedPublicFetch:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
                                           "error_code": "RETENTION_POLICY_UNAVAILABLE"})
                     continue
-                modes.add(grant.data_mode)
                 try:
                     result = self.journal.completed_result(
                         job, source_id=source_id, grant=grant, now=now
@@ -80,9 +81,9 @@ class DistributedPublicFetch:
                     result = None
                 if result is None:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
-                                          "data_mode": grant.data_mode,
                                           "error_code": "RESULT_UNAVAILABLE"})
                     continue
+                modes.add(result["data_mode"])
                 source_results.append({
                     "source_id": source_id,
                     "status": result["status"],

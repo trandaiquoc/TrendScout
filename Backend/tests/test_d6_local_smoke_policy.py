@@ -13,6 +13,7 @@ from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.sources.live_gateway import GatewayError, SourceApproval, checked_source_approval
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
 
@@ -47,6 +48,11 @@ class LocalSmokePolicyTests(unittest.TestCase):
 
             args = (Approvals(), GOOGLE_SOURCE_ID, policy.plan_fingerprint, lambda: now)
             self.assertEqual(checked_source_approval(*args, runner=runner), approval)
+            volatile = LocalVolatileCheckpoints(store.store)
+            self.addCleanup(volatile.close)
+            volatile_runner = GuardedAttemptRunner(PublicAdmission(
+                LocalSmokeStore(volatile), policy, state_key="volatile-test"))
+            self.assertEqual(checked_source_approval(*args, runner=volatile_runner), approval)
             with self.assertRaises(GatewayError):
                 checked_source_approval(*args)
             synthetic = LocalSmokeStore(LocalSQLiteAtomicStateStore(

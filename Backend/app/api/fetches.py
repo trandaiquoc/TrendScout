@@ -155,15 +155,16 @@ async def create_fetch(
             raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         # Background work is only enabled by explicit local/test composition.
         # The durable queue remains authoritative if this process stops.
-        background_tasks.add_task(
-            distributed.run_once, f"api-{secrets.token_hex(12)}"
-        )
+        if accepted["status"] in {"QUEUED", "RUNNING"}:
+            background_tasks.add_task(
+                distributed.run_once, f"api-{secrets.token_hex(12)}"
+            )
         fetch_id = accepted["job_id"]
         response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
         return {
             "fetch_id": fetch_id,
             "status": accepted["status"],
-            "data_mode": "SYNTHETIC",
+            "data_mode": distributed.data_mode,
             "sources": sorted(distributed.admission.policy.enabled_sources),
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",

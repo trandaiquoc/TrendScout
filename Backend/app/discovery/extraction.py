@@ -71,8 +71,8 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
     observed, fetched = _utc(observation.observed_at), _utc(observation.fetched_at)
     if observed > fetched or fetched > now:
         raise ValueError("Observation or fetch time is in the future")
-    if observation.language != "en":
-        raise ValueError("Only explicitly identified English text is supported")
+    if observation.language not in {"en", "und"}:
+        raise ValueError("Only English or unverified-language text is supported")
     if observation.source_url is not None:
         try:
             parsed = urlsplit(observation.source_url)
@@ -155,6 +155,7 @@ def extract_candidates(observations: tuple[Observation, ...], *,
             observation.parser_version,
             canonical_url(observation.source_url) if observation.source_url else None,
             observation.delivery_mode,
+            observation.language,
         )
         for phrase, original in _phrases(observation.text):
             forms[phrase].add(original)
@@ -167,6 +168,8 @@ def extract_candidates(observations: tuple[Observation, ...], *,
         ).encode()).hexdigest()
         categories = _categories(phrase)
         flags = ("RULE_BASED_UNVALIDATED", "COVERAGE_LIMITED")
+        if any(item.language == "und" for item in records[phrase]):
+            flags += ("LANGUAGE_UNVERIFIED",)
         if categories == ("unclassified",):
             flags += ("UNCLASSIFIED",)
         evidence = tuple(sorted(records[phrase], key=lambda x: (

@@ -83,12 +83,17 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
             from app.local_smoke_policy import local_smoke_policy
             from app.storage.local_smoke_store import LocalSmokeStore
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
+            local_store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
+            backing_store = local_store.store if type(local_store) is LocalSmokeStore else None
+            if type(backing_store) is LocalVolatileCheckpoints:
+                backing_store = backing_store.store
             valid = (not os.environ.get("VERCEL")
                      and approval.local_controls_verified is True
                      and isinstance(runner, GuardedAttemptRunner)
                      and type(runner.admission.store) is LocalSmokeStore
-                     and type(runner.admission.store.store) is LocalSQLiteAtomicStateStore
-                     and runner.admission.store.store.data_mode == "LIVE"
+                     and type(backing_store) is LocalSQLiteAtomicStateStore
+                     and backing_store.data_mode == "LIVE"
                      and runner.admission.policy == replace(local_smoke_policy(), enabled=True))
         else:
             valid = False

@@ -50,7 +50,13 @@ async def capabilities(request: Request, response: Response):
         "public_fetch_enabled": enabled,
         "fetch_enabled": enabled,
         "fetch_block_reason": block_reason,
-        "data_mode": "SYNTHETIC" if request.app.state.public_fetch_enabled else None,
+        "data_mode": (request.app.state.distributed_public_fetch.data_mode
+                      if request.app.state.public_fetch_enabled
+                      and request.app.state.distributed_public_fetch is not None
+                      else "SYNTHETIC" if request.app.state.public_fetch_enabled else None),
+        "local_live_demo": bool(enabled and settings.environment_profile == "local"
+                                and request.app.state.distributed_public_fetch is not None
+                                and request.app.state.distributed_public_fetch.data_mode == "LIVE"),
         "allowed_operations": {"fetch": enabled},
         "query_plan": {
             "id": plan.plan_id,

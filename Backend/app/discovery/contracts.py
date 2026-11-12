@@ -64,6 +64,7 @@ class Evidence:
     parser_version: str
     source_url: str | None
     delivery_mode: Literal["FRESH", "CACHED"] = "FRESH"
+    language: str = "en"
 
 
 @dataclass(frozen=True)

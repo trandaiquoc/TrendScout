@@ -9,8 +9,7 @@ import asyncio
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
+from app import local_ledger
 from app.jobs.public_admission import PublicAdmission
 from app.local_credentials import LocalCredentialProvider
 from app.local_smoke_policy import local_smoke_policy
@@ -25,7 +24,6 @@ from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
 _SOURCES = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
-_LEDGER = Path(__file__).resolve().parents[1] / "data" / "local" / "d6-smoke"
 _USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
 _SAFE_CODES = frozenset({"SOURCE_NOT_APPROVED", "CREDENTIAL_UNAVAILABLE", "RATE_LIMITED",
     "QUOTA_EXHAUSTED", "UPSTREAM_TIMEOUT", "UPSTREAM_ERROR", "DAY_UNAVAILABLE",
@@ -53,9 +51,9 @@ async def run_smoke():
     credentials = LocalCredentialProvider()
     if any(value != "PRESENT" for value in credentials.status().values()):
         return {"status": "INVALID_CONFIG"}
-    _LEDGER.mkdir(parents=True, mode=0o700, exist_ok=True)
-    store = LocalSmokeStore(LocalSQLiteAtomicStateStore.for_local_live(_LEDGER / "ledger.sqlite"))
-    admission = PublicAdmission(store, replace(local_smoke_policy(), enabled=True), state_key="d6-smoke")
+    local_ledger.DIRECTORY.mkdir(parents=True, mode=0o700, exist_ok=True)
+    store = LocalSmokeStore(LocalSQLiteAtomicStateStore.for_local_live(local_ledger.DIRECTORY / "ledger.sqlite"))
+    admission = PublicAdmission(store, replace(local_smoke_policy(), enabled=True), state_key=local_ledger.STATE_KEY)
     now = datetime.now(timezone.utc)
     job = admission.admit("d6-one-time-smoke-idempotency", now=now)["job_id"]
     fence = admission.claim(job, "d6-smoke", now=now)["fence"]

@@ -1,6 +1,7 @@
 """Offline tests for process-local provider data and persistent quota state."""
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,56 @@ from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 
 
 class VolatileCheckpointTests(unittest.TestCase):
+    def test_background_sweep_removes_expired_checkpoint_without_access(self):
+        current = [datetime.now(timezone.utc)]
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "ledger.sqlite")
+            volatile = LocalVolatileCheckpoints(store, clock=lambda: current[0])
+            try:
+                def write(state):
+                    state["jobs"] = {"job": {"source_checkpoints": {"youtube": {
+                        "retain_until": (current[0] + timedelta(seconds=1)).isoformat()}}}}
+                    return state, None
+                volatile.transact("demo", write)
+                current[0] += timedelta(seconds=2)
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    with volatile._mutex:
+                        if not volatile._values:
+                            break
+                    time.sleep(0.05)
+                with volatile._mutex:
+                    self.assertEqual(volatile._values, {})
+            finally:
+                volatile.close()
+
+    def test_purge_source_clears_only_volatile_data_and_keeps_quota(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "ledger.sqlite")
+            volatile = LocalVolatileCheckpoints(store, clock=lambda: now)
+            try:
+                def write(state):
+                    state["jobs"] = {"job": {"source_checkpoints": {
+                        source: {"retain_until": (now + timedelta(seconds=30)).isoformat(),
+                                 "snapshot": {"value": "fixture-" + source}}
+                        for source in ("youtube", "wikimedia")}}}
+                    state["quota"] = {"reserved": 1}
+                    return state, None
+                volatile.transact("demo", write)
+                self.assertEqual(volatile.purge_source("youtube"), 1)
+                self.assertEqual(volatile.purge_source("youtube"), 0)
+                state = volatile.transact("demo", lambda s: (s, s["jobs"]["job"]["source_checkpoints"].copy()))
+                self.assertEqual(set(state), {"wikimedia"})
+                self.assertEqual(volatile.transact("demo", lambda s: (s, s["quota"])), {"reserved": 1})
+                for file in Path(directory).iterdir():
+                    if file.is_file():
+                        self.assertNotIn(b"fixture-youtube", file.read_bytes())
+            finally:
+                volatile.close()
+            with self.assertRaises(ValueError):
+                volatile.purge_source("youtube")
+
     def test_checkpoint_never_reaches_sqlite_and_is_lost_on_restart(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:

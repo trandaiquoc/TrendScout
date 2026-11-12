@@ -66,7 +66,7 @@ class SmokeFlowTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             ledger = Path(directory) / "smoke"
-            with patch.object(d6_local_smoke, "_LEDGER", ledger), \
+            with patch.object(d6_local_smoke.local_ledger, "DIRECTORY", ledger), \
                  patch.object(d6_local_smoke, "LocalCredentialProvider", Credentials), \
                  patch.object(d6_local_smoke.LivePageGateway, "controlled_network", query_factory), \
                  patch.object(d6_local_smoke.WikimediaTopPageGateway, "controlled_network", wiki_factory), \
@@ -103,7 +103,7 @@ class SmokeFlowTests(unittest.IsolatedAsyncioTestCase):
         async def wiki_factory(*_args, **_kwargs):
             return Gateway(d6_local_smoke.WIKIMEDIA_SOURCE_ID)
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(d6_local_smoke, "_LEDGER", Path(directory) / "smoke"), \
+            with patch.object(d6_local_smoke.local_ledger, "DIRECTORY", Path(directory) / "smoke"), \
                  patch.object(d6_local_smoke, "LocalCredentialProvider", Credentials), \
                  patch.object(d6_local_smoke.LivePageGateway, "controlled_network", query_factory), \
                  patch.object(d6_local_smoke.WikimediaTopPageGateway, "controlled_network", wiki_factory):

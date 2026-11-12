@@ -111,6 +111,9 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["data_mode"], "MIXED")
         self.assertEqual(candidate["data_mode"], "MIXED")
         self.assertEqual({item["data_mode"] for item in candidate["evidence"]}, {"LIVE", "SYNTHETIC"})
+        self.assertIn("LANGUAGE_UNVERIFIED", candidate["quality_flags"])
+        self.assertTrue(all(item["language"] == "und" for item in candidate["evidence"]
+                            if item["data_mode"] == "LIVE"))
         self.assertNotIn(YOUTUBE_SOURCE_ID, {item["source_id"] for item in candidate["evidence"]})
         self.assertEqual(result["rejected_record_count"], 1)
         self.assertEqual(candidate["status"], "INSUFFICIENT_DATA")

@@ -322,11 +322,15 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
                 retained_status = await client.get(f"/api/v1/fetches/{fetch_id}")
 
         self.assertEqual(capabilities.status_code, 200)
+        self.assertEqual(capabilities.json()["data_mode"], "SYNTHETIC")
+        self.assertFalse(capabilities.json()["local_live_demo"])
         self.assertEqual(capabilities.json()["admission"]["guarantee_scope"],
                          "injected AtomicStateStore; backing guarantees are environment-specific")
         self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(accepted.json()["data_mode"], "SYNTHETIC")
         self.assertEqual(replay.status_code, 202)
         self.assertEqual(replay.json()["fetch_id"], fetch_id)
+        self.assertEqual(replay.json()["status"], status.json()["status"])
         self.assertRegex(fetch_id, r"^[a-f0-9]{32}$")
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.json()["data_mode"], "SYNTHETIC")

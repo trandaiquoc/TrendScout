@@ -104,6 +104,30 @@ class LocalVolatileCheckpoints:
                 self._values.pop(key, None)
             return result
 
+    def purge_source(self, source_id):
+        """Remove this process's retained checkpoints for a source.
+
+        This is a local operator primitive, not a user-request workflow or
+        secure erasure guarantee. Durable quota receipts are intentionally kept.
+        """
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError("source ID required")
+        with self._mutex:
+            if self._closed:
+                raise ValueError("local demo store is closed")
+            removed = 0
+            for key in list(self._values):
+                for job in list(self._values[key]):
+                    entries = self._values[key][job]
+                    if source_id in entries:
+                        del entries[source_id]
+                        removed += 1
+                    if not entries:
+                        del self._values[key][job]
+                if not self._values[key]:
+                    del self._values[key]
+            return removed
+
     def close(self):
         self._stop.set()
         self._sweeper.join(timeout=2)
