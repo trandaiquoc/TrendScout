@@ -6,7 +6,7 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 
 | Gate | Trạng thái | Bằng chứng và giới hạn |
 | --- | --- | --- |
-| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 621 unittest, Golden hai hash seed và browser E2E. |
+| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 622 unittest, Golden hai hash seed và browser E2E. |
 | Cấu hình credentials | PRESENT | Hai key hiện diện trong `.env` local được Git bỏ qua và có quyền 600; hiện diện không chứng minh key hợp lệ hoặc quyền/quota. Không ghi giá trị. |
 | LIVE_CONFIGURED | BLOCKED | Gateway và dashboard Fetch live chưa được nối thành runtime local được kiểm thử. |
 | LIVE_SMOKE_VERIFIED | BLOCKED | Chưa có phê duyệt smoke/budget; chưa gửi request tới provider. |
@@ -24,6 +24,8 @@ SQLite có factory riêng cho dữ liệu live local, yêu cầu thư mục owne
 Gateway phân biệt scope `LOCAL_SMOKE` với `PRODUCTION`: local bắt buộc policy smoke cố định, wrapper giới hạn nguồn và SQLite live local, cùng các grant server-side khác; production tiếp tục đòi bằng chứng distributed controls. Tạo scope này không tự cấp phê duyệt provider và không chứng minh an toàn production.
 
 `scripts.d6_local_smoke` là công cụ smoke đề xuất, mặc định từ chối chạy; test mock kiểm tra bốn lần gọi tối đa và không lưu body response vào ledger. Chỉ dùng sau khi chủ dự án phê duyệt bốn request, xác nhận quota, không phát sinh phí và quyền sử dụng; không suy ra approval từ việc có key. Công cụ chưa được chạy live và chưa thay thế kiểm tra pagination hoặc D7 E2E. Mỗi ledger chỉ chấp nhận một attempt mỗi nguồn; không xóa ledger để vượt giới hạn.
+
+Dashboard đã chuẩn bị để nhận `LIVE`/`MIXED` chỉ khi capability xác định rõ demo local và không read-only; nguồn đang hoạt động được ghi `Live local`, dữ liệu thiếu mode không bị tự gắn `SYNTHETIC`. Kiểm thử gate UI là offline, chưa chứng minh live UI hoặc YouTube branding compliance.
 
 Phân loại `topic-terms-v2` bổ sung từ khóa mẫu cho đủ 13 nhóm chủ đề đang hoạt động; đây là heuristic chưa được đánh giá độ chính xác, có thể gán nhiều nhóm hoặc `unclassified`, không chứng minh hiểu hết mọi chủ đề. Định danh keyword và phiên bản thuật toán trích xuất không đổi; Fashion và Home & Living vẫn được ưu tiên nghiên cứu theo quy tắc hiện có.
 

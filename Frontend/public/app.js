@@ -1,5 +1,5 @@
 import { getJson } from './modules/api.js';
-import { loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
+import { acceptsDiscovery, canStartFetch, isLocalLiveDemo, loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
 import { PublicFetchController } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
@@ -136,10 +136,12 @@ function renderFetchPresentation() {
     ? 'fetch.retry'
     : canRetry ? 'fetch.check-status' : 'fetch.cta';
   button.querySelector('[data-i18n="fetch.cta"]').textContent = t(buttonKey);
-  badge.textContent = t(state.fetchReady ? 'fetch.synthetic-label' : 'fetch.unavailable');
+  const liveDemo = isLocalLiveDemo(state.capabilities);
+  badge.textContent = t(state.fetchReady
+    ? (liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
   badge.classList.toggle('pill--green', state.fetchReady);
   badge.classList.toggle('pill--amber', !state.fetchReady);
-  readiness.textContent = state.fetchReady ? t('fetch.ready') : t(blockKey);
+  readiness.textContent = state.fetchReady ? t(liveDemo ? 'fetch.live-ready' : 'fetch.ready') : t(blockKey);
   status.hidden = !isActionState;
   const sourceSummary = Array.isArray(presentation.fetch?.sources)
     ? presentation.fetch.sources
@@ -174,12 +176,7 @@ async function loadPublicCapabilities() {
     const capabilities = await loadCapabilities(getLocale());
     state.capabilities = capabilities;
     state.fetchBlockReason = capabilities.fetch_block_reason || null;
-    state.fetchReady = capabilities.public_fetch_enabled === true
-      && capabilities.fetch_enabled === true
-      && capabilities.authentication_required === false
-      && capabilities.data_mode === 'SYNTHETIC'
-      && Array.isArray(capabilities.sources)
-      && capabilities.sources.some((source) => source.enabled_for_current_operation === true);
+    state.fetchReady = canStartFetch(capabilities);
     if (!state.fetchReady && !state.fetchBlockReason) {
       state.fetchBlockReason = 'FEATURE_DISABLED';
     }
@@ -222,7 +219,7 @@ const fetchController = new PublicFetchController({
       state.publicFetchDiscovery = null;
       state.publicFetchSources = [];
       loadRun(runId);
-    } else if (fetchStatus?.discovery?.data_mode === 'SYNTHETIC') {
+    } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
       state.publicFetchDiscovery = fetchStatus.discovery;
       state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
       state.runId = null;
@@ -377,7 +374,7 @@ function renderDiscoveryBundle(bundle) {
     const name = ({ wikimedia_pageviews_top_per_country: 'Wikimedia',
       google_web_serp: 'Google / SerpApi', bing_web_serp: 'Bing / SerpApi',
       youtube_video_search: 'YouTube' })[source.source_id] || source.source_id || '—';
-    sourceList.append(element('li', `${name} · ${source.data_mode || 'SYNTHETIC'} · ${source.status} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
+    sourceList.append(element('li', `${name} · ${source.data_mode || '—'} · ${source.status} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
   }
   const category = state.category === 'home_goods' ? 'home_living' : state.category;
   const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -396,7 +393,7 @@ function renderDiscoveryBundle(bundle) {
     const classifications = [...new Set(assessments.map((assessment) => assessment.classification))];
     const status = classifications.length ? classifications.join(', ')
       : localizedStatus('keywordstatus.', candidate.status || 'INSUFFICIENT_DATA');
-    item.append(element('span', ` · ${candidate.data_mode || 'SYNTHETIC'} · ${status}`));
+    item.append(element('span', ` · ${candidate.data_mode || '—'} · ${status}`));
     const details = element('details');
     details.append(element('summary', t('demo.evidence')));
     const evidenceList = element('ul');
@@ -687,7 +684,7 @@ function renderPublicCandidateDetail(candidate) {
   content.replaceChildren();
   $('#detail-title').textContent = candidate.keyword || t('detail.title-fallback');
   const sources = [...new Set((candidate.evidence || []).map((item) => item.source_id))];
-  $('#detail-subtitle').textContent = [sources.join(' · '), candidate.data_mode || 'SYNTHETIC'].join(' · ');
+  $('#detail-subtitle').textContent = [sources.join(' · '), candidate.data_mode || '—'].join(' · ');
   detailField(content, t('detail.score-status'), localizedStatus(
     'keywordstatus.', candidate.status || 'INSUFFICIENT_DATA'
   ));
