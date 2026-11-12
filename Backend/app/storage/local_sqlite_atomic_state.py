@@ -1,8 +1,8 @@
-"""Local-only durable atomic state for offline synthetic Fetch.
+"""Local-only durable atomic state for demo Fetch.
 
 SQLite coordinates independent processes on one host and local filesystem. It is
-not a multi-host store and cannot be used outside an explicitly local/test,
-synthetic runtime.
+not a multi-host store. Live storage requires a separate local-only constructor
+and an owner-only directory; it does not authorize a provider request.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 from typing import Callable
@@ -19,21 +20,35 @@ from app.ports.atomic_state import AtomicStateStore, State
 
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _MAX_STATE_BYTES = 4 * 1024 * 1024
+_LOCAL_LIVE_TOKEN = object()
 
 
 class LocalSQLiteAtomicStateStore:
-    """File-backed atomic store scoped to local/test synthetic executions."""
+    """File-backed atomic store scoped to local demo or test executions."""
 
     def __init__(self, path: str | os.PathLike[str], *, environment_profile: str,
-                 data_mode: str = "SYNTHETIC", timeout_seconds: float = 10.0):
-        if (environment_profile not in {"local", "test"} or data_mode != "SYNTHETIC"
+                 data_mode: str = "SYNTHETIC", timeout_seconds: float = 10.0,
+                 _local_live_token=None):
+        local_live = (data_mode == "LIVE" and environment_profile == "local"
+                      and _local_live_token is _LOCAL_LIVE_TOKEN and not os.environ.get("VERCEL"))
+        if (environment_profile not in {"local", "test"}
+                or (data_mode != "SYNTHETIC" and not local_live)
                 or type(timeout_seconds) not in {int, float}
                 or not 0.1 <= timeout_seconds <= 60):
-            raise ValueError("local SQLite requires an explicit local/test synthetic profile")
+            raise ValueError("local SQLite requires an authorized local profile")
         raw_path = os.fspath(path)
         if not isinstance(raw_path, str) or not raw_path or raw_path == ":memory:":
             raise ValueError("persistent local SQLite file path required")
         self.path = Path(raw_path).expanduser().absolute()
+        self.data_mode = data_mode
+        if local_live:
+            try:
+                parent = self.path.parent.lstat()
+            except OSError:
+                raise ValueError("local live storage directory unavailable") from None
+            if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid()
+                    or parent.st_mode & 0o077):
+                raise ValueError("local live storage directory must be owner-only")
         self.timeout_seconds = float(timeout_seconds)
         self._prepare_file()
         with closing(self._connect()) as connection:
@@ -41,6 +56,12 @@ class LocalSQLiteAtomicStateStore:
                 "CREATE TABLE IF NOT EXISTS atomic_state "
                 "(state_key TEXT PRIMARY KEY, state_json TEXT NOT NULL)"
             )
+
+    @classmethod
+    def for_local_live(cls, path, *, timeout_seconds=10.0):
+        """Construct local storage only; does not enable an endpoint or provider."""
+        return cls(path, environment_profile="local", data_mode="LIVE",
+                   timeout_seconds=timeout_seconds, _local_live_token=_LOCAL_LIVE_TOKEN)
 
     def _prepare_file(self) -> None:
         if not self.path.parent.is_dir():

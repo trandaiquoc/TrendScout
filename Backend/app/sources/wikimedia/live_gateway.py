@@ -104,7 +104,7 @@ class WikimediaTopPageGateway:
 
     def _check_approval(self):
         return checked_source_approval(self.approvals, WIKIMEDIA_SOURCE_ID,
-            self.runner.admission.policy.plan_fingerprint, self.clock)
+            self.runner.admission.policy.plan_fingerprint, self.clock, runner=self.runner)
 
     def _validate_request(self, request):
         now = self.clock()

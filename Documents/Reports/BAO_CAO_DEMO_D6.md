@@ -6,7 +6,7 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 
 | Gate | Trạng thái | Bằng chứng và giới hạn |
 | --- | --- | --- |
-| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 613 unittest, Golden hai hash seed và browser E2E. |
+| OFFLINE regression | PASS | `bash Backend/scripts/verify_offline_readiness.sh` trước và sau thay đổi; lần sau gồm 621 unittest, Golden hai hash seed và browser E2E. |
 | Cấu hình credentials | PRESENT | Hai key hiện diện trong `.env` local được Git bỏ qua và có quyền 600; hiện diện không chứng minh key hợp lệ hoặc quyền/quota. Không ghi giá trị. |
 | LIVE_CONFIGURED | BLOCKED | Gateway và dashboard Fetch live chưa được nối thành runtime local được kiểm thử. |
 | LIVE_SMOKE_VERIFIED | BLOCKED | Chưa có phê duyệt smoke/budget; chưa gửi request tới provider. |
@@ -16,6 +16,14 @@ Ngày cập nhật: 12/11/2026. D6 là tích hợp live local cá nhân; D7 là 
 Các adapter và gateway D5 đã có, song Public Fetch, response provenance và discovery hiện chủ ý khóa synthetic. D6 cần tích hợp local có kiểm soát và xác minh chính sách trước khi bật live; không thay đổi Vercel read-only. Discovery hỗ trợ đầu vào live có grant backend theo nguồn và giữ nguồn gốc mixed; không tự cấp grant. Thiếu quyền trích xuất thì loại record khỏi discovery; thiếu quyền metric thì giữ `INSUFFICIENT_EVIDENCE`.
 
 Đã chuẩn bị `LocalLiveGuard` và test chặn peer/Host ngoài loopback, proxy headers và cross-origin; guard chưa được gắn vào live app. Đây không phải xác thực và không chặn local direct clients; bắt buộc có quota/cooldown, giới hạn đồng thời và phê duyệt riêng trước khi kết nối provider.
+
+Đã chuẩn bị policy smoke mặc định tắt với một lượt Wikimedia, hai lượt chung SerpApi, một lượt YouTube theo ngày/tháng, một job mỗi 24 giờ và mỗi pool tối đa một attempt đồng thời. `LocalSmokeStore` giới hạn một reservation cho từng nguồn trong ledger, giữ bộ đếm qua khởi tạo lại và không cho Google dùng lượt của Bing; test dùng SQLite local. Cost units nội bộ chỉ đếm attempt, không phải tiền hoặc quota còn lại của provider. Policy và wrapper chưa được gắn vào runtime; ledger thật còn cần được bố trí tại đường dẫn owner-only bền vững trước smoke.
+
+SQLite có factory riêng cho dữ liệu live local, yêu cầu thư mục owner-only và từ chối Vercel; factory không bật API. Cần thiết kế và kiểm chứng xóa dữ liệu, kể cả WAL sau crash, trước khi lưu dữ liệu provider thật. Ledger quota cần tồn tại qua restart; không coi xóa ledger là cách cấp thêm ngân sách.
+
+Gateway phân biệt scope `LOCAL_SMOKE` với `PRODUCTION`: local bắt buộc policy smoke cố định, wrapper giới hạn nguồn và SQLite live local, cùng các grant server-side khác; production tiếp tục đòi bằng chứng distributed controls. Tạo scope này không tự cấp phê duyệt provider và không chứng minh an toàn production.
+
+`scripts.d6_local_smoke` là công cụ smoke đề xuất, mặc định từ chối chạy; test mock kiểm tra bốn lần gọi tối đa và không lưu body response vào ledger. Chỉ dùng sau khi chủ dự án phê duyệt bốn request, xác nhận quota, không phát sinh phí và quyền sử dụng; không suy ra approval từ việc có key. Công cụ chưa được chạy live và chưa thay thế kiểm tra pagination hoặc D7 E2E. Mỗi ledger chỉ chấp nhận một attempt mỗi nguồn; không xóa ledger để vượt giới hạn.
 
 Phân loại `topic-terms-v2` bổ sung từ khóa mẫu cho đủ 13 nhóm chủ đề đang hoạt động; đây là heuristic chưa được đánh giá độ chính xác, có thể gán nhiều nhóm hoặc `unclassified`, không chứng minh hiểu hết mọi chủ đề. Định danh keyword và phiên bản thuật toán trích xuất không đổi; Fashion và Home & Living vẫn được ưu tiên nghiên cứu theo quy tắc hiện có.
 
@@ -31,6 +39,7 @@ Tài liệu chính thức đối chiếu 12/11/2026; mức quota thực tế và
 
 - [Wikimedia Analytics API](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/access-policy.html) yêu cầu User-Agent có thông tin liên hệ và khuyến nghị gửi tuần tự; chưa kiểm chứng khả năng liên hệ của URL cấu hình.
 - [SerpApi pricing](https://serpapi.com/pricing) mô tả gói Free 250 searches/tháng và Starter $25/tháng cho 1.000 searches. Search thành công tính quota; kết quả cached/error/failed không tính theo trang này. Gói, credit còn lại, overage và giá thực tế của tài khoản chưa được xác nhận. Google/Bing dùng chung pool.
+- Điều khoản sử dụng và quyền xử lý dữ liệu SerpApi cho trường hợp demo này chưa được xác nhận; trang điều khoản không truy cập được trong lần kiểm tra, nên không xem quyền đó là đã được cấp.
 - [Google](https://serpapi.com/search-api) và [Bing](https://serpapi.com/bing-search-api) SerpApi có thể phục vụ cache dù trạng thái là `Success`; gateway live đặt `no_cache=true` để yêu cầu truy vấn mới, dự trù mỗi request có thể trừ credit. Cache synthetic được ghi rõ; không suy ra thời gian tìm kiếm thực tế chỉ từ lúc backend nhận response.
 - [YouTube quota](https://developers.google.com/youtube/data/determine_quota_cost) hiện mô tả `search.list` dùng bucket riêng mặc định 100 calls/ngày, mỗi call 1 đơn vị; trang quota tài khoản mới là nguồn cho quota thực tế. Không tự bật billing.
 - [YouTube Developer Policies III.E.2 và III.E.4.h](https://developers.google.com/youtube/terms/developer-policies) giới hạn tổng hợp và tạo dữ liệu/metrics dẫn xuất từ API Data. Áp dụng chính xác với keyword extraction cần xác nhận quyền/chính sách; không tự suy diễn rằng API key cấp quyền đó. [Chính sách lưu trữ](https://developers.google.com/youtube/terms/developer-policies) cũng quy định thời hạn tối đa cho nhiều loại dữ liệu không được ủy quyền. Không cấp grant xử lý live khi chưa xác minh; hiển thị dữ liệu YouTube riêng còn cần kiểm tra yêu cầu branding và chính sách.

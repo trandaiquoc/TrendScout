@@ -9,6 +9,7 @@ import asyncio
 import html
 import inspect
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
@@ -59,7 +60,7 @@ class GatewayError(Exception):
         super().__init__(code)
 
 
-def checked_source_approval(approvals, source_id, plan_fingerprint, clock):
+def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, runner=None):
     """Validate a current server-owned source approval without leaking provider detail."""
     try:
         approval = approvals.current(source_id)
@@ -74,8 +75,23 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock):
                  and all(value is True for value in (approval.source_enabled, approval.global_enabled,
                      approval.usage_approved, approval.retention_approved, approval.quota_approved,
                      approval.cost_approved, approval.security_approved,
-                     approval.distributed_controls_verified, approval.egress_controls_verified,
-                     approval.telemetry_controls_verified)))
+                     approval.egress_controls_verified, approval.telemetry_controls_verified)))
+        if valid and approval.scope == "PRODUCTION":
+            valid = approval.distributed_controls_verified is True
+        elif valid and approval.scope == "LOCAL_SMOKE":
+            from dataclasses import replace
+            from app.local_smoke_policy import local_smoke_policy
+            from app.storage.local_smoke_store import LocalSmokeStore
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            valid = (not os.environ.get("VERCEL")
+                     and approval.local_controls_verified is True
+                     and isinstance(runner, GuardedAttemptRunner)
+                     and type(runner.admission.store) is LocalSmokeStore
+                     and type(runner.admission.store.store) is LocalSQLiteAtomicStateStore
+                     and runner.admission.store.store.data_mode == "LIVE"
+                     and runner.admission.policy == replace(local_smoke_policy(), enabled=True))
+        else:
+            valid = False
     except Exception:
         valid = False
     if not valid:
@@ -100,6 +116,8 @@ class SourceApproval:
     distributed_controls_verified: bool = False
     egress_controls_verified: bool = False
     telemetry_controls_verified: bool = False
+    scope: str = "PRODUCTION"
+    local_controls_verified: bool = False
 
 
 class ApprovalProvider(Protocol):
@@ -197,7 +215,7 @@ class LivePageGateway:
 
     def _check_approval(self):
         return checked_source_approval(self.approvals, self.source_id,
-            self.runner.admission.policy.plan_fingerprint, self.clock)
+            self.runner.admission.policy.plan_fingerprint, self.clock, runner=self.runner)
 
     def _credential(self):
         reference = source_capability(self.source_id).credential_reference
