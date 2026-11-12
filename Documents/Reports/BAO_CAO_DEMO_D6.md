@@ -89,6 +89,8 @@ Before treating D6.1B as accepted, run the new focused tests and the required of
 
 This section supersedes the earlier pending-toolchain status above for the Windows gates only. Windows is the primary development and local execution environment; Linux remains secondary for compatibility and Linux-only security checks. Verification used native Windows PowerShell 5.1, Python 3.12.10, the project virtual environment, Node.js, and installed Chrome. Python 3.14 was left installed. No WSL, Docker, Podman, provider request, real API key, paid call, deployment, or push was used.
 
+For this Windows execution, `git fetch origin` succeeded and the starting local `HEAD` matched `origin/main` at `7e579921395d54aa08dde4f359d7f0cfd7f8f020`; the starting tree was clean and had zero divergence. The implementation was committed locally as `f04ab7376c8be87ce68597779a09656bddfd3710`; no push was made.
+
 | Gate | Result | Evidence / limitation |
 | --- | --- | --- |
 | G1 Native Windows environment | PASS | `setup.ps1` installed pinned requirements into `Backend/.venv`; `py -3.12 --version` reported 3.12.10; `pip check`, `httpx`/FastAPI imports and SQLite in-memory query passed. Setup creates no credential file. |
