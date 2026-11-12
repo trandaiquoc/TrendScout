@@ -168,6 +168,9 @@ button:disabled { cursor: not-allowed; }
 }
 .nav-label { margin: 0 11px 9px; }
 .sidebar nav { display: grid; gap: 3px; }
+.policy-links { display: flex; gap: 12px; flex-wrap: wrap; padding: 12px 8px; font-size: 11px; }
+.policy-links a { color: var(--ink-strong); text-decoration: underline; }
+.policy-notice { margin-bottom: 14px; padding: 10px 14px; background: #fff3d8; color: #704200; font-size: 11px; font-weight: 700; }
 .nav-link {
   display: flex;
   align-items: center;
