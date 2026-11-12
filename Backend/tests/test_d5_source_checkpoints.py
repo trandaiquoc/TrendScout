@@ -6,8 +6,9 @@ from datetime import timedelta
 from pathlib import Path
 
 from test_d5_public_admission import NOW, coordinator
+from test_d5_public_admission import policy as admission_policy
 
-from app.jobs.public_admission import AdmissionDenied
+from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.sources.catalog import GOOGLE_SOURCE_ID
 
@@ -103,6 +104,45 @@ class SourceCheckpointTests(unittest.TestCase):
         self.admission.store.transact("public", corrupt)
         with self.assertRaisesRegex(AdmissionDenied, "CHECKPOINT_INVALID"):
             self.load()
+
+    def test_maintenance_prunes_payload_before_replay_receipt_and_runs_when_disabled(self):
+        short_policy = admission_policy(
+            lease_seconds=10, max_job_seconds=10, receipt_seconds=20,
+        )
+        admission = PublicAdmission(
+            self.admission.store, short_policy, state_key="retention"
+        )
+        job_id = admission.admit("retention-maintenance-key", now=NOW)["job_id"]
+        fence = admission.claim(job_id, "worker", now=NOW)["fence"]
+        journal = SourceCheckpointJournal(admission)
+        journal.save(
+            job_id, "worker", fence, source_id=GOOGLE_SOURCE_ID, grant=grant(),
+            now=NOW, expected_revision=0,
+            snapshot={"schema": 1, "source_id": GOOGLE_SOURCE_ID,
+                      "data_mode": "SYNTHETIC",
+                      "plan_fingerprint": admission.policy.plan_fingerprint,
+                      "records": [{"title": "short-lived fixture"}]},
+        )
+        admission.disable()
+
+        first = admission.prune_expired(now=NOW + timedelta(seconds=11))
+        retained = admission.store.transact(
+            admission.state_key,
+            lambda state: (state, state["jobs"][job_id]),
+        )
+        self.assertEqual(first["source_checkpoints"], 1)
+        self.assertEqual(retained["state"], "EXPIRED")
+        self.assertEqual(retained["source_checkpoints"], {})
+        self.assertEqual(retained["job_id"], job_id)
+
+        second = admission.prune_expired(now=NOW + timedelta(seconds=21))
+        remaining = admission.store.transact(
+            admission.state_key,
+            lambda state: (state, (job_id in state["jobs"], bool(state["keys"]))),
+        )
+        self.assertEqual(second["idempotency_receipts"], 1)
+        self.assertEqual(second["jobs"], 1)
+        self.assertEqual(remaining, (False, False))
 
 
 if __name__ == "__main__":

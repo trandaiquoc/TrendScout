@@ -176,6 +176,115 @@ class PublicAdmission:
             raise AdmissionDenied("CLOCK_REGRESSION")
         state["last_observed_at"] = now.isoformat()
 
+    def _prune_expired_records(self, state, now):
+        """Remove expired receipts and payloads without dropping live replay state."""
+        jobs, keys = state.get("jobs"), state.get("keys")
+        starts, inflight = state.get("starts"), state.get("inflight")
+        if (not isinstance(jobs, dict) or not isinstance(keys, dict)
+                or not isinstance(starts, list) or not isinstance(inflight, dict)):
+            raise AdmissionDenied("STATE_INVALID")
+        counts = {"idempotency_receipts": 0, "jobs": 0,
+                  "source_checkpoints": 0, "invalid_checkpoints": 0,
+                  "starts": 0, "inflight_slots": 0}
+
+        for digest, receipt in list(keys.items()):
+            if (not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)
+                    or not isinstance(receipt, dict)
+                    or not isinstance(receipt.get("job_id"), str)
+                    or not _JOB_ID.fullmatch(receipt["job_id"])):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                expired = _parse(receipt["expires_at"]) <= now
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            if expired:
+                del keys[digest]
+                counts["idempotency_receipts"] += 1
+
+        for job_id, job in list(jobs.items()):
+            if (not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id)
+                    or not isinstance(job, dict) or job.get("job_id") != job_id):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                job_expiry = _parse(job["expires_at"])
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            checkpoints = job.get("source_checkpoints", {})
+            if not isinstance(checkpoints, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            for source_id, checkpoint in list(checkpoints.items()):
+                try:
+                    if (not isinstance(source_id, str) or not source_id
+                            or not isinstance(checkpoint, dict)):
+                        raise ValueError("invalid checkpoint metadata")
+                    expiry = min(_parse(checkpoint["retain_until"]), job_expiry)
+                except (KeyError, TypeError, ValueError):
+                    del checkpoints[source_id]
+                    counts["invalid_checkpoints"] += 1
+                    continue
+                if expiry <= now:
+                    del checkpoints[source_id]
+                    counts["source_checkpoints"] += 1
+                elif expiry.isoformat() != checkpoint["retain_until"]:
+                    checkpoint["retain_until"] = expiry.isoformat()
+
+        referenced = {receipt["job_id"] for receipt in keys.values()}
+        for job_id, job in list(jobs.items()):
+            job_expiry = _parse(job["expires_at"])
+            if job_expiry <= now:
+                if job.get("state") in {"QUEUED", "RUNNING"}:
+                    job.update(state="EXPIRED", owner=None, lease_until=None)
+                if job_id not in referenced:
+                    del jobs[job_id]
+                    counts["jobs"] += 1
+
+        start_cutoff = now - timedelta(seconds=self.policy.window_seconds)
+        kept_starts = []
+        for value in starts:
+            try:
+                if _parse(value) > start_cutoff:
+                    kept_starts.append(value)
+                else:
+                    counts["starts"] += 1
+            except (TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+        state["starts"] = kept_starts
+
+        for slot_id, slot in list(inflight.items()):
+            if not isinstance(slot_id, str) or not isinstance(slot, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                expired = _parse(slot["expires_at"]) <= now
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            if expired:
+                del inflight[slot_id]
+                counts["inflight_slots"] += 1
+        return counts
+
+    def prune_expired(self, *, now: datetime) -> dict[str, int]:
+        """Run bounded cleanup while Fetch is disabled or enabled.
+
+        Source payloads expire independently from idempotency receipts. This is
+        an internal maintenance operation and must only be called by a trusted
+        server-side runner.
+        """
+        now = _utc(now)
+        empty = {"idempotency_receipts": 0, "jobs": 0,
+                 "source_checkpoints": 0, "invalid_checkpoints": 0,
+                 "starts": 0, "inflight_slots": 0}
+
+        def operation(state):
+            if not state:
+                return state, empty
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+            self._guard_clock(state, now)
+            return state, self._prune_expired_records(state, now)
+
+        return self.store.transact(self.state_key, operation)
+
     def admit(self, idempotency_key: str, *, now: datetime) -> dict:
         now = _utc(now)
         if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key):
@@ -188,15 +297,7 @@ class PublicAdmission:
         def op(state):
             self._guard_clock(state, now)
             jobs, keys = state["jobs"], state["keys"]
-            # Retain idempotency receipts at least as long as their job can run.
-            for key in list(keys):
-                if _parse(keys[key]["expires_at"]) <= now:
-                    del keys[key]
-            referenced = {record["job_id"] for record in keys.values()}
-            for job_id in list(jobs):
-                job = jobs[job_id]
-                if job_id not in referenced and _parse(job["expires_at"]) <= now:
-                    del jobs[job_id]
+            self._prune_expired_records(state, now)
             existing = keys.get(digest)
             if existing:
                 job = jobs.get(existing["job_id"], {})
