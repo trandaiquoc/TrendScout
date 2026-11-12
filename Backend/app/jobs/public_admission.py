@@ -144,6 +144,19 @@ class PublicAdmission:
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
         return self._pools[SOURCE_POOLS[source_id]].attempt_timeout_seconds
 
+    def operationally_enabled(self) -> bool:
+        """Read the server-owned kill switch for public capability reporting."""
+        if not self.policy.enabled:
+            return False
+        def operation(state):
+            if not state:
+                return {}, True
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                return state, False
+            return state, state.get("operational_enabled") is True
+        return self.store.transact(self.state_key, operation)
+
     def transact_owned(self, job_id: str, owner: str, fence: int, *, now: datetime, operation):
         """Run an internal pure mutation only while the current job lease is held."""
         now = _utc(now)
@@ -186,7 +199,9 @@ class PublicAdmission:
                     del jobs[job_id]
             existing = keys.get(digest)
             if existing:
-                return {"job_id": existing["job_id"], "result": "REPLAY"}
+                job = jobs.get(existing["job_id"], {})
+                return {"job_id": existing["job_id"], "result": "REPLAY",
+                        "created_at": job.get("created_at")}
             active = next((job for job in jobs.values()
                            if job["state"] in {"QUEUED", "RUNNING"}
                            and _parse(job["expires_at"]) > now
@@ -217,7 +232,8 @@ class PublicAdmission:
                 starts.append(now.isoformat())
             keys[digest] = {"job_id": job_id,
                             "expires_at": (now + timedelta(seconds=self.policy.receipt_seconds)).isoformat()}
-            return {"job_id": job_id, "result": result}
+            return {"job_id": job_id, "result": result,
+                    "created_at": jobs.get(job_id, {}).get("created_at")}
         return self._transaction(op)
 
     def read_job(self, job_id: str, *, now: datetime) -> dict | None:

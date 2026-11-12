@@ -15,20 +15,30 @@ async def capabilities(request: Request, response: Response):
     enabled = bool(request.app.state.public_fetch_enabled)
     block_reason = request.app.state.public_fetch_block_reason
     if enabled:
-        run_service = request.app.state.run_service
-        if run_service is None:
-            enabled = False
-            block_reason = "SYNTHETIC_RUNTIME_UNAVAILABLE"
-        else:
+        distributed = request.app.state.distributed_public_fetch
+        if distributed is not None:
             try:
-                block_reason = await request.app.state.fetch_registry.admission_reason(
-                    storage=run_service.storage,
-                    run_lock=run_service.lock,
-                )
-                enabled = block_reason is None
-            except (OSError, StorageError):
+                enabled = distributed.admission.operationally_enabled()
+                if not enabled:
+                    block_reason = "FEATURE_DISABLED"
+            except Exception:
                 enabled = False
                 block_reason = "ADMISSION_STATE_UNAVAILABLE"
+        else:
+            run_service = request.app.state.run_service
+            if run_service is None:
+                enabled = False
+                block_reason = "SYNTHETIC_RUNTIME_UNAVAILABLE"
+            else:
+                try:
+                    block_reason = await request.app.state.fetch_registry.admission_reason(
+                        storage=run_service.storage,
+                        run_lock=run_service.lock,
+                    )
+                    enabled = block_reason is None
+                except (OSError, StorageError):
+                    enabled = False
+                    block_reason = "ADMISSION_STATE_UNAVAILABLE"
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
     response.headers["Cache-Control"] = "no-store"
     return {
@@ -52,13 +62,37 @@ async def capabilities(request: Request, response: Response):
             "max_pages_per_query": 1,
         },
         "admission": {
-            "global_fetch_limit": request.app.state.public_fetch_limit,
-            "window_seconds": request.app.state.public_fetch_window_seconds,
+            "global_fetch_limit": (
+                request.app.state.distributed_public_fetch.admission.policy.max_starts_per_window
+                if request.app.state.distributed_public_fetch is not None
+                else request.app.state.public_fetch_limit
+            ),
+            "window_seconds": (
+                request.app.state.distributed_public_fetch.admission.policy.window_seconds
+                if request.app.state.distributed_public_fetch is not None
+                else request.app.state.public_fetch_window_seconds
+            ),
             "max_concurrent": 1,
-            "cooldown_seconds": settings.run_cooldown_seconds,
-            "status_poll_limit": request.app.state.public_fetch_poll_limit,
-            "idempotency_ttl_seconds": request.app.state.public_fetch_ttl_seconds,
-            "guarantee_scope": "single local process; resets on restart",
+            "cooldown_seconds": (
+                request.app.state.distributed_public_fetch.admission.policy.cooldown_seconds
+                if request.app.state.distributed_public_fetch is not None
+                else settings.run_cooldown_seconds
+            ),
+            "status_poll_limit": (
+                request.app.state.distributed_public_fetch.admission.policy.max_status_polls
+                if request.app.state.distributed_public_fetch is not None
+                else request.app.state.public_fetch_poll_limit
+            ),
+            "idempotency_ttl_seconds": (
+                request.app.state.distributed_public_fetch.admission.policy.receipt_seconds
+                if request.app.state.distributed_public_fetch is not None
+                else request.app.state.public_fetch_ttl_seconds
+            ),
+            "guarantee_scope": (
+                "injected AtomicStateStore; backing guarantees are environment-specific"
+                if request.app.state.distributed_public_fetch is not None
+                else "single local process; resets on restart"
+            ),
         },
         "sources": [
             {

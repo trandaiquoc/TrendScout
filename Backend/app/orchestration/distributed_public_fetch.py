@@ -32,7 +32,7 @@ class DistributedPublicFetch:
     def submit(self, idempotency_key: str) -> dict:
         accepted = self.admission.admit(idempotency_key, now=self.utcnow())
         return {"job_id": accepted["job_id"], "result": accepted["result"],
-                "status": "QUEUED"}
+                "status": "QUEUED", "created_at": accepted.get("created_at")}
 
     def status(self, job_id: str) -> dict | None:
         now = self.utcnow()

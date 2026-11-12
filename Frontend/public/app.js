@@ -110,6 +110,12 @@ const FETCH_STATE_MESSAGES = {
   'poll-error': 'fetch.poll-error',
   expired: 'fetch.expired',
 };
+const FETCH_SOURCE_LABELS = {
+  wikimedia_pageviews_top_per_country: 'fetch.source.wikimedia',
+  google_web_serp: 'fetch.source.google',
+  bing_web_serp: 'fetch.source.bing',
+  youtube_video_search: 'fetch.source.youtube',
+};
 
 function renderFetchPresentation() {
   const presentation = state.fetchPresentation;
@@ -133,7 +139,24 @@ function renderFetchPresentation() {
   badge.classList.toggle('pill--amber', !state.fetchReady);
   readiness.textContent = state.fetchReady ? t('fetch.ready') : t(blockKey);
   status.hidden = !isActionState;
-  status.textContent = isActionState ? t(messageKey) : '';
+  const sourceSummary = Array.isArray(presentation.fetch?.sources)
+    ? presentation.fetch.sources
+      .filter((source) => source && typeof source === 'object')
+      .map((source) => {
+        const sourceKey = FETCH_SOURCE_LABELS[source.source_id];
+        const sourceLabel = sourceKey ? t(sourceKey) : source.source_id;
+        const statusKey = `fetch.source-status.${source.status}`;
+        const sourceStatus = source.status && t(statusKey) !== statusKey
+          ? t(statusKey) : source.status;
+        return [sourceLabel, sourceStatus, source.data_mode, source.delivery_state]
+          .filter((value) => typeof value === 'string' && value).join(' · ');
+      })
+      .join(' | ')
+    : '';
+  status.textContent = isActionState
+    ? [t(messageKey), sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '']
+      .filter(Boolean).join(' ')
+    : '';
 }
 
 function scheduleCapabilityRefresh(delayMs) {
@@ -193,7 +216,9 @@ const fetchController = new PublicFetchController({
     }
   },
   onTerminal(runId) {
-    loadRun(runId);
+    if (runId) {
+      loadRun(runId);
+    }
     scheduleCapabilityRefresh(100);
   },
   locale: getLocale,

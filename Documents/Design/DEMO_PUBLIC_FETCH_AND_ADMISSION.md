@@ -30,8 +30,8 @@
 2. `/api/v1/fetches` is a separate public endpoint. Its feature flag defaults off. An enabled request still requires the local/test profile, synthetic mode, a non-read-only app, explicitly injected offline-only adapter and fake storage, and no cloud project configuration. Production and Vercel force the endpoint off.
 3. The request body is exactly `{}`. The server selects the fixed `demo-us-en` plan and one-source offline allowlist; no arbitrary URL, query, source, budget, tenant, role, or run ID is accepted.
 4. Origin/Host and Fetch Metadata are checked as browser abuse signals. They are not authentication and do not stop direct clients.
-5. A process-local global admission window (three new fetches per hour), one-active-run lock, cooldown, request-size limit, bounded polling, deadline, and idempotency registry protect the isolated synthetic runtime. A shared local file lock admits one app process at a time; a second process fails closed. These controls do not provide multi-host/distributed guarantees and reset on restart.
-6. Because anonymous rate limits can be evaded with multiple IPs and the current code has no distributed limiter or durable quota ledger, live public Fetch remains hard-disabled. Enabling live sources requires a separate approval and verified distributed admission, quota, cost, and abuse controls.
+5. The default local synthetic path uses a process-local admission window, one-active-run lock, cooldown, request-size limit, bounded polling, deadline, and in-memory idempotency registry. A separate injected `DistributedPublicFetch` path is available only in local/test synthetic composition with all four server-declared synthetic handlers and an enabled `AtomicStateStore` policy; it uses atomic admission, idempotency, quota and poll budgets with a queue worker. The integration test uses a local SQLite transaction harness only. Neither path proves production or multi-host backing guarantees.
+6. Since anonymous limits can be evaded by direct clients, bots and multiple IPs, both compositions remain limited to local/test synthetic mode. Production and Vercel remain read-only/disabled; no distributed backend, bot defense or durable quota service has been verified for production. Provider live activation requires separate D6 approvals and verified infrastructure.
 7. Fetch IDs are high-entropy opaque identifiers. Status reads are read-only and reveal only the record associated with that ID; they never start work or call providers.
 8. In-memory idempotency and fetch status expire after a bounded TTL and are lost on restart. The runtime may not claim duplicate suppression across restarts or independent hosts. Multiple IPs and direct API clients cannot bypass the one process's global synthetic request window, but they can exhaust it; process restart clears it.
 
@@ -45,18 +45,18 @@ Anonymous, read-only, `Cache-Control: no-store`. It reports contract version, mo
 
 - Requires `Idempotency-Key` (16–128 safe ASCII characters), same-origin browser checks where an Origin is present, and the server-side public-fetch gate.
 - Requires JSON `{}` only, with a 1 KiB body limit.
-- Returns `202` with opaque `fetch_id`, `QUEUED`, `SYNTHETIC`, the fixed source and plan, creation time, and status URL.
-- Same key and fingerprint returns the existing accepted fetch. Same key with a different fingerprint returns `409`. Concurrent duplicates in the supported single-process mode create at most one run.
-- New work is limited by a global per-process window, one active run, and the existing `HostRunLock` cooldown. Rate-limit rejections return `429` with a bounded retry hint.
+- Returns `202` with opaque `fetch_id`, `QUEUED`, `SYNTHETIC`, the fixed source set, creation time and status URL.
+- Same key returns the existing accepted job. The distributed facade fingerprints the immutable server query plan and does not accept client query/source/budget fields.
+- In the default composition, new work is limited by a global per-process window, one active run and `HostRunLock` cooldown. In the injected distributed local/test composition, atomic admission enforces server policy rate, cooldown, idempotency, request/cost quota and bounded polling.
 - Live mode and non-injected source/storage dependencies are rejected before `RunService.start()`.
 
 ### `GET /api/v1/fetches/{fetch_id}`
 
-Validates the opaque ID, applies bounded read polling, and returns a safe status projection. It performs storage reads only; no provider or pipeline work is triggered. Internal run errors are mapped to safe codes and never expose tracebacks or raw exception text. The record and idempotency entry live for a bounded in-memory TTL.
+Validates the opaque ID, applies bounded read polling, and returns a safe status projection. In the default composition it performs storage reads only; in injected distributed local/test mode the POST schedules a bounded worker and GET only reads retained status/results. Internal errors are mapped to safe codes and never expose tracebacks or raw exception text. Default fetch receipts are in-memory; distributed job/idempotency/poll state follows the injected atomic store's retention policy.
 
 ## Offline execution boundary
 
-The supported D3A test path injects a marked offline fixture adapter and `FakeStorage` into `create_app`, sets an explicit test/local synthetic profile and feature flag, and is run inside the repository's strict network-isolation harness. The default source registry still constructs the live Wikimedia adapter when used by the legacy path; the public synthetic path refuses that default and requires the offline-only injection marker. The path never creates Firestore storage or activates YouTube, Google, or Bing.
+The supported D3A test path injects a marked offline fixture adapter and `FakeStorage` into `create_app`. The D5 facade path injects an `AtomicStateStore`, worker and four explicitly `SYNTHETIC` handlers; it does not require Firebase or the legacy run storage. Both require an explicit test/local synthetic profile and feature flag and are covered by strict network-isolation readiness tests. These local/test seams do not permit production composition, and no live gateway or provider activation is implied.
 
 ## Frontend behavior
 

@@ -17,6 +17,7 @@ from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
 from app.composition import build_run_service, read_only_storage
+from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.orchestration.public_fetch import (
     FETCH_TTL_SECONDS,
     FETCH_WINDOW_SECONDS,
@@ -29,7 +30,12 @@ from app.orchestration.public_fetch import (
 from app.orchestration.runs import HostRunLock, RunService
 from app.ports.storage import StorageError
 from app.settings import Settings
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 
 
 def create_app(
@@ -43,6 +49,7 @@ def create_app(
     read_storage_factory=None,
     settings: Settings | None = None,
     synthetic_supplement=None,
+    distributed_public_fetch: DistributedPublicFetch | None = None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -57,7 +64,17 @@ def create_app(
         run_mode=run_mode,
         storage=storage,
         adapter_factory=adapter_factory,
+        distributed_public_fetch=distributed_public_fetch,
     )
+    if distributed_public_fetch is not None:
+        expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
+        if (not isinstance(distributed_public_fetch, DistributedPublicFetch)
+                or settings.environment_profile not in {"local", "test"}
+                or run_mode != "synthetic" or read_only
+                or not settings.public_fetch_enabled
+                or distributed_public_fetch.data_mode != "SYNTHETIC"
+                or set(distributed_public_fetch.admission.policy.enabled_sources) != expected_sources):
+            raise ValueError("distributed public Fetch injection is restricted to enabled local/test synthetic mode")
     if synthetic_supplement is not None and not (
         public_fetch_enabled and run_mode == "synthetic"
         and getattr(synthetic_supplement, "__trendscout_offline_only__", False)
@@ -73,7 +90,7 @@ def create_app(
             if read_only:
                 yield
                 return
-            if app.state.public_fetch_enabled:
+            if app.state.public_fetch_enabled and app.state.distributed_public_fetch is None:
                 runtime_guard = SingleProcessGuard(
                     str(effective_lock_path) + ".public-fetch-runtime"
                 )
@@ -118,9 +135,12 @@ def create_app(
     application.state.settings = settings
     application.state.public_fetch_enabled = public_fetch_enabled
     application.state.public_fetch_block_reason = public_fetch_block_reason
+    application.state.distributed_public_fetch = distributed_public_fetch
     application.state.fetch_registry = PublicFetchRegistry()
     application.state.public_fetch_source_ids = (
-        PUBLIC_SOURCE_IDS + (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        tuple(sorted(distributed_public_fetch.admission.policy.enabled_sources))
+        if distributed_public_fetch is not None
+        else PUBLIC_SOURCE_IDS + (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
         if synthetic_supplement is not None else PUBLIC_SOURCE_IDS
     )
     application.state.public_fetch_limit = MAX_FETCHES_PER_WINDOW
@@ -236,7 +256,8 @@ def create_app(
     return application
 
 
-def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory):
+def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory,
+                         distributed_public_fetch=None):
     if not settings.public_fetch_enabled:
         return False, "FEATURE_DISABLED"
     if read_only:
@@ -247,6 +268,12 @@ def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_fact
         return False, "LIVE_FETCH_NOT_APPROVED"
     if settings.google_cloud_project:
         return False, "CLOUD_STORAGE_NOT_ALLOWED"
+    if distributed_public_fetch is not None:
+        if (not isinstance(distributed_public_fetch, DistributedPublicFetch)
+                or distributed_public_fetch.data_mode != "SYNTHETIC"
+                or not distributed_public_fetch.admission.policy.enabled):
+            return False, "DISTRIBUTED_SYNTHETIC_RUNTIME_REQUIRED"
+        return True, None
     if storage is None or not getattr(storage, "__trendscout_offline_only__", False):
         return False, "OFFLINE_FAKE_STORAGE_REQUIRED"
     if adapter_factory is None or not getattr(

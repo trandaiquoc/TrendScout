@@ -1,6 +1,6 @@
 import { ApiError, getJson, requestJson } from './api.js';
 
-const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED']);
+const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED']);
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS_PER_ATTEMPT = 90;
 
@@ -73,9 +73,7 @@ export class PublicFetchController {
           this.key = null;
           this.fetchId = null;
           this.onState({ kind: status.status.toLowerCase(), busy: false, fetch: status });
-          if (status.run_id) {
-            this.onTerminal(status.run_id, status);
-          }
+          this.onTerminal(status.run_id || null, status);
           return;
         }
         await wait(POLL_INTERVAL_MS);

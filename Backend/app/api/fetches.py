@@ -2,13 +2,16 @@
 
 import ipaddress
 import json
+import secrets
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, Response
 
+from app.jobs.public_admission import AdmissionDenied
 from app.orchestration.public_fetch import (
     FETCH_ID_RE,
     FETCH_WINDOW_SECONDS,
+    IDEMPOTENCY_KEY_RE,
     PublicFetchBusy,
     PublicFetchNotFound,
     PublicFetchPollLimit,
@@ -130,17 +133,41 @@ def _require_enabled(request: Request) -> None:
 async def create_fetch(
     request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     response.headers["Cache-Control"] = "no-store"
     _require_enabled(request)
     validate_public_request_origin(request, request.app.state.settings.environment_profile)
-    if (
-        not idempotency_key
-        or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH
-    ):
+    if not idempotency_key or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
         raise HTTPException(400, {"code": "IDEMPOTENCY_KEY_REQUIRED"})
+    if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        raise HTTPException(400, {"code": "INVALID_IDEMPOTENCY_KEY"})
     await _read_small_json_object(request)
+
+    distributed = request.app.state.distributed_public_fetch
+    if distributed is not None:
+        try:
+            accepted = distributed.submit(idempotency_key)
+        except AdmissionDenied as exc:
+            _raise_distributed_admission_error(exc.code, distributed)
+        except ValueError:
+            raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
+        # Background work is only enabled by explicit local/test composition.
+        # The durable queue remains authoritative if this process stops.
+        background_tasks.add_task(
+            distributed.run_once, f"api-{secrets.token_hex(12)}"
+        )
+        fetch_id = accepted["job_id"]
+        response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
+        return {
+            "fetch_id": fetch_id,
+            "status": accepted["status"],
+            "data_mode": "SYNTHETIC",
+            "sources": sorted(distributed.admission.policy.enabled_sources),
+            "created_at": accepted.get("created_at"),
+            "status_url": f"/api/v1/fetches/{fetch_id}",
+        }
 
     run_service = request.app.state.run_service
     if run_service is None:
@@ -206,6 +233,16 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
     _require_enabled(request)
     if not FETCH_ID_RE.fullmatch(fetch_id):
         raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
+    distributed = request.app.state.distributed_public_fetch
+    if distributed is not None:
+        validate_public_request_origin(request, request.app.state.settings.environment_profile)
+        try:
+            result = distributed.status(fetch_id)
+        except AdmissionDenied as exc:
+            _raise_distributed_admission_error(exc.code, distributed)
+        if result is None:
+            raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
+        return result
     try:
         record = await request.app.state.fetch_registry.get(fetch_id)
     except PublicFetchNotFound:
@@ -245,3 +282,16 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
         else None,
         "terminal": status in TERMINAL,
     }
+
+
+def _raise_distributed_admission_error(code: str, service) -> None:
+    if code == "JOB_NOT_FOUND":
+        raise HTTPException(404, {"code": "FETCH_NOT_FOUND"}) from None
+    if code in {"RATE_LIMITED", "COOLDOWN", "STATUS_POLL_LIMIT"}:
+        retry_after = service.admission.policy.window_seconds
+        if code == "COOLDOWN":
+            retry_after = max(1, service.admission.policy.cooldown_seconds)
+        raise HTTPException(429, {"code": code}, headers={"Retry-After": str(retry_after)}) from None
+    if code in {"LEASE_BUSY", "FETCH_ALREADY_RUNNING"}:
+        raise HTTPException(409, {"code": "FETCH_ALREADY_RUNNING"}) from None
+    raise HTTPException(503, {"code": code}) from None

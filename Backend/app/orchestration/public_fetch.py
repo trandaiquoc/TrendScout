@@ -18,7 +18,7 @@ from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.sources.query_plan import get_query_plan
 
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
-FETCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+FETCH_ID_RE = re.compile(r"^(?:[A-Za-z0-9_-]{43}|[a-f0-9]{32})$")
 FETCH_TTL_SECONDS = 3600
 FETCH_WINDOW_SECONDS = 3600
 MAX_FETCHES_PER_WINDOW = 3

@@ -2,15 +2,22 @@
 
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from test_d5_public_admission import coordinator, policy
 from test_runs import fixture
 
+from app.jobs.distributed_worker import DistributedFetchWorker
+from app.jobs.public_admission import PoolLimit
+from app.jobs.source_checkpoints import CheckpointGrant
 from app.main import create_app
+from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -18,6 +25,7 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
+from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.storage.fake import FakeStorage
 
 TEST_ENV = {
@@ -27,6 +35,40 @@ TEST_ENV = {
     "TREND_SCOUT_RUN_COOLDOWN_SECONDS": "0",
     "TREND_SCOUT_OPERATOR_TOKEN": "test-only-legacy-token-123456789",
 }
+_DISTRIBUTED_SOURCES = {
+    WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+}
+
+
+def distributed_fixture_service(state_path):
+    with sqlite3.connect(state_path) as connection:
+        connection.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    config = policy(
+        enabled_sources=frozenset(_DISTRIBUTED_SOURCES),
+        pools={"wikimedia": PoolLimit(2, 5, 2, 5, 1),
+               "serpapi": PoolLimit(2, 5, 2, 5, 1),
+               "youtube": PoolLimit(1, 3, 1, 3, 1)},
+        plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+        cooldown_seconds=0, max_status_polls=20,
+    )
+    admission = coordinator(state_path, config)
+    handlers = {}
+    for source_id in _DISTRIBUTED_SOURCES:
+        def handler(context):
+            return {"status": "SUCCESS", "data_mode": "SYNTHETIC",
+                    "records": [{"source_id": context.source_id,
+                                 "keyword": "synthetic fixture"}],
+                    "record_count": 1}
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+        handlers[source_id] = handler
+
+    def resolve_grant(source_id, now):
+        return CheckpointGrant(source_id, "SYNTHETIC", "api-fixture-policy-v1",
+                               now + timedelta(hours=1), 300, True)
+
+    worker = DistributedFetchWorker(admission, handlers=handlers,
+                                    resolve_grant=resolve_grant)
+    return DistributedPublicFetch(admission, worker, resolve_grant=resolve_grant)
 
 
 class OfflineFixtureAdapter:
@@ -165,6 +207,70 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         denied = await self.client.post("/api/runs")
         self.assertEqual(denied.status_code, 401)
         self.assertEqual(OfflineFixtureAdapter.calls, 0)
+
+    async def test_distributed_worker_facade_is_exposed_only_as_local_synthetic_fetch(self):
+        state_path = str(Path(self.tmp.name) / "distributed.sqlite")
+        # The API seam accepts only a fully declared four-source synthetic worker.
+        # This fixture exercises the route and retained result projection;
+        # source adapters are independently covered through MockTransport tests.
+        service = distributed_fixture_service(state_path)
+        app = create_app(
+            settings=Settings.from_environment(TEST_ENV),
+            lock_path=str(Path(self.tmp.name) / "distributed.lock"),
+            distributed_public_fetch=service,
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1"
+            ) as client:
+                capabilities = await client.get("/api/v1/capabilities")
+                headers = {"Content-Type": "application/json", "Origin": "http://127.0.0.1",
+                           "Idempotency-Key": "distributed-public-api-fixture-0001"}
+                accepted = await client.post("/api/v1/fetches", content="{}", headers=headers)
+                replay = await client.post("/api/v1/fetches", content="{}", headers=headers)
+                fetch_id = accepted.json()["fetch_id"]
+                status = await client.get(f"/api/v1/fetches/{fetch_id}")
+                service.admission.disable()
+                disabled = await client.get("/api/v1/capabilities")
+                retained_status = await client.get(f"/api/v1/fetches/{fetch_id}")
+
+        self.assertEqual(capabilities.status_code, 200)
+        self.assertEqual(capabilities.json()["admission"]["guarantee_scope"],
+                         "injected AtomicStateStore; backing guarantees are environment-specific")
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(replay.status_code, 202)
+        self.assertEqual(replay.json()["fetch_id"], fetch_id)
+        self.assertRegex(fetch_id, r"^[a-f0-9]{32}$")
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["data_mode"], "SYNTHETIC")
+        self.assertEqual({row["source_id"] for row in status.json()["sources"]},
+                         _DISTRIBUTED_SOURCES)
+        self.assertTrue(all(row["records"][0]["keyword"] == "synthetic fixture"
+                            for row in status.json()["sources"]))
+        self.assertFalse(disabled.json()["public_fetch_enabled"])
+        self.assertEqual(disabled.json()["fetch_block_reason"], "FEATURE_DISABLED")
+        self.assertEqual(retained_status.status_code, 200)
+        self.assertNotIn("api_key", status.text.lower())
+        self.assertNotIn("Authorization", capabilities.text)
+
+    async def test_distributed_fetch_injection_cannot_enable_read_only_or_live(self):
+        state_path = str(Path(self.tmp.name) / "read-only-distributed.sqlite")
+        service = distributed_fixture_service(state_path)
+        invalid_compositions = (
+            (Settings.from_environment(TEST_ENV), {"read_only": True}),
+            (Settings.from_environment({**TEST_ENV, "TREND_SCOUT_ENVIRONMENT": "production",
+                                        "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false"}), {}),
+            (Settings.from_environment({**TEST_ENV, "TREND_SCOUT_RUN_MODE": "live",
+                                        "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false"}), {}),
+            (Settings.from_environment({**TEST_ENV, "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false"}), {}),
+        )
+        for settings, options in invalid_compositions:
+            with self.subTest(options=options, profile=settings.environment_profile,
+                              run_mode=settings.run_mode), self.assertRaisesRegex(
+                                  ValueError,
+                                  "restricted to enabled local/test synthetic mode",
+                              ):
+                create_app(settings=settings, distributed_public_fetch=service, **options)
 
     async def test_public_rate_limit_counts_new_work_and_not_idempotent_replays(self):
         self.app.state.fetch_registry.max_fetches_per_window = 1

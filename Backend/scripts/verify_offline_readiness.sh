@@ -19,26 +19,26 @@ run_browser_isolated() {
   "$PYTHON" "$GUARD" --allow-unix-sockets -- "$@"
 }
 
-echo "[1/11] Verify strict seccomp network isolation"
+echo "[1/12] Verify strict seccomp network isolation"
 run_strict "$PYTHON" "$BACKEND/scripts/probe_network_isolation.py"
 
-echo "[2/11] Run complete unittest suite"
+echo "[2/12] Run complete unittest suite"
 (cd "$BACKEND" && run_strict "$PYTHON" -m unittest discover -s tests -v)
 
-echo "[3/11] Run Golden Regression with both hash seeds"
+echo "[3/12] Run Golden Regression with both hash seeds"
 (cd "$BACKEND" && run_strict env PYTHONHASHSEED=1 "$PYTHON" -m unittest discover -s tests -p 'test_golden_contract.py' -v)
 (cd "$BACKEND" && run_strict env PYTHONHASHSEED=983 "$PYTHON" -m unittest discover -s tests -p 'test_golden_contract.py' -v)
 
-echo "[4/11] Check installed dependency consistency"
+echo "[4/12] Check installed dependency consistency"
 run_strict "$PYTHON" -m pip check
 
-echo "[5/11] Check shell and dashboard JavaScript syntax"
+echo "[5/12] Check shell and dashboard JavaScript syntax"
 run_strict bash -n "$ROOT/setup.sh" "$ROOT/start.sh" "$BACKEND/scripts/verify_offline_readiness.sh"
 while IFS= read -r -d '' script; do
   run_strict node --check "$script"
 done < <(find "$ROOT/Frontend/public" -type f -name '*.js' -print0)
 
-echo "[6/11] Check Vercel dashboard bundle against source assets"
+echo "[6/12] Check Vercel dashboard bundle against source assets"
 ASSET="$BACKEND/app/dashboard_assets.py"
 if [[ -e "$ASSET" ]]; then
   echo "Refusing to overwrite existing generated asset: $ASSET" >&2
@@ -53,19 +53,22 @@ run_strict "$PYTHON" -c 'import runpy,sys; from pathlib import Path; root=Path(s
 cleanup_asset
 trap - EXIT
 
-echo "[7/11] Run Chrome DOM tests with Internet families blocked and AF_UNIX for Chrome IPC"
+echo "[7/12] Run Chrome DOM tests with Internet families blocked and AF_UNIX for Chrome IPC"
 (cd "$BACKEND" && run_browser_isolated "$PYTHON" tests/browser_workspace_offline.py)
 
-echo "[8/11] Run Chrome keyboard and mobile viewport tests under the same browser sandbox"
+echo "[8/12] Run Chrome keyboard and mobile viewport tests under the same browser sandbox"
 (cd "$BACKEND" && run_browser_isolated "$PYTHON" tests/browser_keyboard_offline.py)
 
-echo "[9/11] Run adapter → API → Chrome dashboard integration with synthetic source responses"
+echo "[9/12] Run adapter → API → Chrome dashboard integration with synthetic source responses"
 (cd "$BACKEND" && run_browser_isolated "$PYTHON" tests/browser_pipeline_e2e_offline.py)
 
-echo "[10/11] Run anonymous one-click synthetic Fetch browser workflow"
+echo "[10/12] Run anonymous one-click synthetic Fetch browser workflow"
 (cd "$BACKEND" && run_browser_isolated "$PYTHON" tests/browser_public_fetch_e2e_offline.py)
 
-echo "[11/11] Run bounded synthetic storage/API workload at 1k, 5k, and 10k entities"
+echo "[11/12] Run Chrome one-click synthetic distributed Fetch response workflow"
+(cd "$BACKEND" && run_browser_isolated "$PYTHON" tests/browser_distributed_fetch_e2e_offline.py)
+
+echo "[12/12] Run bounded synthetic storage/API workload at 1k, 5k, and 10k entities"
 (cd "$BACKEND" && run_strict env PYTHONPATH="$BACKEND" "$PYTHON" scripts/benchmark_storage_offline.py)
 
 echo "OFFLINE_READINESS_VERIFICATION=PASS"
