@@ -133,6 +133,9 @@ class D5SourceHandlers:
 
         async def collect_from_provider(context: SourceWorkContext):
             context.heartbeat()
+            saved_progress = (context.resume_snapshot or {}).get("progress", {})
+            resume_snapshot = (saved_progress.get("collector")
+                               if isinstance(saved_progress, dict) else None)
             result = await collector.collect(
                 plan=self.plan,
                 limits=self.limits,
@@ -140,6 +143,8 @@ class D5SourceHandlers:
                 owner=context.owner,
                 fence=context.fence,
                 heartbeat=context.heartbeat,
+                checkpoint=lambda snapshot: context.checkpoint({"collector": snapshot}),
+                resume_snapshot=resume_snapshot,
             )
             retry_times = [row.retry_at for row in result.queries if row.retry_at is not None]
             should_defer = result.stop_reason == "DEFERRED" and bool(retry_times)
@@ -154,17 +159,17 @@ class D5SourceHandlers:
                 "reason": row.reason,
                 "retry_at": _jsonable(row.retry_at),
             } for row in result.queries]
-            context.checkpoint({"pages": sum(row.pages for row in result.queries),
-                                "records": len(records), "status": result.status})
             return {
-                "status": "PARTIAL" if omitted or should_defer else result.status,
+                "status": "PARTIAL" if omitted or result.checkpoint_records_omitted or should_defer
+                          else result.status,
                 "data_mode": result.data_mode or collector.gateway.data_mode,
                 "records": records,
                 "record_count": len(records),
                 **({"error_code": "RATE_LIMITED"} if should_defer else {}),
                 "coverage": {"attempted_calls": result.attempted_calls,
                              "complete": result.complete,
-                             "records_omitted_storage_limit": omitted,
+                             "records_omitted_storage_limit": (
+                                 omitted + result.checkpoint_records_omitted),
                              "queries": query_results,
                              "stop_reason": result.stop_reason,
                              "retry_at": _jsonable(max(retry_times)) if should_defer else None},
