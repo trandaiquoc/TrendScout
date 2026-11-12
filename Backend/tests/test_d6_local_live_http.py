@@ -15,7 +15,7 @@ from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.local_smoke_policy import local_smoke_policy
-from app.main import create_local_live_app
+from app.main import create_app, create_local_live_app
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.orchestration.local_live_composition import local_live_composition
 from app.settings import Settings
@@ -287,6 +287,20 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             create_local_live_app(enabled=True, composition_factory=empty_composition,
                                   settings=synthetic_settings)
+        with self.assertRaises(ValueError):
+            create_app(
+                settings=synthetic_settings,
+                run_mode="live",
+                local_live_opt_in=True,
+                local_live_context_factory=empty_composition,
+            )
+        with self.assertRaises(ValueError):
+            create_app(
+                settings=Settings.from_environment({"TREND_SCOUT_ENVIRONMENT": "local"}),
+                read_only=True,
+                local_live_opt_in=True,
+                local_live_context_factory=empty_composition,
+            )
         with patch.dict("os.environ", {"VERCEL": "1"}):
             with self.assertRaises(ValueError):
                 create_local_live_app(enabled=True, composition_factory=empty_composition,

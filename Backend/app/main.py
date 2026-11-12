@@ -73,7 +73,9 @@ def create_app(
         if (type(local_live_opt_in) is not bool
                 or not callable(local_live_context_factory)
                 or settings.environment_profile != "local"
+                or settings.run_mode != "live"
                 or run_mode != "live"
+                or read_only
                 or settings.read_only
                 or settings.google_cloud_project or settings.public_fetch_enabled
                 or os.environ.get("VERCEL")):
