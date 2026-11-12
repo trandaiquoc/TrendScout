@@ -29,7 +29,7 @@ Demo-scope security evidence covers anonymous bounded synthetic Fetch, no login/
 
 ## Bằng chứng offline
 
-`bash Backend/scripts/verify_offline_readiness.sh` PASS ngày 12/11/2026: 601 unittest, Golden với hai hash seed, package/dependency checks, bundle parity, Chrome responsive/keyboard, adapter→API→dashboard, hai browser Fetch flows và bounded workload benchmark; `OFFLINE_READINESS_VERIFICATION=PASS` (12/12). Ruff trên file thay đổi và `git diff --check` PASS. Repo-wide `ruff check Backend/app Backend/tests` trước đây chưa sạch: 1.512 lỗi style/format ngoài phạm vi. Harness `--help` và automated SQLite/unit checks chạy offline; không gọi live provider, Firestore hay emulator và không phát sinh provider cost.
+`bash Backend/scripts/verify_offline_readiness.sh` PASS ngày 12/11/2026: 603 unittest, Golden với hai hash seed, package/dependency checks, bundle parity, Chrome responsive/keyboard, adapter→API→dashboard, hai browser Fetch flows và bounded workload benchmark; `OFFLINE_READINESS_VERIFICATION=PASS` (12/12). Ruff trên các file Python vừa đổi, 8 test multi-host harness và `git diff --check` PASS. Repo-wide `ruff check Backend/app Backend/tests` trước đây chưa sạch: 1.512 lỗi style/format ngoài phạm vi. Harness `--help` và automated SQLite/unit checks chạy offline; không gọi live provider, Firestore hay emulator và không phát sinh provider cost.
 
 ## Công việc và giới hạn còn lại
 

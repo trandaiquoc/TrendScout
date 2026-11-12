@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.jobs.multihost_probe import register_host
@@ -132,6 +133,24 @@ class MultiHostProbeTests(unittest.TestCase):
         self.assertEqual(saved["attempts"], 2)
         self.assertEqual(source["data_mode"], "SYNTHETIC")
         self.assertEqual(source["records"][0]["worker_host_id"], "worker-b")
+
+    def test_register_only_host_does_not_start_a_worker_runner(self):
+        args = SimpleNamespace(
+            host_id="worker-b", expected_hosts="worker-a,worker-b",
+            run_id="d4e5f6a7", register_only=True,
+            idle_poll_seconds=0.5, crash_first_job=False,
+        )
+        with (
+            patch.object(multihost_gate_probe, "_machine_fingerprint",
+                         return_value="2" * 64),
+            patch.object(multihost_gate_probe, "_wait_for_peers") as wait_for_peers,
+            patch.object(multihost_gate_probe, "DistributedWorkerRunner") as runner,
+        ):
+            result = asyncio.run(multihost_gate_probe._run_worker(args, self.store))
+
+        self.assertEqual(result, 0)
+        wait_for_peers.assert_called_once()
+        runner.assert_not_called()
 
     def test_two_independent_processes_race_one_shared_synthetic_quota_unit(self):
         run_id = "b2c3d4e5"
