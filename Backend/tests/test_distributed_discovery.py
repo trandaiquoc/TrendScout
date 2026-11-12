@@ -100,6 +100,34 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 0)
         self.assertEqual(result["rejected_record_count"], 1)
 
+    def test_live_without_extraction_grant_reports_processing_blocked(self):
+        source = source_result(WIKIMEDIA_SOURCE_ID, {
+            "article_display": "Quiet luxury", "article_original": "Quiet_luxury",
+            "project": "en.wikipedia", "country_scope": "US", "access": "all-access",
+            "observation_date": "2026-11-10", "fetched_at": FETCHED,
+            "source_url": "https://en.wikipedia.org/wiki/Quiet_luxury",
+        })
+        source["data_mode"] = "LIVE"
+
+        result = discover_fetch_results([source], now=NOW)
+
+        self.assertEqual(result["status"], "DISCOVERY_PROCESSING_BLOCKED")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertEqual(result["rejected_record_count"], 1)
+        self.assertIn("DISCOVERY_PROCESSING_BLOCKED", result["limitations"])
+
+    def test_empty_live_source_without_grant_still_explains_processing_block(self):
+        result = discover_fetch_results([{
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "FAILED",
+            "data_mode": "LIVE",
+            "records": [],
+        }], now=NOW)
+
+        self.assertEqual(result["status"], "DISCOVERY_PROCESSING_BLOCKED")
+        self.assertEqual(result["candidate_count"], 0)
+        self.assertIn("DISCOVERY_PROCESSING_BLOCKED", result["limitations"])
+
     def test_live_requires_source_grant_and_preserves_mixed_provenance(self):
         sources = four_source_results()
         sources[1]["data_mode"] = "LIVE"

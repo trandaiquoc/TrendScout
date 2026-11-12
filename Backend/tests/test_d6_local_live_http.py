@@ -149,7 +149,10 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(status.status_code, 200)
                     body = status.json()
                     self.assertEqual(body["data_mode"], "LIVE")
+                    self.assertEqual(body["discovery"]["status"], "DISCOVERY_PROCESSING_BLOCKED")
                     self.assertEqual(body["discovery"]["candidate_count"], 0)
+                    self.assertIn("DISCOVERY_PROCESSING_BLOCKED",
+                                  body["discovery"]["limitations"])
                     sources = {row["source_id"]: row for row in body["sources"]}
                     self.assertEqual(len(sources), 4)
                     self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["record_count"], 1)

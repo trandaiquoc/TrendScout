@@ -173,6 +173,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         raise ValueError("invalid or duplicate processing grants")
     observations = []
     rejected_records = 0
+    processing_blocked = False
     for source_result in source_results:
         if not isinstance(source_result, dict):
             rejected_records += 1
@@ -181,17 +182,23 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_id not in _ALLOWED:
             rejected_records += 1
             continue
+        grant = grants.get(source_id)
+        extraction_granted = (
+            isinstance(grant, ProcessingGrant)
+            and grant.extraction_allowed is True
+            and isinstance(grant.policy_version, str) and bool(grant.policy_version.strip())
+            and isinstance(grant.expires_at, datetime)
+            and grant.expires_at.tzinfo is not None and grant.expires_at.utcoffset() is not None
+            and grant.expires_at > now
+        )
+        if source_result.get("data_mode") == "LIVE" and not extraction_granted:
+            processing_blocked = True
         records = source_result.get("records", [])
         if not isinstance(records, list) or len(records) > 512:
             rejected_records += 1
             continue
         if source_result.get("data_mode") == "LIVE":
-            grant = grants.get(source_id)
-            if (grant is None or grant.extraction_allowed is not True
-                    or not isinstance(grant.policy_version, str) or not grant.policy_version.strip()
-                    or not isinstance(grant.expires_at, datetime)
-                    or grant.expires_at.tzinfo is None or grant.expires_at.utcoffset() is None
-                    or grant.expires_at <= now):
+            if not extraction_granted:
                 rejected_records += len(records)
                 continue
         for record in records:
@@ -260,12 +267,13 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
             } for item in candidate.evidence],
         })
     return {
-        "status": "INSUFFICIENT_EVIDENCE",
+        "status": "DISCOVERY_PROCESSING_BLOCKED" if processing_blocked else "INSUFFICIENT_EVIDENCE",
         "data_mode": result_mode,
         "candidate_count": len(candidates),
         "shown_count": len(shown),
         "rejected_record_count": rejected_records,
         "candidates": shown,
         "limitations": (["SYNTHETIC_ONLY", "NOT_LIVE_VERIFIED"] if result_mode == "SYNTHETIC" else [])
+                       + (["DISCOVERY_PROCESSING_BLOCKED"] if processing_blocked else [])
                        + ["NO_BASELINE", "COVERAGE_LIMITED", "US_FILTER_IS_NOT_US_AUDIENCE"],
     }
