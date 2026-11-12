@@ -4,16 +4,21 @@ import re
 import socket
 from datetime import datetime, timezone
 
+_HOST_ID = re.compile(r"^[A-Za-z0-9._~-]{1,40}$")
+
 
 def register_host(store, *, run_id, host_id, machine_fingerprint, expected_hosts):
     """Atomically register a host and reject duplicate machine identities."""
     if (not callable(getattr(store, "transact", None))
             or not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{8,32}", run_id)
-            or not isinstance(host_id, str) or not re.fullmatch(r"[A-Za-z0-9._~-]{1,40}", host_id)
+            or not isinstance(host_id, str) or not _HOST_ID.fullmatch(host_id)
             or not isinstance(machine_fingerprint, str)
             or not re.fullmatch(r"[a-f0-9]{64}", machine_fingerprint)
             or not isinstance(expected_hosts, tuple) or len(expected_hosts) != 2
-            or len(set(expected_hosts)) != 2 or host_id not in expected_hosts):
+            or any(not isinstance(value, str) or not _HOST_ID.fullmatch(value)
+                   for value in expected_hosts)
+            or len(set(expected_hosts)) != 2
+            or host_id not in expected_hosts):
         raise ValueError("invalid multi-host registration request")
     key = f"d5mh-host-{run_id}"
     now = datetime.now(timezone.utc).isoformat()
@@ -25,6 +30,8 @@ def register_host(store, *, run_id, host_id, machine_fingerprint, expected_hosts
                 or state.get("expected_hosts") != list(expected_hosts)
                 or not isinstance(state.get("hosts"), dict)):
             raise ValueError("multi-host run scope mismatch")
+        if any(other_id not in expected_hosts for other_id in state["hosts"]):
+            raise ValueError("multi-host registration contains an unexpected host")
         existing = state["hosts"].get(host_id)
         if (isinstance(existing, dict)
                 and existing.get("machine_fingerprint") != machine_fingerprint):
@@ -35,6 +42,6 @@ def register_host(store, *, run_id, host_id, machine_fingerprint, expected_hosts
                 raise ValueError("host IDs resolve to the same machine identity")
         state["hosts"][host_id] = {"machine_fingerprint": machine_fingerprint,
                                    "hostname": socket.gethostname(), "seen_at": now}
-        return state, len(state["hosts"])
+        return state, sum(host in state["hosts"] for host in expected_hosts)
 
     return store.transact(key, operation)
