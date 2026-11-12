@@ -8,7 +8,7 @@
 
 - `FirestoreAtomicStateStore` implements the `AtomicStateStore` transaction port but is not wired into the public application runtime. It is suitable for an explicitly composed test worker; existing code does not prove a Firestore-backed deployment.
 - `LocalSQLiteAtomicStateStore` and the current multi-process tests prove same-host process coordination only. The adapter explicitly rejects production use.
-- `DistributedWorkerRunner` provides a polling loop, graceful stop, and lets errors reach the process supervisor. No service manager configuration or production worker composition exists yet.
+- `DistributedWorkerRunner` provides a polling loop, graceful stop, and lets errors reach the process supervisor. The opt-in probe now has a crash-once synthetic mode to exercise lease recovery, but this is still a test harness, not production worker composition.
 - The workspace has no `docker`/`podman`, PostgreSQL client/server, or Redis server. It has `systemctl`, but that does not show access to two independent hosts.
 - No organization-owned cloud project, Firestore database, VM, billing account, or service identity can be verified from this checkout. No credentials were inspected or used.
 
@@ -93,7 +93,28 @@ Poll the returned job ID:
   inspect --job-id RETURNED_JOB_ID
 ```
 
-The job must reach `COMPLETED` with `data_mode=SYNTHETIC`, one `D5_MULTIHOST_PROBE` record, and exactly one recorded `worker_host_id` matching one of the two registered hosts. Check both host logs to confirm the non-owner remained available and did not execute the same job. Then stop each process cleanly. To verify automatic supervisor recovery, send `SIGKILL` to one unit with `systemctl kill --signal=SIGKILL trendscout-d5-probe.service`; confirm systemd restarts it and the same host returns to `worker_ready`, then run a fresh probe job. Save the two cloud instance IDs, host logs, job ID, result, and restart evidence with the D5 approval record.
+The job must reach `COMPLETED` with `data_mode=SYNTHETIC`, one `D5_MULTIHOST_PROBE` record, and exactly one recorded `worker_host_id` matching one of the two registered hosts. Check both host logs to confirm the non-owner remained available and did not execute the same job. Save the two cloud instance IDs, host logs, job ID, result, and restart evidence with the D5 approval record.
+
+### Active-job crash and lease recovery
+
+Use a fresh `run-id` for this scenario because the intentional-crash marker is one-shot per run. Host A must be the only active consumer; register host B without allowing it to pull work:
+
+```bash
+# First install the worker systemd unit below on Host A, adding the
+# test-only --crash-first-job argument. It exits 86 after claiming one job.
+# Start Host A; it will wait for Host B to register.
+sudo systemctl start trendscout-d5-probe.service
+
+# On Host B, register its independent machine identity without consuming jobs.
+.venv/bin/python scripts/multihost_gate_probe.py \
+  --project-id ORGANIZATION_NONPROD_PROJECT \
+  --confirm-nonproduction-project ORGANIZATION_NONPROD_PROJECT \
+  --run-id c3d4e5f6 \
+  --acknowledge-nonproduction-writes \
+  worker --host-id worker-b --expected-hosts worker-a,worker-b --register-only
+```
+
+Once host A logs `worker_ready` and host B logs `worker_registered_only`, submit one job using `submit` above with the same run ID. Confirm host A logs `intentional_worker_crash` and systemd records exit code 86 and restarts the process. Once host A has logged `worker_ready` after restart, stop host A's unit before its 30-second job lease expires. Start host B's systemd worker unit using its own host ID and the same run/expected-host values, without `--register-only` or `--crash-first-job`. Wait at least 30 seconds from host A's claim, then inspect the job. It must be `COMPLETED`, `attempts=2`, `data_mode=SYNTHETIC`, and record `worker_host_id=worker-b`. The probe's two-attempt policy exists for this single controlled crash and does not make repeated crashes succeed. Retain the crash, supervisor restart, host B recovery, and job inspection logs. This scenario must be performed on the two approved hosts to count as real multi-host recovery evidence; the offline process test validates only the code path.
 
 ### Distributed quota race
 
@@ -151,6 +172,8 @@ User=trendscout
 Group=trendscout
 WorkingDirectory=/opt/trendscout/Backend
 EnvironmentFile=/etc/trendscout/d5-probe.env
+# For the crash-recovery scenario only, add --crash-first-job to host A's
+# worker arguments. Never include it in a regular service unit.
 ExecStart=/opt/trendscout/Backend/.venv/bin/python scripts/multihost_gate_probe.py --project-id ${PROJECT_ID} --confirm-nonproduction-project ${PROJECT_ID} --run-id ${RUN_ID} --acknowledge-nonproduction-writes worker --host-id ${HOST_ID} --expected-hosts ${EXPECTED_HOSTS}
 Restart=on-failure
 RestartSec=3

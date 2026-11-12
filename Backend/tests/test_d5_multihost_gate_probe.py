@@ -5,7 +5,7 @@ import multiprocessing
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +31,16 @@ def reserve_quota_from_process(args):
         machine_fingerprint=fingerprint, expected_hosts=("worker-a", "worker-b"),
         timeout_seconds=5, now=now,
     )
+
+
+def crash_first_job_process(args):
+    path, run_id, host_id, fingerprint, now = args
+    store = LocalSQLiteAtomicStateStore(
+        path, environment_profile="test", data_mode="SYNTHETIC"
+    )
+    _, worker = _worker(store, run_id, host_id, fingerprint,
+                        crash_first_job=True, utcnow=lambda: now)
+    asyncio.run(worker.run_once(host_id))
 
 
 class MultiHostProbeTests(unittest.TestCase):
@@ -91,6 +101,37 @@ class MultiHostProbeTests(unittest.TestCase):
         self.assertEqual(stored["data_mode"], "SYNTHETIC")
         self.assertEqual(stored["records"][0]["fixture"], "D5_MULTIHOST_PROBE")
         self.assertEqual(stored["records"][0]["worker_host_id"], "worker-a")
+
+    def test_process_crash_after_claim_is_recovered_by_second_worker(self):
+        run_id = "c3d4e5f6"
+        now = datetime.now(timezone.utc)
+        admission = multihost_gate_probe._admission(self.store, run_id)
+        job = admission.admit("crash-recovery-probe-key", now=now)
+        context = multiprocessing.get_context("spawn")
+        crashed = context.Process(
+            target=crash_first_job_process,
+            args=((str(self.store.path), run_id, "worker-a", "1" * 64, now),),
+        )
+        crashed.start()
+        crashed.join(timeout=10)
+        if crashed.is_alive():
+            crashed.terminate()
+            crashed.join()
+            self.fail("crash-injected worker did not terminate")
+        self.assertEqual(crashed.exitcode, 86)
+
+        recovered_at = now + timedelta(seconds=31)
+        _, recovery_worker = _worker(
+            self.store, run_id, "worker-b", "2" * 64,
+            crash_first_job=True, utcnow=lambda: recovered_at,
+        )
+        result = asyncio.run(recovery_worker.run_once("worker-b"))
+        self.assertEqual(result["state"], "COMPLETED")
+        saved = admission.read_job(job["job_id"], now=recovered_at)
+        source = saved["source_checkpoints"][WIKIMEDIA_SOURCE_ID]["snapshot"]["result"]
+        self.assertEqual(saved["attempts"], 2)
+        self.assertEqual(source["data_mode"], "SYNTHETIC")
+        self.assertEqual(source["records"][0]["worker_host_id"], "worker-b")
 
     def test_two_independent_processes_race_one_shared_synthetic_quota_unit(self):
         run_id = "b2c3d4e5"

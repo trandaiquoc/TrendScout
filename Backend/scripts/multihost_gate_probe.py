@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
 import signal
 import socket
@@ -88,7 +89,7 @@ def _policy():
         pools={"wikimedia": PoolLimit(5, 10, 5, 10, 1, max_inflight=1)},
         plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
         max_starts_per_window=5, window_seconds=3600, cooldown_seconds=0,
-        lease_seconds=30, max_attempts=1, max_job_seconds=120,
+        lease_seconds=30, max_attempts=2, max_job_seconds=120,
         receipt_seconds=300, max_records=50, max_status_polls=20, enabled=True,
     )
 
@@ -268,10 +269,32 @@ def _grant(source_id, now):
                            now + timedelta(minutes=5), 300, True)
 
 
-def _worker(store, run_id, host_id, machine_fingerprint):
+def _claim_crash_once(store, run_id, job_id):
+    key = f"d5mh-crash-{run_id}"
+
+    def operation(state):
+        state = state or {"schema": 1, "run_id": run_id, "crashed_job_id": None}
+        if state.get("schema") != 1 or state.get("run_id") != run_id:
+            raise ValueError("crash probe scope mismatch")
+        if state.get("crashed_job_id") is not None:
+            return state, False
+        state["crashed_job_id"] = job_id
+        state["crash_host_pid"] = os.getpid()
+        return state, True
+
+    return store.transact(key, operation)
+
+
+def _worker(store, run_id, host_id, machine_fingerprint, *, crash_first_job=False,
+            utcnow=_now):
     admission = _admission(store, run_id)
 
-    async def synthetic_handler(_context):
+    async def synthetic_handler(context):
+        if crash_first_job and _claim_crash_once(store, run_id, context.job_id):
+            print(json.dumps({"event": "intentional_worker_crash", "run_id": run_id,
+                              "job_id": context.job_id, "host_id": host_id,
+                              "exit_code": 86}), flush=True)
+            os._exit(86)
         return {
             "status": "SUCCESS", "data_mode": "SYNTHETIC",
             "records": [{"fixture": "D5_MULTIHOST_PROBE", "worker_host_id": host_id,
@@ -281,7 +304,7 @@ def _worker(store, run_id, host_id, machine_fingerprint):
 
     return admission, DistributedFetchWorker(
         admission, handlers={WIKIMEDIA_SOURCE_ID: synthetic_handler},
-        resolve_grant=_grant,
+        resolve_grant=_grant, utcnow=utcnow,
     )
 
 
@@ -300,6 +323,10 @@ def _parser():
     worker.add_argument("--expected-hosts", required=True,
                         help="Two comma-separated IDs, identical on both hosts")
     worker.add_argument("--idle-poll-seconds", type=float, default=0.5)
+    worker.add_argument("--register-only", action="store_true",
+                        help="Register and validate host identity, then exit without consuming jobs")
+    worker.add_argument("--crash-first-job", action="store_true",
+                        help="Test-only: exit 86 after claiming the first job so another host can recover it")
     submit = commands.add_parser("submit", help="Queue one bounded synthetic test job")
     submit.add_argument("--idempotency-key", required=True)
     inspect = commands.add_parser("inspect", help="Read one job's state and synthetic result")
@@ -336,18 +363,24 @@ async def _run_worker(args, store):
     fingerprint = _machine_fingerprint()
     _wait_for_peers(store, run_id=args.run_id, host_id=host_id,
                     machine_fingerprint=fingerprint, expected_hosts=expected)
-    admission, worker = _worker(store, args.run_id, host_id, fingerprint)
+    print(json.dumps({"event": "worker_ready", "host_id": host_id,
+                      "hostname": socket.gethostname(), "run_id": args.run_id}), flush=True)
+    if args.register_only:
+        print(json.dumps({"event": "worker_registered_only", "host_id": host_id,
+                          "run_id": args.run_id}), flush=True)
+        return 0
+    _, worker = _worker(store, args.run_id, host_id, fingerprint,
+                        crash_first_job=args.crash_first_job)
     runner = DistributedWorkerRunner(worker, owner=host_id,
                                      idle_poll_seconds=args.idle_poll_seconds)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
-    print(json.dumps({"event": "worker_ready", "host_id": host_id,
-                      "hostname": socket.gethostname(), "run_id": args.run_id}), flush=True)
     completed = await runner.run(stop)
     print(json.dumps({"event": "worker_stopped", "host_id": host_id,
                       "completed_jobs": completed}), flush=True)
+    return 0
 
 
 def main(argv=None):
@@ -358,8 +391,7 @@ def main(argv=None):
         raise SystemExit("refusing Firestore writes without --acknowledge-nonproduction-writes")
     store = _store(args.project_id)
     if args.action == "worker":
-        asyncio.run(_run_worker(args, store))
-        return 0
+        return asyncio.run(_run_worker(args, store))
     if args.action == "quota-start":
         print(json.dumps(prepare_quota_probe(store, args.run_id), sort_keys=True))
         return 0
