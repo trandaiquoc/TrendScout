@@ -47,6 +47,10 @@ class LocalSmokeStore:
             counts = dict(counts)
             updated, result = operation(state)
             after = _receipts(updated)
+            if not updated and not after:
+                # Capability/status inspection must not turn an empty ledger
+                # into a truthy, schema-less admission document.
+                return updated, result
             for receipt, source in after.items():
                 if receipt in before:
                     if before[receipt] != source:

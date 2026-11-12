@@ -20,6 +20,7 @@ from app.sources.serpapi.pagination import build_contexts, initial_offset
 from app.sources.wikimedia.live_gateway import WikimediaRequest, WikimediaTopPageGateway
 from app.sources.youtube.pagination import build_execution_plan
 from app.storage.local_smoke_store import LocalSmokeStore
+from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
@@ -51,7 +52,7 @@ async def run_smoke():
     credentials = LocalCredentialProvider()
     if any(value != "PRESENT" for value in credentials.status().values()):
         return {"status": "INVALID_CONFIG"}
-    local_ledger.DIRECTORY.mkdir(parents=True, mode=0o700, exist_ok=True)
+    secure_private_directory(local_ledger.DIRECTORY)
     store = LocalSmokeStore(LocalSQLiteAtomicStateStore.for_local_live(local_ledger.DIRECTORY / "ledger.sqlite"))
     admission = PublicAdmission(store, replace(local_smoke_policy(), enabled=True), state_key=local_ledger.STATE_KEY)
     now = datetime.now(timezone.utc)

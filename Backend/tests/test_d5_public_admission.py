@@ -11,6 +11,7 @@ from pathlib import Path
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_file_security import secure_private_directory, verify_private_file
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 
@@ -75,6 +76,8 @@ def reserve_then_crash(path, job_id, fence):
 class PublicAdmissionTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        if os.name == "nt":
+            secure_private_directory(self.directory.name)
         self.path = str(Path(self.directory.name) / "coordinator.sqlite")
         self.control = coordinator(self.path)
 
@@ -118,7 +121,10 @@ class PublicAdmissionTests(unittest.TestCase):
                 LocalSQLiteAtomicStateStore(**kwargs)
 
     def test_local_database_file_is_owner_only(self):
-        self.assertEqual(self.control.store.store.path.stat().st_mode & 0o077, 0)
+        if os.name == "nt":
+            verify_private_file(self.control.store.store.path)
+        else:
+            self.assertEqual(self.control.store.store.path.stat().st_mode & 0o077, 0)
 
     def test_independent_processes_share_inflight_limit(self):
         config = policy(pools={"serpapi": PoolLimit(100, 100, 100, 100, 1, 2, 30),

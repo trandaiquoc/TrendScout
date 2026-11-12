@@ -113,7 +113,8 @@ def create_app(
                 or set(distributed_public_fetch.admission.policy.enabled_sources)
                 != expected_sources):
             raise ValueError(
-                "distributed Fetch injection is restricted to an approved runtime composition"
+                "distributed Fetch injection is restricted to enabled local/test synthetic mode "
+                "or an explicitly approved runtime composition"
             )
     if synthetic_supplement is not None and not (
         public_fetch_enabled and run_mode == "synthetic"

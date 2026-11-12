@@ -4,14 +4,12 @@ This is a single-process local demo boundary, not a durable or multi-host store.
 A restart loses results; reservations remain on disk to prevent repeat requests.
 """
 
-import fcntl
-import os
-import stat
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_process_lock import LocalProcessLock
 
 
 class LocalVolatileCheckpoints:
@@ -25,16 +23,9 @@ class LocalVolatileCheckpoints:
         self._closed = False
         self._stop = threading.Event()
         lock_path = store.path.with_name(store.path.name + ".process-lock")
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-                raise ValueError("unsafe local demo lock file")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BaseException:
-            os.close(fd)
-            raise
-        self._lock_fd = fd
+        self._process_lock = LocalProcessLock(lock_path)
+        if not self._process_lock.acquire():
+            raise BlockingIOError("local demo process lock is already held")
         self._sweeper = threading.Thread(target=self._sweep_loop, daemon=True)
         self._sweeper.start()
 
@@ -134,6 +125,5 @@ class LocalVolatileCheckpoints:
         with self._mutex:
             if not self._closed:
                 self._values.clear()
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
+                self._process_lock.release()
                 self._closed = True

@@ -8,7 +8,7 @@ PUBLIC = Path(__file__).resolve().parents[2] / "Frontend" / "public"
 
 class WorkspaceStructureTests(unittest.TestCase):
     def test_required_workspace_sections_and_safe_disabled_controls(self):
-        html = (PUBLIC / "index.html").read_text()
+        html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (
             "overview",
             "sources",
@@ -27,7 +27,7 @@ class WorkspaceStructureTests(unittest.TestCase):
 
     def test_all_browser_http_access_uses_the_shared_client(self):
         source = "\n".join(
-            path.read_text()
+            path.read_text(encoding="utf-8")
             for path in (PUBLIC / "app.js", *sorted((PUBLIC / "modules").rglob("*.js")))
         )
         self.assertIn("method: 'GET'", source)

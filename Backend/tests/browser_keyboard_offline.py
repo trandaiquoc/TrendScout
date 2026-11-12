@@ -1,110 +1,92 @@
 """Offline Chrome keyboard, dialog, and 320/375px viewport checks."""
 
-import fcntl
 import json
 import os
 import select
-import shutil
-import socket
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 from browser_workspace_offline import FAKE, PUBLIC
+from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+
+if os.name != "nt":
+    import fcntl
 
 
 def main():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            probe = socket.socket(family)
-            probe.close()
-        except PermissionError:
-            continue
-        raise SystemExit("Internet blocker is not active")
-    chrome = shutil.which("google-chrome") or shutil.which("chromium")
+    require_linux_network_isolation()
+    chrome = find_chrome()
     if not chrome:
         raise SystemExit("Chrome unavailable")
-    html = (PUBLIC / "index.html").read_text()
-    css = (PUBLIC / "styles.css").read_text()
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
     html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     html = html.replace("</body>", FAKE + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-cdp-") as directory:
         page = Path(directory) / "index.html"
-        page.write_text(html)
-        p2c_r, p2c_w = os.pipe()
-        c2p_r, c2p_w = os.pipe()
-        child_r = fcntl.fcntl(p2c_r, fcntl.F_DUPFD, 10)
-        child_w = fcntl.fcntl(c2p_w, fcntl.F_DUPFD, 10)
-        os.set_inheritable(child_r, True)
-        os.set_inheritable(child_w, True)
+        page.write_text(html, encoding="utf-8")
+        if os.name == "nt":
+            browser = ChromeDevTools(chrome, Path(directory) / "profile")
+            call = browser.call
+        else:
+            p2c_r, p2c_w = os.pipe()
+            c2p_r, c2p_w = os.pipe()
+            child_r = fcntl.fcntl(p2c_r, fcntl.F_DUPFD, 10)
+            child_w = fcntl.fcntl(c2p_w, fcntl.F_DUPFD, 10)
+            os.set_inheritable(child_r, True)
+            os.set_inheritable(child_w, True)
 
-        def child_setup():
-            os.dup2(child_r, 3)
-            os.dup2(child_w, 4)
+            def child_setup():
+                os.dup2(child_r, 3)
+                os.dup2(child_w, 4)
 
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
-        }
-        command = [
-            chrome,
-            "--headless",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--disable-background-networking",
-            "--disable-extensions",
-            "--no-proxy-server",
-            "--disable-sync",
-            "--disable-component-update",
-            "--allow-file-access-from-files",
-            "--no-first-run",
-            "--remote-debugging-pipe",
-            "--user-data-dir=" + directory + "/profile",
-            "about:blank",
-        ]
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=False,
-            preexec_fn=child_setup,
-            env=env,
-        )
-        for fd in (p2c_r, c2p_w, child_r, child_w):
-            os.close(fd)
-        pending = b""
-        counter = 0
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+            }
+            command = [chrome, "--headless", "--no-sandbox", "--disable-gpu",
+                "--disable-background-networking", "--disable-extensions", "--no-proxy-server",
+                "--disable-sync", "--disable-component-update", "--allow-file-access-from-files",
+                "--no-first-run", "--remote-debugging-pipe",
+                "--user-data-dir=" + directory + "/profile", "about:blank"]
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=False,
+                preexec_fn=child_setup, env=env)
+            for fd in (p2c_r, c2p_w, child_r, child_w):
+                os.close(fd)
+            pending = b""
+            counter = 0
 
-        def call(method, params=None, session=None):
-            nonlocal pending, counter
-            counter += 1
-            message = {"id": counter, "method": method, "params": params or {}}
-            if session:
-                message["sessionId"] = session
-            os.write(p2c_w, json.dumps(message).encode() + b"\0")
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline:
-                while b"\0" in pending:
-                    raw, pending = pending.split(b"\0", 1)
-                    if not raw:
-                        continue
-                    reply = json.loads(raw)
-                    if reply.get("id") == counter:
-                        if "error" in reply:
-                            raise RuntimeError(str(reply["error"]))
-                        return reply.get("result", {})
-                ready, _, _ = select.select([c2p_r], [], [], max(0, deadline - time.monotonic()))
-                if not ready:
-                    break
-                chunk = os.read(c2p_r, 65536)
-                if not chunk:
-                    break
-                pending += chunk
-            raise RuntimeError("Chrome DevTools response timeout")
+            def call(method, params=None, session=None):
+                nonlocal pending, counter
+                counter += 1
+                message = {"id": counter, "method": method, "params": params or {}}
+                if session:
+                    message["sessionId"] = session
+                os.write(p2c_w, json.dumps(message).encode() + b"\0")
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    while b"\0" in pending:
+                        raw, pending = pending.split(b"\0", 1)
+                        if not raw:
+                            continue
+                        reply = json.loads(raw)
+                        if reply.get("id") == counter:
+                            if "error" in reply:
+                                raise RuntimeError(str(reply["error"]))
+                            return reply.get("result", {})
+                    ready, _, _ = select.select([c2p_r], [], [], max(0, deadline - time.monotonic()))
+                    if not ready:
+                        break
+                    chunk = os.read(c2p_r, 65536)
+                    if not chunk:
+                        break
+                    pending += chunk
+                raise RuntimeError("Chrome DevTools response timeout")
 
         try:
             target = call("Target.createTarget", {"url": "about:blank"})["targetId"]
@@ -250,14 +232,17 @@ def main():
                 "Chrome DevTools: keyboard navigation, Escape dialog, 320/375px all views, theme and locale: PASS"
             )
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            os.close(p2c_w)
-            os.close(c2p_r)
+            if os.name == "nt":
+                browser.close()
+            else:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                os.close(p2c_w)
+                os.close(c2p_r)
 
 
 if __name__ == "__main__":

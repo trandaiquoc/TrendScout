@@ -11,12 +11,16 @@ import json
 import os
 import re
 import sqlite3
-import stat
 from contextlib import closing
 from pathlib import Path
 from typing import Callable
 
 from app.ports.atomic_state import AtomicStateStore, State
+from app.storage.local_file_security import (
+    UnsafeLocalFile,
+    verify_private_directory,
+    verify_private_file,
+)
 
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _MAX_STATE_BYTES = 4 * 1024 * 1024
@@ -43,12 +47,9 @@ class LocalSQLiteAtomicStateStore:
         self.data_mode = data_mode
         if local_live:
             try:
-                parent = self.path.parent.lstat()
-            except OSError:
-                raise ValueError("local live storage directory unavailable") from None
-            if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.geteuid()
-                    or parent.st_mode & 0o077):
-                raise ValueError("local live storage directory must be owner-only")
+                verify_private_directory(self.path.parent)
+            except UnsafeLocalFile as exc:
+                raise ValueError("local live storage directory must be owner-only") from exc
         self.timeout_seconds = float(timeout_seconds)
         self._prepare_file()
         with closing(self._connect()) as connection:
@@ -69,7 +70,8 @@ class LocalSQLiteAtomicStateStore:
         try:
             descriptor = os.open(
                 self.path,
-                os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                os.O_CREAT | os.O_EXCL | os.O_RDWR
+                | (getattr(os, "O_NOFOLLOW", 0) if os.name != "nt" else 0),
                 0o600,
             )
         except FileExistsError:
@@ -77,12 +79,24 @@ class LocalSQLiteAtomicStateStore:
                 metadata = self.path.lstat()
             except OSError as exc:
                 raise ValueError("local SQLite file is unavailable") from exc
-            if (not self.path.is_file() or self.path.is_symlink()
-                    or metadata.st_uid != os.geteuid()):
+            if not self.path.is_file() or self.path.is_symlink():
                 raise ValueError("local SQLite file must be a regular file owned by this user")
-            os.chmod(self.path, 0o600)
+            if os.name == "nt":
+                try:
+                    verify_private_file(self.path)
+                except UnsafeLocalFile as exc:
+                    raise ValueError("local SQLite file must be owner-only") from exc
+            else:
+                if metadata.st_uid != os.geteuid():
+                    raise ValueError("local SQLite file must be owned by this user")
+                os.chmod(self.path, 0o600)
         else:
             os.close(descriptor)
+        if self.data_mode == "LIVE":
+            try:
+                verify_private_file(self.path)
+            except UnsafeLocalFile as exc:
+                raise ValueError("local SQLite file must be owner-only") from exc
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -91,6 +105,15 @@ class LocalSQLiteAtomicStateStore:
         connection.execute(f"PRAGMA busy_timeout = {int(self.timeout_seconds * 1000)}")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = FULL")
+        if self.data_mode == "LIVE":
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(self.path) + suffix)
+                if sidecar.exists():
+                    try:
+                        verify_private_file(sidecar)
+                    except UnsafeLocalFile as exc:
+                        connection.close()
+                        raise ValueError("local live SQLite sidecar is not owner-only") from exc
         return connection
 
     def transact(self, key: str, operation: Callable[[State], tuple[State, object]]):

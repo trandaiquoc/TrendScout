@@ -8,13 +8,15 @@ from pathlib import Path
 
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
+from local_security_helpers import private_test_directory
 
 
 class VolatileCheckpointTests(unittest.TestCase):
     def test_background_sweep_removes_expired_checkpoint_without_access(self):
         current = [datetime.now(timezone.utc)]
         with tempfile.TemporaryDirectory() as directory:
-            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "ledger.sqlite")
+            private = private_test_directory(directory)
+            store = LocalSQLiteAtomicStateStore.for_local_live(private / "ledger.sqlite")
             volatile = LocalVolatileCheckpoints(store, clock=lambda: current[0])
             try:
                 def write(state):
@@ -37,7 +39,8 @@ class VolatileCheckpointTests(unittest.TestCase):
     def test_purge_source_clears_only_volatile_data_and_keeps_quota(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "ledger.sqlite")
+            private = private_test_directory(directory)
+            store = LocalSQLiteAtomicStateStore.for_local_live(private / "ledger.sqlite")
             volatile = LocalVolatileCheckpoints(store, clock=lambda: now)
             try:
                 def write(state):
@@ -53,8 +56,8 @@ class VolatileCheckpointTests(unittest.TestCase):
                 state = volatile.transact("demo", lambda s: (s, s["jobs"]["job"]["source_checkpoints"].copy()))
                 self.assertEqual(set(state), {"wikimedia"})
                 self.assertEqual(volatile.transact("demo", lambda s: (s, s["quota"])), {"reserved": 1})
-                for file in Path(directory).iterdir():
-                    if file.is_file():
+                for file in private.iterdir():
+                    if file.is_file() and not file.name.endswith(".process-lock"):
                         self.assertNotIn(b"fixture-youtube", file.read_bytes())
             finally:
                 volatile.close()
@@ -64,7 +67,7 @@ class VolatileCheckpointTests(unittest.TestCase):
     def test_checkpoint_never_reaches_sqlite_and_is_lost_on_restart(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ledger.sqlite"
+            path = private_test_directory(directory) / "ledger.sqlite"
             store = LocalSQLiteAtomicStateStore.for_local_live(path)
             volatile = LocalVolatileCheckpoints(store, clock=lambda: now)
             try:
@@ -80,8 +83,8 @@ class VolatileCheckpointTests(unittest.TestCase):
                 self.assertIn("source", volatile.transact("demo", read))
                 with self.assertRaises(BlockingIOError):
                     LocalVolatileCheckpoints(store, clock=lambda: now)
-                for file in Path(directory).iterdir():
-                    if file.is_file():
+                for file in path.parent.iterdir():
+                    if file.is_file() and not file.name.endswith(".process-lock"):
                         self.assertNotIn(b"fixture-private-checkpoint", file.read_bytes())
             finally:
                 volatile.close()
@@ -96,7 +99,8 @@ class VolatileCheckpointTests(unittest.TestCase):
     def test_expired_checkpoint_is_removed_from_memory(self):
         current = [datetime.now(timezone.utc)]
         with tempfile.TemporaryDirectory() as directory:
-            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "ledger.sqlite")
+            private = private_test_directory(directory)
+            store = LocalSQLiteAtomicStateStore.for_local_live(private / "ledger.sqlite")
             volatile = LocalVolatileCheckpoints(store, clock=lambda: current[0])
             try:
                 def write(state):

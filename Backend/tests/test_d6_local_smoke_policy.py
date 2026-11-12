@@ -15,6 +15,8 @@ from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from app.workers.guarded_attempt import GuardedAttemptRunner
+from app.storage.local_file_security import verify_private_file
+from local_security_helpers import grant_authenticated_users, private_test_directory
 
 
 class MemoryStore:
@@ -30,7 +32,7 @@ class LocalSmokePolicyTests(unittest.TestCase):
     def test_local_approval_cannot_claim_production_or_use_synthetic_store(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "live.sqlite"
+            path = private_test_directory(directory) / "live.sqlite"
             store = LocalSmokeStore(LocalSQLiteAtomicStateStore.for_local_live(path))
             policy = replace(local_smoke_policy(), enabled=True)
             runner = GuardedAttemptRunner(PublicAdmission(store, policy, state_key="local-test"))
@@ -49,7 +51,6 @@ class LocalSmokePolicyTests(unittest.TestCase):
             args = (Approvals(), GOOGLE_SOURCE_ID, policy.plan_fingerprint, lambda: now)
             self.assertEqual(checked_source_approval(*args, runner=runner), approval)
             volatile = LocalVolatileCheckpoints(store.store)
-            self.addCleanup(volatile.close)
             volatile_runner = GuardedAttemptRunner(PublicAdmission(
                 LocalSmokeStore(volatile), policy, state_key="volatile-test"))
             self.assertEqual(checked_source_approval(*args, runner=volatile_runner), approval)
@@ -70,22 +71,51 @@ class LocalSmokePolicyTests(unittest.TestCase):
             with self.assertRaises(GatewayError):
                 checked_source_approval(ProductionApprovals(), GOOGLE_SOURCE_ID,
                                         policy.plan_fingerprint, lambda: now, runner=runner)
+            volatile.close()
 
     def test_live_storage_requires_explicit_factory_and_private_local_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "live.sqlite"
+            private = private_test_directory(directory)
+            path = private / "live.sqlite"
             with self.assertRaises(ValueError):
                 LocalSQLiteAtomicStateStore(path, environment_profile="local", data_mode="LIVE")
             store = LocalSQLiteAtomicStateStore.for_local_live(path)
             self.assertEqual(store.data_mode, "LIVE")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            verify_private_file(path)
             with patch.dict(os.environ, {"VERCEL": "1"}):
                 with self.assertRaises(ValueError):
                     LocalSQLiteAtomicStateStore.for_local_live(path)
-            Path(directory).chmod(0o755)
-            with self.assertRaises(ValueError):
-                LocalSQLiteAtomicStateStore.for_local_live(path)
-            Path(directory).chmod(0o700)
+            if os.name == "nt":
+                insecure = private_test_directory(directory, "insecure")
+                grant_authenticated_users(insecure, "(OI)(CI)M")
+                with self.assertRaises(ValueError):
+                    LocalSQLiteAtomicStateStore.for_local_live(insecure / "quota.sqlite")
+            else:
+                private.chmod(0o755)
+                with self.assertRaises(ValueError):
+                    LocalSQLiteAtomicStateStore.for_local_live(path)
+                private.chmod(0o700)
+
+    def test_live_sqlite_database_wal_and_shm_inherit_private_acl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = private_test_directory(directory)
+            path = private / "live.sqlite"
+            store = LocalSQLiteAtomicStateStore.for_local_live(path)
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO atomic_state(state_key, state_json) VALUES (?, ?)",
+                    ("acl-check", "{}"),
+                )
+                verify_private_file(path)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(str(path) + suffix)
+                    self.assertTrue(sidecar.is_file(), f"SQLite did not create {suffix}")
+                    verify_private_file(sidecar)
+                connection.rollback()
+            finally:
+                connection.close()
 
     def test_default_denies_and_shared_provider_attempt_budgets_are_bounded(self):
         policy = local_smoke_policy()
@@ -101,7 +131,7 @@ class LocalSmokePolicyTests(unittest.TestCase):
     def test_persistent_source_cap_cannot_consume_other_engine_budget(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ledger.sqlite"
+            path = private_test_directory(directory) / "ledger.sqlite"
             def admission():
                 store = LocalSQLiteAtomicStateStore(path, environment_profile="test")
                 return PublicAdmission(LocalSmokeStore(store), replace(local_smoke_policy(), enabled=True),
@@ -122,7 +152,7 @@ class LocalSmokePolicyTests(unittest.TestCase):
 
     def test_concurrent_duplicate_source_reservations_allow_only_one(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ledger.sqlite"
+            path = private_test_directory(directory) / "ledger.sqlite"
             LocalSQLiteAtomicStateStore(path, environment_profile="test")
             def reserve(index):
                 store = LocalSmokeStore(LocalSQLiteAtomicStateStore(path, environment_profile="test"))

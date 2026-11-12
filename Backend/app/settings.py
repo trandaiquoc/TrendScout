@@ -210,7 +210,11 @@ class Settings:
 
         lock_path = environment.get("TREND_SCOUT_LOCK_PATH")
         if lock_path is None:
-            lock_path = str(Path.home() / ".cache/trendscout/manual-run.lock")
+            try:
+                home = Path.home()
+            except RuntimeError:
+                home = Path(environment.get("LOCALAPPDATA") or Path.cwd())
+            lock_path = str(home / ".cache/trendscout/manual-run.lock")
         if not lock_path.strip():
             raise ValueError("TREND_SCOUT_LOCK_PATH must not be empty")
 

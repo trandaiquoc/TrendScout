@@ -1,11 +1,10 @@
 """Offline Chrome check for anonymous, capability-gated one-click synthetic Fetch."""
 
 import json
-import shutil
-import socket
 import subprocess
 import tempfile
 from pathlib import Path
+from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
@@ -14,19 +13,12 @@ FETCH_ID = "f" * 43
 
 
 def main():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            probe = socket.socket(family)
-            probe.close()
-        except PermissionError:
-            continue
-        raise SystemExit("Internet blocker is not active")
-
-    chrome = shutil.which("google-chrome") or shutil.which("chromium")
+    require_linux_network_isolation()
+    chrome = find_chrome()
     if not chrome:
         raise SystemExit("Chrome unavailable")
-    html = (PUBLIC / "index.html").read_text()
-    css = (PUBLIC / "styles.css").read_text()
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
     html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
@@ -81,7 +73,7 @@ document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+err
     html = html.replace("</body>", bridge + check + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-public-fetch-") as directory:
         page = Path(directory) / "index.html"
-        page.write_text(html)
+        page.write_text(html, encoding="utf-8")
         command = [
             chrome,
             "--headless",
@@ -100,7 +92,8 @@ document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+err
             "--dump-dom",
             page.as_uri(),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=30)
         if result.returncode or 'data-public-fetch-result="PASS"' not in result.stdout:
             marker = result.stdout[result.stdout.find("data-public-fetch-result=") - 200 :][:900]
             raise SystemExit(

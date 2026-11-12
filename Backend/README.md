@@ -1,5 +1,22 @@
 # TrendScout backend — Bước 3
 
+## Native Windows (môi trường chính)
+
+Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `..\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.
+
+```powershell
+..\setup.ps1
+..\start.ps1 -Synthetic
+```
+
+Demo synthetic nghe loopback, dùng fixture, không gọi provider, và dừng bằng Ctrl+C. Chế độ cloud tiêu chuẩn `..\start.ps1` cần environment `GOOGLE_CLOUD_PROJECT`, `TREND_SCOUT_OPERATOR_TOKEN` do chủ máy cấu hình và ADC; startup không fetch provider. Setup không tạo file `.env` hoặc API keys. Trên Windows, mặc định credential file cho `LocalCredentialProvider` là `%LOCALAPPDATA%\TrendScout\.env`; thư mục này được setup chuẩn bị với DACL giới hạn, nhưng setup không tạo credential file.
+
+Chạy `..\verify_offline_readiness.ps1` để thực hiện D6.1B focused tests, toàn bộ unittest, cả hai golden hash seed, `pip check`, JavaScript syntax, Chrome browser E2E và storage benchmark. File lock dùng byte-range lock Windows qua `msvcrt`, tự nhả khi process kết thúc. Kiểm tra ACL xác minh owner SID và DACL bằng Windows security APIs; cho phép user hiện tại, SYSTEM, Administrators và owner-rights ACE. Reparse point, ACL không đọc được hoặc ACE cấp quyền cho principal khác bị từ chối. SQLite quota ledger nằm dưới `%LOCALAPPDATA%\TrendScout\local\d6-smoke`; database, WAL/SHM và process lock thừa hưởng ACL riêng của thư mục đó.
+
+## Linux (tương thích và bảo mật phụ)
+
+Giữ các script `.sh` và chạy `bash scripts/verify_offline_readiness.sh` từ `Backend/`. Linux là nơi chạy seccomp, libseccomp, resource limits và syscall isolation; không bỏ hoặc giả lập các gate này trên Windows. Xem báo cáo D6 để biết trạng thái gate từng hệ điều hành.
+
 ## D4 — Google/Bing SERP ngoại tuyến
 
 `app/sources/serpapi/` là hợp đồng dùng chung cho Google và Bing qua SerpApi candidate; hai adapter chỉ nhận `httpx.MockTransport`, fake resolver và quota pool được inject. Request dùng query thuộc `demo-us-en` v1, endpoint cố định, Google `start` và Bing `first`; provider next URL chỉ được phân tích offset, không được gọi. Mỗi attempt reserve budget, retry/deadline/page cap có giới hạn; record deduplicate URL nhưng giữ query evidence, trạng thái cache và thời điểm provider nếu hợp lệ. Position là vị trí trong mẫu SERP, không phải search volume hay sales. Không có filter bảy ngày khi ngữ nghĩa chưa được xác minh.

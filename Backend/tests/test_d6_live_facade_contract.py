@@ -16,15 +16,16 @@ from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
+from local_security_helpers import private_test_directory
 
 
 class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_contract_requires_local_boundary_and_hides_raw_records(self):
         now = datetime.now(timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            sqlite = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "state.sqlite")
+            private = private_test_directory(directory)
+            sqlite = LocalSQLiteAtomicStateStore.for_local_live(private / "state.sqlite")
             volatile = LocalVolatileCheckpoints(sqlite)
-            self.addCleanup(volatile.close)
             store = LocalSmokeStore(volatile)
             admission = PublicAdmission(store, replace(local_smoke_policy(), enabled=True), state_key="demo")
             def grant(source, at):
@@ -57,8 +58,8 @@ class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["discovery"]["candidate_count"], 0)
             self.assertNotIn("fixture-private-record", repr(result))
             self.assertTrue(all("records" not in source for source in result["sources"]))
-            for path in Path(directory).iterdir():
-                if path.is_file():
+            for path in private.iterdir():
+                if path.is_file() and not path.name.endswith(".process-lock"):
                     self.assertNotIn(b"fixture-private-record", path.read_bytes())
             # Restart/expiry may remove all volatile results while the quota job remains.
             # A permission grant alone is not evidence of a live source result.
@@ -67,6 +68,7 @@ class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(missing["data_mode"])
             self.assertTrue(all(row["status"] == "UNAVAILABLE" and "data_mode" not in row
                                 for row in missing["sources"]))
+            volatile.close()
 
 
 if __name__ == "__main__":

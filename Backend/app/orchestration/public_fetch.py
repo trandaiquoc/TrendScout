@@ -1,10 +1,8 @@
 """Bounded process-local admission for the offline public Fetch demonstration."""
 
 import asyncio
-import fcntl
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
@@ -16,6 +14,7 @@ from typing import Callable
 
 from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.sources.query_plan import get_query_plan
+from app.storage.local_process_lock import LocalProcessLock
 
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 FETCH_ID_RE = re.compile(r"^(?:[A-Za-z0-9_-]{43}|[a-f0-9]{32})$")
@@ -48,25 +47,13 @@ class SingleProcessGuard:
 
     def __init__(self, path: str) -> None:
         self.path = Path(path).expanduser()
-        self._file = None
+        self._process_lock = LocalProcessLock(self.path)
 
     def acquire(self) -> bool:
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        handle = os.fdopen(fd, "r+")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.close()
-            return False
-        self._file = handle
-        return True
+        return self._process_lock.acquire()
 
     def release(self) -> None:
-        if self._file is not None:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-            self._file.close()
-            self._file = None
+        self._process_lock.release()
 
 
 @dataclass

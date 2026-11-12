@@ -5,13 +5,12 @@
 import asyncio
 import json
 import os
-import shutil
-import socket
 import subprocess
 import tempfile
 from pathlib import Path
 
 import httpx
+from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
@@ -139,21 +138,14 @@ async def prepare_api_data():
 
 
 def main():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            probe = socket.socket(family)
-            probe.close()
-        except PermissionError:
-            continue
-        raise SystemExit("Internet blocker is not active")
-
-    chrome = shutil.which("google-chrome") or shutil.which("chromium")
+    require_linux_network_isolation()
+    chrome = find_chrome()
     if not chrome:
         raise SystemExit("Chrome unavailable")
     run, keyword_page, detail = asyncio.run(prepare_api_data())
     public = ROOT / "Frontend" / "public"
-    html = (public / "index.html").read_text()
-    css = (public / "styles.css").read_text()
+    html = (public / "index.html").read_text(encoding="utf-8")
+    css = (public / "styles.css").read_text(encoding="utf-8")
     bridge = browser_page(run, keyword_page, detail)
     html = html.replace('href="/dashboard/styles.css"', f"<style>{css}</style>", 1)
     html = html.replace('src="/dashboard/app.js"', f'src="{(public / "app.js").as_uri()}"', 1)
@@ -188,7 +180,7 @@ document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join(
     html = html.replace("</body>", bridge + check + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-browser-e2e-") as directory:
         page = Path(directory) / "index.html"
-        page.write_text(html)
+        page.write_text(html, encoding="utf-8")
         command = [
             chrome,
             "--headless",
@@ -212,7 +204,8 @@ document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join(
             for key, value in os.environ.items()
             if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
         }
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=30, env=env)
         if result.returncode or 'data-e2e-result="PASS"' not in result.stdout:
             result_index = result.stdout.find('data-e2e-result=')
             body_index = result.stdout.rfind('<body', 0, result_index)
@@ -222,7 +215,7 @@ document.body.setAttribute('data-e2e-result',errors.length?'FAIL: '+errors.join(
                 f"browser stderr={result.stderr[-700:]}"
             )
     print(
-        "Chrome real offline pipeline → ASGI API → dashboard rendered keyword "
+        "Chrome real offline pipeline -> ASGI API -> dashboard rendered keyword "
         f"{detail['keyword_id']}: PASS"
     )
 

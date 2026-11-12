@@ -1,7 +1,6 @@
 """Local-host manual run coordinator and durable Firestore persistence."""
 
 import asyncio
-import fcntl
 import json
 import os
 from collections.abc import Callable
@@ -13,6 +12,7 @@ from uuid import uuid4
 from app.adapters.base import CollectionSource
 from app.models.observations import FetchStatus
 from app.ports.storage import AnalysisStorage
+from app.storage.local_process_lock import LocalProcessLock
 
 TERMINAL = frozenset({"COMPLETED", "PARTIAL", "FAILED", "ABORTED"})
 SHARDS = 16
@@ -40,21 +40,27 @@ class RunCooldown(Exception):
 
 
 class HostRunLock:
-    """flock serializes workers on one Ubuntu host, including separate processes."""
+    """Serialize workers across local processes with a crash-released OS lock."""
     def __init__(self, path: str, cooldown_seconds: int = 60):
         self.path = Path(path).expanduser()
         self.cooldown_seconds = cooldown_seconds
         self.file = None
+        self._process_lock = LocalProcessLock(
+            self.path.with_name(self.path.name + ".process-lock")
+        )
 
     def acquire(self, *, ignore_cooldown=False):
-        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        handle = os.fdopen(fd, "r+")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.close()
+        if not self._process_lock.acquire():
             raise RunBusy("A run is already active")
+        try:
+            flags = os.O_CREAT | os.O_RDWR
+            if os.name != "nt":
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.path, flags, 0o600)
+            handle = os.fdopen(fd, "r+", encoding="utf-8")
+        except BaseException:
+            self._process_lock.release()
+            raise
         self.file = handle
         try:
             content = handle.read()
@@ -78,9 +84,9 @@ class HostRunLock:
 
     def release(self):
         if self.file is not None:
-            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
             self.file.close()
             self.file = None
+            self._process_lock.release()
 
 
 class RunService:

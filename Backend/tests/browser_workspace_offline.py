@@ -2,11 +2,10 @@
 
 import json
 import os
-import shutil
-import socket
 import subprocess
 import tempfile
 from pathlib import Path
+from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
@@ -213,18 +212,12 @@ CHECK = r"""<script>
 
 
 def main():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            probe = socket.socket(family)
-            probe.close()
-        except PermissionError:
-            continue
-        raise SystemExit("Internet blocker is not active")
-    chrome = shutil.which("google-chrome") or shutil.which("chromium")
+    require_linux_network_isolation()
+    chrome = find_chrome()
     if not chrome:
         raise SystemExit("Chrome unavailable")
-    html = (PUBLIC / "index.html").read_text()
-    css = (PUBLIC / "styles.css").read_text()
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
     invalid_preferences = """<script>try{localStorage.setItem('trendscout.theme','sepia');localStorage.setItem('trendscout.locale','fr')}catch{}</script>"""
     html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
@@ -242,7 +235,8 @@ def main():
             width_check = check.replace(
                 "INVALID_PREFERENCE_TEST", "true" if width == 768 else "false"
             )
-            page.write_text(page_html.replace("</body>", FAKE + width_check + "</body>"))
+            page.write_text(page_html.replace("</body>", FAKE + width_check + "</body>"),
+                            encoding="utf-8")
             command = [
                 chrome,
                 "--headless",
@@ -266,7 +260,8 @@ def main():
                 for key, value in os.environ.items()
                 if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
             }
-            result = subprocess.run(command, capture_output=True, text=True, timeout=40, env=env)
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                    errors="replace", timeout=40, env=env)
             if result.returncode or 'data-browser-result="PASS"' not in result.stdout:
                 marker = (
                     result.stdout.split("data-browser-result=", 1)[-1][:800]

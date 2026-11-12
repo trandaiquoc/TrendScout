@@ -2,14 +2,13 @@
 
 import asyncio
 import json
-import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import httpx
+from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
@@ -39,23 +38,16 @@ async def demo_api_snapshot():
 
 
 def main():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            probe = socket.socket(family)
-            probe.close()
-        except PermissionError:
-            continue
-        raise SystemExit("Internet blocker is not active")
-
-    chrome = shutil.which("google-chrome") or shutil.which("chromium")
+    require_linux_network_isolation()
+    chrome = find_chrome()
     if not chrome:
         raise SystemExit("Chrome unavailable")
     capabilities, status = asyncio.run(demo_api_snapshot())
     fetch_id = status["fetch_id"]
     capability_payload = json.dumps(capabilities, ensure_ascii=True, separators=(",", ":"))
     status_payload = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
-    html = (PUBLIC / "index.html").read_text()
-    css = (PUBLIC / "styles.css").read_text()
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
     html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
@@ -99,7 +91,7 @@ document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: 
     html = html.replace("</body>", bridge + check + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-distributed-fetch-") as directory:
         page = Path(directory) / "index.html"
-        page.write_text(html)
+        page.write_text(html, encoding="utf-8")
         command = [
             chrome, "--headless", "--no-sandbox", "--disable-gpu",
             "--disable-background-networking", "--disable-extensions", "--no-proxy-server",
@@ -107,13 +99,14 @@ document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: 
             "--no-first-run", f"--user-data-dir={directory}/profile", "--window-size=1280,900",
             "--virtual-time-budget=5000", "--dump-dom", page.as_uri(),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=30)
         if result.returncode or 'data-distributed-fetch-result="PASS"' not in result.stdout:
             marker = result.stdout[result.stdout.find("data-distributed-fetch-result=") - 200:][:900]
             raise SystemExit(
                 f"Distributed Fetch Chrome E2E failed: {marker}; browser stderr={result.stderr[-700:]}"
             )
-    print("Chrome demo API → distributed synthetic Fetch → keyword detail: PASS")
+    print("Chrome demo API -> distributed synthetic Fetch -> keyword detail: PASS")
 
 
 if __name__ == "__main__":

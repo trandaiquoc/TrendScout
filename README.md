@@ -2,6 +2,29 @@
 
 Demo khám phá tín hiệu quan tâm qua Wikimedia Pageviews US/all-access. Backend Python 3.12 + FastAPI làm sạch, phân loại và tính điểm heuristic; dashboard hiển thị bằng chứng. Đây không phải xác suất, xu hướng mua sắm hoặc đo lường toàn bộ mạng xã hội.
 
+## Windows (môi trường phát triển chính)
+
+Cần Python native 3.12, Git, Node.js và Chrome. Giữ nguyên các bản Python khác; `setup.ps1` dùng Python Launcher `py -3.12`, tạo `Backend\.venv` và cài các dependency đã pin trong virtual environment. Có thể cài Python 3.12 qua `winget install --id Python.Python.3.12 --exact` nếu máy chưa có.
+
+```powershell
+.\setup.ps1
+.\start.ps1 -Synthetic
+```
+
+Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. Demo synthetic dùng fixture cục bộ và không gửi provider request. `start.ps1` không tạo `.env`, API key hoặc credential. Chế độ cloud tiêu chuẩn chỉ chạy khi `GOOGLE_CLOUD_PROJECT` và `TREND_SCOUT_OPERATOR_TOKEN` đã được chủ máy cấu hình tường minh trong environment; ADC cũng phải được thiết lập riêng. Khởi động không gửi provider request. Guarded local LIVE HTTP vẫn cần entrypoint cấp đủ approval/grant backend, `enabled=True`, một worker và các kiểm soát runtime; `start.ps1` không bật chế độ đó.
+
+Chạy offline regression, browser E2E và benchmark:
+
+```powershell
+.\verify_offline_readiness.ps1
+```
+
+Script chạy D6.1B security tests trên Windows, toàn bộ unittest, golden tests với hai hash seed, `pip check`, JavaScript syntax, Chrome E2E và storage benchmark. Dùng Chrome cài trên máy; script không tải browser, cài package toàn cục hoặc gọi provider. Windows ACL được đọc và xác minh qua Windows security descriptor; DACL data được giới hạn cho user hiện tại, SYSTEM và Administrators. Quota database, WAL/SHM và process-lock dùng thư mục có ACL riêng dưới `%LOCALAPPDATA%\TrendScout`.
+
+## Linux (môi trường kiểm tra phụ)
+
+Giữ `setup.sh`, `start.sh`, `demo.sh` và các kiểm tra seccomp trên Linux. Chạy `bash Backend/scripts/verify_offline_readiness.sh` từ root để kiểm tra Linux security gate, gồm seccomp, syscall và giới hạn tài nguyên. Không mô phỏng kết quả các kiểm tra đó trên Windows. Windows là môi trường phát triển/chạy chính; Linux là kiểm tra tương thích và bảo mật riêng.
+
 ## Chạy trên Ubuntu
 
 Cần Python 3.12, gói `python3.12-venv` tương ứng và ADC đã đăng nhập. Việc cài gói hệ thống hoặc đăng nhập ADC được thực hiện riêng; script không tự thay đổi Firebase.

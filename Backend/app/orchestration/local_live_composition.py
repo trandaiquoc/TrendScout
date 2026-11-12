@@ -22,6 +22,7 @@ from app.sources.live_gateway import GatewayError, LivePageGateway
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.local_smoke_store import LocalSmokeStore
+from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from app.workers.d5_source_handlers import D5SourceHandlers
@@ -54,7 +55,7 @@ async def local_live_composition(*, credentials, approvals, user_agent,
         raise ValueError("explicit local credentials, approvals and policy resolvers required")
     checkpoint_grant = _bounded_checkpoint_resolver(resolve_checkpoint_grant)
     async with AsyncExitStack() as stack:
-        local_ledger.DIRECTORY.mkdir(parents=True, mode=0o700, exist_ok=True)
+        secure_private_directory(local_ledger.DIRECTORY)
         sqlite = LocalSQLiteAtomicStateStore.for_local_live(
             local_ledger.DIRECTORY / "ledger.sqlite")
         volatile = LocalVolatileCheckpoints(sqlite, clock=utcnow)

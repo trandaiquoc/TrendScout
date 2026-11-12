@@ -26,15 +26,15 @@ from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from app.workers.d5_source_handlers import D5SourceHandlers
 from app.workers.guarded_attempt import GuardedAttemptRunner
+from local_security_helpers import private_test_directory
 
 
 class OfflineWorkerCompositionTests(unittest.IsolatedAsyncioTestCase):
     async def test_fixture_sources_share_bounded_ledger_without_persisting_records(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "ledger.sqlite"
+            path = private_test_directory(directory) / "ledger.sqlite"
             backing = LocalSQLiteAtomicStateStore.for_local_live(path)
             volatile = LocalVolatileCheckpoints(backing, clock=lambda: NOW)
-            self.addCleanup(volatile.close)
             admission = PublicAdmission(LocalSmokeStore(volatile),
                 replace(local_smoke_policy(), enabled=True), state_key="fixture")
             runner = GuardedAttemptRunner(admission, clock=lambda: NOW)
@@ -83,12 +83,13 @@ class OfflineWorkerCompositionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(counts.values()), {1})
                 self.assertIn("fixture-only-private-marker", repr(result["sources"]))
                 self.assertEqual(len(result["sources"]), 4)
-                for file in Path(directory).iterdir():
-                    if file.is_file():
+                for file in path.parent.iterdir():
+                    if file.is_file() and not file.name.endswith(".process-lock"):
                         self.assertNotIn(b"fixture-only-private-marker", file.read_bytes())
             finally:
                 for gateway in gateways:
                     await gateway.aclose()
+                volatile.close()
 
 
 if __name__ == "__main__":

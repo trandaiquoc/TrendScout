@@ -23,6 +23,7 @@ from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from test_d6_local_live_composition import FixtureApprovals
+from local_security_helpers import private_test_directory
 from test_d5_wikimedia_gateway import USER_AGENT
 
 
@@ -30,7 +31,8 @@ NOW = datetime(2026, 11, 12, tzinfo=timezone.utc)
 
 
 def _live_facade(directory):
-    backing = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
+    private = private_test_directory(directory)
+    backing = LocalSQLiteAtomicStateStore.for_local_live(private / "quota.sqlite")
     checkpoints = LocalVolatileCheckpoints(backing, clock=lambda: NOW)
     policy = replace(local_smoke_policy(), enabled=True)
     admission = PublicAdmission(LocalSmokeStore(checkpoints), policy, state_key="http-fixture")
@@ -143,7 +145,7 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(accepted.status_code, 202)
                     result = await client.get(accepted.json()["status_url"])
                     self.assertEqual(result.status_code, 200)
-                    self.assertEqual(result.json()["status"], "COMPLETED")
+                    self.assertEqual(result.json()["status"], "PARTIAL", result.text)
                     self.assertEqual(result.json()["data_mode"], "LIVE")
                     self.assertEqual(result.json()["discovery"]["candidate_count"], 0)
                     self.assertEqual(len(result.json()["sources"]), 4)
@@ -156,7 +158,7 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
                         headers={"Idempotency-Key": "actual-local-composition-0001"},
                     )
                     self.assertEqual(replay.json()["fetch_id"], accepted.json()["fetch_id"])
-                    self.assertEqual(replay.json()["status"], "COMPLETED")
+                    self.assertEqual(replay.json()["status"], "PARTIAL")
                     await client.get(accepted.json()["status_url"])
                     self.assertEqual(sum(counts.values()), 4)
 
@@ -193,7 +195,7 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
                     headers = {"Idempotency-Key": "http-fixture-request-0001"}
                     first = await client.post("/api/v1/fetches", json={}, headers=headers)
                     replay = await client.post("/api/v1/fetches", json={}, headers=headers)
-                    self.assertEqual(first.status_code, 202)
+                    self.assertEqual(first.status_code, 202, first.text)
                     self.assertEqual(replay.status_code, 202)
                     self.assertNotEqual(first.json()["fetch_id"], "")
                     self.assertEqual(first.json()["fetch_id"], replay.json()["fetch_id"])

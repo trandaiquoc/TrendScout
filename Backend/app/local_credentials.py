@@ -7,6 +7,12 @@ import os
 import stat
 from pathlib import Path
 
+from app.storage.local_file_security import (
+    UnsafeLocalFile,
+    verify_private_directory,
+    verify_private_file,
+)
+
 REFERENCES = frozenset({"YOUTUBE_API_KEY", "SERPAPI_API_KEY"})
 MAX_FILE_SIZE = 8192
 
@@ -17,19 +23,34 @@ class InvalidCredentialConfig(ValueError):
 
 class LocalCredentialProvider:
     def __init__(self, path: Path | None = None):
+        if path is None and os.name == "nt":
+            app_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+            path = app_data / "TrendScout" / ".env"
         self.path = path or Path(__file__).resolve().parents[2] / ".env"
 
     def _read(self):
         try:
-            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            if os.name != "nt":
+                flags |= os.O_NOFOLLOW
+            fd = os.open(self.path, flags)
         except FileNotFoundError:
             return {}
         except OSError:
             raise InvalidCredentialConfig("Credential file unavailable or unsafe") from None
         try:
             info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or info.st_mode & 0o077 or info.st_size > MAX_FILE_SIZE):
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_SIZE:
+                raise InvalidCredentialConfig("Credential file permissions or type are unsafe")
+            try:
+                if os.name == "nt":
+                    verify_private_directory(self.path.parent)
+                verify_private_file(self.path)
+            except UnsafeLocalFile:
+                raise InvalidCredentialConfig(
+                    "Credential file permissions or type are unsafe"
+                ) from None
+            if os.name != "nt" and (info.st_uid != os.getuid() or info.st_mode & 0o077):
                 raise InvalidCredentialConfig("Credential file permissions or type are unsafe")
             with os.fdopen(fd, "rb") as stream:
                 fd = -1

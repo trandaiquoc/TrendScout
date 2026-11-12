@@ -368,7 +368,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         async with create_offline_client(httpx.MockTransport(handler)) as http:
             client = SerpApiClient(http, Resolver(), SharedQuotaPool(2, 2), HttpPolicy(max_retries=0))
             result = await GoogleSearchAdapter(client, utcnow=lambda: NOW).execute(
-                limits=ExecutionLimits(max_queries=1, deadline_seconds=0.1))
+                limits=ExecutionLimits(max_queries=1, deadline_seconds=1.0))
         self.assertEqual(result.stop_reason, "DEADLINE_EXCEEDED")
         self.assertFalse(result.complete)
 
