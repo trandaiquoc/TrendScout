@@ -1,6 +1,6 @@
 # D5 demo-first architecture — production gates remain open
 
-**Status (12/11/2026):** local four-source synthetic demo verified; `DEMO_ACCEPTANCE=100%`. `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`, `D5_PRODUCTION_READINESS=PARTIAL`, and live provider activation is disabled. Current development/cloud accounts are personal; do not use personal Firebase/Firestore or credentials as production infrastructure. The D6/D7 roadmap separates company-owned onboarding/live activation from the local demo.
+**Status (12/11/2026):** `DEMO_ACCEPTANCE=100%` and `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS` for the offline technical foundation. `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`, `D5_PRODUCTION_READINESS=PARTIAL`, and live provider activation is disabled. Current development/cloud accounts are personal; do not use personal Firebase/Firestore or credentials as production infrastructure. The D6/D7 roadmap separates company-owned onboarding/live activation from the local demo.
 
 The anonymous browser reads capabilities and submits a server-controlled Fetch. The backend gates admission; durable coordination, quotas and bounded workers eventually call source-specific adapters, normalize observations, run discovery and publish versioned evidence to the dashboard. Public clients cannot control provider endpoints, plans, credentials, quota or authorization. Vercel remains read-only. Legacy `POST /api/runs` retains its Bearer requirement.
 

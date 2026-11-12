@@ -1,6 +1,6 @@
 # D5 — Blueprint tích hợp live bốn nguồn
 
-**Trạng thái (12/11/2026): `DEMO_ACCEPTANCE=100%` cho demo local synthetic; `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; `D5_PRODUCTION_READINESS=PARTIAL`; `FOUR_SOURCE_LIVE_VERIFIED=NOT_ACCEPTED`.** Bối cảnh mới: TrendScout là dự án cá nhân để trình bày demo; các tài khoản phát triển hiện có thuộc cá nhân, công ty chưa cấp tài khoản/hạ tầng. Không dùng các tài nguyên cá nhân đó làm điều kiện hay bằng chứng production. Không có D3C. D5 ưu tiên demo và hoàn thiện code/offline tests; D6 tích hợp tài khoản/credentials do công ty cấp và quy trình kích hoạt live; D7 nghiệm thu multi-host production, live E2E và UAT. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public live Fetch vẫn disabled; Vercel hiện read-only.
+**Trạng thái (12/11/2026): `DEMO_ACCEPTANCE=100%`; `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS`; `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED`; `D5_PRODUCTION_READINESS=PARTIAL`; `FOUR_SOURCE_LIVE_VERIFIED=NOT_ACCEPTED`.** Bối cảnh mới: TrendScout là dự án cá nhân để trình bày demo; các tài khoản phát triển hiện có thuộc cá nhân, công ty chưa cấp tài khoản/hạ tầng. Không dùng các tài nguyên cá nhân đó làm điều kiện hay bằng chứng production. Không có D3C. D5 demo-first và hoàn thiện code/offline tests; D6 tích hợp tài khoản/credentials do công ty cấp và quy trình kích hoạt live; D7 nghiệm thu multi-host production, live E2E và UAT. Bốn nguồn: Wikimedia Pageviews top-per-country, Google SERP qua SerpApi, Bing SERP qua SerpApi, YouTube Data API v3. Public live Fetch vẫn disabled; Vercel hiện read-only.
 
 ## Acceptance tracks — DEMO-FIRST, PRODUCTION-LATER
 
@@ -9,11 +9,12 @@ Hai acceptance độc lập; PASS của demo không phải production readiness.
 | Track / gate | Acceptance evidence | Status |
 |---|---|---|
 | `DEMO_ACCEPTANCE` — dashboard, UI/UX, one-click Fetch, four synthetic sources, keyword discovery, regression và demo-scope security | Local loopback launcher/API, một nút Fetch và polling, bốn nguồn `SYNTHETIC`, keyword search/filter/detail/evidence, responsive/theme/locale/keyboard, browser E2E, regression/Golden, không login UI hoặc browser credentials, Fetch inputs/server policy bounded | **PASS — 100%**; local synthetic presentation only |
+| `D5_LIVE_CAPABLE_OFFLINE_VERIFIED` — revised D5 technical foundation | Four live-capable adapters remain approval-gated; credential/storage boundaries, atomic Fetch, local multi-process quota/queue/checkpoint recovery, keyword discovery, dashboard flow, offline tests, 604-case full readiness and D6 onboarding/deployment blueprint | **PASS for offline foundation only**; no public live activation or production deployment claimed |
 | `PRODUCTION_MULTI_HOST_ACCEPTANCE` — shared backing store, hai host độc lập, supervisor, distributed quota và crash recovery | Cùng non-production backing store thực, hai host instance độc lập cùng chạy, quota/queue cạnh tranh, supervisor restart sau crash, recovery evidence và review quyền/chi phí | **BLOCKED**; chưa có company-owned hạ tầng được cấp/duyệt và chưa chạy hai host thực. Same-host tests không thay thế gate này |
 | `D5_PRODUCTION_READINESS` | Production backing, distributed controls, retention/reconciliation, deployment/supervision và independent security review được xác minh | **PARTIAL**; offline implementations/tests không chứng minh deployment behavior |
 | `FOUR_SOURCE_LIVE_VERIFIED` | Mỗi provider có approval, account/credential phù hợp, quota/cost review và dated live evidence | **NOT_ACCEPTED**; toàn bộ live activation disabled; chuyển sang D6/D7 |
 
-Tỷ lệ `DEMO_ACCEPTANCE=100%` chỉ áp dụng checklist demo ở dưới. Không gọi D5 production-ready, `D5_LIVE_CAPABLE_OFFLINE_VERIFIED` hoặc bốn nguồn LIVE_VERIFIED dựa trên tỷ lệ này.
+`DEMO_ACCEPTANCE=100%` chỉ áp dụng checklist demo ở dưới. `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS` chỉ áp dụng các technical gates offline trong roadmap; không chứng minh production multi-host, production readiness hoặc provider LIVE_VERIFIED.
 
 ## 1. Ranh giới và nghiệm thu từng nguồn
 
@@ -88,7 +89,7 @@ Không cho client thay plan, query, URL, source, provider, quota hoặc permissi
 | Full regression | Readiness script và Golden pass | PASS: `bash Backend/scripts/verify_offline_readiness.sh`; 604 unittest, Golden hai hash seed, 12/12 readiness steps và browser checks PASS ngày 12/11/2026 |
 | D6 onboarding blueprint | Ownership, secrets, controls, approval và rollout có thể review | PASS sau khi đối chiếu checklist D6: register metadata-only, secret lifecycle, admin authorization riêng, controls, provider approvals, per-source live evidence và rollback được nêu; không tạo account/secret hoặc bật live |
 
-`D5_LIVE_CAPABLE_OFFLINE_VERIFIED` chỉ dùng khi các D5 offline technical gates được định nghĩa trong roadmap hoàn tất; trạng thái này không chứng minh production multi-host. Production multi-host có tên gate riêng và chưa PASS. Provider onboarding/live activation vẫn ở D6, final live/UAT ở D7.
+`D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS` sau khi các D5 offline technical gates được định nghĩa trong roadmap hoàn tất; trạng thái này không chứng minh production multi-host. Production multi-host có tên gate riêng và chưa PASS. Provider onboarding/live activation vẫn ở D6, final live/UAT ở D7.
 
 ### Demo-first presentation checklist
 

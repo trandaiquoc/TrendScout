@@ -1,6 +1,6 @@
 # D5 admission, quota, cache and queue design
 
-**Status (12/11/2026):** local synthetic admission/quota/cache/queue behavior has offline evidence for the demo; `DEMO_ACCEPTANCE=100%`. `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED` and `D5_PRODUCTION_READINESS=PARTIAL`: current resources are personal, company infrastructure is not provided, and no real shared backing/two-host/supervisor run has occurred. Local/test synthetic Fetch uses a file-backed atomic store across independent processes, which does not protect a multi-host production deployment. The guarded Firestore adapter is not wired into production and was not tested against Firestore or its emulator. Do not point it at the owner's personal Firebase/Firestore project.
+**Status (12/11/2026):** local synthetic admission/quota/cache/queue behavior has offline evidence for the demo; `DEMO_ACCEPTANCE=100%` and `D5_LIVE_CAPABLE_OFFLINE_VERIFIED=PASS` for offline gates. `PRODUCTION_MULTI_HOST_ACCEPTANCE=BLOCKED` and `D5_PRODUCTION_READINESS=PARTIAL`: current resources are personal, company infrastructure is not provided, and no real shared backing/two-host/supervisor run has occurred. Local/test synthetic Fetch uses a file-backed atomic store across independent processes, which does not protect a multi-host production deployment. The guarded Firestore adapter is not wired into production and was not tested against Firestore or its emulator. Do not point it at the owner's personal Firebase/Firestore project.
 
 ## Implemented offline foundation (2026-11-12)
 
