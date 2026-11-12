@@ -68,7 +68,7 @@ class DistributedPublicFetch:
                     "source_id": source_id,
                     "status": result["status"],
                     "data_mode": result["data_mode"],
-                    "delivery_state": "FRESH",
+                    "delivery_state": result.get("delivery_state", "FRESH"),
                     "record_count": result["record_count"],
                     "records": result["records"],
                     "coverage": result.get("coverage"),

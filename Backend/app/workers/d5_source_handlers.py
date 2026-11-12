@@ -13,11 +13,13 @@ from enum import Enum
 from typing import Callable, Mapping
 
 from app.jobs.distributed_worker import SourceWorkContext
+from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
+    source_capability,
 )
 from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
 from app.sources.query_plan import QueryPlan
@@ -80,25 +82,40 @@ class D5SourceHandlers:
     def __init__(self, *, query_collectors: Mapping[str, GuardedQueryCollector],
                  wikimedia: WikimediaTopPageGateway, plan: QueryPlan,
                  limits: CollectionLimits,
-                 observation_date: Callable[[], date] | None = None):
+                 observation_date: Callable[[], date] | None = None,
+                 shared_cache: SharedCache | None = None,
+                 resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
+                 utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if (set(query_collectors) != _QUERY_SOURCES
                 or any(not isinstance(value, GuardedQueryCollector)
                        or value.gateway.source_id != source
                        for source, value in query_collectors.items())
                 or not isinstance(wikimedia, WikimediaTopPageGateway)
                 or not isinstance(plan, QueryPlan) or not isinstance(limits, CollectionLimits)
-                or (observation_date is not None and not callable(observation_date))):
+                or (observation_date is not None and not callable(observation_date))
+                or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
+                or ((shared_cache is None) != (resolve_cache_grant is None))
+                or (resolve_cache_grant is not None and not callable(resolve_cache_grant))
+                or not callable(utcnow)):
             raise ValueError("fixed four-source collectors, plan and limits required")
         self.query_collectors = dict(query_collectors)
         self.wikimedia = wikimedia
         self.plan = plan
         self.limits = limits
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
+        self.shared_cache = shared_cache
+        self.resolve_cache_grant = resolve_cache_grant
+        self.utcnow = utcnow
 
     def build(self) -> dict[str, Callable[[SourceWorkContext], object]]:
         handlers = {source: self._query_handler(source) for source in sorted(_QUERY_SOURCES)}
         async def collect_wikimedia(context):
-            return await self._wikimedia_handler(context)
+            observation_date = self.observation_date()
+            return await self._with_cache(
+                WIKIMEDIA_SOURCE_ID, context,
+                lambda: self._wikimedia_handler(context, observation_date),
+                query_scope=f"{self.plan.fingerprint}:{observation_date.isoformat()}",
+            )
 
         setattr(collect_wikimedia, "__trendscout_data_mode__", self.wikimedia.data_mode)
         handlers[WIKIMEDIA_SOURCE_ID] = collect_wikimedia
@@ -110,6 +127,11 @@ class D5SourceHandlers:
         collector = self.query_collectors[source_id]
 
         async def collect(context: SourceWorkContext):
+            return await self._with_cache(
+                source_id, context, lambda: collect_from_provider(context)
+            )
+
+        async def collect_from_provider(context: SourceWorkContext):
             context.heartbeat()
             result = await collector.collect(
                 plan=self.plan,
@@ -151,9 +173,60 @@ class D5SourceHandlers:
         setattr(collect, "__trendscout_data_mode__", collector.gateway.data_mode)
         return collect
 
-    async def _wikimedia_handler(self, context: SourceWorkContext):
+    async def _with_cache(self, source_id, context, collect, *, query_scope=None):
+        if self.shared_cache is None:
+            return await collect()
+        now = self.utcnow()
+        try:
+            grant = self.resolve_cache_grant(source_id, now)
+        except Exception:
+            raise CacheUnavailable() from None
+        scope = None
+        if isinstance(grant, CacheGrant):
+            capability = source_capability(source_id)
+            scope = CacheScope(
+                source_id=source_id,
+                provider_id=capability.provider_id,
+                query=query_scope or self.plan.fingerprint,
+                plan_fingerprint=self.plan.fingerprint,
+                market=self.plan.market,
+                language=self.plan.language or "all",
+                window=self.plan.time_filter_rule,
+                parser_version=f"source-v{capability.capability_version}",
+                policy_version=grant.policy_version,
+            )
+            cached = self.shared_cache.get(scope, grant=grant, now=now)
+            if cached.get("status") == "CACHED" and cached.get("origin") == "SYNTHETIC":
+                payload = cached.get("payload")
+                if (not isinstance(payload, dict)
+                        or payload.get("data_mode") != cached.get("origin")
+                        or payload.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}):
+                    raise CacheUnavailable()
+                return {**payload, "delivery_state": "CACHED"}
+
+        result = await collect()
+        if not isinstance(result, dict):
+            return result
+        result.setdefault("delivery_state", "FRESH")
+        if (scope is not None and grant.allowed is True
+                and result.get("status") in {"SUCCESS", "PARTIAL"}
+                and result.get("record_count", 0) > 0
+                and result.get("data_mode") == "SYNTHETIC"):
+            fetched_at = self.utcnow()
+            try:
+                self.shared_cache.put(
+                    scope, grant=grant, origin=result["data_mode"], payload=result,
+                    fetched_at=fetched_at, now=self.utcnow(),
+                )
+            except Exception:
+                flags = result.setdefault("quality_flags", [])
+                if "CACHE_WRITE_FAILED" not in flags:
+                    flags.append("CACHE_WRITE_FAILED")
+        return result
+
+    async def _wikimedia_handler(self, context: SourceWorkContext, observation_date=None):
         context.heartbeat()
-        date_value = self.observation_date()
+        date_value = observation_date or self.observation_date()
         request = WikimediaRequest(date_value, context.plan_fingerprint)
         attempt_id = hashlib.sha256(
             f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{date_value.isoformat()}:page-1".encode()
@@ -197,3 +270,7 @@ class D5SourceHandlers:
                              "rejected": page.rejected_count,
                              "records_omitted_storage_limit": omitted,
                              "item_count": page.item_count}}
+
+
+class CacheUnavailable(Exception):
+    code = "CACHE_UNAVAILABLE"

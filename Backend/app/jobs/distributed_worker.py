@@ -180,12 +180,14 @@ class DistributedFetchWorker:
             if set(value) != {"status", "retry_at"}:
                 raise ValueError("invalid deferred source result")
             return value
-        allowed = {"status", "data_mode", "records", "record_count", "error_code",
-                   "coverage", "quality_flags"}
+        allowed = {"status", "data_mode", "delivery_state", "records", "record_count",
+                   "error_code", "coverage", "quality_flags"}
         if set(value) - allowed:
             raise ValueError("source result contains an unsupported field")
         if value.get("data_mode") != expected_mode:
             raise ValueError("source result provenance mismatch")
+        if value.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}:
+            raise ValueError("invalid result delivery state")
         records = value.get("records")
         if not isinstance(records, list) or len(records) > 1000 or any(
             not isinstance(record, dict) for record in records

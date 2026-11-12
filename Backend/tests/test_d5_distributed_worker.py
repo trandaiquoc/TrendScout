@@ -9,12 +9,13 @@ from pathlib import Path
 
 import httpx
 from test_d5_live_gateway import Approvals, Credentials
-from test_d5_public_admission import NOW, coordinator, policy
+from test_d5_public_admission import NOW, SqliteTestStore, coordinator, policy
 from test_d5_wikimedia_gateway import USER_AGENT
 from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PoolLimit
+from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.catalog import (
@@ -229,15 +230,20 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         admission.admit("four-source-worker-fixture-key", now=self.clock())
         runner = GuardedAttemptRunner(admission, clock=self.clock)
         collectors = {}
+        request_counts = {source: 0 for source in SOURCES}
 
-        def search_handler(request):
-            return httpx.Response(200, json={
-                "search_metadata": {"status": "Success"},
-                "organic_results": [{"position": 1, "link": "https://example.org/fixture",
-                                     "title": "synthetic fixture result"}],
-            })
+        def search_handler(source):
+            def handle(request):
+                request_counts[source] += 1
+                return httpx.Response(200, json={
+                    "search_metadata": {"status": "Success"},
+                    "organic_results": [{"position": 1, "link": "https://example.org/fixture",
+                                         "title": "synthetic fixture result"}],
+                })
+            return handle
 
         def youtube_handler(_request):
+            request_counts[YOUTUBE_SOURCE_ID] += 1
             return httpx.Response(200, json={
                 "kind": "youtube#searchListResponse",
                 "items": [{"kind": "youtube#searchResult",
@@ -246,7 +252,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             })
 
         for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
-            handler = youtube_handler if source == YOUTUBE_SOURCE_ID else search_handler
+            handler = youtube_handler if source == YOUTUBE_SOURCE_ID else search_handler(source)
             gateway = LivePageGateway.offline_fixture(
                 source, Credentials(), Approvals(source), runner,
                 transport=httpx.MockTransport(handler), clock=self.clock,
@@ -256,14 +262,22 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         wikimedia = WikimediaTopPageGateway.offline_fixture(
             Approvals(WIKIMEDIA_SOURCE_ID), runner, user_agent=USER_AGENT,
-            transport=httpx.MockTransport(lambda _request: httpx.Response(
-                200, json=wikimedia_response(NOW.date()))), clock=self.clock,
+            transport=httpx.MockTransport(lambda _request: self._counted_wikimedia_response(
+                request_counts)), clock=self.clock,
         )
         self.gateways.append(wikimedia)
+        cache = SharedCache(SqliteTestStore(self.path))
+
+        def cache_grant(source_id, now):
+            return CacheGrant(source_id, "fixture-cache-policy-v1", now + timedelta(hours=1),
+                              max_fresh_seconds=600, max_stale_seconds=1200,
+                              max_retention_seconds=1800, allowed=True)
+
         registry = D5SourceHandlers(
             query_collectors=collectors, wikimedia=wikimedia, plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
-            observation_date=lambda: NOW.date(),
+            observation_date=lambda: NOW.date(), shared_cache=cache,
+            resolve_cache_grant=cache_grant, utcnow=self.clock,
         ).build()
         worker = DistributedFetchWorker(admission, handlers=registry,
                                         resolve_grant=self.grant, utcnow=self.clock)
@@ -274,6 +288,19 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source_result["data_mode"], "SYNTHETIC")
             self.assertGreater(source_result["record_count"], 0)
         self.assertNotIn("raw_record", repr(result))
+        first_request_counts = dict(request_counts)
+
+        admission.admit("four-source-worker-cached-key", now=self.clock())
+        cached = await worker.run_once("cached-fixture-worker")
+        self.assertEqual(cached["state"], "PARTIAL", repr(cached["sources"]))
+        self.assertEqual(request_counts, first_request_counts)
+        self.assertTrue(all(item.get("delivery_state") == "CACHED"
+                            for item in cached["sources"].values()))
+
+    @staticmethod
+    def _counted_wikimedia_response(request_counts):
+        request_counts[WIKIMEDIA_SOURCE_ID] += 1
+        return httpx.Response(200, json=wikimedia_response(NOW.date()))
 
     async def test_public_fetch_facade_reads_retained_worker_results(self):
         results = {source: self.source_result(1) for source in SOURCES}
