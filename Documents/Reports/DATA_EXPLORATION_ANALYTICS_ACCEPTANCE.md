@@ -40,9 +40,9 @@ This is the current native-Windows acceptance record. It supersedes older machin
 | G5 — compatible algorithm outputs | Actual partial-cohort rank values persisted; unsupported methods visibly skip with reasons; evaluation remains honestly unevaluated | PASS |
 | G6 — capability registry and icons | Runtime registry and browser catalog display configured Wikimedia and nonconfigured adapters without claiming live access | PASS |
 | G7 — native Windows Chrome and regression | Vietnamese/English desktop, Vietnamese mobile, algorithm cards and Collection merge/delete browser runs; 737 tests and 765 subtests pass | PASS |
-| G8 — report, screenshots, local commit | This Windows addendum and fresh evidence are present; local commit remains pending | IN PROGRESS |
+| G8 — report, screenshots, local commit | Windows addendum, 13 screenshots, and reviewed local implementation commit `37368e3` are present; this final report-status update is being committed locally | PASS |
 
-No push or deployment is authorized or performed. G8 remains open until the final local commit is created and checked.
+All parent-goal gates G1–G8 pass. The work is committed locally; no push or deployment was performed.
 
 **Status:** in progress; not a final acceptance pass
 **Reviewed:** 2026-11-13
