@@ -24,6 +24,7 @@ from app.sources.catalog import (
     source_capability,
 )
 from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
+from app.sources.live_gateway import GatewayError
 from app.sources.query_plan import QueryPlan
 from app.sources.wikimedia.live_gateway import (
     WikimediaGatewayError,
@@ -307,11 +308,20 @@ class D5SourceHandlers:
                     or result["record_count"] != len(result["records"])):
                 raise AdmissionDenied("CHECKPOINT_INVALID")
             try:
-                await asyncio.to_thread(
-                    self.wikimedia.runner.admission.settle_attempt,
-                    context.job_id, context.owner, context.fence,
-                    attempt_id=attempt_id, now=self.utcnow(),
+                settle_recovered = getattr(
+                    self.wikimedia.runner, "settle_recovered_attempt", None
                 )
+                if callable(settle_recovered):
+                    await asyncio.to_thread(
+                        settle_recovered, context.job_id, context.owner, context.fence,
+                        attempt_id=attempt_id, now=self.utcnow(),
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self.wikimedia.runner.admission.settle_attempt,
+                        context.job_id, context.owner, context.fence,
+                        attempt_id=attempt_id, now=self.utcnow(),
+                    )
             except Exception:
                 raise AdmissionDenied("SETTLEMENT_PENDING") from None
             return result
@@ -339,23 +349,24 @@ class D5SourceHandlers:
                     WIKIMEDIA_SOURCE_ID)),
                 on_page_receipt=persist_page_receipt,
             )
-        except WikimediaGatewayError as exc:
+        except (WikimediaGatewayError, GatewayError) as exc:
             if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
                 raise AdmissionDenied(exc.code) from None
             context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
             status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
             result = {"status": status, "data_mode": self.wikimedia.data_mode,
                       "records": [], "record_count": 0, "error_code": exc.code}
-            if exc.diagnostic is not None:
+            diagnostic = getattr(exc, "diagnostic", None)
+            if diagnostic is not None:
                 result["transport_diagnostic"] = {
-                    "source_id": exc.diagnostic.source_id,
-                    "failure_phase": exc.diagnostic.failure_phase,
-                    "http_status": exc.diagnostic.http_status,
-                    "exception_class": exc.diagnostic.exception_class,
-                    "bytes_received": exc.diagnostic.bytes_received,
-                    "response_size_limit": exc.diagnostic.response_size_limit,
-                    "attempt_id": exc.diagnostic.attempt_id,
-                    "error_code": exc.diagnostic.error_code,
+                    "source_id": diagnostic.source_id,
+                    "failure_phase": diagnostic.failure_phase,
+                    "http_status": diagnostic.http_status,
+                    "exception_class": diagnostic.exception_class,
+                    "bytes_received": diagnostic.bytes_received,
+                    "response_size_limit": diagnostic.response_size_limit,
+                    "attempt_id": diagnostic.attempt_id,
+                    "error_code": diagnostic.error_code,
                 }
             return result
         result = result_for(page)

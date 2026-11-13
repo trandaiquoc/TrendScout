@@ -11,9 +11,12 @@ import hashlib
 import json
 import re
 import socket
+import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from urllib.parse import quote
 
 from app.jobs.public_admission import SOURCE_POOLS, AdmissionDenied
 from app.local_ledger import STATE_KEY
@@ -261,6 +264,7 @@ class SameLedgerTranches:
             return envelope, "MIGRATED"
         return self.store.transact(STATE_KEY, operation)
 
+
     @staticmethod
     def _validate_v2(state):
         if (not isinstance(state, dict) or state.get("schema") != STATE_SCHEMA
@@ -273,6 +277,9 @@ class SameLedgerTranches:
                 or not isinstance(state.get("reservations"), list)
                 or not isinstance(state.get("settlements"), list)
                 or not isinstance(state.get("job_starts"), list)):
+            raise AdmissionDenied("TRANCHE_STATE_INVALID")
+        runtime_state = state.get("runtime_admission_state", {})
+        if not isinstance(runtime_state, dict):
             raise AdmissionDenied("TRANCHE_STATE_INVALID")
         legacy = _validate_legacy(state["legacy_state"])
         migration = state["migration"]
@@ -485,3 +492,52 @@ class SameLedgerTranches:
                                            "outcome": outcome, "settled_at_utc": now.isoformat()})
             return updated, "SETTLED"
         return self.store.transact(STATE_KEY, operation)
+
+
+def read_only_ledger_compatibility_preflight(path, *, designated_host_id: str,
+                                             host_id: str) -> dict:
+    """Validate a later canonical ledger without opening it writable or returning state.
+
+    This helper is intended for the separately approved canonical host. Current
+    offline acceptance calls it only with representative temporary databases.
+    """
+    if (not isinstance(designated_host_id, str) or not designated_host_id.strip()
+            or not isinstance(host_id, str) or not host_id.strip()):
+        return {"status": "BLOCKED", "reason": "HOST_ID_REQUIRED"}
+    if host_id != designated_host_id:
+        return {"status": "BLOCKED", "reason": "CANONICAL_EXECUTION_HOST_MISMATCH"}
+    try:
+        ledger_path = Path(path).expanduser().absolute()
+        if not ledger_path.is_file() or ledger_path.is_symlink():
+            return {"status": "BLOCKED", "reason": "LEDGER_UNAVAILABLE"}
+        uri = f"file:{quote(str(ledger_path), safe='/')}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            tables = {row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "atomic_state" not in tables:
+                return {"status": "BLOCKED", "reason": "LEDGER_SCHEMA_UNSUPPORTED"}
+            row = connection.execute(
+                "SELECT state_json FROM atomic_state WHERE state_key = ?", (STATE_KEY,)
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            return {"status": "BLOCKED", "reason": "LEDGER_STATE_MISSING"}
+        state = json.loads(row[0])
+        if not isinstance(state, dict):
+            return {"status": "BLOCKED", "reason": "LEDGER_VALIDATION_FAILED"}
+        if state.get("schema") == 1:
+            _validate_legacy(state)
+            return {"status": "READ_ONLY_COMPATIBLE", "schema": 1,
+                    "reason": "VALIDATED_V1_REQUIRES_SEPARATE_MIGRATION_AUTHORIZATION"}
+        if state.get("schema") == STATE_SCHEMA:
+            SameLedgerTranches._validate_v2(state)
+            if state.get("designated_host_id") != designated_host_id:
+                return {"status": "BLOCKED", "reason": "CANONICAL_EXECUTION_HOST_MISMATCH"}
+            return {"status": "READ_ONLY_COMPATIBLE", "schema": STATE_SCHEMA,
+                    "reason": "VALIDATED_V2_NO_MUTATION_PERFORMED"}
+        return {"status": "BLOCKED", "reason": "LEDGER_SCHEMA_UNSUPPORTED"}
+    except (OSError, sqlite3.Error, json.JSONDecodeError, AdmissionDenied,
+            TypeError, ValueError):
+        return {"status": "BLOCKED", "reason": "LEDGER_VALIDATION_FAILED"}
