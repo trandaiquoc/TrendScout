@@ -1,82 +1,69 @@
-"""Run the owner-authorized one-request D6.2 Wikimedia local LIVE smoke."""
+"""Fail-closed retirement shim for the historical D6.2 LIVE launcher."""
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import logging
-import os
 import re
-import socket
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
-from uuid import uuid4
-
-import httpx
-import uvicorn
 
 from app import local_ledger
-from app.jobs.source_checkpoints import CheckpointGrant
-from app.main import create_local_live_app
-from app.orchestration.local_live_composition import local_live_composition
-from app.settings import Settings
-from app.local_smoke_policy import local_smoke_policy
-from app.sources.catalog import (
-    BING_SOURCE_ID,
-    GOOGLE_SOURCE_ID,
-    WIKIMEDIA_SOURCE_ID,
-    YOUTUBE_SOURCE_ID,
-    source_capability,
-)
-from app.sources.live_gateway import SourceApproval
-from app.sources.query_plan import DEFAULT_QUERY_PLAN
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
-_CONTACT = re.compile(
-    r"\([^\r\n()]*?(?:https?://|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})[^\r\n()]*\)"
-)
-_OTHER_SOURCES = frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID})
+LEGACY_APPROVAL_ID = "D6.2-WIKIMEDIA-ONE-REQUEST-2026-11-12"
+LEGACY_APPROVAL_BLOCKED = "LEGACY_APPROVAL_EXPIRED_OR_CONSUMED"
+
+_SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_DIAGNOSTIC_FIELDS = frozenset({
+    "source_id", "failure_phase", "http_status", "exception_class",
+    "bytes_received", "response_size_limit", "attempt_id", "error_code",
+})
+_DIAGNOSTIC_PHASES = frozenset({
+    "REQUEST_DISPATCH", "RESPONSE_HEADERS", "BODY_STREAM", "JSON_DECODE",
+    "SCHEMA_VALIDATION",
+})
+_DIAGNOSTIC_EXCEPTIONS = frozenset({
+    "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "RemoteProtocolError",
+    "DecodingError", "WriteError", "WriteTimeout", "PoolTimeout", "CloseError",
+    "RequestError", "TimeoutException", "HttpDeadlineExceeded", "TimeoutError",
+    "JSONDecodeError", "ValueError", "TypeError", "RecursionError",
+})
 
 
 class WikimediaOnlyApprovals:
-    """One task-scoped source approval; all other live providers fail closed."""
+    """Compatibility shim: the historical approval is permanently retired."""
 
-    def __init__(self, expires_at: datetime):
-        self.expires_at = expires_at
+    def __init__(self, expires_at=None):
+        # Kept only to make attempted expiry refreshes explicit and harmless.
+        self.requested_expiry = expires_at
 
     def current(self, source_id: str):
-        if source_id != WIKIMEDIA_SOURCE_ID:
-            return None
-        return SourceApproval(
-            source_id=source_id,
-            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
-            expires_at=self.expires_at,
-            policy_version="d6.2-wikimedia-one-request-v1",
-            approval_id="D6.2-WIKIMEDIA-ONE-REQUEST-2026-11-12",
-            source_enabled=True,
-            global_enabled=True,
-            usage_approved=True,
-            retention_approved=True,
-            quota_approved=True,
-            cost_approved=True,
-            security_approved=True,
-            egress_controls_verified=True,
-            telemetry_controls_verified=True,
-            scope="LOCAL_SMOKE",
-            local_controls_verified=True,
-        )
+        return None
 
 
 class NoProviderCredentials:
+    """Compatibility guard that never resolves provider credentials."""
+
     def resolve(self, reference):
-        raise RuntimeError(f"unexpected credential resolution: {reference}")
+        raise RuntimeError("provider credential resolution is disabled in the retired launcher")
+
+
+def legacy_approval_preflight(*, approval_id=LEGACY_APPROVAL_ID, expires_at=None) -> dict:
+    """Reject the retired identifier regardless of caller, clock, machine, or ledger."""
+    return {
+        "status": "BLOCKED",
+        "reason": LEGACY_APPROVAL_BLOCKED,
+        "approval_id": approval_id,
+        "approval_retired": approval_id == LEGACY_APPROVAL_ID,
+        "provider_request_count": 0,
+    }
 
 
 def wikimedia_reservation_state(database: Path) -> str:
-    """Read the canonical quota ledger without changing it or exposing its contents."""
+    """Read one ledger path without mutation; absence is never authorization."""
     if not database.exists():
         return "NO_LEDGER"
     uri = database.as_uri() + "?mode=ro"
@@ -96,38 +83,82 @@ def wikimedia_reservation_state(database: Path) -> str:
         if not isinstance(counts, dict) or not isinstance(jobs, dict):
             return "INVALID_LEDGER"
         if WIKIMEDIA_SOURCE_ID in counts:
+            count = counts[WIKIMEDIA_SOURCE_ID]
+            if type(count) is not int or count < 1:
+                return "INVALID_LEDGER"
             return "RESERVED"
         for job in jobs.values():
-            if not isinstance(job, dict) or not isinstance(job.get("receipts", {}), dict):
+            if not isinstance(job, dict):
                 return "INVALID_LEDGER"
-            if any(receipt.get("source_id") == WIKIMEDIA_SOURCE_ID
-                   for receipt in job.get("receipts", {}).values()
-                   if isinstance(receipt, dict)):
-                return "RESERVED"
+            receipts = job.get("receipts", {})
+            if not isinstance(receipts, dict):
+                return "INVALID_LEDGER"
+            for receipt in receipts.values():
+                if not isinstance(receipt, dict):
+                    return "INVALID_LEDGER"
+                if receipt.get("source_id") == WIKIMEDIA_SOURCE_ID:
+                    return "RESERVED"
         return "NO_RESERVATION"
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return "INVALID_LEDGER"
 
 
+def _valid_transport_diagnostic(value, *, source_error_code=None) -> bool:
+    if not isinstance(value, dict) or set(value) != _DIAGNOSTIC_FIELDS:
+        return False
+    return not (
+        value["source_id"] != WIKIMEDIA_SOURCE_ID
+        or not isinstance(value["failure_phase"], str)
+        or value["failure_phase"] not in _DIAGNOSTIC_PHASES
+        or (value["http_status"] is not None and (
+            type(value["http_status"]) is not int or not 100 <= value["http_status"] <= 599
+        ))
+        or (value["exception_class"] is not None and (
+            not isinstance(value["exception_class"], str)
+            or value["exception_class"] not in _DIAGNOSTIC_EXCEPTIONS
+        ))
+        or type(value["bytes_received"]) is not int
+        or not 0 <= value["bytes_received"] <= 1_000_000_000
+        or type(value["response_size_limit"]) is not int
+        or not 1 <= value["response_size_limit"] <= 10_000_000
+        or not isinstance(value["attempt_id"], str)
+        or not _SAFE_ATTEMPT_ID.fullmatch(value["attempt_id"])
+        or not isinstance(value["error_code"], str)
+        or not _SAFE_CODE.fullmatch(value["error_code"])
+        or value["error_code"] != source_error_code
+    )
+
+
 def _summary(status_body):
+    """Select status fields and validated diagnostics; omit malformed diagnostics."""
     if not isinstance(status_body, dict):
         return None
+    raw_sources = status_body.get("sources", [])
     sources = []
-    for row in status_body.get("sources", []):
-        if not isinstance(row, dict):
-            continue
-        source = {
-            "source_id": row.get("source_id"),
-            "status": row.get("status"),
-            "data_mode": row.get("data_mode"),
-            "record_count": row.get("record_count", 0),
-            "error_code": row.get("error_code"),
-        }
-        coverage = row.get("coverage")
-        if isinstance(coverage, dict):
-            source["rejected_count"] = coverage.get("rejected", 0)
-            source["observation_date"] = coverage.get("observation_date")
-        sources.append(source)
+    if isinstance(raw_sources, list):
+        for row in raw_sources:
+            if not isinstance(row, dict):
+                continue
+            source = {
+                "source_id": row.get("source_id"),
+                "status": row.get("status"),
+                "data_mode": row.get("data_mode"),
+                "record_count": row.get("record_count", 0),
+                "error_code": row.get("error_code"),
+            }
+            coverage = row.get("coverage")
+            if isinstance(coverage, dict):
+                source["rejected_count"] = coverage.get("rejected", 0)
+                source["observation_date"] = coverage.get("observation_date")
+            diagnostic = row.get("transport_diagnostic")
+            if _valid_transport_diagnostic(diagnostic, source_error_code=row.get("error_code")):
+                source["transport_diagnostic"] = {
+                    field: diagnostic[field] for field in (
+                        "source_id", "failure_phase", "http_status", "exception_class",
+                        "bytes_received", "response_size_limit", "attempt_id", "error_code",
+                    )
+                }
+            sources.append(source)
     discovery = status_body.get("discovery")
     return {
         "fetch_status": status_body.get("status"),
@@ -144,222 +175,16 @@ def _summary(status_body):
 
 
 async def _run_once():
-    started_at = datetime.now(timezone.utc)
-    observation_date = (started_at - timedelta(days=2)).date()
-    expiry = started_at + timedelta(minutes=5)
-    approvals = WikimediaOnlyApprovals(expiry)
-    user_agent_override = os.environ.get("WIKIMEDIA_USER_AGENT")
-    settings_env = {"TREND_SCOUT_ENVIRONMENT": "local"}
-    if user_agent_override is not None:
-        settings_env["WIKIMEDIA_USER_AGENT"] = user_agent_override
-    settings = Settings.from_environment(settings_env)
-    if not _CONTACT.search(settings.wikimedia_user_agent):
-        return {"status": "BLOCKED", "reason": "USER_AGENT_CONTACT_INVALID"}
-    if approvals.current(WIKIMEDIA_SOURCE_ID) is None or any(
-        approvals.current(source_id) is not None for source_id in _OTHER_SOURCES
-    ):
-        return {"status": "BLOCKED", "reason": "SOURCE_ISOLATION_INVALID"}
-
-    capability = source_capability(WIKIMEDIA_SOURCE_ID)
-    endpoint = capability.endpoint + f"/{observation_date:%Y/%m/%d}"
-    expected_path = urlsplit(endpoint).path
-    live_request_count = 0
-    live_http_status = None
-    unexpected_hosts = []
-    database = local_ledger.DIRECTORY / "ledger.sqlite"
-    ledger_was_absent = not database.exists()
-    original_send = httpx.AsyncHTTPTransport.handle_async_request
-
-    async def counted_send(transport, request):
-        nonlocal live_request_count, live_http_status
-        host = request.url.host
-        if host == "wikimedia.org":
-            if (request.method != "GET" or request.url.scheme != "https"
-                    or request.url.path != expected_path or request.url.query):
-                raise RuntimeError("Wikimedia outbound request exceeded the approved scope")
-            live_request_count += 1
-            response = await original_send(transport, request)
-            live_http_status = response.status_code
-            return response
-        if host not in {"127.0.0.1", "localhost"}:
-            unexpected_hosts.append(host)
-            raise RuntimeError("unexpected outbound host")
-        return await original_send(transport, request)
-
-    fixed_clock = lambda: started_at
-
-    def checkpoint_grant(source_id, now):
-        return CheckpointGrant(
-            source_id, "LIVE", "d6.2-wikimedia-volatile-120s",
-            now + timedelta(minutes=5), 120, True,
-        )
-
-    def composition_factory():
-        return local_live_composition(
-            credentials=NoProviderCredentials(),
-            approvals=approvals,
-            user_agent=settings.wikimedia_user_agent,
-            resolve_checkpoint_grant=checkpoint_grant,
-            resolve_processing_grants=lambda _now: (),
-            utcnow=fixed_clock,
-        )
-
-    application = create_local_live_app(
-        enabled=True, workers=1, composition_factory=composition_factory, settings=settings,
-    )
-    output = {
-        "status": "BLOCKED",
-        "preflight": {
-            "utc_observation_date": observation_date.isoformat(),
-            "source_id": WIKIMEDIA_SOURCE_ID,
-            "endpoint": endpoint,
-            "user_agent_contact_valid": True,
-            "approval_id": "D6.2-WIKIMEDIA-ONE-REQUEST-2026-11-12",
-            "approval_valid": True,
-            "processing_grant": "ABSENT",
-            "other_sources_approved": False,
-            "initial_ledger_file": "ABSENT" if ledger_was_absent else "PRESENT",
-        },
-        "provider_request_count": 0,
-        "http_status": None,
-    }
-
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-    config = uvicorn.Config(
-        application, host="127.0.0.1", port=port, workers=1,
-        proxy_headers=False, access_log=False, log_level="critical",
-    )
-    server = uvicorn.Server(config)
-    server_task = None
-    try:
-        with patch_transport(counted_send):
-            server_task = asyncio.create_task(server.serve())
-            for _ in range(400):
-                if server.started:
-                    break
-                if server_task.done():
-                    return output
-                await asyncio.sleep(0.025)
-            if not server.started:
-                return output
-
-            state = wikimedia_reservation_state(database)
-            output["preflight"]["quota_reservation_state"] = state
-            if state not in {"NO_LEDGER", "NO_RESERVATION"}:
-                output["reason"] = "WIKIMEDIA_QUOTA_ALREADY_RESERVED"
-                return output
-
-            active_policy = local_smoke_policy()
-            wiki_limit = active_policy.pools["wikimedia"]
-            if (wiki_limit.daily_requests != 1 or wiki_limit.monthly_requests != 1
-                    or wiki_limit.daily_cost_units != 1 or wiki_limit.monthly_cost_units != 1
-                    or active_policy.max_starts_per_window != 1
-                    or active_policy.window_seconds != 86_400):
-                output["reason"] = "LOCAL_QUOTA_POLICY_MISMATCH"
-                return output
-            output["preflight"]["local_quota_policy"] = "ONE_REQUEST_ONE_ATTEMPT_24H"
-            output["preflight"]["source_isolation"] = "WIKIMEDIA_ONLY"
-            output["preflight"]["processing_grant"] = "ABSENT"
-            print(json.dumps({"preflight": output["preflight"]}, sort_keys=True), flush=True)
-
-            timeout = httpx.Timeout(25.0, connect=5.0)
-            async with httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}", timeout=timeout,
-                follow_redirects=False, trust_env=False,
-            ) as client:
-                key = f"d6-2-wikimedia-{uuid4().hex}"
-                accepted = await client.post(
-                    "/api/v1/fetches", json={}, headers={"Idempotency-Key": key},
-                )
-                output["local_post_status"] = accepted.status_code
-                if accepted.status_code != 202:
-                    output["reason"] = "LOCAL_FETCH_NOT_ACCEPTED"
-                    return output
-                accepted_body = accepted.json()
-                status_url = accepted_body.get("status_url")
-                if not isinstance(status_url, str) or not status_url.startswith("/api/v1/fetches/"):
-                    output["reason"] = "LOCAL_STATUS_URL_INVALID"
-                    return output
-                status_response = None
-                for attempt in range(10):
-                    status_response = await client.get(status_url)
-                    if status_response.status_code != 200:
-                        break
-                    status_body = status_response.json()
-                    if status_body.get("terminal") is True:
-                        break
-                    if attempt < 9:
-                        await asyncio.sleep(0.25)
-                if status_response is None or status_response.status_code != 200:
-                    output["reason"] = "LOCAL_STATUS_FAILED"
-                    return output
-                output["local_status_http_status"] = status_response.status_code
-                output["fetch"] = _summary(status_response.json())
-                output["provider_request_count"] = live_request_count
-                output["http_status"] = live_http_status
-                output["unexpected_hosts"] = unexpected_hosts
-                output["quota_reservation_state_after"] = wikimedia_reservation_state(database)
-                wiki_row = next((row for row in output["fetch"]["sources"]
-                                 if row["source_id"] == WIKIMEDIA_SOURCE_ID), {})
-                success = (
-                    live_request_count == 1 and live_http_status == 200
-                    and not unexpected_hosts
-                    and wiki_row.get("status") == "SUCCESS"
-                    and wiki_row.get("data_mode") == "LIVE"
-                    and type(wiki_row.get("record_count")) is int
-                    and wiki_row["record_count"] > 0
-                    and output["quota_reservation_state_after"] == "RESERVED"
-                    and output["fetch"].get("discovery_candidate_count") == 0
-                )
-                output["status"] = "WIKIMEDIA_LIVE_SMOKE_VERIFIED" if success else "PARTIAL"
-                output["local_status_http_status"] = status_response.status_code
-                return output
-    except Exception as exc:
-        output["status"] = "FAILED_OR_BLOCKED"
-        output["reason"] = "RUNTIME_ERROR"
-        output["error_type"] = type(exc).__name__
-        output["provider_request_count"] = live_request_count
-        output["http_status"] = live_http_status
-        output["unexpected_hosts"] = unexpected_hosts
-        if database.exists():
-            output["quota_reservation_state_after"] = wikimedia_reservation_state(database)
-        return output
-    finally:
-        if server_task is not None and not server_task.done():
-            server.should_exit = True
-            try:
-                await asyncio.wait_for(server_task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                server_task.cancel()
-
-
-def patch_transport(handler):
-    """Patch request dispatch for this single-process activation run."""
-    from unittest.mock import patch
-
-    return patch.object(httpx.AsyncHTTPTransport, "handle_async_request", handler)
+    """Legacy activation entrypoint; always blocks before app or transport creation."""
+    return legacy_approval_preflight()
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="One-request Wikimedia-only D6.2 LIVE smoke")
+    parser = argparse.ArgumentParser(description="Retired D6.2 Wikimedia LIVE launcher")
     parser.add_argument("--owner-approved-wikimedia-only", action="store_true")
-    args = parser.parse_args(argv)
-    if not args.owner_approved_wikimedia_only:
-        print('{"status":"BLOCKED","reason":"EXPLICIT_D6_2_OPT_IN_REQUIRED"}')
-        return 2
-    logging.disable(logging.CRITICAL)
-    try:
-        result = asyncio.run(_run_once())
-    except Exception:
-        result = {
-            "status": "FAILED_OR_BLOCKED",
-            "reason": "PRE_REQUEST_RUNTIME_EXCEPTION",
-            "provider_request_count": 0,
-        }
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result.get("status") == "WIKIMEDIA_LIVE_SMOKE_VERIFIED" else 1
+    parser.parse_args(argv)
+    print(json.dumps(legacy_approval_preflight(), sort_keys=True))
+    return 1
 
 
 if __name__ == "__main__":
