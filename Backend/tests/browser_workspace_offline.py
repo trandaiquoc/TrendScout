@@ -207,6 +207,7 @@ CHECK = r"""<script>
     const mergeSection=[...document.querySelectorAll('.collection-manage-section')].find(section=>section.querySelector('.collection-picker'));
     mergeSection?.querySelector('.button-primary')?.click();
     check(document.querySelector('#workbench-collection-dialog')?.textContent.includes('Fixture Collection B'),'selected merge destination reaches the review step');
+    check(document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]')?.id,'merge review dialog exposes its title to assistive technology');
     document.querySelector('#workbench-collection-dialog button')?.click();
     applyLocale('en');document.documentElement.dataset.theme='dark';await wait(60);
     document.querySelector('.workbench-context-button')?.click();
@@ -220,17 +221,20 @@ CHECK = r"""<script>
     applyLocale('vi');document.documentElement.dataset.theme='light';await wait(40);
     window.__checkpoint='collection create';document.querySelector('#collection-create').click();
     let collectionForm=document.querySelector('#workbench-collection-dialog form');
+    check(document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]')?.id,'create dialog exposes its title to assistive technology');
     collectionForm.elements.namedItem('name').value='Fixture created Collection';
     collectionForm.requestSubmit();await wait(60);
     check(testRequests.some(request=>request.path==='/api/v1/collections'&&request.method==='POST'&&JSON.parse(request.body).name==='Fixture created Collection'),'Collection creation submits the entered name to its API');
     window.__checkpoint='collection edit open';document.querySelector('.workbench-context-button')?.click();await wait(20);
     document.querySelector('.collection-manage-actions button')?.click();await wait(20);
     collectionForm=document.querySelector('#workbench-collection-dialog form');
+    check(document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]')?.id,'edit dialog exposes its title to assistive technology');
     collectionForm.elements.namedItem('name').value='Fixture renamed Collection';
     collectionForm.requestSubmit();await wait(60);
     check(testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='PATCH'&&JSON.parse(request.body).name==='Fixture renamed Collection'),'Collection editing saves the changed name');
     window.__checkpoint='collection delete open';document.querySelector('.workbench-context-button')?.click();await wait(20);
     document.querySelector('.collection-danger-button')?.click();await wait(20);
+    check(document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]')?.id,'delete confirmation exposes its title to assistive technology');
     document.querySelector('#workbench-collection-dialog .button-primary')?.click();await wait(60);
     check(testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='DELETE'),'Collection deletion requires and submits a separate confirmation');
     window.__checkpoint='bulk assignment';const keywordCheck=document.querySelector('#workbench-rows tr input[type=checkbox]');

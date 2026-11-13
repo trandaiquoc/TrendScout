@@ -180,6 +180,8 @@ def main():
             press(" ", "Space", 32, " ")
             if not evaluate("document.querySelector('#workbench-collection-dialog').open && document.activeElement.name==='name'"):
                 raise RuntimeError("keyboard activation did not open the Collection form and focus its name field: " + str(evaluate("JSON.stringify({active:document.activeElement?.id,name:document.activeElement?.name,button:document.querySelector('#collection-create')?.outerHTML,dialog:document.querySelector('#workbench-collection-dialog')?.open,view:document.querySelector('[data-view=collections]')?.hidden})")))
+            if not evaluate("document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]').id"):
+                raise RuntimeError("Collection form dialog has no accessible title")
             call("Input.insertText", {"text": "Keyboard-created Collection"}, session)
             press("Tab", "Tab", 9)
             if evaluate("document.activeElement.name") != "description":
@@ -216,6 +218,8 @@ def main():
             press(" ", "Space", 32, " ")
             if not evaluate("document.querySelector('#workbench-collection-dialog form [name=name]')?.value==='Fixture Collection A'"):
                 raise RuntimeError("keyboard activation did not open the edit form with the current Collection name")
+            if not evaluate("document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]').id"):
+                raise RuntimeError("Collection edit dialog has no accessible title")
             press("a", "KeyA", 65, modifiers=2)
             call("Input.insertText", {"text": "Keyboard-edited Collection"}, session)
             for _ in range(6):
@@ -239,6 +243,8 @@ def main():
             press(" ", "Space", 32, " ")
             if not evaluate("document.querySelector('#workbench-collection-dialog h2')?.textContent.includes('Xóa bộ sưu tập này')"):
                 raise RuntimeError("keyboard activation did not open the delete-impact confirmation")
+            if not evaluate("document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]').id"):
+                raise RuntimeError("Collection delete dialog has no accessible title")
             evaluate("document.querySelector('#workbench-collection-dialog .button-primary').focus()")
             press(" ", "Space", 32, " ")
             for _ in range(60):
@@ -267,6 +273,17 @@ def main():
                 )
             if evaluate("document.querySelector('#detail-dialog').open"):
                 raise RuntimeError("Escape did not close the dialog")
+
+            evaluate("document.querySelector('#workbench-rows button').click()")
+            for _ in range(60):
+                if evaluate("document.querySelector('#workbench-detail')?.open && document.querySelector('#workbench-detail').getAttribute('aria-labelledby')===document.querySelector('#workbench-detail [id$=title]')?.id"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("keyword details dialog did not expose its accessible title")
+            press("Escape", "Escape", 27)
+            if evaluate("document.querySelector('#workbench-detail').open"):
+                raise RuntimeError("Escape did not close keyword details")
 
             evaluate("location.hash='#sources';window.dispatchEvent(new Event('hashchange'))")
             for _ in range(60):
