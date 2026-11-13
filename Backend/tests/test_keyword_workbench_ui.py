@@ -55,6 +55,16 @@ class KeywordWorkbenchUITests(unittest.TestCase):
         self.assertIn("'workbench.rows-unavailable'", english)
         self.assertIn("'workbench.rows-unavailable'", vietnamese)
 
+    def test_collection_tree_keeps_scroll_and_focus_when_it_renders_again(self):
+        module = (PUBLIC / "modules" / "keyword-workbench.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
+        self.assertIn("const scrollTop=sidebar?.scrollTop??0", module)
+        self.assertIn("sidebar.scrollTop=scrollTop", module)
+        self.assertIn("replacement?.focus({preventScroll:true})", module)
+        self.assertIn("toggle.focus({preventScroll:true})", module)
+        self.assertIn("window.scrollTo(pageX,pageY)", module)
+        self.assertIn("border-left: 1px solid var(--line)", css)
+
 
 if __name__ == "__main__":
     unittest.main()

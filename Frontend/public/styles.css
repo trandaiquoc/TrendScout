@@ -506,8 +506,8 @@ button:disabled { cursor: not-allowed; }
 .workbench-tree { display: grid; gap: 2px; }
 .workbench-tree-item { display: flex; align-items: center; justify-content: space-between; flex: 1; min-width: 0; min-height: 37px; padding: 7px 8px; border: 0; border-radius: 7px; color: var(--ink); background: transparent; text-align: left; cursor: pointer; font: inherit; font-size: 12px; }
 .workbench-tree-item:hover, .workbench-tree-item.is-active { background: var(--surface-soft); color: var(--accent-strong, var(--accent)); }
-.workbench-tree-row { display: flex; align-items: center; gap: 2px; padding-left: calc(var(--tree-depth, 0) * 12px); }
-.workbench-tree-children { display: grid; }
+.workbench-tree-row { display: flex; align-items: center; gap: 2px; padding-left: calc(var(--tree-depth, 0) * 14px); }
+.workbench-tree-children { display: grid; margin-left: 12px; padding-left: 4px; border-left: 1px solid var(--line); }
 .workbench-disclosure, .workbench-disclosure-spacer { display: grid; place-items: center; flex: 0 0 26px; width: 26px; height: 32px; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
 .workbench-disclosure:hover { background: var(--surface-soft); }
 .workbench-tree-count { flex: 0 0 auto; margin-left: 6px; color: var(--muted); font-size: 10px; }

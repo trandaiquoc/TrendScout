@@ -13,7 +13,7 @@ const labels = (key, fallback = key) => { const value = t(key); return value ===
 const formatted = (key, values, fallback = key) => { const value = t(key, values); return value === key ? fallback.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => String(values[name] ?? '')) : value; };
 const number = (value) => formatNumber(value, getLocale());
 const date = (value) => value ? formatDate(value, getLocale()) : labels('common.unavailable', '—');
-const state = { items: [], suggestions: [], summary: null, rows: [], total: null, offset: 0, limit: 25, sequence: 0,
+const state = { items: [], suggestions: [], summary: null, rows: [], total: null, offset: 0, limit: 25, sequence: 0, treeRenderSequence: 0,
   selected: new Set(), allFiltered: false, mode: 'AUTO_CREATE', expanded: new Set(), query: '',
   collectionId: '', filterState: 'all', classification: 'all', source: '', evidence: 'all', sort: 'recent',
   dateFrom: '', dateTo: '', detailSequence: 0, collectionSequence: 0, mobileOpen: false };
@@ -140,10 +140,12 @@ function updateRoute() {
   window.history.replaceState(null,'',url.pathname+url.search+url.hash);
 }
 function changedFilters() { state.selected.clear(); state.allFiltered=false; updateRoute(); loadRows(); }
-function selectView(id, filter) { state.collectionId=id; state.filterState=filter; state.offset=0; $('#workbench-state').value=filter; state.selected.clear(); state.allFiltered=false; renderTree(); updateRoute(); loadRows(); setMobileOpen(false); }
+function selectView(id, filter) { state.collectionId=id; state.filterState=filter; state.offset=0; $('#workbench-state').value=filter; state.selected.clear(); state.allFiltered=false; if(window.innerWidth<=900&&state.mobileOpen)setMobileOpen(false); renderTree(); updateRoute(); loadRows(); }
 function nameOf(item) { const local=t(`topic.${item.category_id}`); return item.category_id&&local!==`topic.${item.category_id}`?local:item.name; }
 function renderTree() {
   const tree=$('#workbench-tree'); if(!tree) return;
+  const sidebar=tree.closest('.workbench-sidebar');const scrollTop=sidebar?.scrollTop??0;const pageX=window.scrollX,pageY=window.scrollY;const renderSequence=++state.treeRenderSequence;
+  const focused=document.activeElement;const focusedRow=focused?.closest?.('[data-collection-node]');const focusId=focusedRow?.dataset.collectionId;const focusClass=focused?.classList.contains('workbench-disclosure')?'workbench-disclosure':focused?.classList.contains('workbench-tree-item')?'workbench-tree-item':focused?.classList.contains('workbench-context-button')?'workbench-context-button':'';
   const search=$('input[type="search"]',tree.parentElement)?.value.trim().toLocaleLowerCase()||'';
   for(const node of [...tree.querySelectorAll('[data-collection-node],.workbench-tree-children')]) node.remove();
   const children=new Map(); for(const item of state.items){const key=item.parent_id||''; if(!children.has(key))children.set(key,[]); children.get(key).push(item);}
@@ -159,8 +161,10 @@ function renderTree() {
        if(descendants.length&&(state.expanded.has(item.id)||search&&descendantMatch)){const group=make('div','','workbench-tree-children');group.setAttribute('role','group');append(group,item.id,depth+1);parent.append(group);}
     }};
   append(tree); for(const node of tree.querySelectorAll('[data-virtual]'))node.classList.toggle('is-active',node.dataset.virtual==='all'?!state.collectionId&&state.filterState==='all':!state.collectionId&&state.filterState==='unassigned');
+  const replacement=focusId&&focusClass?[...tree.querySelectorAll('[data-collection-node]')].find(row=>row.dataset.collectionId===focusId)?.querySelector(`.${focusClass}`):null;
+  requestAnimationFrame(()=>{if(renderSequence!==state.treeRenderSequence)return;if(sidebar)sidebar.scrollTop=scrollTop;window.scrollTo(pageX,pageY);replacement?.focus({preventScroll:true});});
 }
-function setMobileOpen(open){state.mobileOpen=open;const sidebar=$('#workbench-sidebar'),toggle=$('#workbench-filter-toggle'),scrim=$('.workbench-scrim'); sidebar?.classList.toggle('is-open',open);if(sidebar)sidebar.inert=window.innerWidth<=900&&!open;if(scrim)scrim.hidden=!open; if(toggle){toggle.setAttribute('aria-expanded',String(open));if(open)sidebar.querySelector('input')?.focus();else toggle.focus();}}
+function setMobileOpen(open){state.mobileOpen=open;const sidebar=$('#workbench-sidebar'),toggle=$('#workbench-filter-toggle'),scrim=$('.workbench-scrim'); sidebar?.classList.toggle('is-open',open);if(sidebar)sidebar.inert=window.innerWidth<=900&&!open;if(scrim)scrim.hidden=!open; if(toggle){toggle.setAttribute('aria-expanded',String(open));if(open)sidebar.querySelector('input')?.focus({preventScroll:true});else toggle.focus({preventScroll:true});}}
 
 async function refresh() {
   try {
