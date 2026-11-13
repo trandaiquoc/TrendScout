@@ -109,6 +109,19 @@ def main():
                     raise RuntimeError("evaluation failed: " + expression)
                 return result["result"].get("value")
 
+            def press(key, code, virtual_key, text=None):
+                for event in ("keyDown", "keyUp"):
+                    params = {
+                        "type": event,
+                        "key": key,
+                        "code": code,
+                        "windowsVirtualKeyCode": virtual_key,
+                        "nativeVirtualKeyCode": virtual_key,
+                    }
+                    if text is not None and event == "keyDown":
+                        params["text"] = text
+                    call("Input.dispatchKeyEvent", params, session)
+
             for _ in range(150):
                 if evaluate(
                     "document.readyState==='complete' && !document.documentElement.classList.contains('js-pending')"
@@ -160,6 +173,40 @@ def main():
                 raise RuntimeError("Enter did not navigate to Collections")
             if evaluate("document.querySelector('#app-shell').classList.contains('menu-open')"):
                 raise RuntimeError("navigation did not close the mobile menu")
+            time.sleep(0.15)
+
+            evaluate("document.querySelector('#collection-create').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#workbench-collection-dialog').open && document.activeElement.name==='name'"):
+                raise RuntimeError("keyboard activation did not open the Collection form and focus its name field: " + str(evaluate("JSON.stringify({active:document.activeElement?.id,name:document.activeElement?.name,button:document.querySelector('#collection-create')?.outerHTML,dialog:document.querySelector('#workbench-collection-dialog')?.open,view:document.querySelector('[data-view=collections]')?.hidden})")))
+            call("Input.insertText", {"text": "Keyboard-created Collection"}, session)
+            press("Tab", "Tab", 9)
+            if evaluate("document.activeElement.name") != "description":
+                raise RuntimeError("Collection form Tab order did not advance from name to description")
+            press("Escape", "Escape", 27)
+            if evaluate("document.querySelector('#workbench-collection-dialog').open || document.activeElement.id!=='collection-create'"):
+                raise RuntimeError("Escape did not close the Collection form and restore focus")
+
+            evaluate("document.querySelector('#collection-create').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#workbench-collection-dialog').open && document.activeElement.name==='name'"):
+                raise RuntimeError("keyboard did not reopen the Collection form after focus restoration")
+            call("Input.insertText", {"text": "Keyboard-created Collection"}, session)
+            for _ in range(7):
+                press("Tab", "Tab", 9)
+            if not evaluate("document.activeElement.matches('#workbench-collection-dialog button[type=submit]')"):
+                raise RuntimeError("Collection form keyboard sequence did not reach Save: " + str(evaluate("JSON.stringify({active:document.activeElement?.outerHTML,fields:[...document.querySelectorAll('#workbench-collection-dialog input,#workbench-collection-dialog textarea,#workbench-collection-dialog select,#workbench-collection-dialog button')].map(e=>({tag:e.tagName,name:e.name,type:e.type,text:e.textContent}))})")))
+            press(" ", "Space", 32, " ")
+            for _ in range(60):
+                if evaluate("!document.querySelector('#workbench-collection-dialog').open"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("Enter did not submit the keyboard-created Collection")
+            if not evaluate("window.testRequests.some(request=>request.path==='/api/v1/collections'&&request.method==='POST'&&JSON.parse(request.body).name==='Keyboard-created Collection')"):
+                raise RuntimeError("keyboard-created Collection was not sent to the Collection API")
+            if evaluate("document.activeElement.id") != "collection-create":
+                raise RuntimeError("closing the Collection form did not restore focus to its opener")
 
             evaluate("document.querySelector('#detail-dialog').showModal()")
             if not evaluate("document.querySelector('#detail-dialog').open"):
@@ -232,7 +279,7 @@ def main():
             if evaluate("document.documentElement.dataset.theme!=='light'"):
                 raise RuntimeError("Space did not activate the theme control")
             print(
-                "Chrome DevTools: keyboard navigation, Escape dialog, 320/375px all views, theme and locale: PASS"
+                "Chrome DevTools: keyboard navigation and Collection form create/escape/focus restore, detail Escape, 320/375px all views, theme and locale: PASS"
             )
         finally:
             if os.name == "nt":
