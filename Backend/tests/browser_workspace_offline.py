@@ -1,4 +1,4 @@
-"""Offline Chrome checks for the bilingual, read-only dashboard."""
+"""Offline Chrome checks for the bilingual workspace with scoped API fixtures."""
 
 import json
 import os
@@ -13,11 +13,24 @@ PUBLIC = ROOT / "Frontend" / "public"
 RUN_A = "a" * 32
 
 FAKE = r"""<script>
-window.testRequests=[];window.pwned=false;
+window.testRequests=[];window.pwned=false;window.fixtureResearch=[];
 window.fetch=(path,opts={})=>{
-  const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{}};
+  const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
   testRequests.push(request);
   const p=request.path;
+  if(p==='/api/v1/collections'&&request.method==='POST')return Promise.resolve(new Response(JSON.stringify({item:{id:'d'.repeat(36),name:JSON.parse(request.body).name,created_by:'USER'}}),{status:201}));
+  if(p==='/api/v1/collections/collection-a'&&request.method==='PATCH')return Promise.resolve(new Response(JSON.stringify({item:{id:'collection-a',name:JSON.parse(request.body).name||'Fixture Collection A'}}),{status:200}));
+  if(p==='/api/v1/collections/collection-a'&&request.method==='DELETE')return Promise.resolve(new Response(JSON.stringify({deleted:true}),{status:200}));
+  if(p==='/api/v1/collections/bulk'&&request.method==='POST')return Promise.resolve(new Response(JSON.stringify({updated:1,action:JSON.parse(request.body).action}),{status:200}));
+  if(p==='/api/v1/research'&&request.method==='POST'){
+    const item={...JSON.parse(request.body),id:'research-fixture',created_at:'2026-01-08T00:00:00Z',updated_at:'2026-01-08T00:00:00Z'};
+    window.fixtureResearch=[item];
+    return Promise.resolve(new Response(JSON.stringify({item}),{status:201}));
+  }
+  if(p==='/api/v1/research/research-fixture'&&request.method==='PATCH'){
+    window.fixtureResearch=window.fixtureResearch.map(item=>({...item,...JSON.parse(request.body)}));
+    return Promise.resolve(new Response(JSON.stringify({item:window.fixtureResearch[0]}),{status:200}));
+  }
   if(p==='/api/timeout-json')return Promise.resolve({ok:true,json:()=>opts.signal.aborted?Promise.reject(new Error('aborted')):new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
   if(p==='/api/network-fail')return Promise.reject(new TypeError('offline network failure'));
   if(p==='/api/auth-fail')return Promise.resolve(new Response('{}',{status:401}));
@@ -57,7 +70,12 @@ window.fetch=(path,opts={})=>{
       {id:'collection-child',name:'Saved child topics',description:'Child records',parent_id:'collection-parent',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false}
     ],suggestions:[],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
   }),{status:200}));
-  if(p.startsWith('/api/v1/datasets/latest/keywords?'))return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
+  if(p.startsWith('/api/v1/datasets/latest/keywords?')){
+    const q=new URL(p,'https://local.invalid').searchParams;
+    const empty=q.get('q')==='empty';
+    return Promise.resolve(new Response(JSON.stringify({items:empty?[]:[{id:'c'.repeat(64),keyword:'Fixture keyword',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,classification_status:'CLASSIFIED',memberships:[],evidence:{views_ceil:12}}],total:empty?0:1,next_offset:null}),{status:200}));
+  }
+  if(p.startsWith('/api/v1/research?'))return Promise.resolve(new Response(JSON.stringify({items:window.fixtureResearch,total:window.fixtureResearch.length}),{status:200}));
   if(p.includes('/keywords?')){
     const q=new URL(p,'https://local.invalid').searchParams;
     const empty=q.get('q')==='empty';
@@ -175,6 +193,24 @@ CHECK = r"""<script>
     check(darkTrigger?.getAttribute('aria-expanded')==='false','Escape closes the picker in the dark theme');
     document.querySelector('#workbench-collection-dialog button')?.click();
     applyLocale('vi');document.documentElement.dataset.theme='light';await wait(40);
+    window.__checkpoint='collection create';document.querySelector('#collection-create').click();
+    let collectionForm=document.querySelector('#workbench-collection-dialog form');
+    collectionForm.elements.namedItem('name').value='Fixture created Collection';
+    collectionForm.requestSubmit();await wait(60);
+    check(testRequests.some(request=>request.path==='/api/v1/collections'&&request.method==='POST'&&JSON.parse(request.body).name==='Fixture created Collection'),'Collection creation submits the entered name to its API');
+    window.__checkpoint='collection edit open';document.querySelector('.workbench-context-button')?.click();await wait(20);
+    document.querySelector('.collection-manage-actions button')?.click();await wait(20);
+    collectionForm=document.querySelector('#workbench-collection-dialog form');
+    collectionForm.elements.namedItem('name').value='Fixture renamed Collection';
+    collectionForm.requestSubmit();await wait(60);
+    check(testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='PATCH'&&JSON.parse(request.body).name==='Fixture renamed Collection'),'Collection editing saves the changed name');
+    window.__checkpoint='collection delete open';document.querySelector('.workbench-context-button')?.click();await wait(20);
+    document.querySelector('.collection-danger-button')?.click();await wait(20);
+    document.querySelector('#workbench-collection-dialog .button-primary')?.click();await wait(60);
+    check(testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='DELETE'),'Collection deletion requires and submits a separate confirmation');
+    window.__checkpoint='bulk assignment';const keywordCheck=document.querySelector('#workbench-rows tr input[type=checkbox]');
+    if(keywordCheck){keywordCheck.click();document.querySelector('#workbench-action').value='ADD';document.querySelector('#workbench-action').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#workbench-target').value='collection-b';document.querySelector('#workbench-bulk button:last-child').click();await wait(80);}
+    check(testRequests.some(request=>request.path==='/api/v1/collections/bulk'&&request.method==='POST'&&JSON.parse(request.body).action==='ADD'&&JSON.parse(request.body).keyword_ids?.includes('c'.repeat(64))&&JSON.parse(request.body).collection_id==='collection-b'),'bulk assignment sends only the selected keyword to the chosen Collection');
     await go('runs');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
     check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
@@ -219,6 +255,14 @@ CHECK = r"""<script>
     await go('research');
     check(Boolean(document.querySelector('#research-form')&&document.querySelector('#research-records')),'persistent research workflow form and saved-record list');
     check(document.querySelector('[data-view=research]').textContent.includes('nhu cầu thị trường'),'research page keeps commercial evidence boundaries visible');
+    document.querySelector('#research-subject').value='Fixture product idea';
+    document.querySelector('#research-hypothesis').value='A testable hypothesis based on the saved trend signal.';
+    document.querySelector('#research-market-evidence').value='Evidence required before commercial validation.';
+    document.querySelector('#research-form').requestSubmit();await wait(80);
+    check(testRequests.some(request=>request.path==='/api/v1/research'&&request.method==='POST'&&JSON.parse(request.body).subject==='Fixture product idea'),'Product Research saves a user-authored hypothesis and evidence');
+    check(document.querySelector('#research-records .research-record h3')?.textContent==='Fixture product idea','saved hypothesis appears in the research list');
+    const researchStatus=document.querySelector('#research-records select');researchStatus.value='RESEARCHING';researchStatus.dispatchEvent(new Event('change',{bubbles:true}));await wait(50);
+    check(testRequests.some(request=>request.path==='/api/v1/research/research-fixture'&&request.method==='PATCH'&&JSON.parse(request.body).status==='RESEARCHING'),'Product Research status persists through its update action');
     check(!document.querySelector('[data-nav=refresh]'),'scheduler navigation is absent');
     check(!document.querySelector('[data-nav=usage]'),'unmeasured AI usage navigation is absent');
     await go('overview');
@@ -275,7 +319,13 @@ CHECK = r"""<script>
     check(testRequests.filter(request=>request.path==='/api/runs/'+'b'.repeat(32)).length===31,'bounded run polling');
     check(document.querySelector('#global-notice').textContent.includes('30 lần kiểm tra'),'polling stop status');
     window.setTimeout=nativeTimeout;
-    check(testRequests.every(request=>request.method==='GET'),'offline browser workflow made no write or Fetch requests');
+    const writes=testRequests.filter(request=>request.method!=='GET');
+    check(writes.length===6&&writes.every(request=>[
+      'POST /api/v1/collections','PATCH /api/v1/collections/collection-a',
+      'DELETE /api/v1/collections/collection-a','POST /api/v1/collections/bulk',
+      'POST /api/v1/research','PATCH /api/v1/research/research-fixture'
+    ].includes(request.method+' '+request.path)),'offline browser writes are limited to the four exercised Collection fixture actions');
+    check(!testRequests.some(request=>request.path.startsWith('/api/v1/fetches')),'offline browser workflow did not submit a provider Fetch');
     check(!testRequests.some(request=>/token|secret|credential/i.test(JSON.stringify(request.headers))),'no credential header');
     check(!testRequests.some(request=>request.path==='/api/config'),'no auth-capability inference from config');
     check(localStorage.getItem('trendscout.theme')==='light','light preference persisted');
@@ -291,7 +341,7 @@ CHECK = r"""<script>
       return;
     }
     window.name='d2-reload';location.reload();return;
-  }catch(error){errors.push('exception: '+String(error));}
+  }catch(error){errors.push('exception at '+(window.__checkpoint||'initial workflow')+': '+String(error));}
   document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');
 })();
 </script>"""
@@ -366,7 +416,7 @@ def main():
             print(
                 "Chrome "
                 + str(width)
-                + "px, locale/theme persistence, all views, read-only API and XSS: PASS"
+                + "px, locale/theme, all views, Collection CRUD/bulk and Research fixtures, no Fetch, XSS: PASS"
             )
 
 
