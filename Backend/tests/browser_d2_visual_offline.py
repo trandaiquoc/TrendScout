@@ -15,6 +15,7 @@ KEYWORD_ID = "c" * 64
 
 FAKE = r"""<script>
 window.fetch=(path,options={})=>{
+  window.fetchRequests=(window.fetchRequests||[]).concat(String(path));
   const value=String(path).split('?')[0];
   if(value==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
   if(value==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({contract_version:'1.0',environment_mode:'test',read_only:true,authentication_required:false,public_fetch_enabled:false,fetch_enabled:false,fetch_block_reason:'FEATURE_DISABLED',data_mode:'SYNTHETIC',sources:[
@@ -23,7 +24,7 @@ window.fetch=(path,options={})=>{
     {source_id:'google_web_serp',display_name:'Google Search',icon:'G',category:'search_engines',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in sampled web search results'},market_scope:'US localization filter',documentation_url:'https://serpapi.com/search-api'},
     {source_id:'bing_web_serp',display_name:'Bing Search',icon:'B',category:'search_engines',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in sampled web search results'},market_scope:'US localization filter',documentation_url:'https://serpapi.com/search-api'}
   ]}),{status:200}));
-  if(value==='/api/v1/analytics/overview')return Promise.resolve(new Response(JSON.stringify({keyword_totals:{unique:3,eligible:3,excluded:0,classified:2,ambiguous:0,unknown:1,ineligible:0,unclassified:1},active_sources:[],source_volume:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}],algorithm_distribution:[{algorithm_id:'observed-volume-rank',version:'v3',status:'COMPLETED',count:3}],algorithm_effectiveness:{status:'NOT_YET_EVALUATED',reason:'No comparable labeled historical evaluation is stored.'},source_operations:[],multi_source_coverage:{status:'INSUFFICIENT_SOURCES',sources:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}]},observations_over_time:[{source:'wikimedia_pageviews_top_per_country',observation_date:'2026-11-10',observed:3,unavailable:0}],top_observed:[{rank:1,keyword:'Example topic',metric:'views_ceil',unit:'approx_pageviews_upper_bound',observed_value:8400}],top_observed_context:{source:'wikimedia_pageviews_top_per_country',project:'en.wikipedia',observation_date:'2026-11-10',cohort_size:3,scope:['wikimedia_pageviews_top_per_country','US','all-access','en.wikipedia','views_ceil','approx_pageviews_upper_bound'],quality_flags:['CENSORED_TOP_LIST','SYNTHETIC_FIXTURE']},last_successful_fetch:{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',age_seconds:3600}}),{status:200}));
+  if(value==='/api/v1/analytics/overview')return Promise.resolve(new Response(JSON.stringify({keyword_totals:{unique:3,eligible:3,excluded:0,classified:2,ambiguous:0,unknown:1,ineligible:0,unclassified:1},active_sources:[],source_volume:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}],algorithm_distribution:[{algorithm_id:'observed-volume-rank',version:'v3',status:'COMPLETED',count:3},{algorithm_id:'observed-volume-rank',version:'v3',status:'SKIPPED',count:1}],algorithm_effectiveness:{status:'NOT_YET_EVALUATED',reason:'No comparable labeled historical evaluation is stored.'},source_operations:[{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',source_manifest:[{source_id:'wikimedia_pageviews_top_per_country',status:'PARTIAL',accepted_records:3,record_count:4}]}],multi_source_coverage:{status:'INSUFFICIENT_SOURCES',sources:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}]},observations_over_time:[{source:'wikimedia_pageviews_top_per_country',observation_date:'2026-11-10',observed:3,unavailable:0}],top_observed:[{rank:1,keyword:'Example topic',metric:'views_ceil',unit:'approx_pageviews_upper_bound',observed_value:8400}],top_observed_context:{source:'wikimedia_pageviews_top_per_country',project:'en.wikipedia',observation_date:'2026-11-10',cohort_size:3,scope:['wikimedia_pageviews_top_per_country','US','all-access','en.wikipedia','views_ceil','approx_pageviews_upper_bound'],quality_flags:['CENSORED_TOP_LIST','SYNTHETIC_FIXTURE']},last_successful_fetch:{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',age_seconds:3600}}),{status:200}));
   if(value==='/api/v1/sources/library')return Promise.resolve(new Response(JSON.stringify({audit_date:'2026-11-13',items:Array.from({length:81},(_,i)=>({source_id:'candidate_'+String(i+1).padStart(2,'0'),display_name:'Research candidate '+(i+1),category:'Research library'}))}),{status:200}));
   if(value==='/api/v1/runtime')return Promise.resolve(new Response(JSON.stringify({embedding:{package:'fastembed',package_version:'0.9.1',model:'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',model_version:'fastembed-0.9.1',inference_device:'CPU',cache_vectors:3,vector_dimensions:'384',classification_policy_version:'contextual-classifier-v1.2',taxonomy_version:'topics-v1.4'},llm:{status:'NOT_CONFIGURED',usage_instrumented:false},scheduler:{status:'DISABLED',implemented:true,enabled:false,worker_running:false,reason:'Disabled in backend configuration.'},system:{status:'AVAILABLE',environment_profile:'local',run_mode:'synthetic',read_only:true,configured_sources:1},storage:{status:'AVAILABLE',engine:'SQLITE',integrity:'OK',keyword_records:124,database_size_bytes:153600,read_only:true}}),{status:200}));
   if(value==='/api/v1/scheduler')return Promise.resolve(new Response(JSON.stringify({items:[],implemented:true,enabled:false,worker_running:false}),{status:200}));
@@ -32,7 +33,7 @@ window.fetch=(path,options={})=>{
   if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[],suggestions:[],mode:'SUGGEST_ONLY',summary:{}}),{status:200}));
   if(value==='/api/v1/collections/inbox')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/research')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
-  if(value==='/api/v1/runs/history')return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
+  if(value==='/api/v1/runs/history')return Promise.resolve(new Response(JSON.stringify({items:[{fetch_id:'e'.repeat(32),run_at:'2026-11-11T03:00:00Z',run_type:'FETCH',sources:['wikimedia_pageviews_top_per_country'],status:'PARTIAL',received_record_count:4,retained_keyword_count:3,rejected_record_count:1,mode:'SYNTHETIC',error_code:'SOURCE_PARTIAL',stage:'DONE',quality_flags:['SYNTHETIC_FIXTURE']}],total:1,next_offset:null}),{status:200}));
   if(value==='/api/v1/datasets/latest/keywords')return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
   if(value==='/api/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')return Promise.resolve(new Response(JSON.stringify({
     run_id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',status:'COMPLETED',keyword_count:124,
@@ -124,6 +125,14 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                 raise RuntimeError("algorithm analysis table exposed a technical identifier instead of the localized registry name")
             if not evaluate("document.querySelectorAll('#analysis-history-chart .chart-row').length===1 && Boolean(document.querySelector('#analysis-history-chart').getAttribute('aria-label'))"):
                 raise RuntimeError("daily observation coverage chart did not render with an accessible label")
+            if not evaluate("document.querySelectorAll('#analysis-source-volume-chart .chart-row').length===1 && document.querySelector('#analysis-source-volume-chart').getAttribute('aria-label').length>0"):
+                raise RuntimeError("source volume chart did not render from persisted fixture data")
+            if not evaluate("document.querySelectorAll('#analysis-algorithm-chart .chart-row').length===1 && document.querySelector('#analysis-algorithm-chart .chart-row').getAttribute('aria-label').includes('Bỏ qua')"):
+                raise RuntimeError("algorithm distribution chart did not show localized outcome counts")
+            if not evaluate("document.querySelectorAll('#analysis-operations-chart .chart-row').length===1 && document.querySelector('#analysis-operations-chart .chart-row').getAttribute('aria-label').includes('Một phần')"):
+                raise RuntimeError("source operations chart did not show persisted partial run status")
+            if not evaluate("document.querySelectorAll('#analysis-coverage-chart .coverage-heatmap-row').length===2 && Boolean(document.querySelector('#analysis-coverage-chart').getAttribute('aria-label'))"):
+                raise RuntimeError("source/date coverage heatmap did not render with an accessible label")
             evaluate("document.querySelector('[data-nav=settings]').click()")
             if not evaluate("window.waitFor(()=>document.querySelector('#settings-schedules .schedule-empty'))", await_promise=True):
                 raise RuntimeError("settings did not show the honest empty scheduler state")
@@ -229,6 +238,23 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             set_preferences("dark", "en")
             go("overview")
             capture("mobile-dark-en-overview.webp", 375)
+
+            set_preferences("light", "vi")
+            for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
+                go(view)
+                for width in (390, 1440):
+                    set_viewport(width, 900 if width > 500 else 820)
+                    if view == "runs" and width == 390 and not evaluate("window.waitFor(()=>Boolean(document.querySelector('#run-history tbody td[data-label]')))", await_promise=True):
+                        raise RuntimeError("Run History fixture did not load for mobile layout review: " + str(evaluate("JSON.stringify({requests:window.fetchRequests.filter(path=>path.includes('/api/v1/runs/history')),content:document.querySelector('#run-history')?.textContent})")))
+                    time.sleep(0.18)
+                    if view == "runs" and width == 390 and not evaluate("Boolean(document.querySelector('#run-history tbody td[data-label]'))"):
+                        raise RuntimeError("mobile Run History rows are missing their column labels")
+                    if view == "runs" and width == 390 and not evaluate("document.querySelector('#run-history').textContent.includes('Dữ liệu một phần') && !document.querySelector('#run-history').textContent.includes('SOURCE_PARTIAL') && !document.querySelector('#run-history').textContent.includes('SYNTHETIC_FIXTURE')"):
+                        raise RuntimeError("Run History exposed raw diagnostic codes instead of a localized partial-data explanation")
+                    if view == "analysis" and width == 390 and not evaluate("Boolean(document.querySelector('#analysis-source-volume tbody td[data-label]'))"):
+                        raise RuntimeError("mobile Analysis rows are missing their column labels")
+                    capture(f"screen-{view}-{width}-vi-light.webp", width, configure=False)
+
             set_viewport(1280)
             go("runs")
             evaluate(
@@ -267,7 +293,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         console_errors.append(message or "console.error")
             if console_errors:
                 raise RuntimeError("Browser console errors: " + " | ".join(console_errors))
-            print("Visual evidence: four theme/locale and screen combinations captured.")
+            print("Visual evidence: Overview matrix and all eight user screens captured at mobile and desktop widths.")
         finally:
             browser.close()
 

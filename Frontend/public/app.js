@@ -118,7 +118,15 @@ function renderDataTable(root, headers, rows, note = '') {
   headers.forEach((label) => headRow.append(element('th', label)));
   head.append(headRow); table.append(head);
   const body = element('tbody');
-  rows.forEach((values) => { const tr = element('tr'); values.forEach((value) => tr.append(element('td', value == null ? t('common.unavailable') : value))); body.append(tr); });
+  rows.forEach((values) => {
+    const tr = element('tr');
+    values.forEach((value, index) => {
+      const cell = element('td', value == null ? t('common.unavailable') : value);
+      cell.dataset.label = headers[index] || '';
+      tr.append(cell);
+    });
+    body.append(tr);
+  });
   table.append(body); const wrap=element('div',null,'table-wrap'); wrap.append(table); root.append(wrap);
 }
 
@@ -147,19 +155,25 @@ async function loadAnalytics() {
         + ' · ' + t('analysis.fetch-age',{age:formatAge(successful.age_seconds)});
     }
     renderDataTable($('#analysis-source-volume'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
-      (data.source_volume || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]), t('analysis.source-volume-note'));
+      (data.source_volume || []).map(row => [localizedSourceName(row.source), number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]), t('analysis.source-volume-note'));
+    renderCountChart($('#analysis-source-volume-chart'), data.source_volume || [], 'source', 'keywords', 'analysis.source-volume-title');
     renderDataTable($('#analysis-algorithms'), [t('analysis.algorithm'), t('analysis.result-state'), t('analysis.count')],
       (data.algorithm_distribution || []).map(row => [localizedAlgorithmName(row.algorithm_id), translatedAlgorithmCode('result', row.status), number(row.count)]), t('analysis.algorithm-distribution-note'));
+    renderAlgorithmDistributionChart(data.algorithm_distribution || []);
+    const effectivenessStatus=data.algorithm_effectiveness?.status || 'NOT_YET_EVALUATED';
     renderDataTable($('#analysis-effectiveness'), [t('analysis.evaluation'), t('analysis.reason')],
-      [[data.algorithm_effectiveness?.status || 'NOT_YET_EVALUATED', data.algorithm_effectiveness?.reason || t('analysis.no-comparable-evaluation')]], t('analysis.effectiveness-note'));
+      [[translatedAlgorithmCode('evaluation',effectivenessStatus), effectivenessStatus==='NOT_YET_EVALUATED'
+        ? t('analysis.no-comparable-evaluation') : (data.algorithm_effectiveness?.reason || t('analysis.no-comparable-evaluation'))]], t('analysis.effectiveness-note'));
     renderDataTable($('#analysis-source-operations'), [t('analysis.fetch-time'), t('analysis.source'), t('analysis.result-state'), t('analysis.records')],
-      (data.source_operations || []).flatMap(run => (run.source_manifest || []).map(source => [run.fetched_at || '—', source.source_id || '—', source.status || run.status || '—', source.accepted_records ?? source.record_count ?? '—'])), t('analysis.source-operations-note'));
+      (data.source_operations || []).flatMap(run => (run.source_manifest || []).map(source => [run.fetched_at ? timestamp(run.fetched_at) : '—', localizedSourceName(source.source_id), localizedStatus('status.',source.status || run.status), source.accepted_records ?? source.record_count ?? '—'])), t('analysis.source-operations-note'));
+    renderSourceOperationsChart(data.source_operations || []);
     renderDataTable($('#analysis-coverage'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
-      (data.multi_source_coverage?.sources || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]),
+      (data.multi_source_coverage?.sources || []).map(row => [localizedSourceName(row.source), number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]),
       data.multi_source_coverage?.status === 'INSUFFICIENT_SOURCES' ? t('analysis.coverage-insufficient') : t('analysis.coverage-caveat'));
+    renderCoverageHeatmap(data.observations_over_time || []);
     renderObservationHistoryChart(data.observations_over_time || []);
     renderDataTable($('#analysis-history'), [t('analysis.date'), t('analysis.source'), t('analysis.observed'), t('analysis.unavailable')],
-      (data.observations_over_time || []).map(row => [row.observation_date, row.source, number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
+      (data.observations_over_time || []).map(row => [row.observation_date, localizedSourceName(row.source), number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
     const top = data.top_observed || [];
     const target = $('#overview-top-keywords');
     renderObservedVolumeChart(top, data.top_observed_context || {});
@@ -173,6 +187,9 @@ async function loadAnalytics() {
     for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
+    for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart']) {
+      const root = $('#' + id); if (root) root.replaceChildren();
+    }
   }
 }
 
@@ -182,6 +199,221 @@ function localizedAlgorithmName(id) {
   const translated = t(key);
   if (translated !== key) return translated;
   return method?.name || t('algorithms.unknown-name');
+}
+
+function localizedSourceName(id) {
+  const keys = {
+    wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
+    youtube_video_search: 'source.name.youtube',
+    google_web_serp: 'source.name.google',
+    bing_web_serp: 'source.name.bing',
+  };
+  return keys[id] ? t(keys[id]) : String(id || t('common.unavailable')).replaceAll('_', ' ');
+}
+
+function localizedRunType(type) {
+  const labels = {
+    FETCH: t('runs.type.fetch'),
+    MANUAL_ANALYSIS: t('runs.type.manual-analysis'),
+    COLLECTION_PROCESSING: t('runs.type.collection-processing'),
+    COLLECTION_RECONCILIATION: t('runs.type.collection-reconciliation'),
+  };
+  return labels[type] || t('common.unavailable');
+}
+
+function localizedRunMode(mode) {
+  const normalized = String(mode || '').toLowerCase();
+  const labels = { live: t('settings.mode.live'), synthetic: t('settings.mode.synthetic'), replay: t('settings.mode.replay') };
+  return labels[normalized] || t('common.unavailable');
+}
+
+function localizedRunOutcome(run) {
+  const codes = {
+    SOURCE_COVERAGE_PARTIAL: t('runs.outcome.partial-coverage'),
+    SOURCE_PARTIAL: t('runs.outcome.partial-coverage'),
+    FETCH_FAILED: t('runs.outcome.fetch-failed'),
+    SOURCE_EXECUTION_FAILED: t('runs.outcome.source-failed'),
+    SOURCE_NOT_APPROVED: t('runs.outcome.source-not-approved'),
+    COLLECTION_PROCESSING_FAILED: t('runs.outcome.collection-failed'),
+    FETCH_ABORTED: t('runs.outcome.interrupted'),
+    RETRY_OUTSIDE_DEADLINE: t('runs.outcome.retry-deadline'),
+    RETENTION_POLICY_UNAVAILABLE: t('runs.outcome.retention-unavailable'),
+    RESULT_UNAVAILABLE: t('runs.outcome.result-unavailable'),
+    RATE_LIMITED: t('runs.outcome.rate-limited'),
+    PROVIDER_RATE_LIMITED: t('runs.outcome.rate-limited'),
+  };
+  if (codes[run.error_code]) return codes[run.error_code];
+  if (run.error_code) return t('runs.outcome.review-details');
+  if (Array.isArray(run.quality_flags) && run.quality_flags.length) {
+    return t('runs.outcome.quality-notes', { count: number(run.quality_flags.length) });
+  }
+  return t('runs.outcome.no-notes');
+}
+
+function renderCountChart(chart, rows, labelField, valueField, ariaKey) {
+  if (!chart) return;
+  chart.replaceChildren();
+  chart.setAttribute('aria-label', t(ariaKey));
+  const valid = rows.filter(row => typeof row[labelField] === 'string' && Number.isFinite(row[valueField]) && row[valueField] >= 0);
+  if (!valid.length) { chart.append(element('li', t('analysis.no-data'), 'chart-empty')); return; }
+  const maximum = Math.max(1, ...valid.map(row => row[valueField]));
+  for (const item of valid.slice(0, 12)) {
+    const row = element('li', null, 'chart-row');
+    const label = element('span', item[labelField], 'chart-label');
+    const track = element('span', null, 'chart-track');
+    const bar = element('span', null, 'chart-bar');
+    bar.setAttribute('aria-hidden', 'true');
+    bar.style.width = `${Math.max(item[valueField] > 0 ? 2 : 0, (item[valueField] / maximum) * 100)}%`;
+    track.append(bar);
+    const displayLabel = labelField === 'source' ? localizedSourceName(item[labelField]) : item[labelField];
+    label.textContent = displayLabel;
+    row.append(label, track, element('strong', number(item[valueField]), 'chart-value'));
+    row.title = `${displayLabel} · ${number(item[valueField])}`;
+    chart.append(row);
+  }
+}
+
+function renderAlgorithmDistributionChart(rows) {
+  const chart = $('#analysis-algorithm-chart');
+  if (!chart) return;
+  chart.replaceChildren();
+  const legendRoot = $('[data-chart-legend="algorithms"]');
+  if (legendRoot) legendRoot.replaceChildren();
+  chart.setAttribute('aria-label', t('analysis.algorithm-chart-label'));
+  const methods = new Map();
+  for (const item of rows) {
+    if (typeof item.algorithm_id !== 'string' || !Number.isFinite(item.count) || item.count < 0) continue;
+    const counts = methods.get(item.algorithm_id) || { COMPLETED: 0, SKIPPED: 0, FAILED: 0 };
+    if (Object.hasOwn(counts, item.status)) counts[item.status] += item.count;
+    methods.set(item.algorithm_id, counts);
+  }
+  const values = [...methods.entries()];
+  if (!values.length) { chart.append(element('li', t('analysis.no-data'), 'chart-empty')); return; }
+  for (const status of ['COMPLETED', 'SKIPPED', 'FAILED']) {
+    const legend = element('span', operationStatusLabel(status), 'chart-legend-item');
+    legend.prepend(element('i', null, `chart-legend-swatch chart-segment--${status.toLowerCase()}`));
+    $('[data-chart-legend="algorithms"]')?.append(legend);
+  }
+  const maximum = Math.max(1, ...values.map(([, counts]) => Object.values(counts).reduce((sum, value) => sum + value, 0)));
+  for (const [id, counts] of values.slice(0, 12)) {
+    const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+    const row = element('li', null, 'chart-row chart-row--stacked');
+    const track = element('span', null, 'chart-track chart-track--stacked');
+    for (const status of ['COMPLETED', 'SKIPPED', 'FAILED']) {
+      const segment = element('span', null, `chart-bar chart-segment--${status.toLowerCase()}`);
+      segment.style.width = `${(counts[status] / maximum) * 100}%`;
+      segment.setAttribute('aria-hidden', 'true');
+      if (counts[status]) segment.title = `${operationStatusLabel(status)}: ${number(counts[status])}`;
+      track.append(segment);
+    }
+    row.append(element('span', localizedAlgorithmName(id), 'chart-label'), track, element('strong', number(total), 'chart-value'));
+    row.setAttribute('aria-label', `${localizedAlgorithmName(id)}: ${['COMPLETED','SKIPPED','FAILED'].map(status => `${operationStatusLabel(status)} ${number(counts[status])}`).join(', ')}`);
+    chart.append(row);
+  }
+}
+
+function renderSourceOperationsChart(runs) {
+  const chart = $('#analysis-operations-chart');
+  const legendRoot = $('[data-chart-legend="operations"]');
+  if (!chart) return;
+  chart.replaceChildren();
+  if (legendRoot) legendRoot.replaceChildren();
+  chart.setAttribute('aria-label', t('analysis.operations-chart-label'));
+  const sources = new Map();
+  for (const run of runs) for (const source of run.source_manifest || []) {
+    if (typeof source.source_id !== 'string') continue;
+    const rawStatus = String(source.status || run.status || 'UNKNOWN').toUpperCase();
+    const status = rawStatus === 'SUCCESS' ? 'COMPLETED' : rawStatus;
+    const counts = sources.get(source.source_id) || { COMPLETED: 0, PARTIAL: 0, FAILED: 0, UNAVAILABLE: 0, OTHER: 0 };
+    if (Object.hasOwn(counts, status)) counts[status] += 1; else counts.OTHER += 1;
+    sources.set(source.source_id, counts);
+  }
+  const rows = [...sources.entries()];
+  if (!rows.length) { chart.append(element('li', t('analysis.no-data'), 'chart-empty')); return; }
+  for (const status of ['COMPLETED', 'PARTIAL', 'FAILED', 'UNAVAILABLE', 'OTHER']) {
+    const legend = element('span', operationStatusLabel(status), 'chart-legend-item');
+    legend.prepend(element('i', null, `chart-legend-swatch chart-segment--${status.toLowerCase()}`));
+    legendRoot?.append(legend);
+  }
+  const statuses = ['COMPLETED','PARTIAL','FAILED','UNAVAILABLE','OTHER'];
+  const maximum = Math.max(1, ...rows.map(([, counts]) => Object.values(counts).reduce((sum, value) => sum + value, 0)));
+  for (const [sourceId, counts] of rows.slice(0, 8)) {
+    const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
+    const row = element('li', null, 'chart-row chart-row--stacked');
+    const track = element('span', null, 'chart-track chart-track--stacked');
+    for (const status of statuses) {
+      const segment = element('span', null, `chart-bar chart-segment--${status.toLowerCase()}`);
+      segment.style.width = `${(counts[status] / maximum) * 100}%`;
+      segment.setAttribute('aria-hidden', 'true');
+      if (counts[status]) segment.title = `${operationStatusLabel(status)}: ${number(counts[status])}`;
+      track.append(segment);
+    }
+    row.append(element('span', localizedSourceName(sourceId), 'chart-label'), track, element('strong', number(total), 'chart-value'));
+    row.setAttribute('aria-label', `${localizedSourceName(sourceId)}: ${statuses.map(status => `${operationStatusLabel(status)} ${number(counts[status])}`).join(', ')}`);
+    chart.append(row);
+  }
+}
+
+function operationStatusLabel(status) {
+  const labels = {
+    COMPLETED: t('analysis.ops.completed'),
+    SKIPPED: t('analysis.ops.skipped'),
+    PARTIAL: t('analysis.ops.partial'),
+    FAILED: t('analysis.ops.failed'),
+    UNAVAILABLE: t('analysis.ops.unavailable'),
+    OTHER: t('analysis.ops.other'),
+  };
+  return labels[status] || labels.OTHER;
+}
+
+function renderCoverageHeatmap(rows) {
+  const chart = $('#analysis-coverage-chart');
+  const legendRoot = $('[data-chart-legend="coverage"]');
+  if (!chart) return;
+  chart.replaceChildren();
+  if (legendRoot) legendRoot.replaceChildren();
+  chart.setAttribute('aria-label', t('analysis.coverage-chart-label'));
+  const bySource = new Map(); const dates = new Set();
+  for (const item of rows) {
+    if (typeof item.source !== 'string' || typeof item.observation_date !== 'string') continue;
+    dates.add(item.observation_date);
+    const source = bySource.get(item.source) || new Map();
+    source.set(item.observation_date, {
+      observed: Number.isFinite(item.observed) ? item.observed : 0,
+      unavailable: Number.isFinite(item.unavailable) ? item.unavailable : 0,
+    });
+    bySource.set(item.source, source);
+  }
+  const dateList = [...dates].sort().slice(-14);
+  const sources = [...bySource.keys()].sort();
+  if (!dateList.length || !sources.length) { chart.append(element('p', t('analysis.no-data'), 'chart-empty')); return; }
+  for (const [key, className] of [['analysis.observed','coverage-cell--observed'],['analysis.unavailable','coverage-cell--unavailable']]) {
+    const legend = element('span', t(key), 'chart-legend-item');
+    legend.prepend(element('i', null, `chart-legend-swatch ${className}`));
+    legendRoot?.append(legend);
+  }
+  chart.style.setProperty('--coverage-columns', dateList.length);
+  const header = element('div', null, 'coverage-heatmap-row coverage-heatmap-header');
+  header.append(element('span', t('analysis.source'), 'coverage-source-label'));
+  for (const date of dateList) header.append(element('span', date.slice(5), 'coverage-date'));
+  chart.append(header);
+  for (const sourceId of sources) {
+    const row = element('div', null, 'coverage-heatmap-row');
+    row.append(element('span', localizedSourceName(sourceId), 'coverage-source-label'));
+    for (const date of dateList) {
+      const counts = bySource.get(sourceId).get(date);
+      const cell = element('span', '—', 'coverage-cell coverage-cell--missing');
+      if (counts) {
+        const status = counts.observed && counts.unavailable ? 'mixed' : counts.observed ? 'observed' : counts.unavailable ? 'unavailable' : 'missing';
+        cell.className = `coverage-cell coverage-cell--${status}`;
+        cell.textContent = `${number(counts.observed)}/${number(counts.unavailable)}`;
+        cell.title = t('analysis.coverage-cell',{source:localizedSourceName(sourceId),date,observed:number(counts.observed),unavailable:number(counts.unavailable)});
+      } else cell.title = t('analysis.coverage-missing-cell',{source:localizedSourceName(sourceId),date});
+      cell.setAttribute('aria-label', cell.title);
+      row.append(cell);
+    }
+    chart.append(row);
+  }
 }
 
 function renderObservedVolumeChart(rows, context) {
@@ -266,13 +498,14 @@ async function loadRunHistory({ append = false } = {}) {
   if (q) params.set('q', q); if (status) params.set('status', status);
   try {
     const data = await getJson('/api/v1/runs/history?' + params.toString(), { locale: getLocale() });
-    const list = append ? root.querySelector('tbody') : null;
     if (!append) root.replaceChildren();
+    const headers=[t('runs.date'),t('runs.type'),t('runs.sources'),t('runs.status'),t('runs.records'),t('runs.duration'),t('runs.mode'),t('runs.outcome'),t('runs.actions')];
     let table = root.querySelector('table');
     if (!table) {
       table = element('table', null, 'data-table'); const thead=element('thead'); const tr=element('tr');
-      [t('runs.date'),t('runs.type'),t('runs.sources'),t('runs.status'),t('runs.records'),t('runs.mode'),t('runs.outcome'),t('runs.actions')].forEach(label=>tr.append(element('th',label)));
-      thead.append(tr); table.append(thead,element('tbody')); root.append(table);
+      headers.forEach(label=>tr.append(element('th',label)));
+      const wrap=element('div',null,'table-wrap');
+      thead.append(tr); table.append(thead,element('tbody')); wrap.append(table); root.append(wrap);
     }
     if (!append && data.history_truncated) root.append(element('p', t('runs.history-limited'), 'fine-print'));
     else if (!append && data.manual_history_status === 'PARTIAL') root.append(element('p', t('runs.manual-history-partial'), 'fine-print'));
@@ -285,11 +518,14 @@ async function loadRunHistory({ append = false } = {}) {
       const recordSummary=[received == null ? null : `${t('runs.received')}: ${number(received)}`,
         retained == null ? null : `${t('runs.retained')}: ${number(retained)}`,
         run.rejected_record_count == null ? null : `${t('runs.rejected')}: ${number(run.rejected_record_count)}`].filter(Boolean).join(' · ') || '—';
-      const outcomes=[run.error_code,run.stage,run.quality_flags?.join(', ')].filter(Boolean).join(' · ') || '—';
-      [run.run_at || '—',run.run_type, (run.sources || []).join(', ') || '—',run.status,recordSummary,run.mode || '—',outcomes].forEach(value=>tr.append(element('td',value)));
+      const duration=Number.isFinite(run.duration_seconds) && run.duration_seconds >= 0
+        ? `${number(run.duration_seconds)} ${t('runs.duration-seconds')}` : t('runs.duration-unavailable');
+      const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',run.status),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
+      values.forEach((value,index)=>{const cell=element('td',value);cell.dataset.label=headers[index];tr.append(cell);});
       const actions=element('td');
       if (run.fetch_id) { const button=element('button',t('runs.details'),'button button-secondary'); button.type='button'; button.addEventListener('click',()=>loadRunHistoryDetail(run.fetch_id)); actions.append(button); }
       else actions.textContent='—';
+      actions.dataset.label=headers[8];
       tr.append(actions); body.append(tr);
     });
     state.runHistoryOffset = data.next_offset ?? data.total;
@@ -749,7 +985,7 @@ function updateRun(run) {
   renderSyntheticDiscovery(run);
   const status = typeof run.status === 'string' ? run.status : '';
   $('#run-status').textContent = t('status.' + status) === 'status.' + status
-    ? (status || 'NOT_AVAILABLE')
+    ? (status || t('common.unavailable'))
     : t('status.' + status);
   $('#run-note').textContent = run.run_id
     ? t('run.selected', { id: run.run_id.slice(0, 10) + '…' })
@@ -757,9 +993,9 @@ function updateRun(run) {
   $('#data-date').textContent = date(run.data_date);
   $('#keyword-count').textContent = number(run.keyword_count);
   $('#scored-count').textContent = number(run.scored_count);
-  $('#runs-current').textContent = run.run_id || 'NOT_AVAILABLE';
-  $('#runs-state').textContent = status ? localizedStatus('status.', status) : 'NOT_AVAILABLE';
-  $('#runs-count').textContent = run.keyword_count == null ? 'NOT_AVAILABLE' : number(run.keyword_count);
+  $('#runs-current').textContent = run.run_id || t('common.unavailable');
+  $('#runs-state').textContent = status ? localizedStatus('status.', status) : t('common.unavailable');
+  $('#runs-count').textContent = run.keyword_count == null ? t('common.unavailable') : number(run.keyword_count);
   $('#metric-records-returned').textContent = '—';
   $('#metric-records-returned-note').textContent = t('metric.not-reported');
   $('#metric-records-stored').textContent = '—';
@@ -770,12 +1006,12 @@ function updateRun(run) {
   $('#metric-last-fetch-note').textContent = run.fetched_at ? t('metric.from-analysis') : t('metric.not-reported');
 
   const coverage = Array.isArray(run.coverage)
-    ? run.coverage.map((item) => (item.date || '—') + ': ' + (item.status || 'NOT_AVAILABLE')
-      + (item.http_status ? ' (' + item.http_status + ')' : '')).join(' · ') || 'NOT_AVAILABLE'
-    : 'NOT_MEASURED';
+    ? run.coverage.map((item) => (item.date || '—') + ': ' + localizedStatus('status.',item.status)
+      + (item.http_status ? ' (' + item.http_status + ')' : '')).join(' · ') || t('common.unavailable')
+    : t('quality.not-measured');
   $('#runs-coverage').textContent = coverage;
   $('#quality-coverage').textContent = coverage;
-  $('#quality-fetched').textContent = run.fetched_at ? timestamp(run.fetched_at) : 'NOT_AVAILABLE';
+  $('#quality-fetched').textContent = run.fetched_at ? timestamp(run.fetched_at) : t('common.unavailable');
 
   const mode = run.mode === 'live' ? 'LIVE'
     : run.mode === 'synthetic' ? 'SYNTHETIC'
