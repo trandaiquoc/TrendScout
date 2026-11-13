@@ -36,6 +36,7 @@ const state = {
   collectionInbox: [],
   collectionSuggestions: [],
   collectionQuery: '',
+  collectionSelectedId: null,
   collectionJobStatus: null,
   collectionInboxTotal: 0,
   collectionSelected: new Set(),
@@ -1148,17 +1149,53 @@ function renderCollections() {
   const query = state.collectionQuery.trim().toLocaleLowerCase();
   const container = $('#collection-list');
   container.replaceChildren();
-  const items = state.collections.filter((item) => `${item.name} ${item.description}`.toLocaleLowerCase().includes(query));
+  const matches = state.collections.filter((item) => `${item.name} ${item.description}`.toLocaleLowerCase().includes(query));
+  const visibleIds = new Set(matches.map((item) => item.id));
+  const collectionById = new Map(state.collections.map((item) => [item.id, item]));
+  matches.forEach((item) => {
+    let parentId = item.parent_id;
+    while (parentId && collectionById.has(parentId) && !visibleIds.has(parentId)) {
+      visibleIds.add(parentId);
+      parentId = collectionById.get(parentId).parent_id;
+    }
+  });
+  const depth = (item) => {
+    let level = 0;
+    let parentId = item.parent_id;
+    const seen = new Set([item.id]);
+    while (parentId && collectionById.has(parentId) && !seen.has(parentId)) {
+      seen.add(parentId);
+      level += 1;
+      parentId = collectionById.get(parentId).parent_id;
+    }
+    return level;
+  };
+  const items = state.collections.filter((item) => visibleIds.has(item.id))
+    .sort((left, right) => depth(left) - depth(right) || left.name.localeCompare(right.name));
+  if (!items.some((item) => item.id === state.collectionSelectedId)) state.collectionSelectedId = null;
+  const rendered = new Map();
   if (!items.length) container.append(element('p', t('collections.empty'), 'collection-empty'));
   items.forEach((item) => {
-    const card = element('article', null, 'panel collection-card');
+    const selected = state.collectionSelectedId === item.id;
+    const card = element('article', null, `panel collection-card${item.category_id ? ' collection-card--topic' : ''}${selected ? ' collection-card--selected' : ' collection-card--compact'}`);
     card.dataset.collectionId = item.id;
     const head = element('div', null, 'collection-card-head');
-    const title = element('h2', item.name);
+    const localizedName = item.category_id ? t(`topic.${item.category_id}`) : item.name;
+    const title = element('h2', localizedName === `topic.${item.category_id}` ? item.name : localizedName);
+    const visibleName = title.textContent;
     const badge = element('span', t(item.created_by === 'AI' ? 'collections.ai' : 'collections.user'), 'pill pill--blue');
-    head.append(title, badge);
-    card.append(head, element('p', item.description || '—', 'collection-description'));
-    card.append(element('p', `${item.membership_count || 0} · ${t('collections.open')}`, 'collection-count'));
+    const count = element('span', String(item.membership_count || 0), 'collection-count-chip');
+    const toggle = element('button', null, 'collection-chip-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', String(selected));
+    toggle.append(title, count);
+    toggle.addEventListener('click', () => {
+      state.collectionSelectedId = selected ? null : item.id;
+      renderCollections();
+    });
+    head.append(toggle, badge);
+    card.append(head, element('p', item.category_id
+      ? t('topic.description', { name: visibleName }) : (item.description || '—'), 'collection-description'));
     const autoMatch = element('button', t(item.auto_match ? 'collections.disable-auto' : 'collections.enable-auto'), 'text-button');
     autoMatch.type = 'button';
     autoMatch.setAttribute('aria-pressed', String(item.auto_match));
@@ -1193,6 +1230,38 @@ function renderCollections() {
       }
     });
     actions.append(edit, remove);
+    if (!item.category_id) {
+      const mergeTarget = element('select');
+      mergeTarget.setAttribute('aria-label', t('collections.merge-target'));
+      state.collections.filter((value) => value.id !== item.id && !value.category_id).forEach((collection) => {
+        const option = element('option', collection.name);
+        option.value = collection.id;
+        mergeTarget.append(option);
+      });
+      const merge = element('button', t('collections.merge'), 'button button-secondary');
+      merge.type = 'button';
+      merge.disabled = !mergeTarget.options.length;
+      merge.addEventListener('click', async () => {
+        if (!mergeTarget.value || !window.confirm(t('collections.confirm-merge', {
+          source: item.name, target: mergeTarget.options[mergeTarget.selectedIndex]?.textContent || '',
+        }))) return;
+        merge.disabled = true;
+        try {
+          const result = await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/merge`, {
+            method: 'POST', body: { target_id: mergeTarget.value }, locale: getLocale(),
+          });
+          state.collectionSelectedId = result.target_id;
+          await loadCollections();
+          $('#collections-status').textContent = t('collections.merged', result);
+          $('#collections-status').classList.remove('notice--error');
+        } catch (error) {
+          merge.disabled = false;
+          $('#collections-status').textContent = getErrorMessage(error, 'collections.error');
+          $('#collections-status').classList.add('notice--error');
+        }
+      });
+      actions.append(mergeTarget, merge);
+    }
     card.append(actions);
     const membershipDetails = element('details', null, 'collection-members-panel');
     membershipDetails.append(element('summary', t('collections.open')));
@@ -1231,7 +1300,11 @@ function renderCollections() {
     membershipDetails.append(bulkControls, keywords);
     card.append(membershipDetails);
     getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() })
-      .then((result) => (result.items || []).forEach((keyword) => {
+      .then((result) => {
+        if (!(result.items || []).length) {
+          keywords.append(element('p', t('collections.no-keywords'), 'collection-empty'));
+        }
+        (result.items || []).forEach((keyword) => {
         const row = element('div', null, 'collection-keyword');
         const checkbox = element('input');
         checkbox.type = 'checkbox';
@@ -1247,10 +1320,34 @@ function renderCollections() {
         const details = [keyword.source, keyword.project, keyword.observed_at,
           Number.isFinite(evidence.views_ceil) ? `${number(evidence.views_ceil)} views` : ''].filter(Boolean).join(' · ');
         const label = element('span', `${keyword.keyword} · ${t(keyword.origin === 'LOCAL_AI' ? 'collections.assigned-ai' : 'collections.assigned-manual')}`);
-        if (keyword.reason || details) {
+        let entityCategories = [];
+        try {
+          entityCategories = Array.isArray(keyword.entity_category_ids)
+            ? keyword.entity_category_ids : JSON.parse(keyword.entity_category_ids || '[]');
+        } catch {}
+        const entityDetails = [
+          keyword.entity_description,
+          keyword.entity_type && keyword.entity_type !== 'unknown'
+            ? `${t('collections.entity-type')}: ${keyword.entity_type}` : '',
+          entityCategories.map((id) => {
+            const localized = t(`topic.${id}`);
+            return localized === `topic.${id}` ? id : localized;
+          }).join(' · '),
+        ].filter(Boolean).join(' · ');
+        if (keyword.reason || details || entityDetails || keyword.entity_id) {
           const evidenceDetails = element('details', null, 'collection-keyword-evidence');
-          evidenceDetails.append(element('summary', t('collections.evidence-details')),
-            element('span', [keyword.reason, details].filter(Boolean).join(' · ')));
+          evidenceDetails.append(element('summary', t('collections.evidence-details')));
+          const evidenceText = [keyword.reason, details, entityDetails,
+            keyword.entity_id ? `${t('collections.entity-id')}: ${keyword.entity_id}` : ''].filter(Boolean).join(' · ');
+          evidenceDetails.append(element('span', evidenceText));
+          const entityUrl = safeEvidenceUrl(keyword.entity_source_url);
+          if (entityUrl) {
+            const sourceLink = element('a', t('collections.entity-source'));
+            sourceLink.href = entityUrl;
+            sourceLink.target = '_blank';
+            sourceLink.rel = 'noopener noreferrer';
+            evidenceDetails.append(sourceLink);
+          }
           label.append(evidenceDetails);
         }
         const destination = element('select');
@@ -1284,8 +1381,19 @@ function renderCollections() {
         row.prepend(checkbox);
         row.append(label, destination, copy, move, unassign);
         keywords.append(row);
-      })).catch(() => {});
-    container.append(card);
+        });
+      }).catch(() => {});
+    rendered.set(item.id, card);
+    if (item.parent_id && rendered.has(item.parent_id)) {
+      let children = $('.collection-tree-children', rendered.get(item.parent_id));
+      if (!children) {
+        children = element('div', null, 'collection-tree-children');
+        rendered.get(item.parent_id).append(children);
+      }
+      children.append(card);
+    } else {
+      container.append(card);
+    }
   });
   const suggestions = $('#suggestion-list');
   suggestions.replaceChildren();

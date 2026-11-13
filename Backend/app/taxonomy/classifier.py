@@ -1,12 +1,12 @@
 """Opt-in contextual rules; results do not alter legacy API or storage."""
-from dataclasses import dataclass
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Literal
 
 from app.taxonomy.registry import TAXONOMY_VERSION, resolve
 
-CLASSIFICATION_VERSION = 'context-title-rules-v0.2'
+CLASSIFICATION_VERSION = 'context-title-rules-v0.3'
 EntityType = Literal['person', 'organization', 'product', 'place', 'event', 'creative_work', 'brand', 'unknown']
 CommercialRelevance = Literal['unknown', 'not_assessed']
 

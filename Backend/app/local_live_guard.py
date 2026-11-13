@@ -54,7 +54,7 @@ class LocalLiveGuard:
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
             }
         ) or (method == "POST" and re.fullmatch(
-            r"/api/v1/collections/(?:[0-9a-f-]{36}/keywords|suggestions/[0-9a-f-]{36}/(?:accept|reject))", path
+            r"/api/v1/collections/(?:[^/]{1,64}/merge|[0-9a-f-]{36}/keywords|suggestions/[0-9a-f-]{36}/(?:accept|reject))", path
         )) or (method == "PATCH" and re.fullmatch(
             r"/api/v1/collections/[0-9a-f-]{36}", path
         )) or (method == "DELETE" and re.fullmatch(

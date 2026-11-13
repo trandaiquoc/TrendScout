@@ -7,8 +7,9 @@ import httpx
 
 from app.api.collections import _mode
 from app.collections import embeddings
+from app.collections.entity_context import EntityContext
 from app.collections.service import CollectionService
-from app.collections.store import CollectionStore, keyword_record
+from app.collections.store import CollectionStore, fingerprint, keyword_record
 from app.main import create_app
 from app.settings import Settings
 from app.sources.wikimedia.cleaning_rules import collection_technical_reason
@@ -155,12 +156,90 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertFalse(restarted.delete(collection_id) is False)
         self.assertTrue(restarted.connect().execute("SELECT 1 FROM suppression").fetchone())
 
+    def test_merge_transfers_keywords_and_preserves_target_pins_and_rejections(self):
+        source = self.store.create({"name": "TV topics"})
+        target = self.store.create({"name": "Screen topics"})
+        records = [keyword_record({"article_display": name, "article_original": name.replace(" ", "_"),
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": index, "views_ceil": 1000},
+            "wikimedia_pageviews_top_per_country", "LIVE") for index, name in enumerate(
+                ("TV series one", "TV series two", "TV series three"), start=1)]
+        for record in records:
+            self.store.feedback_action(source, record, "ADD")
+        self.store.feedback_action(target, records[0], "ADD")
+        self.store.feedback_action(target, records[1], "REMOVE")
+        result = self.store.merge(source, target)
+        self.assertEqual(result, {"merged": True, "transferred": 1, "skipped": 2, "target_id": target})
+        self.assertFalse(any(item["id"] == source for item in self.store.list_collections()))
+        target_rows = self.store.keywords_for(target)
+        self.assertEqual({item["id"] for item in target_rows}, {records[0]["id"], records[2]["id"]})
+        self.assertTrue(all(item["origin"] == "USER" and item["pinned"] for item in target_rows))
+        self.assertEqual(self.store.search_keywords()["total"], 3)
+        with self.store.connect() as db:
+            self.assertTrue(db.execute("SELECT 1 FROM suppression WHERE fingerprint=?",
+                                       (fingerprint("TV topics"),)).fetchone())
+
     def test_mode_default_and_legacy_setting_migration(self):
         self.assertEqual(_mode(self.service), "AUTO_CREATE")
         with self.store.connect() as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST')")
         self.assertEqual(_mode(self.service), "SUGGEST_ONLY")
         self.assertEqual(_mode(self.service), "SUGGEST_ONLY")
+
+    def test_duplicate_collection_name_is_rejected(self):
+        self.store.create({"name": "Smart Home"})
+        with self.assertRaisesRegex(ValueError, "COLLECTION_ALREADY_EXISTS"):
+            self.store.create({"name": "smart home"})
+
+    def test_verified_entity_context_creates_hierarchical_memberships_and_unknown_people_stay_unassigned(self):
+        class ContextResolver:
+            def __init__(self, store):
+                self.store = store
+                self.contexts = {}
+
+            def enrich(self, records):
+                for row in records:
+                    recognized = row["keyword"] == "Travis Kelce"
+                    self.contexts[row["id"]] = EntityContext(
+                        row["id"], row["keyword"], 10, "Q123", "American football player" if recognized else "Person",
+                        "person", ("Q2066131",) if recognized else (),
+                        ("celebrity_public_figures.athletes",) if recognized else (),
+                        "https://en.wikipedia.org/wiki/" + row["keyword"].replace(" ", "_"),
+                        "TEST_VERIFIED_CONTEXT", "CLASSIFIED" if recognized else "UNKNOWN", "2026-11-13T00:00:00Z")
+                with self.store.connect() as db:
+                    db.executemany("""INSERT OR REPLACE INTO entity_context(keyword_id,title,page_id,entity_id,
+                        description,entity_type,occupations,category_ids,source_url,method,status,context_version,captured_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
+                return self.contexts
+
+            def cached(self, keyword_ids):
+                return {key: self.contexts[key] for key in keyword_ids if key in self.contexts}
+
+        resolver = ContextResolver(self.store)
+        self.service = CollectionService(self.store, entity_context_resolver=resolver)
+        rows = []
+        for name in ("Travis Kelce", "Unclassified Person Alpha", "Unclassified Person Beta",
+                     "Unclassified Person Gamma"):
+            rows.append({"article_display": name, "article_original": name.replace(" ", "_"),
+                "project": "en.wikipedia", "observation_date": "2026-11-10",
+                "fetched_at": "2026-11-12T00:00:00Z", "views_ceil": 1000})
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("entity-hierarchy", live_source(rows))
+        collections = {item["category_id"]: item for item in self.store.list_collections() if item["category_id"]}
+        parent = collections["celebrity_public_figures"]
+        athlete = collections["celebrity_public_figures.athletes"]
+        self.assertEqual(athlete["parent_id"], parent["id"])
+        for category_id in ("fashion", "home_living", "technology", "entertainment", "sports", "gaming"):
+            self.assertIn(category_id, collections)
+        self.assertEqual(collections["fashion"]["membership_count"], 0)
+        self.assertEqual(collections["home_living"]["membership_count"], 0)
+        member_rows = self.store.keywords_for(athlete["id"])
+        self.assertEqual([row["keyword"] for row in member_rows], ["Travis Kelce"])
+        self.assertEqual(parent["membership_count"], 1)
+        self.assertFalse(any("Unclassified Person" in item["name"] for item in self.store.list_collections()))
+        unassigned = self.store.search_keywords(query="Unclassified Person", state="unassigned")
+        self.assertEqual(unassigned["total"], 3)
+        self.assertEqual(member_rows[0]["entity_id"], "Q123")
 
     def test_reconciliation_archives_only_unpinned_ai_and_rolls_back(self):
         collection = self.store.create({"name": "Fashion"})
@@ -305,7 +384,8 @@ class SmartCollectionsTests(unittest.TestCase):
             self.store.delete(created["id"])
             result = self.service._process_fetch("after-delete-fetch", source)
         self.assertEqual(result["created_collections"], 0)
-        self.assertEqual(self.store.list_collections(), [])
+        self.assertTrue(all(item["category_id"] for item in self.store.list_collections()))
+        self.assertFalse(any(item["name"] == created["name"] for item in self.store.list_collections()))
 
     def test_ambiguous_equal_similarity_stays_unassigned(self):
         first = self.store.create({"name": "Fashion and clothing", "description": "denim"})

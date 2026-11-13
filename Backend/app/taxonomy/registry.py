@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 
-TAXONOMY_VERSION = 'topics-v1.1'
+TAXONOMY_VERSION = 'topics-v1.2'
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ _DEFINITIONS = (
     ('health_fitness', 'Health & Fitness', (('fitness','Fitness'),('wellness','Wellness'),('health','Health Topics'))),
     ('travel_lifestyle', 'Travel & Lifestyle', (('destinations','Destinations'),('experiences','Experiences'),('lifestyle','Lifestyle'))),
     ('business_finance', 'Business & Finance', (('companies','Companies'),('markets','Financial Markets'),('finance','Finance'))),
-    ('news_politics', 'News & Politics', (('elections','Elections'),('government','Government'),('policy','Public Policy'),('current_events','Current Events'))),
+    ('news_politics', 'News & Politics', (('elections','Elections'),('government','Government'),('policy','Public Policy'),('current_events','Current Events'),('public_figures','Public Figures'))),
     ('other', 'Other', ()),
     ('unclassified', 'Unclassified', ()),
 )

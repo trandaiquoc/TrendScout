@@ -17,6 +17,7 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS collections (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+ category_id TEXT UNIQUE, parent_id TEXT REFERENCES collections(id) ON DELETE CASCADE,
  examples TEXT NOT NULL DEFAULT '[]', exclusions TEXT NOT NULL DEFAULT '[]',
  created_by TEXT NOT NULL CHECK(created_by IN ('USER','AI')),
  auto_match INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -91,6 +92,14 @@ CREATE TABLE IF NOT EXISTS keyword_decisions (
  decision TEXT NOT NULL CHECK(decision IN ('EXCLUDED','RESTORED')),
  reason TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS entity_context (
+ keyword_id TEXT PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
+ title TEXT NOT NULL, page_id INTEGER, entity_id TEXT, description TEXT NOT NULL DEFAULT '',
+ entity_type TEXT NOT NULL, occupations TEXT NOT NULL DEFAULT '[]',
+ category_ids TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL DEFAULT '',
+ method TEXT NOT NULL, status TEXT NOT NULL, context_version TEXT NOT NULL,
+ captured_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS membership_reconciliation_runs (
  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL
 );
@@ -132,6 +141,12 @@ class CollectionStore:
                                       ("inferred_embeddings", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in job_columns:
                     db.execute(f"ALTER TABLE fetch_jobs ADD COLUMN {name} {declaration}")
+            collection_columns = {row["name"] for row in db.execute("PRAGMA table_info(collections)")}
+            if "category_id" not in collection_columns:
+                db.execute("ALTER TABLE collections ADD COLUMN category_id TEXT")
+                db.execute("CREATE UNIQUE INDEX IF NOT EXISTS collections_category_id ON collections(category_id)")
+            if "parent_id" not in collection_columns:
+                db.execute("ALTER TABLE collections ADD COLUMN parent_id TEXT REFERENCES collections(id) ON DELETE CASCADE")
         if self.path.is_symlink():
             raise ValueError("collection database must not be a symlink")
         try:
@@ -230,7 +245,11 @@ class CollectionStore:
         ids = tuple(dict.fromkeys(collection_ids))
         if ids:
             placeholders = ",".join("?" for _ in ids)
-            clauses.append(f"EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.collection_id IN ({placeholders}))")
+            clauses.append(f"""EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.collection_id IN (
+                WITH RECURSIVE topic_tree(id) AS (
+                    SELECT id FROM collections WHERE id IN ({placeholders})
+                    UNION ALL SELECT child.id FROM collections child JOIN topic_tree parent ON child.parent_id=parent.id
+                ) SELECT id FROM topic_tree))""")
             parameters.extend(ids)
         where = " AND ".join(clauses) or "1=1"
         ordering = {
@@ -249,10 +268,14 @@ class CollectionStore:
                 return {"ids": [row["id"] for row in rows], "total": total}
             pagination = " LIMIT ? OFFSET ?" if limit is not None else ""
             page_parameters = (*parameters, limit, offset) if limit is not None else tuple(parameters)
-            rows = db.execute(f"""SELECT k.*,
+            rows = db.execute(f"""SELECT k.*,e.entity_id,e.entity_type,e.description AS entity_description,
+                e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
+                e.source_url AS entity_source_url,e.method AS entity_classification_method,
+                e.status AS entity_classification_status,e.captured_at AS entity_context_captured_at,
                 (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin))
                  FROM memberships m JOIN collections c ON c.id=m.collection_id WHERE m.keyword_id=k.id) memberships_json
-                FROM keywords k WHERE {where} ORDER BY {ordering}{pagination}""",
+                FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
+                WHERE {where} ORDER BY {ordering}{pagination}""",
                 page_parameters).fetchall()
             items = []
             for row in rows:
@@ -260,8 +283,12 @@ class CollectionStore:
                 try:
                     item["evidence"] = json.loads(item["evidence"])
                     item["memberships"] = json.loads(item.pop("memberships_json") or "[]")
+                    item["entity_occupations"] = json.loads(item["entity_occupations"] or "[]")
+                    item["entity_category_ids"] = json.loads(item["entity_category_ids"] or "[]")
                 except (TypeError, ValueError):
                     item["memberships"] = []
+                    item["entity_occupations"] = []
+                    item["entity_category_ids"] = []
                 item["algorithm_results"] = [dict(result) for result in db.execute(
                     "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
                     (item["id"],))]
@@ -274,7 +301,24 @@ class CollectionStore:
             rows = db.execute("""SELECT c.*, count(m.keyword_id) AS membership_count
                 FROM collections c LEFT JOIN memberships m ON m.collection_id=c.id
                 WHERE c.status='ACTIVE' GROUP BY c.id ORDER BY c.updated_at DESC""").fetchall()
-            return [self._collection(row) for row in rows]
+            items = [self._collection(row) for row in rows]
+            by_id = {item["id"]: item for item in items}
+            for item in items:
+                item["direct_membership_count"] = item["membership_count"]
+            for item in sorted(items, key=lambda row: self._collection_depth(row, by_id), reverse=True):
+                if item["parent_id"] in by_id:
+                    by_id[item["parent_id"]]["membership_count"] += item["membership_count"]
+            return items
+
+    @staticmethod
+    def _collection_depth(item, by_id):
+        depth, parent_id = 0, item.get("parent_id")
+        seen = {item["id"]}
+        while parent_id in by_id and parent_id not in seen:
+            seen.add(parent_id)
+            depth += 1
+            parent_id = by_id[parent_id].get("parent_id")
+        return depth
 
     @staticmethod
     def _collection(row):
@@ -287,13 +331,43 @@ class CollectionStore:
     def create(self, data, *, created_by="USER", reason=""):
         identifier, stamp = str(uuid.uuid4()), now()
         with self.connect() as db:
-            db.execute("""INSERT INTO collections(id,name,description,examples,exclusions,created_by,
-                auto_match,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (identifier, data["name"], data.get("description", ""),
+            name_key = fingerprint(data["name"])
+            if any(fingerprint(row[0]) == name_key for row in db.execute(
+                    "SELECT name FROM collections WHERE status='ACTIVE'")):
+                raise ValueError("COLLECTION_ALREADY_EXISTS")
+            db.execute("""INSERT INTO collections(id,name,description,category_id,parent_id,examples,exclusions,created_by,
+                auto_match,reason,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (identifier, data["name"], data.get("description", ""), data.get("category_id"), data.get("parent_id"),
                  json.dumps(data.get("examples", []), ensure_ascii=False),
                  json.dumps(data.get("exclusions", []), ensure_ascii=False), created_by,
                  int(data.get("auto_match", True)), reason, stamp, stamp))
         return identifier
+
+    def ensure_category_collection(self, category, *, parent_id=None):
+        """Create one stable system topic node per taxonomy ID, unless the owner suppressed it."""
+        identifier = "topic-" + fingerprint(category.id)[:32]
+        description = f"Keywords and entities about {category.display_name.casefold()}."
+        with self.connect() as db:
+            row = db.execute("SELECT id FROM collections WHERE category_id=? AND status='ACTIVE'",
+                             (category.id,)).fetchone()
+            if row:
+                return row["id"]
+            if db.execute("SELECT 1 FROM suppression WHERE fingerprint=? AND kind='DELETED_COLLECTION'",
+                          (fingerprint(category.display_name),)).fetchone():
+                return None
+            # Reuse a same-named user Collection so taxonomy filters do not fork its identity.
+            existing = db.execute("""SELECT id FROM collections WHERE status='ACTIVE'
+                AND name=? COLLATE NOCASE ORDER BY created_at LIMIT 1""", (category.display_name,)).fetchone()
+            if existing:
+                return existing["id"]
+            stamp = now()
+            db.execute("""INSERT OR IGNORE INTO collections(id,name,description,category_id,parent_id,
+                examples,exclusions,created_by,auto_match,reason,created_at,updated_at)
+                VALUES(?,?,?,?,?,'[]','[]','AI',1,'taxonomy-backed entity classification',?,?)""",
+                (identifier, category.display_name, description, category.id, parent_id, stamp, stamp))
+            row = db.execute("SELECT id FROM collections WHERE category_id=? AND status='ACTIVE'",
+                             (category.id,)).fetchone()
+            return row["id"] if row else None
 
     def update(self, identifier, data):
         allowed = {"name", "description", "examples", "exclusions", "auto_match"}
@@ -322,13 +396,58 @@ class CollectionStore:
 
     def delete(self, identifier):
         with self.connect() as db:
-            row = db.execute("SELECT name FROM collections WHERE id=?", (identifier,)).fetchone()
+            row = db.execute("SELECT id,name FROM collections WHERE id=?", (identifier,)).fetchone()
             if row is None:
                 return False
-            db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
-                       (fingerprint(row["name"]), "DELETED_COLLECTION", now(), row["name"]))
+            descendants = db.execute("""WITH RECURSIVE tree(id,name) AS (
+                SELECT id,name FROM collections WHERE id=? UNION ALL
+                SELECT c.id,c.name FROM collections c JOIN tree t ON c.parent_id=t.id
+            ) SELECT name FROM tree""", (identifier,)).fetchall()
+            stamp = now()
+            db.executemany("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
+                [(fingerprint(item["name"]), "DELETED_COLLECTION", stamp, item["name"]) for item in descendants])
             db.execute("DELETE FROM collections WHERE id=?", (identifier,))
             return True
+
+    def merge(self, source_id, target_id):
+        """Merge a user/AI Collection into another, pin moved links, and suppress its old name."""
+        if source_id == target_id:
+            raise ValueError("COLLECTION_MERGE_SAME_TARGET")
+        with self.connect() as db:
+            rows = db.execute("""SELECT id,name,category_id FROM collections
+                WHERE id IN (?,?) AND status='ACTIVE'""", (source_id, target_id)).fetchall()
+            by_id = {row["id"]: row for row in rows}
+            if source_id not in by_id or target_id not in by_id:
+                raise ValueError("COLLECTION_NOT_FOUND")
+            source, target = by_id[source_id], by_id[target_id]
+            if source["category_id"] or target["category_id"]:
+                raise ValueError("TAXONOMY_COLLECTION_MERGE_FORBIDDEN")
+            memberships = db.execute("SELECT * FROM memberships WHERE collection_id=?", (source_id,)).fetchall()
+            transferred = skipped = 0
+            stamp = now()
+            for membership in memberships:
+                decision = db.execute("SELECT action FROM feedback WHERE collection_id=? AND keyword_id=?",
+                                      (target_id, membership["keyword_id"])).fetchone()
+                if decision and decision["action"] == "REMOVE":
+                    skipped += 1
+                    continue
+                existing = db.execute("SELECT pinned FROM memberships WHERE collection_id=? AND keyword_id=?",
+                                      (target_id, membership["keyword_id"])).fetchone()
+                if existing and existing["pinned"]:
+                    skipped += 1
+                    continue
+                db.execute("""INSERT OR REPLACE INTO memberships
+                    (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                    VALUES(?,?,'USER',1,NULL,?,?)""",
+                    (target_id, membership["keyword_id"], f"Merged from {source['name']}", stamp))
+                db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'ADD',?)",
+                           (target_id, membership["keyword_id"], stamp))
+                transferred += 1
+            db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
+                       (fingerprint(source["name"]), "DELETED_COLLECTION", stamp, source["name"]))
+            db.execute("DELETE FROM collections WHERE id=?", (source_id,))
+            db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?", (stamp, target_id))
+            return {"merged": True, "transferred": transferred, "skipped": skipped, "target_id": target_id}
 
     def archive_unpinned_ai_memberships(self, run_id: str, reason: str):
         """Archive automatic memberships before reconciliation so they can be restored exactly."""
@@ -370,9 +489,18 @@ class CollectionStore:
 
     def keywords_for(self, collection_id):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("""SELECT k.*,m.origin,m.pinned,m.score,m.reason
+            return [dict(row) for row in db.execute("""SELECT k.*,m.origin,m.pinned,m.score,m.reason,
+                e.entity_id,e.entity_type,e.description AS entity_description,
+                e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
+                e.source_url AS entity_source_url,e.method AS entity_classification_method
                 FROM memberships m JOIN keywords k ON k.id=m.keyword_id
-                WHERE m.collection_id=? ORDER BY k.keyword COLLATE NOCASE""", (collection_id,))]
+                LEFT JOIN entity_context e ON e.keyword_id=k.id
+                WHERE m.collection_id IN (
+                    WITH RECURSIVE topic_tree(id) AS (
+                        SELECT id FROM collections WHERE id=?
+                        UNION ALL SELECT child.id FROM collections child JOIN topic_tree parent ON child.parent_id=parent.id
+                    ) SELECT id FROM topic_tree
+                ) ORDER BY k.keyword COLLATE NOCASE""", (collection_id,))]
 
     def feedback_action(self, collection_id, record, action, *, pinned=True):
         with self.connect() as db:

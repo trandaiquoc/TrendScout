@@ -68,7 +68,16 @@ export async function requestJson(path, {
       throw new ApiError(message, response.status);
     }
     if (!response.ok) {
-      throw new ApiError(httpMessages[locale]?.[response.status] || (locale === 'en'
+      const code = body?.detail?.code || body?.code;
+      const knownMessage = {
+        COLLECTION_ALREADY_EXISTS: locale === 'en'
+          ? 'A Collection with this name already exists.' : 'Đã có Bộ sưu tập trùng tên.',
+        COLLECTION_MERGE_SAME_TARGET: locale === 'en'
+          ? 'Choose a different target Collection.' : 'Hãy chọn Bộ sưu tập đích khác.',
+        TAXONOMY_COLLECTION_MERGE_FORBIDDEN: locale === 'en'
+          ? 'Built-in topic Collections cannot be merged.' : 'Không thể gộp các Bộ sưu tập chủ đề hệ thống.',
+      }[code];
+      throw new ApiError(knownMessage || httpMessages[locale]?.[response.status] || (locale === 'en'
         ? 'The request could not be completed (HTTP ' + response.status + ').'
         : 'Không thể hoàn tất yêu cầu (HTTP ' + response.status + ').'),
       response.status, body, Number(response.headers.get('retry-after')) || null);

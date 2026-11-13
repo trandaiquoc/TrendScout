@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.discovery.contracts import ProcessingGrant
 from app.collections.store import CollectionStore
+from app.discovery.contracts import ProcessingGrant
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.shared_cache import CacheGrant, SharedCache
@@ -36,6 +36,17 @@ from app.workers.guarded_attempt import GuardedAttemptRunner
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 USER_AGENT = "TrendScoutTest/1.0 (https://github.com/trandaiquoc/TrendScout)"
+
+
+class NoEntityContext:
+    def __init__(self, _store):
+        pass
+
+    def enrich(self, _records):
+        return {}
+
+    def cached(self, _keyword_ids):
+        return {}
 
 
 def payload(day):
@@ -199,7 +210,8 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
         )
         inner = app.app
         isolated_collections = CollectionStore(self.directory.name + "/collections.sqlite")
-        with patch("app.collections.store.CollectionStore.local", return_value=isolated_collections):
+        with (patch("app.collections.store.CollectionStore.local", return_value=isolated_collections),
+              patch("app.main.WikimediaEntityContextResolver", NoEntityContext)):
             async with inner.router.lifespan_context(inner):
                 async with httpx.AsyncClient(
                     transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1234)),

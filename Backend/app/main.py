@@ -13,13 +13,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api.capabilities import router as capabilities_router
 from app.api.algorithms import router as algorithms_router
+from app.api.capabilities import router as capabilities_router
 from app.api.collections import router as collections_router
 from app.api.datasets import router as datasets_router
 from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
+from app.collections.entity_context import WikimediaEntityContextResolver
 from app.composition import build_run_service, read_only_storage
 from app.local_live_guard import LocalLiveGuard
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
@@ -140,7 +141,11 @@ def create_app(
                     try:
                         from app.collections.service import CollectionService
                         from app.collections.store import CollectionStore
-                        app.state.collection_service = CollectionService(CollectionStore.local())
+                        collection_store = CollectionStore.local()
+                        app.state.collection_service = CollectionService(
+                            collection_store,
+                            entity_context_resolver=WikimediaEntityContextResolver(collection_store),
+                        )
                     except Exception:
                         _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")
                         app.state.collection_service = None

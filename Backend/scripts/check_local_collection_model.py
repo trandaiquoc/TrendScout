@@ -8,12 +8,10 @@ import tempfile
 import time
 from pathlib import Path
 
-from app.collections import embeddings
-from app.collections.service import CollectionService
-from app.collections.store import CollectionStore
-
+from app.api.collections import _mode
 from app.collections.embeddings import MODEL_NAME, embed
-from app.collections.service import cosine
+from app.collections.service import CollectionService, cosine
+from app.collections.store import CollectionStore
 
 
 def main():
@@ -79,6 +77,7 @@ def main():
         ])
         source = [{"source_id": "wikimedia_pageviews_top_per_country", "data_mode": "LIVE", "records": rows}]
         service = CollectionService(store)
+        assert _mode(service) == "AUTO_CREATE"
         result = service._process_fetch("real-model-acceptance-1", source)
         assert result["processed"] == 106, result
         smart_keywords = store.keywords_for(smart_home)
@@ -102,7 +101,7 @@ def main():
             "late_record_assigned": True, "unrelated_record_rejected": True,
             "rejection_survives_repeated_fetch_and_reopen": True,
             "new_collection_reclassified_cached_embeddings": True,
-            "collection_auto_creation_default": "SUGGEST"}, indent=2))
+            "collection_auto_creation_default": "AUTO_CREATE"}, indent=2))
 
 
 if __name__ == "__main__":

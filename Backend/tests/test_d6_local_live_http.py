@@ -39,6 +39,17 @@ NOW = datetime(2026, 11, 12, tzinfo=timezone.utc)
 _OFFLINE_GUARD_COUNTS = None
 
 
+class NoEntityContext:
+    def __init__(self, _store):
+        pass
+
+    def enrich(self, _records):
+        return {}
+
+    def cached(self, _keyword_ids):
+        return {}
+
+
 def _finish_offline_guard(guard):
     try:
         assert _OFFLINE_GUARD_COUNTS["real_constructions"] == 0
@@ -105,6 +116,9 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch("app.collections.store.CollectionStore.local", return_value=store)
         patcher.start()
         self.addCleanup(patcher.stop)
+        context_patcher = patch("app.main.WikimediaEntityContextResolver", NoEntityContext)
+        context_patcher.start()
+        self.addCleanup(context_patcher.stop)
 
     async def test_wikimedia_only_http_flow_uses_one_provider_request(self):
         with tempfile.TemporaryDirectory() as directory, \

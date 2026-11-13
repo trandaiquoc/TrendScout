@@ -21,8 +21,12 @@ from app.collections.store import (
     keyword_record,
     now,
 )
+from app.taxonomy.registry import resolve as resolve_category
 
-ASSIGN_THRESHOLD = 0.68
+# Calibrated against the real local-model Smart Home positive (0.538 with its
+# explicit semantic anchor) and unrelated saved topics. The margin and explicit
+# negative examples remain additional gates when several Collections fit.
+ASSIGN_THRESHOLD = 0.52
 ASSIGN_MARGIN = 0.08
 PROPOSAL_THRESHOLD = 0.82
 EXCLUSION_THRESHOLD = 0.68
@@ -34,6 +38,7 @@ PAIR_PROPOSAL_THRESHOLD = 0.92
 COLLECTION_SEMANTIC_ANCHORS = {
     "smart home": "Relevant Smart Home topics include robot vacuum cleaner, smart thermostat, connected appliances, smart speakers, and home automation.",
 }
+INITIAL_TOPIC_ROOTS = ("fashion", "home_living", "technology", "entertainment", "sports", "gaming")
 
 
 def cosine(left, right):
@@ -44,8 +49,9 @@ def cosine(left, right):
 
 
 class CollectionService:
-    def __init__(self, store: CollectionStore):
+    def __init__(self, store: CollectionStore, entity_context_resolver=None):
         self.store = store
+        self.entity_context_resolver = entity_context_resolver
         self._thread_state = local()
 
     async def process_fetch(self, fetch_id: str, sources: list[dict]):
@@ -104,6 +110,14 @@ class CollectionService:
                     WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
+        # Entity context is enriched only on a successful provider update. Organize/replay
+        # operations consume persisted context and never trigger a new provider request.
+        if sources and self.entity_context_resolver is not None:
+            try:
+                self.entity_context_resolver.enrich(records)
+            except Exception:
+                # Context enrichment is optional evidence; provider Fetch and analysis continue.
+                pass
         self._update_job(fetch_id, stage="ANALYZING_SEMANTIC_MEANING", skipped=skipped)
         if sources and not fetch_id.startswith("organize-"):
             self._persist_dataset_snapshot(fetch_id, sources, records, available, skipped)
@@ -115,6 +129,34 @@ class CollectionService:
                 ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""").fetchall()
             records = [dict(row) for row in persisted]
             eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
+        if self.entity_context_resolver is not None:
+            contexts = self.entity_context_resolver.cached(record["id"] for record in records)
+            for record in records:
+                context = contexts.get(record["id"])
+                if context is not None:
+                    record["entity_type"] = context.entity_type
+                    record["entity_description"] = context.description
+                    record["entity_id"] = context.entity_id
+                    record["entity_category_ids"] = context.category_ids
+        category_collection_ids = {}
+        for category_id in INITIAL_TOPIC_ROOTS:
+            self.store.ensure_category_collection(resolve_category(category_id))
+        for category_id in sorted({category for record in records
+                                   for category in record.get("entity_category_ids", ())}):
+            category = resolve_category(category_id)
+            parent_id = None
+            if category.parent_id:
+                parent_id = self.store.ensure_category_collection(resolve_category(category.parent_id))
+                if parent_id is None:
+                    continue
+            category_collection_ids[category_id] = self.store.ensure_category_collection(
+                category, parent_id=parent_id)
+        for record in records:
+            record["category_collection_ids"] = tuple(
+                category_collection_ids[category_id]
+                for category_id in record.get("entity_category_ids", ())
+                if category_collection_ids.get(category_id)
+            )
         # Do not claim inference succeeded if package/model is missing. Provider Fetch remains complete.
         try:
             collections = self.store.list_collections()
@@ -167,6 +209,8 @@ class CollectionService:
                     exclusion_cursor += len(item["exclusions"])
                     local_prototypes = prototype_vectors[prototype_cursor:prototype_cursor + len(prototype_texts)]
                     prototype_cursor += len(prototype_texts)
+                    if item.get("category_id"):
+                        continue
                     feedback = db.execute("SELECT action FROM feedback WHERE collection_id=? AND keyword_id=?",
                                           (item["id"], record["id"])).fetchone()
                     membership = db.execute("SELECT pinned FROM memberships WHERE collection_id=? AND keyword_id=?",
@@ -189,6 +233,28 @@ class CollectionService:
                         continue
                     scores.append((score, item))
                 strong = [(score, item) for score, item in scores if score >= ASSIGN_THRESHOLD]
+                for category_collection_id in record.get("category_collection_ids", ()):
+                    category_collection = db.execute("SELECT auto_match,status FROM collections WHERE id=?",
+                                                      (category_collection_id,)).fetchone()
+                    if not category_collection or category_collection["status"] != "ACTIVE" or not category_collection["auto_match"]:
+                        continue
+                    feedback = db.execute("SELECT action FROM feedback WHERE collection_id=? AND keyword_id=?",
+                                          (category_collection_id, record["id"])).fetchone()
+                    membership = db.execute("SELECT pinned FROM memberships WHERE collection_id=? AND keyword_id=?",
+                                            (category_collection_id, record["id"])).fetchone()
+                    if feedback and feedback["action"] == "REMOVE":
+                        continue
+                    if membership and membership["pinned"]:
+                        continue
+                    reason = (f"Verified entity context: {record.get('entity_type', 'unknown')}; "
+                              f"taxonomy category {record.get('entity_category_ids', ())}")
+                    db.execute("""INSERT OR IGNORE INTO memberships
+                        (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                        VALUES(?,?,'LOCAL_AI',0,NULL,?,?)""",
+                        (category_collection_id, record["id"], reason, now()))
+                    fits_existing_collection = True
+                    if db.execute("SELECT changes()").fetchone()[0]:
+                        assigned += 1
                 # A single strong match is unambiguous. Multiple strong matches are retained
                 # when each collection independently matches; they are valid many-to-many links.
                 # Close matches just above threshold remain review-only unless backed by an
@@ -207,7 +273,8 @@ class CollectionService:
                 else:
                     rejected = db.execute("SELECT 1 FROM feedback WHERE keyword_id=? AND action='REMOVE' LIMIT 1",
                                           (record["id"],)).fetchone()
-                    if not rejected and not fits_existing_collection:
+                    unresolved_person = record.get("entity_type") == "person" and not record.get("entity_category_ids")
+                    if not rejected and not fits_existing_collection and not unresolved_person:
                         unassigned_rows.append((record, topic_vector))
         self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
         created, suggestions = self._propose(fetch_id, unassigned_rows, collections)
@@ -449,11 +516,20 @@ class CollectionService:
     def _candidate_text(record):
         # Provider/project metadata describes provenance, not the keyword's subject.
         # Keep it in evidence and avoid diluting topic semantics with repetitive context.
-        return f"Topic: {record['keyword']}."
+        description = record.get("entity_description", "")
+        categories = ", ".join(record.get("entity_category_ids", ()))
+        entity_type = record.get("entity_type", "unknown")
+        context = f" Verified context: {description}." if description else ""
+        role = f" Verified topic categories: {categories}." if categories else ""
+        return f"Topic: {record['keyword']}. Entity type: {entity_type}.{context}{role}"
 
     @staticmethod
     def _topic_text(record):
-        return f"Wikimedia topic: {record['keyword']}."
+        description = record.get("entity_description", "")
+        categories = ", ".join(record.get("entity_category_ids", ()))
+        context = f" Description: {description}." if description else ""
+        topic = f" Categories: {categories}." if categories else ""
+        return f"Wikimedia topic: {record['keyword']}.{context}{topic}"
 
     @staticmethod
     def _collection_text(item):
@@ -563,8 +639,12 @@ class CollectionService:
                 return True
             labels = [row["name"] for row in db.execute("SELECT name FROM proposals WHERE status='PENDING'")]
             labels.extend(row["label"] for row in db.execute("SELECT label FROM suppression WHERE label<>''"))
-            labels.extend(row["name"] for row in db.execute("SELECT name FROM collections WHERE status='ACTIVE'"))
-        labels.extend(item["name"] for item in collections)
+            active = [dict(row) for row in db.execute(
+                "SELECT name,category_id FROM collections WHERE status='ACTIVE'")]
+            labels.extend(item["name"] for item in active
+                          if not item["category_id"] or fingerprint(item["name"]) == fingerprint(name))
+        labels.extend(item["name"] for item in collections
+                      if not item.get("category_id") or fingerprint(item["name"]) == fingerprint(name))
         labels = list(dict.fromkeys(labels))[:500]
         if any(self._name_overlap(name, existing) >= 0.70 for existing in labels):
             return True

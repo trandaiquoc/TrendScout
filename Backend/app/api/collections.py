@@ -44,6 +44,11 @@ class CollectionPatch(BaseModel):
         return values
 
 
+class CollectionMergeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str = Field(min_length=1, max_length=64)
+
+
 class MembershipInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     keyword_id: str = Field(min_length=1, max_length=64)
@@ -113,7 +118,10 @@ async def create_collection(value: CollectionInput, request: Request):
     if not name:
         raise HTTPException(422, {"code": "COLLECTION_NAME_REQUIRED"})
     service = _service(request)
-    identifier = service.store.create({**value.model_dump(), "name": name})
+    try:
+        identifier = service.store.create({**value.model_dump(), "name": name})
+    except ValueError as exc:
+        raise HTTPException(409, {"code": str(exc)}) from None
     result = await service.reclassify_unassigned()
     return {"id": identifier, "reclassification": result}
 
@@ -141,6 +149,17 @@ def delete_collection(collection_id: str, request: Request):
     if not _service(request).store.delete(collection_id):
         raise HTTPException(404, {"code": "COLLECTION_NOT_FOUND"})
     return {"deleted": True}
+
+
+@router.post("/collections/{collection_id}/merge")
+def merge_collection(collection_id: str, value: CollectionMergeInput, request: Request):
+    _mutating(request)
+    try:
+        return _service(request).store.merge(collection_id, value.target_id)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "COLLECTION_NOT_FOUND" else 422
+        raise HTTPException(status, {"code": code}) from None
 
 
 @router.get("/collections/{collection_id}/keywords")
