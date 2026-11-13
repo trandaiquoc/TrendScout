@@ -268,19 +268,21 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
 
             set_preferences("light", "vi")
             for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
-                for width in (390, 1440):
+                for width in (320, 390, 768, 1024, 1440, 1920):
                     set_viewport(width, 900 if width > 500 else 820)
                     go(view)
-                    if view == "runs" and width == 390 and not evaluate("window.waitFor(()=>Boolean(document.querySelector('#run-history tbody td[data-label]')))", await_promise=True):
+                    if evaluate("document.documentElement.scrollWidth>innerWidth+1"):
+                        raise RuntimeError(f"{width}px document horizontal overflow on {view} (vi/light)")
+                    if view == "runs" and width <= 390 and not evaluate("window.waitFor(()=>Boolean(document.querySelector('#run-history tbody td[data-label]')))", await_promise=True):
                         raise RuntimeError("Run History fixture did not load for mobile layout review: " + str(evaluate("JSON.stringify({requests:window.fetchRequests.filter(path=>path.includes('/api/v1/runs/history')),content:document.querySelector('#run-history')?.textContent})")))
                     time.sleep(0.18)
-                    if view == "runs" and width == 390 and not evaluate("Boolean(document.querySelector('#run-history tbody td[data-label]'))"):
+                    if view == "runs" and width <= 390 and not evaluate("Boolean(document.querySelector('#run-history tbody td[data-label]'))"):
                         raise RuntimeError("mobile Run History rows are missing their column labels")
                     if view == "runs" and width == 390 and not evaluate("document.querySelector('#run-history').textContent.includes('Dữ liệu một phần') && !document.querySelector('#run-history').textContent.includes('SOURCE_PARTIAL') && !document.querySelector('#run-history').textContent.includes('SYNTHETIC_FIXTURE')"):
                         raise RuntimeError("Run History exposed raw diagnostic codes instead of a localized partial-data explanation")
-                    if view == "analysis" and width == 390 and not evaluate("Boolean(document.querySelector('#analysis-source-volume tbody td[data-label]'))"):
+                    if view == "analysis" and width <= 390 and not evaluate("Boolean(document.querySelector('#analysis-source-volume tbody td[data-label]'))"):
                         raise RuntimeError("mobile Analysis rows are missing their column labels")
-                    if view == "collections" and width == 390:
+                    if view == "collections" and width <= 390:
                         if not evaluate("waitFor(()=>Boolean(document.querySelector('#workbench-filter-toggle')))", await_promise=True):
                             raise RuntimeError("mobile Collection filter toggle was not mounted")
                         evaluate("document.querySelector('#workbench-filter-toggle')?.click()")
@@ -303,9 +305,11 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             for locale, theme in (("vi", "dark"), ("en", "light"), ("en", "dark")):
                 set_preferences(theme, locale)
                 for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
-                    for width in (390, 1440):
+                    for width in (320, 390, 768, 1024, 1440, 1920):
                         set_viewport(width, 900 if width > 500 else 820)
                         go(view)
+                        if evaluate("document.documentElement.scrollWidth>innerWidth+1"):
+                            raise RuntimeError(f"{width}px document horizontal overflow on {view} ({locale}/{theme})")
                         time.sleep(0.18)
                         capture(f"screen-{view}-{width}-{locale}-{theme}.webp", width, configure=False)
 
@@ -347,7 +351,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         console_errors.append(message or "console.error")
             if console_errors:
                 raise RuntimeError("Browser console errors: " + " | ".join(console_errors))
-            print("Visual evidence: Overview matrix and all eight user screens captured at mobile and desktop widths.")
+            print("Visual evidence: Overview and all eight secondary screens captured at six widths in VI/EN light/dark.")
         finally:
             browser.close()
 
