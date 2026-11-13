@@ -339,6 +339,26 @@ async function loadRuntimeStatus() {
       [t('settings.llm-state'),l.status], [t('settings.ai-usage'),l.usage_instrumented ? t('settings.measured') : t('settings.not-measured')],
     ];
     for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value ?? t('common.unavailable')));root.append(row);}
+    const systemRoot=$('#settings-system-details');
+    if(systemRoot){
+      const system=data.system || {}; const storage=data.storage || {};
+      const profileLabels={local:t('settings.profile.local'),test:t('settings.profile.test'),vercel:t('settings.profile.vercel')};
+      const modeLabels={live:t('settings.mode.live'),synthetic:t('settings.mode.synthetic'),replay:t('settings.mode.replay')};
+      const systemFields=[
+        [t('settings.system-status'),system.status?t(system.status==='AVAILABLE'?'settings.system-available':'settings.system-unavailable'):t('common.unavailable')],
+        [t('settings.environment'),profileLabels[system.environment_profile]||t('common.unavailable')],
+        [t('settings.execution-mode'),modeLabels[system.run_mode]||t('common.unavailable')],
+        [t('settings.source-count'),number(system.configured_sources)],
+        [t('settings.storage-status'),storage.status?t(storage.status==='AVAILABLE'?'settings.system-available':'settings.system-unavailable'):t('common.unavailable')],
+        [t('settings.storage-engine'),storage.engine==='SQLITE'?'SQLite':t('common.unavailable')],
+        [t('settings.storage-integrity'),storage.integrity?t(storage.integrity==='OK'?'settings.integrity-ok':'settings.integrity-check'):t('common.unavailable')],
+        [t('settings.storage-records'),number(storage.keyword_records)],
+        [t('settings.storage-size'),formatBytes(storage.database_size_bytes)],
+        [t('settings.storage-access'),typeof storage.read_only==='boolean'?t(storage.read_only?'settings.read-only':'settings.read-write-configured'):t('common.unavailable')],
+      ];
+      systemRoot.replaceChildren();
+      for(const [label,value] of systemFields){const row=element('div');row.append(element('dt',label),element('dd',value));systemRoot.append(row);}
+    }
     const schedulerStatus=$('#settings-scheduler-status');
     schedulerStatus.textContent=t(s.worker_running?'settings.scheduler-running':'settings.scheduler-disabled');
     schedulerStatus.classList.toggle('pill--green',Boolean(s.worker_running));
@@ -380,6 +400,14 @@ function formatScheduleTime(value,timezone) {
   if(!Number.isFinite(date.getTime()))return t('common.unavailable');
   try { return new Intl.DateTimeFormat(getLocale()==='vi'?'vi-VN':'en-US',{dateStyle:'medium',timeStyle:'short',timeZone:timezone}).format(date); }
   catch { return t('common.unavailable'); }
+}
+
+function formatBytes(value) {
+  if(!Number.isFinite(value)||value<0)return t('common.unavailable');
+  if(value<1024)return `${number(value)} B`;
+  const units=['KB','MB','GB'];let size=value/1024,index=0;
+  while(size>=1024&&index<units.length-1){size/=1024;index+=1;}
+  return `${new Intl.NumberFormat(getLocale()==='vi'?'vi-VN':'en-US',{maximumFractionDigits:1}).format(size)} ${units[index]}`;
 }
 
 async function loadResearchWorkspace() {

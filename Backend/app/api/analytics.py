@@ -28,6 +28,13 @@ def runtime_status(request: Request):
             group_concat(DISTINCT dimension) AS vector_dimensions FROM cache WHERE model_version=?""",
             (embeddings.MODEL_VERSION,),
         ).fetchone()
+        integrity = db.execute("PRAGMA quick_check(1)").fetchone()[0]
+        keyword_count = db.execute("SELECT count(*) FROM keywords").fetchone()[0]
+    database_path = getattr(service.store, "path", None)
+    try:
+        database_size_bytes = int(database_path.stat().st_size) if database_path else None
+    except OSError:
+        database_size_bytes = None
     return {
         "embedding": {
             "package": "fastembed",
@@ -45,6 +52,21 @@ def runtime_status(request: Request):
         },
         "llm": {"status": "NOT_CONFIGURED", "provider": None, "usage_instrumented": False},
         "scheduler": _scheduler_status(request),
+        "system": {
+            "status": "AVAILABLE",
+            "environment_profile": request.app.state.settings.environment_profile,
+            "run_mode": request.app.state.settings.run_mode,
+            "read_only": bool(request.app.state.read_only),
+            "configured_sources": len(request.app.state.settings.enabled_source_ids),
+        },
+        "storage": {
+            "status": "AVAILABLE" if integrity == "ok" else "CHECK_REQUIRED",
+            "engine": "SQLITE",
+            "integrity": "OK" if integrity == "ok" else "CHECK_REQUIRED",
+            "keyword_records": keyword_count,
+            "database_size_bytes": database_size_bytes,
+            "read_only": bool(request.app.state.read_only),
+        },
     }
 
 

@@ -810,6 +810,7 @@ tbody tr:hover { background: var(--surface-soft); }
 .comparison-description { padding: 11px 13px; border-radius: 8px; background: var(--surface-soft); color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
 
 .quality-grid, .research-grid, .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.settings-operations { grid-column: 1 / -1; }
 .quality-icon { display: grid; width: 35px; height: 35px; place-items: center; border-radius: 10px; background: var(--teal-soft); color: var(--teal); font-size: 16px; }
 .button-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
 .research-grid .panel > p { font-size: 11px; }

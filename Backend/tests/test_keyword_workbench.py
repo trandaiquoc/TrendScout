@@ -98,6 +98,15 @@ class KeywordWorkbenchTests(unittest.TestCase):
         runtime = self._request("GET", "/api/v1/runtime").json()
         self.assertEqual(runtime["llm"]["status"], "NOT_CONFIGURED")
         self.assertEqual(runtime["scheduler"]["status"], "DISABLED")
+        self.assertEqual(runtime["system"]["status"], "AVAILABLE")
+        self.assertEqual(runtime["system"]["environment_profile"], "test")
+        self.assertTrue(runtime["system"]["read_only"])
+        self.assertEqual(runtime["storage"]["engine"], "SQLITE")
+        self.assertEqual(runtime["storage"]["integrity"], "OK")
+        self.assertEqual(runtime["storage"]["keyword_records"], 4)
+        self.assertGreater(runtime["storage"]["database_size_bytes"], 0)
+        self.assertTrue(runtime["storage"]["read_only"])
+        self.assertNotIn(str(self.store.path), str(runtime))
 
     def test_source_library_exposes_research_candidates_as_locked(self):
         response = self._request("GET", "/api/v1/sources/library")
