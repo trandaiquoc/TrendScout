@@ -126,6 +126,10 @@ async function loadAnalytics() {
   try {
     const data = await getJson('/api/v1/analytics/overview', { locale: getLocale() });
     state.analytics = data;
+    if (!state.algorithmCatalog) {
+      try { state.algorithmCatalog = await getJson('/api/v1/algorithms', { locale: getLocale() }); }
+      catch { state.algorithmCatalog = null; }
+    }
     const totals = data.keyword_totals || {};
     $('#metric-records-stored').textContent = number(totals.unique);
     $('#metric-records-stored-note').textContent = t('analysis.unique-keywords');
@@ -145,7 +149,7 @@ async function loadAnalytics() {
     renderDataTable($('#analysis-source-volume'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
       (data.source_volume || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]), t('analysis.source-volume-note'));
     renderDataTable($('#analysis-algorithms'), [t('analysis.algorithm'), t('analysis.result-state'), t('analysis.count')],
-      (data.algorithm_distribution || []).map(row => [`${row.algorithm_id} · ${row.version}`, row.status, number(row.count)]), t('analysis.algorithm-distribution-note'));
+      (data.algorithm_distribution || []).map(row => [localizedAlgorithmName(row.algorithm_id), translatedAlgorithmCode('result', row.status), number(row.count)]), t('analysis.algorithm-distribution-note'));
     renderDataTable($('#analysis-effectiveness'), [t('analysis.evaluation'), t('analysis.reason')],
       [[data.algorithm_effectiveness?.status || 'NOT_YET_EVALUATED', data.algorithm_effectiveness?.reason || t('analysis.no-comparable-evaluation')]], t('analysis.effectiveness-note'));
     renderDataTable($('#analysis-source-operations'), [t('analysis.fetch-time'), t('analysis.source'), t('analysis.result-state'), t('analysis.records')],
@@ -169,6 +173,14 @@ async function loadAnalytics() {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
   }
+}
+
+function localizedAlgorithmName(id) {
+  const method = state.algorithmCatalog?.algorithms?.find((item) => item.algorithm_id === id);
+  const key = `algorithms.name.${String(id || '').toLowerCase()}`;
+  const translated = t(key);
+  if (translated !== key) return translated;
+  return method?.name || t('algorithms.unknown-name');
 }
 
 function renderObservedVolumeChart(rows, context) {
