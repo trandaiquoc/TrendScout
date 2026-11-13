@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -19,6 +20,7 @@ class CollectionInput(BaseModel):
     examples: list[str] = Field(default_factory=list, max_length=30)
     exclusions: list[str] = Field(default_factory=list, max_length=30)
     auto_match: bool = True
+    parent_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("examples", "exclusions")
     @classmethod
@@ -65,7 +67,11 @@ class BulkMembershipInput(BaseModel):
     keyword_ids: list[str] = Field(default_factory=list, max_length=500)
     all_filtered: bool = False
     query: str = Field(default="", max_length=100)
-    state: Literal["all", "unassigned", "ai", "manual", "needs_review", "excluded"] = "all"
+    state: Literal["all", "unassigned", "ai", "manual", "mixed", "needs_review", "excluded"] = "all"
+    classification: Literal["all", "CLASSIFIED", "AMBIGUOUS", "UNKNOWN", "INELIGIBLE"] = "all"
+    evidence: Literal["all", "metric", "algorithm", "missing"] = "all"
+    date_from: str = Field(default="", max_length=10)
+    date_to: str = Field(default="", max_length=10)
     collection_ids: list[str] = Field(default_factory=list, max_length=20)
     source: str = Field(default="", max_length=100)
     collection_id: str | None = Field(default=None, max_length=64)
@@ -95,7 +101,7 @@ def _mutating(request):
 def list_collections(request: Request):
     service = _service(request)
     return {"items": service.store.list_collections(), "suggestions": service.store.suggestions(),
-            "mode": _mode(service)}
+            "mode": _mode(service), "summary": service.store.workbench_summary()}
 
 
 def _mode(service):
@@ -118,6 +124,11 @@ async def create_collection(value: CollectionInput, request: Request):
     if not name:
         raise HTTPException(422, {"code": "COLLECTION_NAME_REQUIRED"})
     service = _service(request)
+    if value.parent_id:
+        with service.store.connect() as db:
+            parent = db.execute("SELECT 1 FROM collections WHERE id=? AND status='ACTIVE'", (value.parent_id,)).fetchone()
+        if not parent:
+            raise HTTPException(404, {"code": "COLLECTION_PARENT_NOT_FOUND"})
     try:
         identifier = service.store.create({**value.model_dump(), "name": name})
     except ValueError as exc:
@@ -226,6 +237,33 @@ async def organize(request: Request):
     return await service.process_fetch("organize-" + str(uuid.uuid4()), list(grouped.values()))
 
 
+@router.post("/collections/reclassify")
+async def reclassify_from_cached_evidence(request: Request):
+    """Re-run local classification without making provider requests."""
+    _mutating(request)
+    service = _service(request)
+    with service.store.connect() as db:
+        rows = db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY observed_at DESC").fetchall()
+    grouped = {}
+    for row in rows:
+        item = dict(row)
+        try:
+            evidence = json.loads(item["evidence"])
+        except (TypeError, ValueError):
+            evidence = {}
+        grouped.setdefault(item["source"], {"source_id": item["source"], "data_mode": item["data_mode"], "records": []})
+        grouped[item["source"]]["records"].append({
+            "article_display": item["keyword"], "article_original": item["keyword"],
+            "project": item["project"], "observation_date": item["observed_at"],
+            "fetched_at": evidence.get("fetched_at"), "provider_rank": evidence.get("provider_rank"),
+            "views_ceil": evidence.get("views_ceil"), "country_scope": evidence.get("country_scope"),
+            "access": evidence.get("access"),
+        })
+    # Reuse the accepted local pipeline and cached entity context; do not enrich from Wikimedia.
+    return await service.process_fetch("organize-cache-" + str(uuid.uuid4()), list(grouped.values()),
+                                       cached_context_only=True)
+
+
 @router.post("/collections/{collection_id}/keywords")
 def add_keyword(collection_id: str, value: MembershipInput, request: Request):
     _mutating(request)
@@ -243,11 +281,20 @@ def add_keyword(collection_id: str, value: MembershipInput, request: Request):
 def bulk_membership(value: BulkMembershipInput, request: Request):
     _mutating(request)
     service = _service(request)
+    for value_date in (value.date_from, value.date_to):
+        if value_date:
+            try:
+                date.fromisoformat(value_date)
+            except ValueError:
+                raise HTTPException(422, {"code": "INVALID_OBSERVATION_DATE"}) from None
+    if value.date_from and value.date_to and value.date_from > value.date_to:
+        raise HTTPException(422, {"code": "INVALID_OBSERVATION_DATE_RANGE"})
     keyword_ids = value.keyword_ids
     if value.all_filtered:
         result = service.store.search_keywords(query=value.query, state=value.state,
             collection_ids=value.collection_ids, source=value.source, sort="recent", limit=None,
-            offset=0, ids_only=True)
+            offset=0, ids_only=True, classification=value.classification, evidence=value.evidence,
+            date_from=value.date_from, date_to=value.date_to)
         keyword_ids = result["ids"]
     if not keyword_ids:
         raise HTTPException(422, {"code": "KEYWORDS_REQUIRED"})
@@ -255,6 +302,8 @@ def bulk_membership(value: BulkMembershipInput, request: Request):
         raise HTTPException(422, {"code": "COLLECTION_REQUIRED"})
     if value.action == "MOVE" and not value.source_collection_id:
         raise HTTPException(422, {"code": "SOURCE_COLLECTION_REQUIRED"})
+    if value.action == "MOVE" and value.collection_id == value.source_collection_id:
+        raise HTTPException(422, {"code": "COLLECTION_MOVE_SAME_TARGET"})
     try:
         return service.store.bulk_membership_action(keyword_ids, value.action,
             collection_id=value.collection_id, source_collection_id=value.source_collection_id)
@@ -263,6 +312,28 @@ def bulk_membership(value: BulkMembershipInput, request: Request):
         if code in {"COLLECTION_NOT_FOUND", "INVALID_BULK_ACTION"}:
             raise HTTPException(404 if code == "COLLECTION_NOT_FOUND" else 422, {"code": code}) from None
         raise
+
+
+@router.get("/collections/keywords/{keyword_id}")
+def keyword_workbench_detail(keyword_id: str, request: Request):
+    service = _service(request)
+    result = service.store.search_keywords(keyword_id=keyword_id, limit=1, offset=0)
+    if not result["items"]:
+        raise HTTPException(404, {"code": "KEYWORD_NOT_FOUND"})
+    item = result["items"][0]
+    with service.store.connect() as db:
+        decision = db.execute("SELECT decision,reason,updated_at FROM keyword_decisions WHERE keyword_id=?", (keyword_id,)).fetchone()
+        feedback = db.execute("""SELECT f.collection_id,c.name,f.action,f.created_at
+            FROM feedback f LEFT JOIN collections c ON c.id=f.collection_id
+            WHERE f.keyword_id=? ORDER BY f.created_at DESC""", (keyword_id,)).fetchall()
+    item["user_decision"] = dict(decision) if decision else None
+    item["user_feedback"] = [dict(row) for row in feedback]
+    for algorithm in item["algorithm_results"]:
+        try:
+            algorithm["result"] = json.loads(algorithm.pop("result_json") or "{}")
+        except (TypeError, ValueError):
+            algorithm["result"] = {}
+    return item
 
 
 @router.delete("/collections/{collection_id}/keywords/{keyword_id}")

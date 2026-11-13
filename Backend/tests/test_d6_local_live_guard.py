@@ -22,6 +22,10 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
         async def classification(keyword_id: str):
             return {"keyword_id": keyword_id}
 
+        @app.get("/api/v1/collections/keywords/{keyword_id}")
+        async def keyword_detail(keyword_id: str):
+            return {"keyword_id": keyword_id}
+
         @app.post("/api/v1/collections/reconciliation/{run_id}/rollback")
         async def rollback(run_id: str):
             return {"run_id": run_id}
@@ -32,6 +36,10 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
 
         @app.post("/api/v1/collections/bulk")
         async def collection_bulk():
+            return {"ok": True}
+
+        @app.post("/api/v1/collections/reclassify")
+        async def reclassify():
             return {"ok": True}
 
         transport = httpx.ASGITransport(app=LocalLiveGuard(app), client=(peer, 1234))
@@ -55,9 +63,19 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
         response = await self.request(url="http://localhost/api/v1/collections/bulk", method="POST")
         self.assertEqual(response.status_code, 200)
 
+    async def test_cached_reclassification_route_is_allowed(self):
+        response = await self.request(url="http://localhost/api/v1/collections/reclassify", method="POST")
+        self.assertEqual(response.status_code, 200)
+
     async def test_classification_evidence_read_is_allowed(self):
         keyword_id = "a" * 64
         response = await self.request(url=f"http://localhost/api/v1/collections/classifications/{keyword_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["keyword_id"], keyword_id)
+
+    async def test_persisted_keyword_workbench_detail_read_is_allowed(self):
+        keyword_id = "b" * 64
+        response = await self.request(url=f"http://localhost/api/v1/collections/keywords/{keyword_id}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["keyword_id"], keyword_id)
 

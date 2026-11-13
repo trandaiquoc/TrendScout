@@ -54,9 +54,9 @@ class CollectionService:
         self.entity_context_resolver = entity_context_resolver
         self._thread_state = local()
 
-    async def process_fetch(self, fetch_id: str, sources: list[dict]):
+    async def process_fetch(self, fetch_id: str, sources: list[dict], *, cached_context_only: bool = False):
         try:
-            return await asyncio.to_thread(self._process_fetch, fetch_id, sources)
+            return await asyncio.to_thread(self._process_fetch, fetch_id, sources, cached_context_only)
         except Exception:
             try:
                 with self.store.connect() as db:
@@ -69,7 +69,7 @@ class CollectionService:
                 pass
             return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "COLLECTION_PROCESSING_FAILED"}
 
-    def _process_fetch(self, fetch_id, sources):
+    def _process_fetch(self, fetch_id, sources, cached_context_only=False):
         self._thread_state.embedding_counts = {"cached_embeddings": 0, "inferred_embeddings": 0}
         with self.store.connect() as db:
             prior = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
@@ -115,7 +115,7 @@ class CollectionService:
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
         # Entity context is enriched only on a successful provider update. Organize/replay
         # operations consume persisted context and never trigger a new provider request.
-        if sources and self.entity_context_resolver is not None:
+        if sources and self.entity_context_resolver is not None and not cached_context_only:
             try:
                 self.entity_context_resolver.enrich(records)
             except Exception:

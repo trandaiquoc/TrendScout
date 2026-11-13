@@ -8,6 +8,10 @@ From the repository root, `bash start.sh` starts the guarded normal Wikimedia LI
 
 The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
+On Windows, start the app from PowerShell at the repository root with `.\start.ps1 -Port 8000`, then open **http://127.0.0.1:8000/dashboard/**. Startup does not fetch provider data. Choose **Collections / Bộ sưu tập** to search and manage saved keywords. **Chưa xếp vào Bộ sưu tập / Not in a Collection** is the place for eligible keywords that have not been organized. Search, sorting, filters and paging read the local database only. **Organize saved keywords again / Sắp xếp lại từ khóa từ dữ liệu đã lưu** uses evidence already saved. Create, edit, merge and delete operate on the local Collections database; merge and delete require confirmation.
+
+Collection counts show keywords placed directly in a Collection; parent counts include unique keywords in subcollections. Missing counts display as unavailable, not zero. Keyword details keep source records, analysis results and data limitations collapsed until opened. Wikimedia pageviews are approximate observed pageviews; they do not measure search volume or purchase intent.
+
 ## Frontend structure
 
 - **public/index.html** contains the semantic workspace shell and all ten views.

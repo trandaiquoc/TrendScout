@@ -124,8 +124,10 @@ CHECK = r"""<script>
     }
     await go('runs');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
-    check(!document.querySelector('[data-view=overview]').hidden,'legacy keyword deep link opens Overview');
-    check(document.querySelector('[data-dashboard-panel=overview]').hidden===false,'legacy keyword deep link keeps explorer available');
+    check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
+    check(new URLSearchParams(location.search).get('q')==='renewables','legacy keyword deep link preserves the search query');
+    check(!document.querySelector('[data-view=collections]').hidden,'legacy keyword deep link opens the keyword workspace');
+    check(document.querySelector('[data-view=overview]').hidden,'legacy keyword deep link does not expose a second explorer');
     check(location.search==='?q=renewables','legacy route preserves query string');
     history.replaceState(null,'',location.pathname+'#runs');window.dispatchEvent(new Event('hashchange'));
     document.querySelector('#run-id').value=RUN_A;document.querySelector('#load-run').click();await wait(180);

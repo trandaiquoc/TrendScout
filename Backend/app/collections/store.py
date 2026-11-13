@@ -257,7 +257,9 @@ class CollectionStore:
             return item
 
     def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
-                        sort="recent", limit=50, offset=0, ids_only=False):
+                        sort="recent", limit=50, offset=0, ids_only=False,
+                        classification="all", evidence="all", date_from="", date_to="",
+                        keyword_id=None):
         normalized = " ".join(query.casefold().split())
         clauses, parameters = [], []
         if normalized:
@@ -267,6 +269,9 @@ class CollectionStore:
         if source:
             clauses.append("k.source=?")
             parameters.append(source)
+        if keyword_id:
+            clauses.append("k.id=?")
+            parameters.append(keyword_id)
         if state == "excluded":
             clauses.append("k.eligible=0")
         elif state == "unassigned":
@@ -275,10 +280,31 @@ class CollectionStore:
             clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')")
         elif state == "manual":
             clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
+        elif state == "mixed":
+            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI') AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
         elif state == "needs_review":
             clauses.append("k.eligible=1 AND (NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id) OR EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI'))")
         elif state != "all":
             raise ValueError("INVALID_KEYWORD_STATE")
+        if classification != "all":
+            if classification not in {"CLASSIFIED", "AMBIGUOUS", "UNKNOWN", "INELIGIBLE"}:
+                raise ValueError("INVALID_CLASSIFICATION_FILTER")
+            clauses.append("cr.classification_status=?")
+            parameters.append(classification)
+        if evidence == "metric":
+            clauses.append("(json_extract(k.evidence,'$.views_ceil') IS NOT NULL OR json_extract(k.evidence,'$.approximate_views') IS NOT NULL)")
+        elif evidence == "algorithm":
+            clauses.append("EXISTS(SELECT 1 FROM algorithm_results ar WHERE ar.keyword_id=k.id AND ar.status='COMPLETED')")
+        elif evidence == "missing":
+            clauses.append("json_extract(k.evidence,'$.views_ceil') IS NULL AND json_extract(k.evidence,'$.approximate_views') IS NULL AND NOT EXISTS(SELECT 1 FROM algorithm_results ar WHERE ar.keyword_id=k.id AND ar.status='COMPLETED')")
+        elif evidence != "all":
+            raise ValueError("INVALID_EVIDENCE_FILTER")
+        if date_from:
+            clauses.append("substr(k.observed_at,1,10)>=?")
+            parameters.append(date_from)
+        if date_to:
+            clauses.append("substr(k.observed_at,1,10)<=?")
+            parameters.append(date_to)
         ids = tuple(dict.fromkeys(collection_ids))
         if ids:
             placeholders = ",".join("?" for _ in ids)
@@ -298,9 +324,9 @@ class CollectionStore:
         if ordering is None:
             raise ValueError("INVALID_KEYWORD_SORT")
         with self.connect() as db:
-            total = db.execute(f"SELECT count(*) FROM keywords k WHERE {where}", parameters).fetchone()[0]
+            total = db.execute(f"SELECT count(*) FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE {where}", parameters).fetchone()[0]
             if ids_only:
-                rows = db.execute(f"SELECT k.id FROM keywords k WHERE {where} ORDER BY {ordering}",
+                rows = db.execute(f"SELECT k.id FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE {where} ORDER BY {ordering}",
                                   parameters).fetchall()
                 return {"ids": [row["id"] for row in rows], "total": total}
             pagination = " LIMIT ? OFFSET ?" if limit is not None else ""
@@ -317,7 +343,8 @@ class CollectionStore:
                 cr.review_status,cr.classified_at,
                 e.source_url AS entity_source_url,e.method AS entity_classification_method,
                 e.status AS entity_classification_status,e.captured_at AS entity_context_captured_at,
-                (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin))
+                (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin,
+                    'pinned',m.pinned,'score',m.score,'reason',m.reason,'category_id',c.category_id))
                  FROM memberships m JOIN collections c ON c.id=m.collection_id WHERE m.keyword_id=k.id) memberships_json
                 FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
                 LEFT JOIN classification_results cr ON cr.keyword_id=k.id
@@ -358,6 +385,43 @@ class CollectionStore:
         return {"items": items, "total": total, "limit": limit, "offset": offset,
                 "next_offset": offset + limit if limit is not None and offset + limit < total else None}
 
+    def workbench_summary(self):
+        """Return unique-keyword status counts and the latest persisted AI job."""
+        with self.connect() as db:
+            totals = db.execute("""SELECT count(*) AS stored,
+                sum(k.eligible=1) AS eligible, sum(k.eligible=0) AS excluded,
+                sum(k.eligible=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS unclassified,
+                sum(k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS assigned
+                FROM keywords k""").fetchone()
+            statuses = {row["classification_status"]: row["total"] for row in db.execute("""SELECT cr.classification_status,
+                count(DISTINCT cr.keyword_id) AS total FROM classification_results cr
+                JOIN keywords k ON k.id=cr.keyword_id WHERE k.eligible=1 GROUP BY cr.classification_status""")}
+            assignment = {row["origin"]: row["total"] for row in db.execute("""SELECT m.origin,
+                count(DISTINCT m.keyword_id) AS total FROM memberships m JOIN keywords k ON k.id=m.keyword_id
+                WHERE k.eligible=1 GROUP BY m.origin""")}
+            mixed = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1
+                AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')
+                AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')""").fetchone()[0]
+            ai_created = db.execute("SELECT count(*) FROM collections WHERE status='ACTIVE' AND created_by='AI' AND category_id IS NULL").fetchone()[0]
+            sources = [row[0] for row in db.execute("SELECT DISTINCT source FROM keywords ORDER BY source")]
+            latest_job = db.execute("SELECT fetch_id,status,stage,available,eligible,processed,assigned,unassigned,created_collections,suggestions,skipped,error_code,updated_at FROM fetch_jobs ORDER BY updated_at DESC LIMIT 1").fetchone()
+            return {
+                "stored_keywords": totals["stored"] or 0,
+                "eligible_keywords": totals["eligible"] or 0,
+                "excluded_keywords": totals["excluded"] or 0,
+                "unclassified_keywords": totals["unclassified"] or 0,
+                "assigned_keywords": totals["assigned"] or 0,
+                "classified_keywords": statuses.get("CLASSIFIED", 0),
+                "ambiguous_keywords": statuses.get("AMBIGUOUS", 0),
+                "unknown_keywords": statuses.get("UNKNOWN", 0),
+                "ai_assigned_keywords": assignment.get("LOCAL_AI", 0),
+                "manually_managed_keywords": assignment.get("USER", 0),
+                "mixed_origin_keywords": mixed,
+                "ai_created_collections": ai_created,
+                "sources": sources,
+                "latest_job": dict(latest_job) if latest_job else None,
+            }
+
     def list_collections(self):
         with self.connect() as db:
             rows = db.execute("""SELECT c.*, count(m.keyword_id) AS membership_count
@@ -367,9 +431,17 @@ class CollectionStore:
             by_id = {item["id"]: item for item in items}
             for item in items:
                 item["direct_membership_count"] = item["membership_count"]
+                item["subtree_unique_keyword_count"] = 0
+            membership_ids = {item["id"]: set() for item in items}
+            for row in db.execute("SELECT collection_id,keyword_id FROM memberships"):
+                if row["collection_id"] in membership_ids:
+                    membership_ids[row["collection_id"]].add(row["keyword_id"])
             for item in sorted(items, key=lambda row: self._collection_depth(row, by_id), reverse=True):
-                if item["parent_id"] in by_id:
-                    by_id[item["parent_id"]]["membership_count"] += item["membership_count"]
+                item["subtree_unique_keyword_count"] = len(membership_ids[item["id"]])
+                if item["parent_id"] in membership_ids:
+                    membership_ids[item["parent_id"]].update(membership_ids[item["id"]])
+            for item in items:
+                item["membership_count"] = item["subtree_unique_keyword_count"]
             return items
 
     @staticmethod
@@ -476,15 +548,28 @@ class CollectionStore:
         if source_id == target_id:
             raise ValueError("COLLECTION_MERGE_SAME_TARGET")
         with self.connect() as db:
-            rows = db.execute("""SELECT id,name,category_id FROM collections
-                WHERE id IN (?,?) AND status='ACTIVE'""", (source_id, target_id)).fetchall()
+            rows = db.execute("""WITH RECURSIVE source_tree(id,name,category_id) AS (
+                SELECT id,name,category_id FROM collections WHERE id=? AND status='ACTIVE'
+                UNION ALL SELECT c.id,c.name,c.category_id FROM collections c
+                JOIN source_tree parent ON c.parent_id=parent.id WHERE c.status='ACTIVE'
+            ) SELECT id,name,category_id FROM source_tree
+            UNION SELECT id,name,category_id FROM collections WHERE id=? AND status='ACTIVE'""",
+                (source_id, target_id)).fetchall()
             by_id = {row["id"]: row for row in rows}
             if source_id not in by_id or target_id not in by_id:
                 raise ValueError("COLLECTION_NOT_FOUND")
-            source, target = by_id[source_id], by_id[target_id]
-            if source["category_id"] or target["category_id"]:
+            target = by_id[target_id]
+            source_tree = db.execute("""WITH RECURSIVE tree(id,name,category_id) AS (
+                SELECT id,name,category_id FROM collections WHERE id=? UNION ALL
+                SELECT c.id,c.name,c.category_id FROM collections c JOIN tree p ON c.parent_id=p.id
+            ) SELECT id,name,category_id FROM tree""", (source_id,)).fetchall()
+            if any(item["id"] == target_id for item in source_tree):
+                raise ValueError("COLLECTION_MERGE_TARGET_DESCENDANT")
+            if target["category_id"] or any(item["category_id"] for item in source_tree):
                 raise ValueError("TAXONOMY_COLLECTION_MERGE_FORBIDDEN")
-            memberships = db.execute("SELECT * FROM memberships WHERE collection_id=?", (source_id,)).fetchall()
+            source_ids = [item["id"] for item in source_tree]
+            placeholders = ",".join("?" for _ in source_ids)
+            memberships = db.execute(f"SELECT * FROM memberships WHERE collection_id IN ({placeholders})", source_ids).fetchall()
             transferred = skipped = 0
             stamp = now()
             for membership in memberships:
@@ -498,15 +583,22 @@ class CollectionStore:
                 if existing and existing["pinned"]:
                     skipped += 1
                     continue
+                if existing and membership["origin"] == "LOCAL_AI":
+                    skipped += 1
+                    continue
+                origin = membership["origin"]
+                pinned = int(bool(membership["pinned"]) or origin == "USER")
+                reason = f"{membership['reason']} (merged from {by_id[membership['collection_id']]['name']})".strip()
                 db.execute("""INSERT OR REPLACE INTO memberships
                     (collection_id,keyword_id,origin,pinned,score,reason,created_at)
-                    VALUES(?,?,'USER',1,NULL,?,?)""",
-                    (target_id, membership["keyword_id"], f"Merged from {source['name']}", stamp))
-                db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'ADD',?)",
-                           (target_id, membership["keyword_id"], stamp))
+                    VALUES(?,?,?,?,?,?,?)""",
+                    (target_id, membership["keyword_id"], origin, pinned, membership["score"], reason, stamp))
+                if origin == "USER":
+                    db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'ADD',?)",
+                               (target_id, membership["keyword_id"], stamp))
                 transferred += 1
-            db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
-                       (fingerprint(source["name"]), "DELETED_COLLECTION", stamp, source["name"]))
+            db.executemany("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
+                [(fingerprint(item["name"]), "DELETED_COLLECTION", stamp, item["name"]) for item in source_tree])
             db.execute("DELETE FROM collections WHERE id=?", (source_id,))
             db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?", (stamp, target_id))
             return {"merged": True, "transferred": transferred, "skipped": skipped, "target_id": target_id}

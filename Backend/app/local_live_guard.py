@@ -42,6 +42,8 @@ class LocalLiveGuard:
         collection_read = (
             method == "GET" and path in {"/api/v1/collections", "/api/v1/collections/inbox"}
         ) or (method == "GET" and re.fullmatch(
+            r"/api/v1/collections/keywords/[a-f0-9]{64}", path
+        )) or (method == "GET" and re.fullmatch(
             rf"/api/v1/collections/(?:jobs/[^/]{1,64}|{collection_id}/keywords|classifications/[a-f0-9]{{64}})", path
         ))
         algorithm_read = method == "GET" and path in {
@@ -53,7 +55,7 @@ class LocalLiveGuard:
         collection_write = (
             method == "POST" and path in {
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
-                "/api/v1/collections/bulk",
+                "/api/v1/collections/bulk", "/api/v1/collections/reclassify",
             }
         ) or (method == "POST" and re.fullmatch(
             rf"/api/v1/collections/(?:reconciliation/reconcile-[0-9a-f-]{{36}}/rollback|[^/]{{1,64}}/merge|{collection_id}/keywords|suggestions/[0-9a-f-]{{36}}/(?:accept|reject))", path

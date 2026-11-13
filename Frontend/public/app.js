@@ -4,10 +4,12 @@ import { PublicFetchController } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
 import { initializeTheme } from './modules/theme.js';
+import { initializeKeywordWorkbench } from './modules/keyword-workbench.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const activeStatuses = new Set(['QUEUED', 'FETCHING', 'NORMALIZING', 'ANALYZING', 'PERSISTING']);
+const workbench = initializeKeywordWorkbench();
 const state = {
   runId: null,
   dataRunId: null,
@@ -198,39 +200,28 @@ function refreshCollectionJob(fetchId) {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
       if (job.status === 'PROCESSING' && attempt < 120) {
-        $('#collections-status').textContent = t('collections.progress', {
-          stage: t(`collections.stage-${job.stage || 'CLEANING'}`), eligible: number(job.eligible || 0),
-          processed: number(job.processed || 0), cached: number(job.cached_embeddings || 0),
-          inferred: number(job.inferred_embeddings || 0), assigned: number(job.assigned || 0),
-          created: number(job.created_collections || 0), unassigned: number(job.unassigned || 0),
-          rejected: number(job.skipped || 0),
+        $('#workbench-status').textContent = t('collections.progress', {
+        stage: t(`collections.stage-${job.stage || 'CLEANING'}`), eligible: number(job.eligible),
+        processed: number(job.processed), cached: number(job.cached_embeddings),
+        inferred: number(job.inferred_embeddings), assigned: number(job.assigned),
+        created: number(job.created_collections), unassigned: number(job.unassigned),
+        rejected: number(job.skipped),
         });
         window.setTimeout(() => poll(attempt + 1), 1000);
         return;
       }
       state.collectionJobStatus = job;
       if (job.status === 'MODEL_UNAVAILABLE') {
-        $('#collections-status').textContent = t('collections.model-unavailable');
+        $('#workbench-status').textContent = t('collections.model-unavailable');
       } else if (job.status === 'COMPLETED') {
         await loadCollections();
-        const summary = $('#collections-status');
+        const summary = $('#workbench-status');
         summary.replaceChildren(element('span', t('collections.completed', {
-          assigned: number(job.assigned || 0), collections: state.collections.filter((item) => item.membership_count > 0).length,
-          created: number(job.created_collections || 0), eligible: number(job.eligible || 0),
-          processed: number(job.processed || 0), cached: number(job.cached_embeddings || 0),
-          unassigned: number(job.unassigned || 0), rejected: number(job.skipped || 0),
+          assigned: number(job.assigned), collections: state.collections.filter((item) => item.membership_count > 0).length,
+          created: number(job.created_collections), eligible: number(job.eligible),
+          processed: number(job.processed), cached: number(job.cached_embeddings),
+          unassigned: number(job.unassigned), rejected: number(job.skipped),
         })));
-        (job.created_collection_names || []).forEach((name) => {
-          const collection = state.collections.find((item) => item.name === name);
-          if (!collection) return;
-          const link = element('a', name);
-          link.href = '#collections';
-          link.addEventListener('click', () => {
-            const details = $(`[data-collection-id="${CSS.escape(collection.id)}"]`, $('#collection-list'));
-            if (details) { details.open = true; details.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
-          });
-          summary.append(document.createTextNode(' '), link);
-        });
       }
       await loadLatestDataset();
       if (state.persistedDatasetAvailable) loadKeywords();
@@ -660,7 +651,7 @@ function renderRows(items) {
     title.append(element('small', item.project || '—'));
     row.append(title);
     const category = Array.isArray(item.memberships) && item.memberships.length
-      ? item.memberships.map((membership) => `${membership.name} (${t(membership.origin === 'LOCAL_AI' ? 'dataset.ai' : 'dataset.manual')})`).join(', ')
+      ? item.memberships.map((membership) => `${membership.name} (${t(membership.origin === 'LOCAL_AI' ? 'workbench.auto-assigned' : 'workbench.user-added')})`).join(', ')
       : Array.isArray(item.categories) && item.categories.length
         ? item.categories.map((value) => t('category.' + value)).join(', ') : t(item.eligible === 0 ? 'dataset.excluded' : 'dataset.unassigned');
     appendCell(row, category, '', t('table.category'));
@@ -1166,8 +1157,10 @@ function showView(name) {
   const legacyOverview = name === 'results' || name === 'keywords';
   const dashboardTab = name === 'analysis' ? 'analysis' : 'overview';
   const valid = new Set(['overview', 'analysis', 'collections', 'sources', 'runs', 'algorithms', 'quality', 'research', 'settings']);
-  const selected = legacyOverview || !valid.has(name) ? 'overview' : name === 'analysis' ? 'overview' : name;
-  if (name && !legacyOverview && !valid.has(name)) {
+  const selected = legacyOverview ? 'collections' : !valid.has(name) ? 'overview' : name === 'analysis' ? 'overview' : name;
+  if (legacyOverview) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#collections`);
+  } else if (name && !valid.has(name)) {
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#overview`);
   }
   $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
@@ -1182,6 +1175,7 @@ function showView(name) {
   });
   $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
   setDashboardTab(dashboardTab, false);
+  $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
   if (selected === 'collections') loadCollections();
   if (selected === 'algorithms') loadAlgorithmCatalog();
   closeMobileNav();
@@ -1220,411 +1214,12 @@ function updateNavigationLabels() {
 }
 
 async function loadCollections({ appendInbox = false } = {}) {
-  try {
-    const inboxOffset = appendInbox ? state.collectionInbox.length : 0;
-    const [data, inbox] = await Promise.all([
-      getJson('/api/v1/collections', { locale: getLocale() }),
-      getJson(`/api/v1/collections/inbox?limit=40&offset=${inboxOffset}`, { locale: getLocale() }),
-    ]);
-    state.collections = data.items || [];
-    state.collectionSuggestions = data.suggestions || [];
-    state.collectionInbox = appendInbox ? [...state.collectionInbox, ...(inbox.items || [])] : (inbox.items || []);
-    state.collectionInboxTotal = inbox.total || 0;
-    $('#collection-mode').value = data.mode || 'AUTO_CREATE';
-    renderCollections();
-    renderCollectionFilters();
-  } catch {
-    $('#collections-status').textContent = t('collections.error');
-    $('#collection-list').replaceChildren();
-    $('#collection-inbox').replaceChildren();
-  }
-}
-
-function renderCollections() {
-  const query = state.collectionQuery.trim().toLocaleLowerCase();
-  const container = $('#collection-list');
-  container.replaceChildren();
-  const matches = state.collections.filter((item) => `${item.name} ${item.description}`.toLocaleLowerCase().includes(query));
-  const visibleIds = new Set(matches.map((item) => item.id));
-  const collectionById = new Map(state.collections.map((item) => [item.id, item]));
-  matches.forEach((item) => {
-    let parentId = item.parent_id;
-    while (parentId && collectionById.has(parentId) && !visibleIds.has(parentId)) {
-      visibleIds.add(parentId);
-      parentId = collectionById.get(parentId).parent_id;
-    }
-  });
-  const depth = (item) => {
-    let level = 0;
-    let parentId = item.parent_id;
-    const seen = new Set([item.id]);
-    while (parentId && collectionById.has(parentId) && !seen.has(parentId)) {
-      seen.add(parentId);
-      level += 1;
-      parentId = collectionById.get(parentId).parent_id;
-    }
-    return level;
-  };
-  const items = state.collections.filter((item) => visibleIds.has(item.id))
-    .sort((left, right) => depth(left) - depth(right) || left.name.localeCompare(right.name));
-  if (!items.some((item) => item.id === state.collectionSelectedId)) state.collectionSelectedId = null;
-  const rendered = new Map();
-  if (!items.length) container.append(element('p', t('collections.empty'), 'collection-empty'));
-  items.forEach((item) => {
-    const selected = state.collectionSelectedId === item.id;
-    const card = element('article', null, `panel collection-card${item.category_id ? ' collection-card--topic' : ''}${selected ? ' collection-card--selected' : ' collection-card--compact'}`);
-    card.dataset.collectionId = item.id;
-    const head = element('div', null, 'collection-card-head');
-    const localizedName = item.category_id ? t(`topic.${item.category_id}`) : item.name;
-    const title = element('h2', localizedName === `topic.${item.category_id}` ? item.name : localizedName);
-    const visibleName = title.textContent;
-    const badge = element('span', t(item.created_by === 'AI' ? 'collections.ai' : 'collections.user'), 'pill pill--blue');
-    const count = element('span', String(item.membership_count || 0), 'collection-count-chip');
-    const toggle = element('button', null, 'collection-chip-toggle');
-    toggle.type = 'button';
-    toggle.setAttribute('aria-expanded', String(selected));
-    toggle.append(title, count);
-    toggle.addEventListener('click', () => {
-      state.collectionSelectedId = selected ? null : item.id;
-      renderCollections();
-    });
-    head.append(toggle, badge);
-    card.append(head, element('p', item.category_id
-      ? t('topic.description', { name: visibleName }) : (item.description || '—'), 'collection-description'));
-    const autoMatch = element('button', t(item.auto_match ? 'collections.disable-auto' : 'collections.enable-auto'), 'text-button');
-    autoMatch.type = 'button';
-    autoMatch.setAttribute('aria-pressed', String(item.auto_match));
-    autoMatch.addEventListener('click', async () => {
-      const result = await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
-        method: 'PATCH', body: { auto_match: !item.auto_match }, locale: getLocale(),
-      });
-      state.collectionJobStatus = result.reclassification;
-      await loadCollections();
-    });
-    card.append(autoMatch, element('p', t(item.auto_match ? 'collections.auto-enabled' : 'collections.auto-disabled'), 'collection-description'));
-    const actions = element('div', null, 'collection-actions');
-    const edit = element('button', t('collections.edit'), 'button button-secondary');
-    edit.type = 'button';
-    edit.addEventListener('click', () => openCollectionDialog(item));
-    const remove = element('button', t('collections.delete'), 'button button-secondary');
-    remove.type = 'button';
-    remove.addEventListener('click', async () => {
-      if (!window.confirm(t('collections.confirm-delete'))) return;
-      remove.disabled = true;
-      try {
-        await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, { method: 'DELETE', locale: getLocale() });
-        state.collections = state.collections.filter((collection) => collection.id !== item.id);
-        renderCollections();
-        await loadCollections();
-        $('#collections-status').textContent = t('collections.deleted', { name: item.name });
-        $('#collections-status').classList.remove('notice--error');
-      } catch (error) {
-        remove.disabled = false;
-        $('#collections-status').textContent = t('collections.delete-error', { name: item.name, error: getErrorMessage(error, 'collections.error') });
-        $('#collections-status').classList.add('notice--error');
-      }
-    });
-    actions.append(edit, remove);
-    if (!item.category_id) {
-      const mergeTarget = element('select');
-      mergeTarget.setAttribute('aria-label', t('collections.merge-target'));
-      state.collections.filter((value) => value.id !== item.id && !value.category_id).forEach((collection) => {
-        const option = element('option', collection.name);
-        option.value = collection.id;
-        mergeTarget.append(option);
-      });
-      const merge = element('button', t('collections.merge'), 'button button-secondary');
-      merge.type = 'button';
-      merge.disabled = !mergeTarget.options.length;
-      merge.addEventListener('click', async () => {
-        if (!mergeTarget.value || !window.confirm(t('collections.confirm-merge', {
-          source: item.name, target: mergeTarget.options[mergeTarget.selectedIndex]?.textContent || '',
-        }))) return;
-        merge.disabled = true;
-        try {
-          const result = await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/merge`, {
-            method: 'POST', body: { target_id: mergeTarget.value }, locale: getLocale(),
-          });
-          state.collectionSelectedId = result.target_id;
-          await loadCollections();
-          $('#collections-status').textContent = t('collections.merged', result);
-          $('#collections-status').classList.remove('notice--error');
-        } catch (error) {
-          merge.disabled = false;
-          $('#collections-status').textContent = getErrorMessage(error, 'collections.error');
-          $('#collections-status').classList.add('notice--error');
-        }
-      });
-      actions.append(mergeTarget, merge);
-    }
-    card.append(actions);
-    const membershipDetails = element('details', null, 'collection-members-panel');
-    membershipDetails.append(element('summary', t('collections.open')));
-    const keywords = element('div', null, 'collection-keywords');
-    const selectedIds = state.collectionMembershipSelected[item.id]
-      || (state.collectionMembershipSelected[item.id] = new Set());
-    const bulkControls = element('div', null, 'collection-bulk');
-    const selectAll = element('input');
-    selectAll.type = 'checkbox';
-    selectAll.setAttribute('aria-label', t('collections.select-page'));
-    const approveSelected = element('button', t('collections.approve-selected'), 'button button-secondary');
-    const rejectSelected = element('button', t('collections.reject-selected'), 'button button-secondary');
-    approveSelected.type = rejectSelected.type = 'button';
-    approveSelected.disabled = rejectSelected.disabled = !selectedIds.size;
-    selectAll.addEventListener('change', async () => {
-      const result = await getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() });
-      for (const keyword of result.items || []) {
-        if (selectAll.checked) selectedIds.add(keyword.id);
-        else selectedIds.delete(keyword.id);
-      }
-      await loadCollections();
-    });
-    const bulkAction = async (action) => {
-      if (!selectedIds.size) return;
-      const result = await requestJson('/api/v1/collections/bulk', {
-        method: 'POST', body: { action, collection_id: item.id, keyword_ids: [...selectedIds] }, locale: getLocale(),
-      });
-      selectedIds.clear();
-      $('#collections-status').textContent = t('collections.bulk-result', result);
-      await loadCollections();
-    };
-    approveSelected.addEventListener('click', () => bulkAction('APPROVE'));
-    rejectSelected.addEventListener('click', () => bulkAction('REJECT'));
-    bulkControls.append(selectAll, element('span', t('collections.select-page')),
-      approveSelected, rejectSelected);
-    membershipDetails.append(bulkControls, keywords);
-    card.append(membershipDetails);
-    getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() })
-      .then((result) => {
-        if (!(result.items || []).length) {
-          keywords.append(element('p', t('collections.no-keywords'), 'collection-empty'));
-        }
-        (result.items || []).forEach((keyword) => {
-        const row = element('div', null, 'collection-keyword');
-        const checkbox = element('input');
-        checkbox.type = 'checkbox';
-        checkbox.checked = selectedIds.has(keyword.id);
-        checkbox.setAttribute('aria-label', keyword.keyword);
-        checkbox.addEventListener('change', () => {
-          if (checkbox.checked) selectedIds.add(keyword.id);
-          else selectedIds.delete(keyword.id);
-          approveSelected.disabled = rejectSelected.disabled = !selectedIds.size;
-        });
-        let evidence = {};
-        try { evidence = JSON.parse(keyword.evidence || '{}'); } catch {}
-        const details = [keyword.source, keyword.project, keyword.observed_at,
-          Number.isFinite(evidence.views_ceil) ? `${number(evidence.views_ceil)} views` : ''].filter(Boolean).join(' · ');
-        const label = element('span', `${keyword.keyword} · ${t(keyword.origin === 'LOCAL_AI' ? 'collections.assigned-ai' : 'collections.assigned-manual')}`);
-        let entityCategories = [];
-        try {
-          entityCategories = Array.isArray(keyword.entity_category_ids)
-            ? keyword.entity_category_ids : JSON.parse(keyword.entity_category_ids || '[]');
-        } catch {}
-        const entityDetails = [
-          keyword.entity_description,
-          keyword.entity_type && keyword.entity_type !== 'unknown'
-            ? `${t('collections.entity-type')}: ${keyword.entity_type}` : '',
-          entityCategories.map((id) => {
-            const localized = t(`topic.${id}`);
-            return localized === `topic.${id}` ? id : localized;
-          }).join(' · '),
-        ].filter(Boolean).join(' · ');
-        if (keyword.reason || details || entityDetails || keyword.entity_id) {
-          const evidenceDetails = element('details', null, 'collection-keyword-evidence');
-          evidenceDetails.append(element('summary', t('collections.evidence-details')));
-          const evidenceText = [keyword.reason, details, entityDetails,
-            keyword.entity_id ? `${t('collections.entity-id')}: ${keyword.entity_id}` : ''].filter(Boolean).join(' · ');
-          evidenceDetails.append(element('span', evidenceText));
-          const entityUrl = safeEvidenceUrl(keyword.entity_source_url);
-          if (entityUrl) {
-            const sourceLink = element('a', t('collections.entity-source'));
-            sourceLink.href = entityUrl;
-            sourceLink.target = '_blank';
-            sourceLink.rel = 'noopener noreferrer';
-            evidenceDetails.append(sourceLink);
-          }
-          label.append(evidenceDetails);
-        }
-        const destination = element('select');
-        destination.setAttribute('aria-label', t('collections.copy'));
-        state.collections.filter((value) => value.id !== item.id).forEach((collection) => {
-          const option = element('option', collection.name);
-          option.value = collection.id;
-          destination.append(option);
-        });
-        const assign = async () => requestJson(`/api/v1/collections/${encodeURIComponent(destination.value)}/keywords`, {
-          method: 'POST', body: { keyword_id: keyword.id }, locale: getLocale(),
-        });
-        const copy = element('button', t('collections.copy'), 'text-button');
-        copy.type = 'button';
-        copy.disabled = !destination.options.length;
-        copy.addEventListener('click', async () => { await assign(); await loadCollections(); });
-        const move = element('button', t('collections.move'), 'text-button');
-        move.type = 'button';
-        move.disabled = !destination.options.length;
-        move.addEventListener('click', async () => {
-          await assign();
-          await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords/${encodeURIComponent(keyword.id)}`, { method: 'DELETE', locale: getLocale() });
-          await loadCollections();
-        });
-        const unassign = element('button', t('collections.remove'), 'text-button');
-        unassign.type = 'button';
-        unassign.addEventListener('click', async () => {
-          await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords/${encodeURIComponent(keyword.id)}`, { method: 'DELETE', locale: getLocale() });
-          await loadCollections();
-        });
-        row.prepend(checkbox);
-        row.append(label, destination, copy, move, unassign);
-        keywords.append(row);
-        });
-      }).catch(() => {});
-    rendered.set(item.id, card);
-    if (item.parent_id && rendered.has(item.parent_id)) {
-      let children = $('.collection-tree-children', rendered.get(item.parent_id));
-      if (!children) {
-        children = element('div', null, 'collection-tree-children');
-        rendered.get(item.parent_id).append(children);
-      }
-      children.append(card);
-    } else {
-      container.append(card);
-    }
-  });
-  const suggestions = $('#suggestion-list');
-  suggestions.replaceChildren();
-  state.collectionSuggestions.forEach((proposal) => {
-      const card = element('article', null, 'panel collection-card');
-      card.append(element('p', t('collections.suggestion'), 'section-kicker'));
-      card.append(element('h2', proposal.name), element('p', proposal.description));
-      const supportIds = JSON.parse(proposal.support_ids || '[]');
-      card.append(element('p', `${t('collections.support')}: ${supportIds.length}`));
-      const accept = element('button', t('collections.accept'), 'button button-primary');
-      const reject = element('button', t('collections.reject'), 'button button-secondary');
-      accept.type = reject.type = 'button';
-      accept.addEventListener('click', async () => {
-        await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/accept`, { method: 'POST', locale: getLocale() });
-        await loadCollections();
-      });
-      reject.addEventListener('click', async () => {
-        await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/reject`, { method: 'POST', locale: getLocale() });
-        await loadCollections();
-      });
-      const actions = element('div', null, 'collection-actions');
-      actions.append(accept, reject);
-      card.append(actions);
-      suggestions.append(card);
-  });
-  const inbox = $('#collection-inbox');
-  inbox.replaceChildren();
-  state.collectionInbox.forEach((keyword) => {
-    const row = element('div', null, 'collection-inbox-row');
-    const checkbox = element('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = state.collectionSelected.has(keyword.id);
-    checkbox.setAttribute('aria-label', keyword.keyword);
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) state.collectionSelected.add(keyword.id);
-      else state.collectionSelected.delete(keyword.id);
-      updateCollectionSelection();
-    });
-    row.append(element('span', `${keyword.keyword} · ${keyword.project} · ${keyword.observed_at}`));
-    const select = element('select');
-    select.setAttribute('aria-label', t('collections.manual-target'));
-    select.append(new Option(t('collections.choose-target'), ''));
-    state.collections.forEach((collection) => {
-      const option = element('option', collection.name);
-      option.value = collection.id;
-      select.append(option);
-    });
-    const add = element('button', t('collections.add'), 'button button-secondary');
-    add.type = 'button';
-    add.disabled = true;
-    select.addEventListener('change', () => { add.disabled = !select.value; });
-    add.addEventListener('click', async () => {
-      await requestJson(`/api/v1/collections/${encodeURIComponent(select.value)}/keywords`, {
-        method: 'POST', body: { keyword_id: keyword.id }, locale: getLocale(),
-      });
-      await loadCollections();
-    });
-    row.prepend(checkbox);
-    const classification = keyword.classification_status ? {
-      status: keyword.classification_status,
-      categories: keyword.classified_topic_category_ids || [],
-      categoryLabels: keyword.classified_topic_categories || [],
-      evidence: keyword.classification_rule_evidence || [],
-      confidence: keyword.confidence_level,
-      commercialRelevance: keyword.commercial_relevance,
-      description: keyword.classified_entity_description || keyword.entity_description || '',
-    } : null;
-    const suggestion = element('div', null, 'collection-ai-suggestion');
-    suggestion.append(element('strong', t('collections.ai-suggestion-title')));
-    if (classification?.categories.length) {
-      suggestion.append(element('p', `${t('collections.ai-suggested-topics')}: ${classification.categoryLabels
-        .map((item) => t(`topic.${item.id}`, item.name)).join(', ') || classification.categories.join(', ')}`));
-      suggestion.append(element('p', `${t('collections.classification-status')}: ${t(`classification.${classification.status}`, classification.status)} · ${t('collections.evidence-confidence')}: ${t(`confidence.${classification.confidence}`, classification.confidence || '—')} · ${t('collections.commercial-relevance')}: ${t(`relevance.${classification.commercialRelevance}`, classification.commercialRelevance || '—')}`));
-      const proof = classification.evidence.map((item) => item.matched_text || item.description || item.kind).filter(Boolean);
-      if (classification.description) proof.unshift(classification.description);
-      suggestion.append(element('p', `${t('collections.classification-evidence')}: ${[...new Set(proof)].join(' · ') || t('collections.no-evidence')}`));
-    } else {
-      suggestion.append(element('p', t('collections.no-ai-suggestion')));
-      if (classification) suggestion.append(element('small', `${t('collections.classification-status')}: ${t(`classification.${classification.status}`, classification.status)} · ${t('collections.needs-review')}`));
-    }
-    row.append(select, add, suggestion);
-    inbox.append(row);
-  });
-  if (!state.collectionInbox.length) inbox.append(element('p', t('collections.empty-inbox')));
-  const more = $('#collection-inbox-more');
-  more.hidden = state.collectionInbox.length >= state.collectionInboxTotal;
-  more.disabled = state.collectionInbox.length >= state.collectionInboxTotal;
-  $('#collection-unassigned-count').textContent = number(state.collectionInboxTotal);
-  const bulkTarget = $('#collection-bulk-target');
-  const previousTarget = bulkTarget.value;
-  bulkTarget.replaceChildren(new Option(t('collections.choose-target'), ''));
-  state.collections.forEach((collection) => {
-    const option = element('option', collection.name);
-    option.value = collection.id;
-    bulkTarget.append(option);
-  });
-  if (state.collections.some((collection) => collection.id === previousTarget)) bulkTarget.value = previousTarget;
-  const keywordTarget = $('#keyword-bulk-target');
-  const previousKeywordTarget = keywordTarget.value;
-  keywordTarget.replaceChildren(new Option(t('dataset.choose-collection'), ''));
-  state.collections.forEach((collection) => keywordTarget.append(new Option(collection.name, collection.id)));
-  if (state.collections.some((collection) => collection.id === previousKeywordTarget)) keywordTarget.value = previousKeywordTarget;
-  bulkTarget.disabled = !state.collections.length;
-  $('#collection-bulk-assign').disabled = !bulkTarget.value || !state.collectionSelected.size;
-  bulkTarget.onchange = () => {
-    $('#collection-bulk-assign').disabled = !bulkTarget.value || !state.collectionSelected.size;
-  };
-  $('#collection-select-page').checked = state.collectionInbox.length > 0
-    && state.collectionInbox.every((keyword) => state.collectionSelected.has(keyword.id));
-  updateCollectionSelection();
-  $('#collections-status').textContent = state.collectionJobStatus?.status === 'COMPLETED'
-    ? t('collections.coverage', state.collectionJobStatus) : t('collections.saved');
-}
-
-function updateCollectionSelection() {
-  $('#collection-selection-count').textContent = t('collections.selected-count', { count: state.collectionSelected.size });
-  const button = $('#collection-bulk-assign');
-  if (button) button.disabled = !$('#collection-bulk-target')?.value || !state.collectionSelected.size;
+  await workbench.refresh();
+  state.collections = workbench.items();
 }
 
 function isMobileNav() {
   return window.matchMedia('(max-width: 900px)').matches;
-}
-
-function openCollectionDialog(item = null) {
-  const dialog = $('#collection-dialog');
-  const form = $('#collection-form');
-  form.dataset.collectionId = item?.id || '';
-  $('#collection-dialog-title').textContent = t(item ? 'collections.edit' : 'collections.create');
-  $('#collection-name').value = item?.name || '';
-  $('#collection-description').value = item?.description || '';
-  $('#collection-examples').value = (item?.examples || []).join('; ');
-  $('#collection-exclusions').value = (item?.exclusions || []).join('; ');
-  $('#collection-auto-match').checked = item?.auto_match ?? true;
-  dialog.showModal();
-  $('#collection-name').focus();
 }
 
 function setMobileNav(open) {
@@ -1996,68 +1591,6 @@ function bindEvents() {
   });
   ['#algorithm-family-filter', '#algorithm-source-filter', '#algorithm-status-filter']
     .forEach((selector) => $(selector).addEventListener('change', renderAlgorithmCatalog));
-  $('#collection-create').addEventListener('click', () => openCollectionDialog());
-  $('#collection-dialog-close').addEventListener('click', () => $('#collection-dialog').close());
-  $('#collection-dialog-cancel').addEventListener('click', () => $('#collection-dialog').close());
-  $('#collection-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const collectionId = form.dataset.collectionId;
-    const splitExamples = (selector) => $(selector).value.split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
-    const body = {
-      name: $('#collection-name').value.trim(),
-      description: $('#collection-description').value.trim(),
-      examples: splitExamples('#collection-examples'),
-      exclusions: splitExamples('#collection-exclusions'),
-      auto_match: $('#collection-auto-match').checked,
-    };
-    const result = await requestJson(collectionId
-      ? `/api/v1/collections/${encodeURIComponent(collectionId)}` : '/api/v1/collections', {
-      method: collectionId ? 'PATCH' : 'POST', body, locale: getLocale(),
-    });
-    state.collectionJobStatus = result.reclassification;
-    $('#collection-dialog').close();
-    await loadCollections();
-  });
-  $('#collection-search').addEventListener('input', (event) => {
-    state.collectionQuery = event.currentTarget.value;
-    renderCollections();
-  });
-  $('#collection-mode').addEventListener('change', async (event) => {
-    const select = event.currentTarget;
-    try {
-      const result = await requestJson('/api/v1/collections/mode', { method: 'POST', body: { mode: select.value }, locale: getLocale() });
-      $('#collections-status').textContent = t('collections.mode-saved', { mode: t(`collections.mode-${result.mode}`) });
-      $('#collections-status').classList.remove('notice--error');
-    } catch (error) {
-      $('#collections-status').textContent = getErrorMessage(error, 'collections.error');
-      $('#collections-status').classList.add('notice--error');
-      await loadCollections();
-    }
-  });
-  $('#collections-refresh').addEventListener('click', async () => {
-    const result = await requestJson('/api/v1/collections/organize', { method: 'POST', locale: getLocale() });
-    $('#collections-status').textContent = `${result.status} · ${result.processed || 0} / ${result.available || 0} · ${result.assigned || 0} · ${result.unassigned || 0}`;
-    await loadCollections();
-  });
-  $('#collection-inbox-more').addEventListener('click', () => loadCollections({ appendInbox: true }));
-  $('#collection-select-page').addEventListener('change', (event) => {
-    for (const keyword of state.collectionInbox) {
-      if (event.currentTarget.checked) state.collectionSelected.add(keyword.id);
-      else state.collectionSelected.delete(keyword.id);
-    }
-    renderCollections();
-  });
-  $('#collection-bulk-assign').addEventListener('click', async () => {
-    if (!state.collectionSelected.size || !$('#collection-bulk-target').value) return;
-    const result = await requestJson('/api/v1/collections/bulk', {
-      method: 'POST', body: { action: 'ADD', collection_id: $('#collection-bulk-target').value,
-        keyword_ids: [...state.collectionSelected] }, locale: getLocale(),
-    });
-    state.collectionSelected.clear();
-    $('#collections-status').textContent = t('collections.bulk-result', result);
-    await loadCollections();
-  });
   $('#detail-dialog').addEventListener('close', () => {
     state.detailSequence += 1;
     state.detail = null;
@@ -2070,9 +1603,6 @@ function bindEvents() {
   });
   document.addEventListener('trendscout:locale', () => {
     updateNavigationLabels();
-    if (window.location.hash === '#collections') {
-      renderCollections();
-    }
     if (state.run) {
       updateRun(state.run);
     }
