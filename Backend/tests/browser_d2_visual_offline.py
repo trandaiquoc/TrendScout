@@ -283,6 +283,8 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         raise RuntimeError("Run History exposed raw diagnostic codes instead of a localized partial-data explanation")
                     if view == "analysis" and width <= 390 and not evaluate("Boolean(document.querySelector('#analysis-source-volume tbody td[data-label]'))"):
                         raise RuntimeError("mobile Analysis rows are missing their column labels")
+                    if view == "sources" and not evaluate("!document.querySelector('#source-library-disclosure')?.open && document.querySelector('#source-library-audit')?.textContent.includes('81')"):
+                        raise RuntimeError("locked research inventory was not collapsed with its candidate count visible")
                     if view == "collections" and width <= 390:
                         if not evaluate("waitFor(()=>Boolean(document.querySelector('#workbench-filter-toggle')))", await_promise=True):
                             raise RuntimeError("mobile Collection filter toggle was not mounted")

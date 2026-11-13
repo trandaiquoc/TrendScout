@@ -149,11 +149,17 @@
         <section class="view-panel" data-view="sources" hidden aria-labelledby="sources-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="sources.kicker"></p><h1 id="sources-heading" data-i18n="sources.title"></h1><p data-i18n="sources.description"></p></div><span class="page-heading-mark" aria-hidden="true">◎</span></div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="sources.scope-note"></p></div>
-          <div class="source-library-heading"><h2 data-i18n="sources.active-title"></h2><p id="source-library-audit" class="fine-print" data-i18n="sources.library-note"></p></div>
+          <div class="source-library-heading"><h2 data-i18n="sources.active-title"></h2></div>
           <div class="source-grid" id="source-registry-list" aria-live="polite"></div>
-          <div class="source-library-heading"><h2 data-i18n="sources.library-title"></h2><label><span data-i18n="sources.search"></span><input id="source-library-search" type="search" maxlength="80"></label></div>
-          <div class="table-wrap panel"><table class="data-table"><thead><tr><th data-i18n="sources.candidate"></th><th data-i18n="sources.category"></th><th data-i18n="sources.status"></th><th data-i18n="sources.research-note"></th></tr></thead><tbody id="source-library-rows"></tbody></table></div>
-          <p class="fine-print" data-i18n="sources.no-aggregation"></p>
+          <details class="source-library-disclosure" id="source-library-disclosure">
+            <summary class="source-library-summary"><span class="source-library-summary-copy"><span class="source-library-title" role="heading" aria-level="2" data-i18n="sources.library-title"></span><span id="source-library-audit" class="fine-print" data-i18n="sources.library-note"></span></span><span class="source-library-chevron" aria-hidden="true">⌄</span></summary>
+            <div class="source-library-content">
+              <p class="fine-print" data-i18n="sources.library-note"></p>
+              <label class="source-library-search"><span data-i18n="sources.search"></span><input id="source-library-search" type="search" maxlength="80"></label>
+              <div class="table-wrap panel"><table class="data-table"><thead><tr><th data-i18n="sources.candidate"></th><th data-i18n="sources.category"></th><th data-i18n="sources.status"></th><th data-i18n="sources.research-note"></th></tr></thead><tbody id="source-library-rows"></tbody></table></div>
+              <p class="fine-print" data-i18n="sources.no-aggregation"></p>
+            </div>
+          </details>
           <div class="panel" id="demo-source-results" hidden><h2 data-i18n="demo.source-title"></h2><p data-i18n="demo.source-help"></p><ul id="demo-source-list"></ul></div>
         </section>
 

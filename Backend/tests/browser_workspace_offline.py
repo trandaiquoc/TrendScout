@@ -49,6 +49,11 @@ window.fetch=(path,opts={})=>{
       {source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
     ]}),{status:200}));
+  if(p==='/api/v1/sources/library')return Promise.resolve(new Response(JSON.stringify({audit_date:'2026-11-13',items:[
+    {source_id:'youtube_video_search',display_name:'YouTube Search',category:'Video'},
+    {source_id:'google_web_serp',display_name:'Google Search',category:'Search'},
+    {source_id:'census_api',display_name:'US Census API',category:'Public data'}
+  ]}),{status:200}));
   if(p==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
   if(p==='/api/runs/'+'d'.repeat(32))return Promise.resolve(new Response('{}',{status:404}));
   if(p.includes('/keywords/'))return Promise.resolve(new Response(JSON.stringify({
@@ -165,6 +170,13 @@ CHECK = r"""<script>
       check(!document.querySelector('#app-shell').classList.contains('menu-open'),'Escape closes mobile navigation');
       check(document.activeElement===menuButton,'mobile navigation restores focus to its trigger');
     }
+    await go('sources');await wait(40);
+    const sourceLibrary=document.querySelector('#source-library-disclosure');
+    check(Boolean(sourceLibrary&&!sourceLibrary.open),'secondary locked research inventory starts collapsed');
+    const sourceSearch=document.querySelector('#source-library-search');sourceSearch.value='youtube';sourceSearch.dispatchEvent(new Event('input',{bubbles:true}));
+    check(Boolean(sourceLibrary?.open&&document.querySelectorAll('#source-library-rows tr').length===1&&document.querySelector('#source-library-rows').textContent.includes('YouTube Search')),'searching the research inventory opens it and shows the matching source');
+    sourceSearch.value='';sourceSearch.dispatchEvent(new Event('input',{bubbles:true}));
+    check(document.querySelectorAll('#source-library-rows tr').length===3,'clearing research search restores all inventory candidates');
     const {applyLocale}=await import(I18N_MODULE_URI);
     await go('collections');await wait(80);
     if(innerWidth<=900){
@@ -431,7 +443,7 @@ def main():
             print(
                 "Chrome "
                 + str(width)
-                + "px, locale/theme, all views, Collection CRUD/bulk and Research fixtures, no Fetch, XSS: PASS"
+                + "px, locale/theme, all views, Source Center search, Collection CRUD/bulk and Research fixtures, no Fetch, XSS: PASS"
             )
 
 

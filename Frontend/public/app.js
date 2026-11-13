@@ -2161,7 +2161,10 @@ function bindEvents() {
   $('#run-history-more').addEventListener('click', () => loadRunHistory({ append: true }));
   $('#run-history-search').addEventListener('input', () => { clearTimeout(window.runHistoryTimer); window.runHistoryTimer=setTimeout(()=>loadRunHistory(),250); });
   $('#run-history-status').addEventListener('change', () => loadRunHistory());
-  $('#source-library-search').addEventListener('input', renderSourceLibrary);
+  $('#source-library-search').addEventListener('input', () => {
+    if ($('#source-library-search').value.trim()) $('#source-library-disclosure').open = true;
+    renderSourceLibrary();
+  });
   $('#research-form').addEventListener('submit',saveResearchRecord);
   $('#research-keyword-search').addEventListener('input',()=>{clearTimeout(window.researchSearchTimer);window.researchSearchTimer=setTimeout(()=>loadResearchKeywords($('#research-keyword-search').value.trim()),250);});
   $('#research-keyword').addEventListener('change',event=>{const item=state.researchKeywords.find(value=>(value.keyword_id || value.id)===event.currentTarget.value);if(item&&!$('#research-subject').value.trim())$('#research-subject').value=item.keyword;});
