@@ -3,6 +3,7 @@
 import base64
 import binascii
 import hmac
+import logging
 import mimetypes
 import os
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.capabilities import router as capabilities_router
+from app.api.collections import router as collections_router
 from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.runs import router as runs_router
@@ -37,6 +39,8 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -131,6 +135,13 @@ def create_app(
                 async with local_live_context_factory() as local_live_fetch:
                     _validate_local_live_facade(local_live_fetch)
                     app.state.distributed_public_fetch = local_live_fetch
+                    try:
+                        from app.collections.service import CollectionService
+                        from app.collections.store import CollectionStore
+                        app.state.collection_service = CollectionService(CollectionStore.local())
+                    except Exception:
+                        _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")
+                        app.state.collection_service = None
                     app.state.public_fetch_source_ids = tuple(sorted(
                         local_live_fetch.admission.policy.enabled_sources
                     ))
@@ -138,6 +149,7 @@ def create_app(
                         yield
                     finally:
                         app.state.distributed_public_fetch = None
+                        app.state.collection_service = None
                         app.state.public_fetch_enabled = False
                         app.state.public_fetch_block_reason = "LOCAL_RUNTIME_STOPPED"
                 return
@@ -190,6 +202,7 @@ def create_app(
     application.state.public_fetch_enabled = public_fetch_enabled
     application.state.public_fetch_block_reason = public_fetch_block_reason
     application.state.distributed_public_fetch = distributed_public_fetch
+    application.state.collection_service = None
     application.state.fetch_registry = PublicFetchRegistry()
     application.state.public_fetch_source_ids = (
         tuple(sorted(distributed_public_fetch.admission.policy.enabled_sources))
@@ -273,6 +286,7 @@ def create_app(
     application.include_router(runs_router, prefix="/api")
     application.include_router(capabilities_router, prefix="/api/v1")
     application.include_router(fetches_router, prefix="/api/v1")
+    application.include_router(collections_router, prefix="/api/v1")
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     if read_only:
 

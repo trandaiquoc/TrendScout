@@ -30,7 +30,9 @@ bash setup.sh
 bash start.sh
 ```
 
-Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/) và chọn **Fetch new data** để gửi một lượt Fetch giới hạn. Khởi động không gọi nhà cung cấp; Fetch mới gửi yêu cầu khi người dùng bấm nút. Chế độ mặc định dùng guarded normal Wikimedia LIVE, một worker, loopback và local storage. Không cần Firebase, Firestore, ADC, Google Cloud project, operator token hay Wikimedia API key. Dữ liệu lưu cục bộ và có thể mất khi dừng tiến trình.
+Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/) và chọn **Fetch new data** để gửi một lượt Fetch giới hạn. Khởi động không gọi nhà cung cấp; Fetch mới gửi yêu cầu khi người dùng bấm nút. Chế độ mặc định dùng guarded normal Wikimedia LIVE, một worker, loopback và local storage. Không cần Firebase, Firestore, ADC, Google Cloud project, operator token hay Wikimedia API key.
+
+`bash setup.sh` cài FastEmbed vào `Backend/.venv`. Bộ sưu tập dùng model multilingual MiniLM chạy CPU cục bộ; model được cache ngoài repository tại `~/.cache/trendscout/fastembed` khi cần. Bộ sưu tập và keyword/evidence snapshot lưu riêng trong `~/.local/state/trendscout/collections-v1/collections.sqlite` và tồn tại sau khi khởi động lại. Nếu model chưa tải hoặc không khả dụng, Wikimedia Fetch vẫn chạy; phân nhóm AI sẽ hiển thị trạng thái không khả dụng. Tab **Collections / Bộ sưu tập** quản lý nhóm, từ khóa, gợi ý và chế độ tạo nhóm. Dữ liệu Fetch còn chịu giới hạn nguồn và lưu trữ; AI chỉ xét toàn bộ record sạch còn khả dụng, không chỉ 100 hàng hiển thị.
 
 `Ctrl+C` dừng tiến trình. Nếu cổng 8000 đang bận, giải phóng cổng hoặc chọn cổng khác bằng `TREND_SCOUT_DEMO_PORT=8123 bash start.sh`. Để chạy fixture ngoại tuyến thay thế, dùng `bash start.sh --synthetic`; dữ liệu đó được gắn nhãn SYNTHETIC và không gọi provider. Các script PowerShell và chế độ Windows không thay đổi.
 

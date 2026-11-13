@@ -485,6 +485,27 @@ button:disabled { cursor: not-allowed; }
 .signal-glyph { color: var(--accent); font-size: 28px; }
 
 .view-panel { min-width: 0; }
+.collection-controls { display: grid; grid-template-columns: auto minmax(160px, 1fr) auto minmax(190px, 230px) auto; align-items: center; gap: 12px; margin-bottom: 18px; }
+.collection-controls input, .collection-controls select, .collection-inbox-row select { min-width: 0; padding: 9px 11px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
+.collection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 310px), 1fr)); gap: 14px; margin: 14px 0; }
+.collection-card { min-width: 0; padding: 18px; }
+.collection-card-head, .collection-actions, .collection-keyword, .collection-inbox-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.collection-card-head h2 { margin: 0; overflow-wrap: anywhere; }
+.collection-description, .collection-count { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.collection-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 12px; }
+.collection-keywords { margin-top: 12px; border-top: 1px solid var(--line); }
+.collection-keyword { min-width: 0; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.collection-keyword span, .collection-inbox-row span { overflow-wrap: anywhere; }
+.collection-inbox-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.collection-inbox-row > span { flex: 1; min-width: 0; font-size: 12px; }
+.collection-inbox-row select { max-width: 220px; }
+.collection-empty, #collection-inbox > p { color: var(--muted); }
+.text-button { padding: 4px; border: 0; color: var(--accent); background: transparent; cursor: pointer; }
+@media (max-width: 900px) {
+  .collection-controls { grid-template-columns: 1fr; }
+  .collection-inbox-row { align-items: stretch; flex-direction: column; }
+  .collection-inbox-row select { max-width: none; }
+}
 .discover-results-heading { margin-top: 28px; }
 .candidate-coverage-note { margin-bottom: 12px; }
 .page-heading { align-items: center; margin: 1px 0 21px; }

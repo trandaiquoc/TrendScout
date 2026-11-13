@@ -41,14 +41,15 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn('data-theme="light"', html)
         self.assertIn("data-theme-toggle", html)
         self.assertIn("data-locale-toggle", html)
-        self.assertEqual(html.count("data-nav="), 10)
+        self.assertEqual(html.count("data-nav="), 11)
         self.assertIn('<nav id="workspace-nav"', html)
-        self.assertEqual(len(re.findall(r'<a class="nav-link[^>]*data-nav=', html.split('<details class="nav-advanced">')[0])), 4)
+        self.assertEqual(len(re.findall(r'<a class="nav-link[^>]*data-nav=', html.split('<details class="nav-advanced">')[0])), 5)
         self.assertIn('<details class="nav-advanced">', html)
         self.assertIn('data-view="overview"', html)
         self.assertIn('id="rows"', html[: html.index('data-view="sources"')])
         for view in (
             "overview",
+            "collections",
             "sources",
             "runs",
             "keywords",

@@ -85,7 +85,7 @@ class DistributedPublicFetch:
         return {"job_id": accepted["job_id"], "result": accepted["result"],
                 "status": accepted["status"], "created_at": accepted.get("created_at")}
 
-    def status(self, job_id: str) -> dict | None:
+    def status(self, job_id: str, *, include_records: bool = False) -> dict | None:
         now = self.utcnow()
         job = self.admission.read_job(job_id, now=now)
         if job is None:
@@ -145,14 +145,15 @@ class DistributedPublicFetch:
                     "candidates": [],
                     "limitations": ["DISCOVERY_PROCESSING_FAILED"],
                 }
+        visible_sources = source_results if include_records or self.data_mode != "LIVE" else [
+            {key: value for key, value in item.items() if key != "records"} for item in source_results
+        ]
         return {
             "fetch_id": job["job_id"],
             "status": job["state"],
             "stage": job["state"],
             "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else None,
-            "sources": ([{key: value for key, value in item.items() if key != "records"}
-                         for item in source_results] if self.data_mode == "LIVE" else source_results)
-                       if terminal else [
+            "sources": visible_sources if terminal else [
                 {"source_id": source_id, "status": job["state"]}
                 for source_id in sorted(self.admission.policy.enabled_sources)
             ],

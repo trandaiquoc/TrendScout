@@ -39,7 +39,7 @@ export async function requestJson(path, {
   if (typeof path !== 'string' || !path.startsWith('/api/')) {
     throw new ApiError(locale === 'en' ? 'Only same-origin API requests are allowed.' : 'Chỉ cho phép yêu cầu API cùng nguồn gốc.');
   }
-  if (!['GET', 'POST'].includes(method)) {
+  if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) {
     throw new ApiError(locale === 'en' ? 'This request method is not allowed.' : 'Phương thức yêu cầu này không được phép.');
   }
   const controller = new AbortController();

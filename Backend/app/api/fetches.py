@@ -135,6 +135,24 @@ def _require_enabled(request: Request) -> None:
         )
 
 
+async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str, owner: str):
+    """Run the admitted fetch, then classify all retained records, independent of UI caps."""
+    # The bounded one-worker queue can contain at most one admitted live Fetch at a time.
+    result = await distributed.run_once(owner)
+    if result and result.get("job_id") != fetch_id and result.get("state") in {"COMPLETED", "PARTIAL"}:
+        result = await distributed.run_once(owner)
+    service = getattr(request.app.state, "collection_service", None)
+    if service is None:
+        return
+    try:
+        result = distributed.status(fetch_id, include_records=True)
+        if result and result.get("terminal"):
+            await service.process_fetch(fetch_id, result.get("sources", []))
+    except Exception:
+        # Fetch success is independent from local semantic availability.
+        return
+
+
 @router.post("/fetches", status_code=202)
 async def create_fetch(
     request: Request,
@@ -163,7 +181,8 @@ async def create_fetch(
         # The durable queue remains authoritative if this process stops.
         if accepted["status"] in {"QUEUED", "RUNNING"}:
             background_tasks.add_task(
-                distributed.run_once, f"api-{secrets.token_hex(12)}"
+                _run_fetch_and_collections, request, distributed, accepted["job_id"],
+                f"api-{secrets.token_hex(12)}"
             )
         fetch_id = accepted["job_id"]
         response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"

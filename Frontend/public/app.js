@@ -1,4 +1,4 @@
-import { getJson } from './modules/api.js';
+import { getJson, requestJson } from './modules/api.js';
 import { acceptsDiscovery, canStartFetch, isLocalLiveDemo, loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
 import { PublicFetchController } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
@@ -32,6 +32,12 @@ const state = {
   fetchReady: false,
   fetchBlockReason: null,
   fetchPresentation: { kind: 'disabled', busy: false },
+  collections: [],
+  collectionInbox: [],
+  collectionSuggestions: [],
+  collectionQuery: '',
+  collectionJobStatus: null,
+  collectionInboxTotal: 0,
 };
 
 function number(value) {
@@ -168,6 +174,27 @@ function renderFetchPresentation() {
     : '';
 }
 
+function refreshCollectionJob(fetchId) {
+  if (!isLocalLiveDemo(state.capabilities) || !fetchId) return;
+  const poll = async (attempt = 0) => {
+    try {
+      const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
+      if (job.status === 'PROCESSING' && attempt < 12) {
+        window.setTimeout(() => poll(attempt + 1), 500);
+        return;
+      }
+      state.collectionJobStatus = job;
+      if (job.status === 'MODEL_UNAVAILABLE') {
+        $('#collections-status').textContent = t('collections.model-unavailable');
+      } else if (job.status === 'COMPLETED') {
+        $('#collections-status').textContent = t('collections.coverage', job);
+      }
+      if (window.location.hash === '#collections') loadCollections();
+    } catch {}
+  };
+  poll();
+}
+
 function liveFetchMessage(kind) {
   return ({
     submitting: 'fetch.submitting-live', queued: 'fetch.queued-live',
@@ -234,6 +261,7 @@ const fetchController = new PublicFetchController({
       state.publicFetchFinishedAt = null;
       loadRun(runId);
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
+      refreshCollectionJob(fetchStatus.fetch_id);
       state.publicFetchDiscovery = fetchStatus.discovery;
       state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
       state.publicFetchFinishedAt = typeof fetchStatus.finished_at === 'string'
@@ -876,7 +904,7 @@ async function openDetail(id) {
 
 function showView(name) {
   const view = name === 'results' ? 'keywords' : name;
-  const valid = new Set(['overview', 'sources', 'runs', 'keywords', 'algorithms', 'quality', 'refresh', 'research', 'usage', 'settings']);
+  const valid = new Set(['overview', 'collections', 'sources', 'runs', 'keywords', 'algorithms', 'quality', 'refresh', 'research', 'usage', 'settings']);
   const selected = valid.has(view) ? view : 'overview';
   $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
   $$('[data-nav]').forEach((link) => {
@@ -892,7 +920,176 @@ function showView(name) {
   if (selected === 'keywords' && !state.dataRunId && !state.publicFetchDiscovery) {
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
   }
+  if (selected === 'collections') loadCollections();
   closeMobileNav();
+}
+
+async function loadCollections({ appendInbox = false } = {}) {
+  try {
+    const inboxOffset = appendInbox ? state.collectionInbox.length : 0;
+    const [data, inbox] = await Promise.all([
+      getJson('/api/v1/collections', { locale: getLocale() }),
+      getJson(`/api/v1/collections/inbox?limit=40&offset=${inboxOffset}`, { locale: getLocale() }),
+    ]);
+    state.collections = data.items || [];
+    state.collectionSuggestions = data.suggestions || [];
+    state.collectionInbox = appendInbox ? [...state.collectionInbox, ...(inbox.items || [])] : (inbox.items || []);
+    state.collectionInboxTotal = inbox.total || 0;
+    $('#collection-mode').value = data.mode || 'SUGGEST';
+    renderCollections();
+  } catch {
+    $('#collections-status').textContent = t('collections.error');
+    $('#collection-list').replaceChildren();
+    $('#collection-inbox').replaceChildren();
+  }
+}
+
+function renderCollections() {
+  const query = state.collectionQuery.trim().toLocaleLowerCase();
+  const container = $('#collection-list');
+  container.replaceChildren();
+  const items = state.collections.filter((item) => `${item.name} ${item.description}`.toLocaleLowerCase().includes(query));
+  if (!items.length) container.append(element('p', t('collections.empty'), 'collection-empty'));
+  items.forEach((item) => {
+    const card = element('article', null, 'panel collection-card');
+    const head = element('div', null, 'collection-card-head');
+    const title = element('h2', item.name);
+    const badge = element('span', t(item.created_by === 'AI' ? 'collections.ai' : 'collections.user'), 'pill pill--blue');
+    head.append(title, badge);
+    card.append(head, element('p', item.description || '—', 'collection-description'));
+    card.append(element('p', `${item.membership_count || 0} · ${t('collections.open')}`, 'collection-count'));
+    const autoMatch = element('button', t(item.auto_match ? 'collections.disable-auto' : 'collections.enable-auto'), 'text-button');
+    autoMatch.type = 'button';
+    autoMatch.setAttribute('aria-pressed', String(item.auto_match));
+    autoMatch.addEventListener('click', async () => {
+      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH', body: { auto_match: !item.auto_match }, locale: getLocale(),
+      });
+      await loadCollections();
+    });
+    card.append(autoMatch, element('p', t(item.auto_match ? 'collections.auto-enabled' : 'collections.auto-disabled'), 'collection-description'));
+    const actions = element('div', null, 'collection-actions');
+    const edit = element('button', t('collections.edit'), 'button button-secondary');
+    edit.type = 'button';
+    edit.addEventListener('click', async () => {
+      const name = window.prompt(t('collections.name'), item.name);
+      if (name === null || !name.trim()) return;
+      const description = window.prompt(t('collections.context'), item.description || '') ?? item.description;
+      const examples = (window.prompt(t('collections.examples'), (item.examples || []).join('; ')) ?? (item.examples || []).join('; '))
+        .split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
+      const exclusions = (window.prompt(t('collections.exclusions'), (item.exclusions || []).join('; ')) ?? (item.exclusions || []).join('; '))
+        .split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
+      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH', body: { name: name.trim(), description, examples, exclusions }, locale: getLocale(),
+      });
+      await loadCollections();
+    });
+    const remove = element('button', t('collections.delete'), 'button button-secondary');
+    remove.type = 'button';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(t('collections.confirm-delete'))) return;
+      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, { method: 'DELETE', locale: getLocale() });
+      await loadCollections();
+    });
+    actions.append(edit, remove);
+    card.append(actions);
+    const keywords = element('div', null, 'collection-keywords');
+    card.append(keywords);
+    getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() })
+      .then((result) => (result.items || []).forEach((keyword) => {
+        const row = element('div', null, 'collection-keyword');
+        let evidence = {};
+        try { evidence = JSON.parse(keyword.evidence || '{}'); } catch {}
+        const details = [keyword.source, keyword.project, keyword.observed_at,
+          Number.isFinite(evidence.views_ceil) ? `${number(evidence.views_ceil)} views` : ''].filter(Boolean).join(' · ');
+        const label = element('span', `${keyword.keyword} · ${keyword.origin} · ${keyword.reason || ''} · ${details}`);
+        const destination = element('select');
+        destination.setAttribute('aria-label', t('collections.copy'));
+        state.collections.filter((value) => value.id !== item.id).forEach((collection) => {
+          const option = element('option', collection.name);
+          option.value = collection.id;
+          destination.append(option);
+        });
+        const assign = async () => requestJson(`/api/v1/collections/${encodeURIComponent(destination.value)}/keywords`, {
+          method: 'POST', body: { keyword_id: keyword.id }, locale: getLocale(),
+        });
+        const copy = element('button', t('collections.copy'), 'text-button');
+        copy.type = 'button';
+        copy.disabled = !destination.options.length;
+        copy.addEventListener('click', async () => { await assign(); await loadCollections(); });
+        const move = element('button', t('collections.move'), 'text-button');
+        move.type = 'button';
+        move.disabled = !destination.options.length;
+        move.addEventListener('click', async () => {
+          await assign();
+          await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords/${encodeURIComponent(keyword.id)}`, { method: 'DELETE', locale: getLocale() });
+          await loadCollections();
+        });
+        const unassign = element('button', t('collections.remove'), 'text-button');
+        unassign.type = 'button';
+        unassign.addEventListener('click', async () => {
+          await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords/${encodeURIComponent(keyword.id)}`, { method: 'DELETE', locale: getLocale() });
+          await loadCollections();
+        });
+        row.append(label, destination, copy, move, unassign);
+        keywords.append(row);
+      })).catch(() => {});
+    container.append(card);
+  });
+  const suggestions = $('#suggestion-list');
+  suggestions.replaceChildren();
+  state.collectionSuggestions.forEach((proposal) => {
+      const card = element('article', null, 'panel collection-card');
+      card.append(element('p', t('collections.suggestion'), 'section-kicker'));
+      card.append(element('h2', proposal.name), element('p', proposal.description));
+      const supportIds = JSON.parse(proposal.support_ids || '[]');
+      card.append(element('p', `${t('collections.support')}: ${supportIds.length}`));
+      const accept = element('button', t('collections.accept'), 'button button-primary');
+      const reject = element('button', t('collections.reject'), 'button button-secondary');
+      accept.type = reject.type = 'button';
+      accept.addEventListener('click', async () => {
+        await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/accept`, { method: 'POST', locale: getLocale() });
+        await loadCollections();
+      });
+      reject.addEventListener('click', async () => {
+        await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/reject`, { method: 'POST', locale: getLocale() });
+        await loadCollections();
+      });
+      const actions = element('div', null, 'collection-actions');
+      actions.append(accept, reject);
+      card.append(actions);
+      suggestions.append(card);
+  });
+  const inbox = $('#collection-inbox');
+  inbox.replaceChildren();
+  state.collectionInbox.forEach((keyword) => {
+    const row = element('div', null, 'collection-inbox-row');
+    row.append(element('span', `${keyword.keyword} · ${keyword.project} · ${keyword.observed_at}`));
+    const select = element('select');
+    select.setAttribute('aria-label', t('collections.open'));
+    state.collections.forEach((collection) => {
+      const option = element('option', collection.name);
+      option.value = collection.id;
+      select.append(option);
+    });
+    const add = element('button', t('collections.add'), 'button button-secondary');
+    add.type = 'button';
+    add.disabled = !state.collections.length;
+    add.addEventListener('click', async () => {
+      await requestJson(`/api/v1/collections/${encodeURIComponent(select.value)}/keywords`, {
+        method: 'POST', body: { keyword_id: keyword.id }, locale: getLocale(),
+      });
+      await loadCollections();
+    });
+    row.append(select, add);
+    inbox.append(row);
+  });
+  if (!state.collectionInbox.length) inbox.append(element('p', t('collections.empty-inbox')));
+  const more = $('#collection-inbox-more');
+  more.hidden = state.collectionInbox.length >= state.collectionInboxTotal;
+  more.disabled = state.collectionInbox.length >= state.collectionInboxTotal;
+  $('#collections-status').textContent = state.collectionJobStatus?.status === 'COMPLETED'
+    ? t('collections.coverage', state.collectionJobStatus) : t('collections.saved');
 }
 
 function isMobileNav() {
@@ -1002,6 +1199,28 @@ function bindEvents() {
   });
   $('#compare-first').addEventListener('change', describeComparison);
   $('#compare-second').addEventListener('change', describeComparison);
+  $('#collection-create').addEventListener('click', async () => {
+    const name = window.prompt(t('collections.name'));
+    if (name === null || !name.trim()) return;
+    const description = window.prompt(t('collections.context'), '') || '';
+    const examples = (window.prompt(t('collections.examples'), '') || '').split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
+    const exclusions = (window.prompt(t('collections.exclusions'), '') || '').split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
+    await requestJson('/api/v1/collections', { method: 'POST', body: { name: name.trim(), description, examples, exclusions }, locale: getLocale() });
+    await loadCollections();
+  });
+  $('#collection-search').addEventListener('input', (event) => {
+    state.collectionQuery = event.currentTarget.value;
+    renderCollections();
+  });
+  $('#collection-mode').addEventListener('change', async (event) => {
+    await requestJson('/api/v1/collections/mode', { method: 'POST', body: { mode: event.currentTarget.value }, locale: getLocale() });
+  });
+  $('#collections-refresh').addEventListener('click', async () => {
+    const result = await requestJson('/api/v1/collections/organize', { method: 'POST', locale: getLocale() });
+    $('#collections-status').textContent = `${result.status} · ${result.processed || 0} / ${result.available || 0} · ${result.assigned || 0} · ${result.unassigned || 0}`;
+    await loadCollections();
+  });
+  $('#collection-inbox-more').addEventListener('click', () => loadCollections({ appendInbox: true }));
   $('#detail-dialog').addEventListener('close', () => {
     state.detailSequence += 1;
     state.detail = null;

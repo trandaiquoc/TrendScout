@@ -36,6 +36,7 @@
       <div class="nav-label" data-i18n="nav.section"></div>
       <nav id="workspace-nav" aria-label="Workspace">
         <a class="nav-link active" href="#overview" data-nav="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◈</span><span data-i18n="nav.overview"></span></a>
+        <a class="nav-link" href="#collections" data-nav="collections"><span class="nav-icon" aria-hidden="true">▦</span><span data-i18n="nav.collections"></span></a>
         <a class="nav-link" href="#sources" data-nav="sources"><span class="nav-icon" aria-hidden="true">◎</span><span data-i18n="nav.sources"></span></a>
         <a class="nav-link" href="#research" data-nav="research"><span class="nav-icon" aria-hidden="true">▧</span><span data-i18n="nav.research"></span></a>
         <a class="nav-link" href="#settings" data-nav="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span data-i18n="nav.settings"></span></a>
@@ -51,7 +52,7 @@
           </nav>
         </details>
       </nav>
-      <div class="policy-links"><a href="/dashboard/privacy.html" data-i18n="policy.privacy">Privacy Policy</a><a href="/dashboard/terms.html" data-i18n="policy.terms">Terms of Service</a></div>
+      <div class="policy-links"><span data-i18n="policy.notice">POLICY DRAFT · LOCAL / NOT YET PUBLIC | YouTube Data API: PENDING APPROVAL</span><a href="/dashboard/privacy.html" data-i18n="policy.privacy">Privacy Policy</a><a href="/dashboard/terms.html" data-i18n="policy.terms">Terms of Service</a></div>
       <div class="sidebar-source">
         <span class="source-monogram">W</span>
         <span><strong>Wikimedia</strong><small id="sidebar-source-status" data-i18n="source.checking"></small></span>
@@ -118,6 +119,15 @@
             <div class="table-wrap"><table><thead><tr><th data-i18n="table.topic"></th><th data-i18n="table.category"></th><th data-i18n="table.evidence"></th><th data-i18n="table.date"></th><th data-i18n="table.status"></th><th><span class="sr-only" data-i18n="table.details"></span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty-state"><span class="empty-art" aria-hidden="true">⌁</span><strong data-i18n="keywords.empty-title"></strong><p data-i18n="keywords.empty-help"></p><button id="empty-fetch" class="button button-secondary" type="button" data-i18n="fetch.cta"></button></div></div>
             <div class="table-footer"><span id="pagination-info" data-i18n="keywords.no-results"></span><div class="pagination"><button id="prev" type="button" disabled data-i18n-aria="a11y.previous-page" aria-label="Previous page">←</button><button id="next" type="button" disabled data-i18n-aria="a11y.next-page" aria-label="Next page">→</button></div></div>
           </div>
+        </section>
+
+        <section class="view-panel" data-view="collections" hidden aria-labelledby="collections-heading">
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="collections.kicker"></p><h1 id="collections-heading" data-i18n="nav.collections"></h1><p data-i18n="collections.description"></p></div><button class="button button-primary" id="collection-create" type="button" data-i18n="collections.create"></button></div>
+          <div class="panel collection-controls"><label for="collection-search" data-i18n="collections.search"></label><input id="collection-search" type="search" maxlength="100" data-i18n-placeholder="collections.search-placeholder"><label for="collection-mode" data-i18n="collections.mode"></label><select id="collection-mode"><option value="SUGGEST" data-i18n="collections.suggest"></option><option value="AUTO_CREATE" data-i18n="collections.auto-create"></option></select><button class="button button-secondary" id="collections-refresh" type="button" data-i18n="collections.organize"></button></div>
+          <p id="collections-status" class="notice notice--info" role="status" aria-live="polite"></p>
+          <div id="suggestion-list" class="collection-grid"></div>
+          <div id="collection-list" class="collection-grid"></div>
+          <div class="panel"><h2 data-i18n="collections.inbox"></h2><div id="collection-inbox" class="collection-inbox"></div><button class="button button-secondary" id="collection-inbox-more" type="button" data-i18n="collections.more" hidden></button></div>
         </section>
 
         <section class="view-panel" data-view="sources" hidden aria-labelledby="sources-heading">
