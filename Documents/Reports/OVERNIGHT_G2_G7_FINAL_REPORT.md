@@ -80,7 +80,7 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 ## Verification
 
 - Focused dashboard, keyword workbench and workspace structure tests: **23 passed, 34 subtests passed**.
-- Full backend suite after the static-shell assertion update: **18 failed, 759 passed, 767 subtests passed**. Seventeen failures require `FIRESTORE_EMULATOR_HOST` and a running Firestore emulator, neither configured. The other two are pre-existing synthetic discovery expectation mismatches documented before this work (`INSUFFICIENT_EVIDENCE` expected while runtime returns `UNAVAILABLE`). No live provider requests were made to chase emulator/synthetic cases.
+- Full backend suite after the static-shell assertion update: **18 failed, 759 passed, 767 subtests passed**. Sixteen Firestore emulator tests require `FIRESTORE_EMULATOR_HOST` and a running emulator, neither configured. The other two are pre-existing synthetic discovery expectation mismatches documented before this work (`INSUFFICIENT_EVIDENCE` expected while runtime returns `UNAVAILABLE`). No live provider requests were made to chase emulator/synthetic cases.
 - Native Chrome offline workspace: passed at 320, 390, 768, 1024, 1440 and 1920 px for locale/theme persistence, all views, read-only API access and XSS handling. The Collection merge picker passed keyboard selection, review-step handoff and Escape dismissal in Vietnamese/English and light/dark in the isolated fixture; no merge was committed and no Fetch occurred.
 - Fresh overview screenshots: 24 combinations at six widths, Vietnamese/English and light/dark are in `Documents/Reports/windows-evidence/overnight-g2-g7/`. Screenshots use an isolated synthetic browser fixture. Five earlier G2 evidence images are also retained in that directory.
 - `node --check` passed for `Frontend/public/app.js` and `Frontend/public/modules/capabilities.js`; Python compilation passed for changed backend modules; `git diff --check` passed (Git emitted only line-ending normalization warnings).
@@ -93,7 +93,7 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 2. Add complete charts or explicitly accept the current accessible analysis tables; expand chart states only where comparable source data exists.
 3. Provide a supported read-only interface to list Firestore-backed manual runs or clearly accept the local-ledger-only scope.
 4. Finish native Chrome keyboard, mobile drawer, modal, pagination, reload and server-restart journeys; capture fresh evidence for every G2–G7 screen and both locales/themes.
-5. Configure a Firestore emulator to run its 17 integration tests. Separately resolve or explicitly accept the two known synthetic discovery expectation mismatches.
+5. Configure a Firestore emulator to run its 16 integration tests. Separately resolve or explicitly accept the two known synthetic discovery expectation mismatches.
 6. Revalidate the dated source research inventory before enabling or approving integrations. No external source approval, credential, quota or production capability is implied here.
 
 No push or deployment was performed.
