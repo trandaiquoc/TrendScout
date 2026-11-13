@@ -747,6 +747,8 @@ export const en = {
   'workbench.manage-settings': 'Settings',
   'workbench.manage-merge': 'Merge into another Collection',
   'workbench.merge-help': 'Choose where to move keywords and subcollections. You will review the change before confirming.',
+  'workbench.merge-system-help': 'System Collections cannot be merged. Create a personal Collection to organize keywords separately.',
+  'workbench.no-merge-target': 'There is no other Collection available as a destination. Create one first.',
   'workbench.merge-action': 'Merge',
   'workbench.merge-into': 'Target Collection',
   'workbench.manage-delete': 'Delete this Collection',

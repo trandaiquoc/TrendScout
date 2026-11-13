@@ -748,6 +748,8 @@ export const vi = {
   'workbench.manage-settings': 'Tùy chọn',
   'workbench.manage-merge': 'Gộp vào Bộ sưu tập khác',
   'workbench.merge-help': 'Chọn Bộ sưu tập nhận từ khóa và các mục con. Bạn sẽ xem lại trước khi xác nhận gộp.',
+  'workbench.merge-system-help': 'Không thể gộp Bộ sưu tập hệ thống. Hãy tạo Bộ sưu tập riêng nếu bạn muốn sắp xếp từ khóa khác.',
+  'workbench.no-merge-target': 'Chưa có Bộ sưu tập khác để nhận nội dung. Hãy tạo một Bộ sưu tập trước.',
   'workbench.merge-action': 'Gộp',
   'workbench.merge-into': 'Bộ sưu tập đích',
   'workbench.manage-delete': 'Xóa Bộ sưu tập này',

@@ -74,6 +74,10 @@ class KeywordWorkbenchUITests(unittest.TestCase):
         self.assertIn("collection-manage-section collection-manage-delete", module)
         self.assertIn(".collection-manage-delete .collection-danger-button", css)
         self.assertIn("@media (max-width: 520px)", css)
+        self.assertIn("if(item.category_id)", module)
+        self.assertIn("if(!targets.length)", module)
+        self.assertIn("workbench.merge-system-help", module)
+        self.assertIn("workbench.no-merge-target", module)
 
 
 if __name__ == "__main__":
