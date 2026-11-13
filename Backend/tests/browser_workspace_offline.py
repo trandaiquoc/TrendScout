@@ -73,7 +73,7 @@ window.fetch=(path,opts={})=>{
   if(p.startsWith('/api/v1/datasets/latest/keywords?')){
     const q=new URL(p,'https://local.invalid').searchParams;
     const empty=q.get('q')==='empty';
-    return Promise.resolve(new Response(JSON.stringify({items:empty?[]:[{id:'c'.repeat(64),keyword:'Fixture keyword',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,classification_status:'CLASSIFIED',memberships:[],evidence:{views_ceil:12}}],total:empty?0:1,next_offset:null}),{status:200}));
+    return Promise.resolve(new Response(JSON.stringify({items:empty?[]:[{id:'c'.repeat(64),keyword:'Fixture keyword',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,classification_status:'CLASSIFIED',memberships:[],evidence:{views_ceil:12}}],total:empty?0:51,next_offset:empty?null:25}),{status:200}));
   }
   if(p.startsWith('/api/v1/research?'))return Promise.resolve(new Response(JSON.stringify({items:window.fixtureResearch,total:window.fixtureResearch.length}),{status:200}));
   if(p.includes('/keywords?')){
@@ -106,6 +106,12 @@ CHECK = r"""<script>
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   try{
     await wait(300);
+    if(RELOAD_TEST&&window.name!=='d2-reload'){
+      document.querySelector('[data-theme-toggle]').click();
+      document.querySelector('[data-locale-toggle]').click();
+      await wait(120);
+      window.name='d2-reload';location.reload();return;
+    }
     if(window.name==='d2-reload'){
       check(document.documentElement.dataset.theme==='dark','theme persisted after reload');
       check(document.documentElement.lang==='en','locale persisted after reload');
@@ -114,9 +120,10 @@ CHECK = r"""<script>
       check(localStorage.getItem('trendscout.theme')==='dark','dark preference stored');
       check(localStorage.getItem('trendscout.locale')==='en','English preference stored');
       check(!Object.keys(localStorage).some(key=>/token|secret|credential/i.test(key)),'no credential in local storage');
-      document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');
       window.name='';
-      return;
+      document.querySelector('[data-theme-toggle]').click();
+      document.querySelector('[data-locale-toggle]').click();
+      await wait(120);
     }
     check(document.documentElement.dataset.theme==='light','light default');
     check(document.documentElement.lang==='vi','Vietnamese default');
@@ -172,6 +179,12 @@ CHECK = r"""<script>
     const collapsedParent=document.querySelector('[data-collection-id="collection-parent"]');
     check(collapsedParent?.querySelector('.workbench-disclosure')?.getAttribute('aria-expanded')==='false','parent Collection starts collapsed in the fixture');
     check(collapsedParent?.querySelector('.workbench-tree-count')?.textContent==='2','collapsed parent shows unique keywords saved in its child Collections');
+    const workbenchSearch=document.querySelector('#workbench-query');workbenchSearch.value='fixture';workbenchSearch.dispatchEvent(new Event('input',{bubbles:true}));await wait(420);
+    check(testRequests.some(request=>request.path.startsWith('/api/v1/datasets/latest/keywords?')&&request.path.includes('q=fixture'))&&document.querySelector('#workbench-rows tr'),'Collection keyword search requests the entered query and renders its matching page');
+    workbenchSearch.value='';workbenchSearch.dispatchEvent(new Event('input',{bubbles:true}));await wait(420);
+    document.querySelector('#workbench-next').click();await wait(30);
+    check(testRequests.some(request=>request.path.startsWith('/api/v1/datasets/latest/keywords?')&&request.path.includes('offset=25'))&&document.querySelector('#workbench-page-info').textContent.includes('26'),'Collection keyword pagination loads the following page');
+    document.querySelector('#workbench-prev').click();await wait(30);
     document.querySelector('.workbench-context-button')?.click();
     const picker=document.querySelector('.collection-picker');
     const pickerTrigger=picker?.querySelector('[role=combobox]');
@@ -255,11 +268,18 @@ CHECK = r"""<script>
     await go('research');
     check(Boolean(document.querySelector('#research-form')&&document.querySelector('#research-records')),'persistent research workflow form and saved-record list');
     check(document.querySelector('[data-view=research]').textContent.includes('nhu cầu thị trường'),'research page keeps commercial evidence boundaries visible');
+    document.querySelector('#research-keyword').value='c'.repeat(64);
     document.querySelector('#research-subject').value='Fixture product idea';
     document.querySelector('#research-hypothesis').value='A testable hypothesis based on the saved trend signal.';
+    document.querySelector('#research-category').value='Home organization';
+    document.querySelector('#research-niche').value='Small apartments';
+    document.querySelector('#research-competitors').value='Review products before drawing conclusions.';
     document.querySelector('#research-market-evidence').value='Evidence required before commercial validation.';
+    document.querySelector('#research-ip').value='Check brand and IP evidence.';
+    document.querySelector('#research-risks').value='Demand is not validated.';
+    document.querySelector('#research-findings').value='Research is still in progress.';
     document.querySelector('#research-form').requestSubmit();await wait(80);
-    check(testRequests.some(request=>request.path==='/api/v1/research'&&request.method==='POST'&&JSON.parse(request.body).subject==='Fixture product idea'),'Product Research saves a user-authored hypothesis and evidence');
+    check(testRequests.some(request=>request.path==='/api/v1/research'&&request.method==='POST'&&JSON.parse(request.body).subject==='Fixture product idea'&&JSON.parse(request.body).keyword_id==='c'.repeat(64)&&JSON.parse(request.body).market_evidence==='Evidence required before commercial validation.'),'Product Research links a saved keyword and records the entered hypothesis and market evidence');
     check(document.querySelector('#research-records .research-record h3')?.textContent==='Fixture product idea','saved hypothesis appears in the research list');
     const researchStatus=document.querySelector('#research-records select');researchStatus.value='RESEARCHING';researchStatus.dispatchEvent(new Event('change',{bubbles:true}));await wait(50);
     check(testRequests.some(request=>request.path==='/api/v1/research/research-fixture'&&request.method==='PATCH'&&JSON.parse(request.body).status==='RESEARCHING'),'Product Research status persists through its update action');
@@ -336,11 +356,6 @@ CHECK = r"""<script>
     check(localStorage.getItem('trendscout.locale')==='en','locale saved');
     check(!Object.keys(localStorage).some(key=>/token|secret|credential/i.test(key)),'no credential storage');
     check(document.documentElement.scrollWidth<=innerWidth+1,'document horizontal overflow');
-    if(INVALID_PREFERENCE_TEST){
-      document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');
-      return;
-    }
-    window.name='d2-reload';location.reload();return;
   }catch(error){errors.push('exception at '+(window.__checkpoint||'initial workflow')+': '+String(error));}
   document.body.setAttribute('data-browser-result',errors.length?'FAIL: '+errors.join('; '):'PASS');
 })();
@@ -370,7 +385,7 @@ def main():
                 )
             width_check = check.replace(
                 "INVALID_PREFERENCE_TEST", "true" if width == 768 else "false"
-            )
+            ).replace("RELOAD_TEST", "true" if width == 320 else "false")
             page.write_text(page_html.replace("</body>", FAKE + width_check + "</body>"),
                             encoding="utf-8")
             command = [
@@ -387,7 +402,7 @@ def main():
                 "--no-first-run",
                 "--user-data-dir=" + directory + "/profile-" + str(width),
                 "--window-size=" + str(width) + ",1000",
-                "--virtual-time-budget=12000",
+                "--virtual-time-budget=24000",
                 "--dump-dom",
                 page.as_uri(),
             ]
@@ -402,7 +417,7 @@ def main():
                 marker = (
                     result.stdout.split("data-browser-result=", 1)[-1][:800]
                     if "data-browser-result=" in result.stdout
-                    else "missing browser result"
+                    else "missing browser result: " + result.stdout[-1200:]
                 )
                 raise SystemExit(
                     "Chrome "
