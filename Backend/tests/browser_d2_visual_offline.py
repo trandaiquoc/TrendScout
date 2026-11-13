@@ -300,6 +300,15 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         time.sleep(0.25)
                     capture(f"screen-{view}-{width}-vi-light.webp", width, configure=False)
 
+            for locale, theme in (("vi", "dark"), ("en", "light"), ("en", "dark")):
+                set_preferences(theme, locale)
+                for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
+                    for width in (390, 1440):
+                        set_viewport(width, 900 if width > 500 else 820)
+                        go(view)
+                        time.sleep(0.18)
+                        capture(f"screen-{view}-{width}-{locale}-{theme}.webp", width, configure=False)
+
             set_viewport(1280)
             go("runs")
             evaluate(
