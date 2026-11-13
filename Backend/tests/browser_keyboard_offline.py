@@ -109,7 +109,7 @@ def main():
                     raise RuntimeError("evaluation failed: " + expression)
                 return result["result"].get("value")
 
-            def press(key, code, virtual_key, text=None):
+            def press(key, code, virtual_key, text=None, modifiers=0):
                 for event in ("keyDown", "keyUp"):
                     params = {
                         "type": event,
@@ -117,6 +117,7 @@ def main():
                         "code": code,
                         "windowsVirtualKeyCode": virtual_key,
                         "nativeVirtualKeyCode": virtual_key,
+                        "modifiers": modifiers,
                     }
                     if text is not None and event == "keyDown":
                         params["text"] = text
@@ -208,6 +209,47 @@ def main():
             if evaluate("document.activeElement.id") != "collection-create":
                 raise RuntimeError("closing the Collection form did not restore focus to its opener")
 
+            evaluate("document.querySelector('[data-collection-node] .workbench-context-button').click()")
+            if not evaluate("Boolean(document.querySelector('.collection-manage-panel .collection-manage-actions button'))"):
+                raise RuntimeError("Collection settings actions did not open")
+            evaluate("document.querySelector('.collection-manage-panel .collection-manage-actions button').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#workbench-collection-dialog form [name=name]')?.value==='Fixture Collection A'"):
+                raise RuntimeError("keyboard activation did not open the edit form with the current Collection name")
+            press("a", "KeyA", 65, modifiers=2)
+            call("Input.insertText", {"text": "Keyboard-edited Collection"}, session)
+            for _ in range(6):
+                press("Tab", "Tab", 9)
+            if not evaluate("document.activeElement.matches('#workbench-collection-dialog button[type=submit]')"):
+                raise RuntimeError("Collection edit form keyboard sequence did not reach Save")
+            press(" ", "Space", 32, " ")
+            for _ in range(60):
+                if evaluate("!document.querySelector('#workbench-collection-dialog').open"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("keyboard did not save edited Collection")
+            if not evaluate("window.testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='PATCH'&&JSON.parse(request.body).name==='Keyboard-edited Collection')"):
+                raise RuntimeError("keyboard-edited Collection was not sent to the Collection API")
+
+            evaluate("document.querySelector('[data-collection-node] .workbench-context-button').click()")
+            if not evaluate("Boolean(document.querySelector('.collection-danger-button'))"):
+                raise RuntimeError("Collection delete action did not render")
+            evaluate("document.querySelector('.collection-danger-button').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#workbench-collection-dialog h2')?.textContent.includes('Xóa bộ sưu tập này')"):
+                raise RuntimeError("keyboard activation did not open the delete-impact confirmation")
+            evaluate("document.querySelector('#workbench-collection-dialog .button-primary').focus()")
+            press(" ", "Space", 32, " ")
+            for _ in range(60):
+                if evaluate("!document.querySelector('#workbench-collection-dialog').open"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("keyboard did not confirm Collection deletion")
+            if not evaluate("window.testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='DELETE')"):
+                raise RuntimeError("keyboard-confirmed Collection deletion was not sent to the Collection API")
+
             evaluate("document.querySelector('#detail-dialog').showModal()")
             if not evaluate("document.querySelector('#detail-dialog').open"):
                 raise RuntimeError("detail dialog did not open")
@@ -279,7 +321,7 @@ def main():
             if evaluate("document.documentElement.dataset.theme!=='light'"):
                 raise RuntimeError("Space did not activate the theme control")
             print(
-                "Chrome DevTools: keyboard navigation and Collection form create/escape/focus restore, detail Escape, 320/375px all views, theme and locale: PASS"
+                "Chrome DevTools: keyboard Collection create/edit/delete, form Escape/focus restore, detail Escape, 320/375px all views, theme and locale: PASS"
             )
         finally:
             if os.name == "nt":
