@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from offline_http_guard import strict_offline_http_guard
 from test_d5_live_gateway import Approvals
 from test_d5_public_admission import NOW, coordinator, policy
 
@@ -325,10 +326,63 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.gateway(lambda _req: httpx.Response(200), user_agent="TrendScoutBot/1.0")
 
     async def test_controlled_network_constructor_opens_no_request(self):
-        gateway = await WikimediaTopPageGateway.controlled_network(
-            self.approvals, self.runner, user_agent=USER_AGENT, clock=lambda: NOW)
-        self.gateways.append(gateway)
-        self.assertEqual(gateway.data_mode, "LIVE")
+        with strict_offline_http_guard() as (guard, fake_transport):
+            tasks_before = set(asyncio.all_tasks())
+            gateway = await WikimediaTopPageGateway.controlled_network(
+                self.approvals, self.runner, user_agent=USER_AGENT, clock=lambda: NOW)
+            self.gateways.append(gateway)
+            self.assertEqual(gateway.data_mode, "LIVE")
+            self.assertEqual(guard["real_constructions"], 0)
+            self.assertEqual(guard["fake_constructions"], 1)
+            self.assertEqual(guard["requests"], 0)
+            self.assertEqual(guard["closed"], 0)
+            self.assertEqual(fake_transport.__name__, "OfflineAsyncHTTPTransport")
+            self.assertEqual(gateway._inner.kwargs,
+                {"verify": True, "trust_env": False, "retries": 0})
+
+            class MissingApproval:
+                def current(self, _source):
+                    return None
+
+            expired = replace(self.approvals.value, expires_at=NOW)
+            wrong_scope = replace(self.approvals.value, scope="UNRECOGNIZED")
+            for invalid in (MissingApproval(),
+                            type("ExpiredApproval", (), {"current": lambda _self, _source: expired})(),
+                            type("WrongScopeApproval", (), {"current": lambda _self, _source: wrong_scope})()):
+                before_closed = guard["closed"]
+                with self.assertRaisesRegex(GatewayError, "SOURCE_NOT_APPROVED"):
+                    await WikimediaTopPageGateway.controlled_network(
+                        invalid, self.runner, user_agent=USER_AGENT, clock=lambda: NOW)
+                self.assertEqual(guard["closed"], before_closed + 1)
+
+            # Initialization happens after the fake transport is allocated; failure must close it.
+            before_closed = guard["closed"]
+            with self.assertRaisesRegex(ValueError, "contact information"):
+                await WikimediaTopPageGateway.controlled_network(
+                    self.approvals, self.runner, user_agent="invalid", clock=lambda: NOW)
+            self.assertEqual(guard["closed"], before_closed + 1)
+            self.assertEqual(guard["real_constructions"], 0)
+            self.assertEqual(guard["requests"], 0)
+
+            await gateway.aclose()
+            self.assertEqual(guard["closed"], before_closed + 2)
+            self.assertEqual(set(asyncio.all_tasks()), tasks_before)
+
+            # A constructor that raises before returning owns no transport to clean up.
+            current_fake = httpx.AsyncHTTPTransport
+
+            class FailingTransport:
+                def __init__(self, **_kwargs):
+                    raise RuntimeError("offline fake constructor failure")
+
+            with patch("httpx.AsyncHTTPTransport", FailingTransport):
+                closed_before = guard["closed"]
+                with self.assertRaisesRegex(RuntimeError, "offline fake constructor failure"):
+                    await WikimediaTopPageGateway.controlled_network(
+                        self.approvals, self.runner, user_agent=USER_AGENT, clock=lambda: NOW)
+                self.assertEqual(guard["closed"], closed_before)
+            self.assertIs(httpx.AsyncHTTPTransport, current_fake)
+            self.assertEqual(guard["real_constructions"], 0)
 
 
 if __name__ == "__main__":

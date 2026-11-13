@@ -9,6 +9,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+from local_security_helpers import private_test_directory
+from offline_http_guard import strict_offline_http_guard
+from test_d5_live_gateway import Approvals
+from test_d5_wikimedia_gateway import USER_AGENT
+from test_d6_local_live_composition import FixtureApprovals
 
 from app import local_ledger
 from app.jobs.distributed_worker import DistributedFetchWorker
@@ -28,13 +33,26 @@ from app.sources.catalog import (
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
-from test_d5_live_gateway import Approvals
-from test_d6_local_live_composition import FixtureApprovals
-from local_security_helpers import private_test_directory
-from test_d5_wikimedia_gateway import USER_AGENT
-
 
 NOW = datetime(2026, 11, 12, tzinfo=timezone.utc)
+_OFFLINE_GUARD_COUNTS = None
+
+
+def _finish_offline_guard(guard):
+    try:
+        assert _OFFLINE_GUARD_COUNTS["real_constructions"] == 0
+        assert _OFFLINE_GUARD_COUNTS["fake_constructions"] > 0
+        assert _OFFLINE_GUARD_COUNTS["requests"] == 0
+    finally:
+        guard.__exit__(None, None, None)
+
+
+def setUpModule():
+    """Run this module with all real HTTP transport construction blocked."""
+    global _OFFLINE_GUARD_COUNTS
+    guard = strict_offline_http_guard()
+    _OFFLINE_GUARD_COUNTS, _ = guard.__enter__()
+    unittest.addModuleCleanup(lambda: _finish_offline_guard(guard))
 
 
 def _live_facade(directory):
