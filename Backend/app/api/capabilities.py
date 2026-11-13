@@ -1,6 +1,7 @@
 """Public, non-secret view of runtime and source capabilities."""
 
 import json
+import sqlite3
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -11,6 +12,48 @@ from app.sources.query_plan import get_query_plan
 
 router = APIRouter()
 _RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_catalog.json"
+
+
+def _saved_source_activity(request):
+    """Return the latest persisted Fetch evidence per source, never live health."""
+    service = getattr(request.app.state, "collection_service", None)
+    if service is None:
+        return {}
+    try:
+        with service.store.connect() as db:
+            rows = db.execute(
+                "SELECT status,data_mode,source_manifest,fetched_at,observation_start,observation_end "
+                "FROM dataset_snapshots ORDER BY created_at DESC LIMIT 100"
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+
+    latest = {}
+    for row in rows:
+        try:
+            manifest = json.loads(row["source_manifest"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if not isinstance(manifest, list):
+            continue
+        for source in manifest:
+            if not isinstance(source, dict):
+                continue
+            source_id = source.get("source_id")
+            if not isinstance(source_id, str) or source_id in latest:
+                continue
+            status = source.get("status")
+            status = status if status in {"SUCCESS", "PARTIAL", "FAILED"} else "UNKNOWN"
+            record_count = source.get("record_count")
+            latest[source_id] = {
+                "status": status,
+                "data_mode": row["data_mode"],
+                "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
+                "fetched_at": row["fetched_at"],
+                "observation_start": row["observation_start"],
+                "observation_end": row["observation_end"],
+            }
+    return latest
 
 
 @router.get("/sources/library")
@@ -54,6 +97,7 @@ async def capabilities(request: Request, response: Response):
                     enabled = False
                     block_reason = "ADMISSION_STATE_UNAVAILABLE"
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
+    saved_activity = _saved_source_activity(request)
     response.headers["Cache-Control"] = "no-store"
     return {
         "contract_version": "1.0",
@@ -142,6 +186,7 @@ async def capabilities(request: Request, response: Response):
                 "enabled_for_current_operation": (
                     enabled and item.source_id in request.app.state.public_fetch_source_ids
                 ),
+                "last_saved_fetch": saved_activity.get(item.source_id),
                 "disabled_reason": None
                 if enabled and item.source_id in request.app.state.public_fetch_source_ids
                 else (block_reason or "SOURCE_NOT_ALLOWED"),

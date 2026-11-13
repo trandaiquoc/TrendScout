@@ -31,7 +31,7 @@ window.fetch=(path,opts={})=>{
     data_mode:'LIVE',local_live_demo:true,environment_mode:'local',read_only:false,
     fetch_enabled:false,public_fetch_enabled:false,authentication_required:false,
     sources:[
-      {source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false},
+      {source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false,last_saved_fetch:{status:'PARTIAL',record_count:7,fetched_at:'2026-11-14T01:00:00Z',data_mode:'SYNTHETIC'}},
       {source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
@@ -128,6 +128,15 @@ CHECK = r"""<script>
       check(!document.querySelector('[data-view=\"'+link.dataset.nav+'\"]')?.hidden,'view '+link.dataset.nav);
       check(link.getAttribute('aria-current')==='page','aria current '+link.dataset.nav);
       check(document.documentElement.scrollWidth<=innerWidth+1,'horizontal overflow '+link.dataset.nav);
+    }
+    if(innerWidth<=900){
+      const menuButton=document.querySelector('#menu-toggle');
+      menuButton.click();
+      check(document.querySelector('#app-shell').classList.contains('menu-open'),'mobile navigation opens');
+      check(document.querySelector('#workspace-nav-panel').contains(document.activeElement),'mobile navigation receives focus');
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+      check(!document.querySelector('#app-shell').classList.contains('menu-open'),'Escape closes mobile navigation');
+      check(document.activeElement===menuButton,'mobile navigation restores focus to its trigger');
     }
     const {applyLocale}=await import(I18N_MODULE_URI);
     await go('collections');await wait(80);

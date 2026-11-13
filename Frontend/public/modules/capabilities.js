@@ -6,7 +6,7 @@ const STATUS_FIELDS = [
   ['sources.approval', 'approval_status'],
   ['sources.local-verification', 'local_live_verification_status'],
   ['sources.current-operation', 'enabled_for_current_operation'],
-  ['sources.current-health', null],
+  ['sources.latest-fetch', null],
   ['sources.production-readiness', 'production_readiness'],
 ];
 
@@ -39,6 +39,21 @@ function localizedStatus(value, translate) {
   return translate('source.status.' + value.toLowerCase());
 }
 
+function savedFetchSummary(activity, translate) {
+  if (!activity) return translate('source.fetch-no-saved-data');
+  const status = ['SUCCESS', 'PARTIAL', 'FAILED'].includes(activity.status)
+    ? translate(`source.fetch.${activity.status.toLowerCase()}`)
+    : translate('source.status-unknown');
+  const count = Number.isInteger(activity.record_count) && activity.record_count >= 0
+    ? `${new Intl.NumberFormat(document.documentElement.lang || 'vi').format(activity.record_count)} ${translate('source.fetch-records')}`
+    : translate('source.fetch-count-unavailable');
+  const fetched = activity.fetched_at ? new Date(activity.fetched_at) : null;
+  const date = fetched && !Number.isNaN(fetched.getTime())
+    ? new Intl.DateTimeFormat(document.documentElement.lang || 'vi', {dateStyle:'medium',timeStyle:'short'}).format(fetched)
+    : translate('source.fetch-time-unavailable');
+  return `${status} · ${count} · ${date}`;
+}
+
 export function renderSourceCapabilities(capabilities, translate) {
   const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
   const grid = document.querySelector('#source-registry-list');
@@ -55,7 +70,7 @@ export function renderSourceCapabilities(capabilities, translate) {
       const list=document.createElement('dl'); list.className='detail-list';
       for (const [labelKey,field] of STATUS_FIELDS) {
         const label=document.createElement('dt'); label.textContent=translate(labelKey);
-        const value=document.createElement('dd'); value.textContent=field===null ? translate('source.health-unreported') : localizedStatus(descriptor[field],translate);
+        const value=document.createElement('dd'); value.textContent=field===null ? savedFetchSummary(descriptor.last_saved_fetch,translate) : localizedStatus(descriptor[field],translate);
         const row=document.createElement('div'); row.append(label,value); list.append(row);
       }
       const categoryLabel=translate(`sources.category.${descriptor.category}`);

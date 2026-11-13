@@ -1,9 +1,16 @@
 """Source catalog exposes capabilities without inventing future adapters."""
 
+import json
+import sqlite3
+import tempfile
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import composition
+from app.api.capabilities import _saved_source_activity
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -16,6 +23,51 @@ from app.sources.catalog import (
 
 
 class SourceCatalogTests(unittest.TestCase):
+    def test_capabilities_project_latest_saved_source_fetch_without_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "snapshots.sqlite"
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            db.execute("""CREATE TABLE dataset_snapshots(
+                status TEXT,data_mode TEXT,source_manifest TEXT,fetched_at TEXT,
+                observation_start TEXT,observation_end TEXT,created_at TEXT)""")
+            db.execute("""INSERT INTO dataset_snapshots VALUES(?,?,?,?,?,?,?)""", (
+                "PARTIAL", "SYNTHETIC", json.dumps([{
+                    "source_id": WIKIMEDIA_SOURCE_ID, "status": "PARTIAL",
+                    "record_count": 7, "error_code": "PRIVATE_PROVIDER_DETAIL",
+                }]), "2026-11-14T01:00:00Z", "2026-11-12", "2026-11-13", "2",
+            ))
+            db.execute("""INSERT INTO dataset_snapshots VALUES(?,?,?,?,?,?,?)""", (
+                "COMPLETED", "SYNTHETIC", json.dumps([{
+                    "source_id": WIKIMEDIA_SOURCE_ID, "status": "SUCCESS",
+                    "record_count": 3,
+                }]), "2026-11-13T01:00:00Z", "2026-11-11", "2026-11-11", "1",
+            ))
+            db.commit()
+            db.close()
+
+            class Store:
+                @contextmanager
+                def connect(self):
+                    db = sqlite3.connect(path)
+                    db.row_factory = sqlite3.Row
+                    try:
+                        yield db
+                    finally:
+                        db.close()
+
+            request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+                collection_service=SimpleNamespace(store=Store())
+            )))
+            activity = _saved_source_activity(request)[WIKIMEDIA_SOURCE_ID]
+
+        self.assertEqual(activity, {
+            "status": "PARTIAL", "data_mode": "SYNTHETIC", "record_count": 7,
+            "fetched_at": "2026-11-14T01:00:00Z", "observation_start": "2026-11-12",
+            "observation_end": "2026-11-13",
+        })
+        self.assertNotIn("PRIVATE_PROVIDER_DETAIL", json.dumps(activity))
+
     def test_four_capabilities_have_central_endpoint_and_readiness_metadata(self):
         expected = {
             WIKIMEDIA_SOURCE_ID: ("wikimedia_aqs", "IMPLEMENTED", True),
