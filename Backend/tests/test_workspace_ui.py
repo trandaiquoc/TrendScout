@@ -21,7 +21,9 @@ class WorkspaceStructureTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn('data-view="' + name + '"', html)
-        self.assertIn('data-i18n="common.synthetic"', html)
+        # The runtime source registry now owns live/synthetic status labels;
+        # the static shell must expose the corresponding source section.
+        self.assertIn('data-i18n="sources.active-title"', html)
         self.assertIn('role="tablist"', html)
         self.assertIn('data-dashboard-tab="analysis"', html)
         self.assertNotIn('data-view="keywords"', html)

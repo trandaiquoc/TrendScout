@@ -1,0 +1,735 @@
+{
+  "audit_date": "2026-11-13",
+  "source_document": "Documents/UX/G0/SOURCE_CATALOG_AND_QUOTA_MATRIX.md",
+  "items": [
+    {
+      "source_id": "facebook",
+      "category": "A. Mainstream social và community",
+      "display_name": "Facebook",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Meta developers](https://developers.facebook.com/). Group bị hạn chế không mặc định truy cập."
+    },
+    {
+      "source_id": "instagram",
+      "category": "A. Mainstream social và community",
+      "display_name": "Instagram",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Instagram platform](https://developers.facebook.com/docs/instagram-platform/); scopes/use case cần duyệt."
+    },
+    {
+      "source_id": "youtube",
+      "category": "A. Mainstream social và community",
+      "display_name": "YouTube",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "R; [Data API](https://developers.google.com/youtube/v3/docs/search/list); D3B synthetic."
+    },
+    {
+      "source_id": "tiktok",
+      "category": "A. Mainstream social và community",
+      "display_name": "TikTok",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Research Tools](https://developers.tiktok.com/products/research-api/) yêu cầu điều kiện phi thương mại; [Commercial Content API](https://developers.tiktok.com/products/commercial-content-api) nêu phạm vi EU, chưa xác nhận phù hợp US."
+    },
+    {
+      "source_id": "x",
+      "category": "A. Mainstream social và community",
+      "display_name": "X",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [X API](https://docs.x.com/); access và giá theo tier cần xác nhận."
+    },
+    {
+      "source_id": "threads",
+      "category": "A. Mainstream social và community",
+      "display_name": "Threads",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Threads API](https://developers.facebook.com/docs/threads/); discovery scope cần xác minh."
+    },
+    {
+      "source_id": "reddit",
+      "category": "A. Mainstream social và community",
+      "display_name": "Reddit",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Data API terms](https://redditinc.com/policies/data-api-terms): thương mại cần thỏa thuận riêng; nội dung/retention có hạn chế."
+    },
+    {
+      "source_id": "snapchat",
+      "category": "A. Mainstream social và community",
+      "display_name": "Snapchat",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Snap developers](https://developers.snap.com/); Spotlight là surface, quyền discovery chưa xác minh."
+    },
+    {
+      "source_id": "pinterest",
+      "category": "A. Mainstream social và community",
+      "display_name": "Pinterest",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [terms](https://developers.pinterest.com/terms/) hạn chế lưu và platform insights nếu thiếu quyền; [rate limits](https://developers.pinterest.com/docs/reference/rate-limits/) theo tier."
+    },
+    {
+      "source_id": "linkedin",
+      "category": "A. Mainstream social và community",
+      "display_name": "LinkedIn",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [access](https://learn.microsoft.com/en-us/linkedin/shared/authentication/getting-access), OAuth và nhiều quyền cần approval; không giả định public search rộng."
+    },
+    {
+      "source_id": "whatsapp",
+      "category": "A. Mainstream social và community",
+      "display_name": "WhatsApp",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [WhatsApp platform](https://developers.facebook.com/docs/whatsapp/); business API không cấp quyền đọc mọi private conversation/community."
+    },
+    {
+      "source_id": "nextdoor",
+      "category": "A. Mainstream social và community",
+      "display_name": "Nextdoor",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Nextdoor](https://about.nextdoor.com/); quyền và geography theo community chưa xác minh."
+    },
+    {
+      "source_id": "bluesky",
+      "category": "A. Mainstream social và community",
+      "display_name": "Bluesky",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://docs.bsky.app/docs/api/app-bsky-feed-get-feed) mô tả public reads; commercial, quota, retention và US scope cần review."
+    },
+    {
+      "source_id": "truth_social",
+      "category": "A. Mainstream social và community",
+      "display_name": "Truth Social",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Truth Social](https://truthsocial.com/); access commercial chưa xác minh."
+    },
+    {
+      "source_id": "bereal",
+      "category": "A. Mainstream social và community",
+      "display_name": "BeReal",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [BeReal](https://bereal.com/); discovery access chưa xác minh."
+    },
+    {
+      "source_id": "discord",
+      "category": "A. Mainstream social và community",
+      "display_name": "Discord",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [privileged intents](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents), [policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy). Không phải kho tin nhắn công khai tải toàn bộ; policy cấm scraping và thương mại hóa API data."
+    },
+    {
+      "source_id": "telegram",
+      "category": "A. Mainstream social và community",
+      "display_name": "Telegram",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://core.telegram.org/api); private groups không mặc định có quyền thương mại."
+    },
+    {
+      "source_id": "mastodon",
+      "category": "A. Mainstream social và community",
+      "display_name": "Mastodon",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://docs.joinmastodon.org/api/); quyền, scope và coverage theo instance."
+    },
+    {
+      "source_id": "tumblr",
+      "category": "A. Mainstream social và community",
+      "display_name": "Tumblr",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://www.tumblr.com/docs/en/api/v2); quyền, quota và commercial review còn mở."
+    },
+    {
+      "source_id": "quora",
+      "category": "A. Mainstream social và community",
+      "display_name": "Quora",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Quora](https://www.quora.com/); không giả định API discovery phù hợp."
+    },
+    {
+      "source_id": "stack_exchange",
+      "category": "A. Mainstream social và community",
+      "display_name": "Stack Exchange",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://api.stackexchange.com/); review license và attribution từng nội dung."
+    },
+    {
+      "source_id": "slack",
+      "category": "A. Mainstream social và community",
+      "display_name": "Slack",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Slack API](https://api.slack.com/); workspace consent không tạo quyền quét toàn nền tảng."
+    },
+    {
+      "source_id": "lemmy",
+      "category": "A. Mainstream social và community",
+      "display_name": "Lemmy",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Lemmy](https://join-lemmy.org/); access và policy theo instance."
+    },
+    {
+      "source_id": "discourse",
+      "category": "A. Mainstream social và community",
+      "display_name": "Discourse",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://docs.discourse.org/); consent và terms theo instance."
+    },
+    {
+      "source_id": "fandom",
+      "category": "A. Mainstream social và community",
+      "display_name": "Fandom",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Fandom](https://www.fandom.com/); license/coverage cần xác minh."
+    },
+    {
+      "source_id": "twitch",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Twitch",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://dev.twitch.tv/docs/api/); auth và terms theo endpoint."
+    },
+    {
+      "source_id": "kick",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Kick",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Kick](https://kick.com/); API commercial discovery chưa xác minh."
+    },
+    {
+      "source_id": "rumble",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Rumble",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Rumble](https://rumble.com/); access chưa xác minh."
+    },
+    {
+      "source_id": "vimeo",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Vimeo",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://developer.vimeo.com/api/guides/start); quyền từng endpoint cần duyệt."
+    },
+    {
+      "source_id": "dailymotion",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Dailymotion",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://developers.dailymotion.com/); quyền và quota chưa xác minh."
+    },
+    {
+      "source_id": "lemon8",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Lemon8",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Lemon8](https://www.lemon8-app.com/); ownership, US access và API cần xác minh."
+    },
+    {
+      "source_id": "patreon",
+      "category": "B. Video, streaming và creator",
+      "display_name": "Patreon",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://docs.patreon.com/); nội dung thành viên/consent không mặc định công khai."
+    },
+    {
+      "source_id": "etsy",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Etsy",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Open API](https://developers.etsy.com/) app/key, commercial review; screen-scraping bị cấm; [limits](https://developers.etsy.com/documentation/essentials/rate-limits/)."
+    },
+    {
+      "source_id": "poshmark",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Poshmark",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Poshmark](https://poshmark.com/); API và parent cần xác minh."
+    },
+    {
+      "source_id": "depop",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Depop",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Depop](https://www.depop.com/); quyền discovery chưa xác minh."
+    },
+    {
+      "source_id": "whatnot",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Whatnot",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Whatnot](https://www.whatnot.com/)."
+    },
+    {
+      "source_id": "mercari",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Mercari",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Mercari US](https://www.mercari.com/)."
+    },
+    {
+      "source_id": "offerup",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "OfferUp",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [OfferUp](https://offerup.com/)."
+    },
+    {
+      "source_id": "tiktok_shop",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "TikTok Shop",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Shop developers](https://partner.tiktokshop.com/); quyền seller/partner không mặc định là market-wide access."
+    },
+    {
+      "source_id": "facebook_marketplace",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Facebook Marketplace",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Marketplace](https://www.facebook.com/marketplace/); không coi là nguồn API độc lập được duyệt."
+    },
+    {
+      "source_id": "amazon",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Amazon",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Amazon developers](https://developer.amazon.com/); chương trình, quyền catalog và use case cần xác minh."
+    },
+    {
+      "source_id": "walmart",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Walmart",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Marketplace API](https://developer.walmart.com/global-marketplace/page/getting-started) dành seller/delegated solution provider; không mặc định catalog toàn sàn."
+    },
+    {
+      "source_id": "ebay",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "eBay",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Browse API](https://developer.ebay.com/develop/api/buy/browse_api) search listings, application token; quyền và quota production cần review."
+    },
+    {
+      "source_id": "shein",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "SHEIN",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [SHEIN US](https://us.shein.com/); quyền API/scrape chưa xác minh."
+    },
+    {
+      "source_id": "temu",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Temu",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Temu](https://www.temu.com/); quyền API/scrape chưa xác minh."
+    },
+    {
+      "source_id": "shop_app",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Shop",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Shopify API](https://shopify.dev/docs/api); merchant scope không mặc định toàn bộ Shop."
+    },
+    {
+      "source_id": "wayfair",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Wayfair",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Wayfair](https://www.wayfair.com/); partner quyền discovery chưa xác minh."
+    },
+    {
+      "source_id": "houzz",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Houzz",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Houzz](https://www.houzz.com/); access thương mại chưa xác minh."
+    },
+    {
+      "source_id": "home_depot",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "The Home Depot",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Home Depot](https://www.homedepot.com/); permission catalog chưa xác minh."
+    },
+    {
+      "source_id": "lowes",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Lowe's",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Lowe's](https://www.lowes.com/); permission catalog chưa xác minh."
+    },
+    {
+      "source_id": "target",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Target",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Target](https://www.target.com/); permission chưa xác minh."
+    },
+    {
+      "source_id": "nordstrom",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Nordstrom",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Nordstrom](https://www.nordstrom.com/); permission chưa xác minh."
+    },
+    {
+      "source_id": "google_shopping",
+      "category": "C. Fashion, Home và shopping",
+      "display_name": "Google Shopping",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Merchant API](https://developers.google.com/merchant/api); merchant-owned data không mặc định là toàn bộ Shopping."
+    },
+    {
+      "source_id": "hacker_news",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Hacker News",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [official API](https://github.com/HackerNews/API); content license và US scope cần review."
+    },
+    {
+      "source_id": "product_hunt",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Product Hunt",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://api.producthunt.com/v2/docs); permission và commercial use cần review."
+    },
+    {
+      "source_id": "substack",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Substack",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [Substack](https://substack.com/); từng feed, bản quyền và paywall cần kiểm tra."
+    },
+    {
+      "source_id": "medium",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Medium",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [Medium](https://medium.com/); feed/license theo tác giả."
+    },
+    {
+      "source_id": "google_news",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Google News",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Google News](https://news.google.com/); access/retention và publisher rights cần xác minh."
+    },
+    {
+      "source_id": "google_trends",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Google Trends",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API alpha](https://developers.google.com/search/apis/trends) giới hạn tester, không mặc định được cấp. Interest không là sales."
+    },
+    {
+      "source_id": "gdelt",
+      "category": "D. News, technology, open data và search",
+      "display_name": "GDELT",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [GDELT](https://www.gdeltproject.org/); dataset scope và rights theo nội dung."
+    },
+    {
+      "source_id": "public_rss",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Public RSS",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [RSS specification](https://www.rssboard.org/rss-specification); feed công khai không tự cấp quyền commercial."
+    },
+    {
+      "source_id": "common_crawl",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Common Crawl",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [data](https://commoncrawl.org/get-started); rights từng website và freshness cần review."
+    },
+    {
+      "source_id": "wikimedia_pageviews",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Wikimedia Pageviews",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "R; [AQS](https://wikitech.wikimedia.org/wiki/Analytics/AQS/Pageviews); pageviews không là unique audience hay intent."
+    },
+    {
+      "source_id": "google_serp",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Google Search",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "R; [SerpApi Google](https://serpapi.com/search-api), shared account với Bing; rank không là volume."
+    },
+    {
+      "source_id": "bing_serp",
+      "category": "D. News, technology, open data và search",
+      "display_name": "Bing Search",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "R; [SerpApi Bing](https://serpapi.com/bing-search-api); không dùng API Bing Search cũ của Microsoft."
+    },
+    {
+      "source_id": "newsapi",
+      "category": "D. News, technology, open data và search",
+      "display_name": "News API",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [documentation](https://newsapi.org/docs); quyền publisher, giá và attribution cần xem hợp đồng."
+    },
+    {
+      "source_id": "github",
+      "category": "D. News, technology, open data và search",
+      "display_name": "GitHub",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [REST API](https://docs.github.com/en/rest); license từng repo, auth/quota và US scope cần review."
+    },
+    {
+      "source_id": "openalex",
+      "category": "D. News, technology, open data và search",
+      "display_name": "OpenAlex",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [API](https://docs.openalex.org/); license, quota và US evidence cần kiểm tra."
+    },
+    {
+      "source_id": "roblox",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Roblox",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Open Cloud](https://create.roblox.com/docs/cloud); entitlement và privacy, nhất là trẻ em, cần review."
+    },
+    {
+      "source_id": "steam_community",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Steam Community",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Steam Web API](https://partner.steamgames.com/doc/webapi_overview); quyền và coverage cần xác minh."
+    },
+    {
+      "source_id": "goodreads",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Goodreads",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Goodreads](https://www.goodreads.com/); API hiện phù hợp chưa xác minh."
+    },
+    {
+      "source_id": "letterboxd",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Letterboxd",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Letterboxd](https://letterboxd.com/); quyền commercial chưa xác minh."
+    },
+    {
+      "source_id": "soundcloud",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "SoundCloud",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://developers.soundcloud.com/docs/api/guide); access và rights cần review."
+    },
+    {
+      "source_id": "spotify",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Spotify",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Web API](https://developer.spotify.com/documentation/web-api); chart/data use và policy cần review riêng."
+    },
+    {
+      "source_id": "apple_podcasts",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Apple Podcasts",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "F; [Apple Podcasts](https://podcasters.apple.com/); quyền chart/feed theo nguồn cần kiểm tra."
+    },
+    {
+      "source_id": "podcast_index",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Podcast Index",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://podcastindex-org.github.io/docs-api/); từng feed có quyền riêng."
+    },
+    {
+      "source_id": "yelp",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Yelp",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Fusion API](https://docs.developer.yelp.com/); reviews và commercial terms cần review."
+    },
+    {
+      "source_id": "tripadvisor",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Tripadvisor",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [Content API](https://tripadvisor-content-api.readme.io/); access, quota và rights cần review."
+    },
+    {
+      "source_id": "strava",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Strava",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "G; [API](https://developers.strava.com/); người dùng consent, privacy và allowed use cần review."
+    },
+    {
+      "source_id": "ravelry",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "Ravelry",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [Ravelry](https://www.ravelry.com/); API và commercial access cần xác minh."
+    },
+    {
+      "source_id": "alltrails",
+      "category": "E. Entertainment và sở thích",
+      "display_name": "AllTrails",
+      "research_status": "LOCKED_RESEARCH_CANDIDATE",
+      "runtime_adapter": false,
+      "approval_status": "NOT_APPROVED",
+      "source_reference": "U; [AllTrails](https://www.alltrails.com/); rights và API cần xác minh."
+    }
+  ]
+}

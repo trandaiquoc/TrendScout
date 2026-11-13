@@ -9,7 +9,7 @@ from browser_support import ChromeDevTools, find_chrome, require_linux_network_i
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
-OUTPUT = ROOT / "Documents" / "Reports" / "evidence" / "d2"
+OUTPUT = ROOT / "Documents" / "Reports" / "windows-evidence" / "overnight-g2-g7"
 RUN_ID = "a" * 32
 KEYWORD_ID = "c" * 64
 
@@ -17,6 +17,22 @@ FAKE = r"""<script>
 window.fetch=(path,options={})=>{
   const value=String(path).split('?')[0];
   if(value==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
+  if(value==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({contract_version:'1.0',environment_mode:'test',read_only:true,authentication_required:false,public_fetch_enabled:false,fetch_enabled:false,fetch_block_reason:'FEATURE_DISABLED',data_mode:'SYNTHETIC',sources:[
+    {source_id:'wikimedia_pageviews_top_per_country',display_name:'Wikimedia Pageviews',icon:'W',category:'trends_search_interest',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false,metric:{name:'views_ceil',unit:'approx_pageviews_upper_bound',meaning:'Approximate pageviews in a censored source sample'},market_scope:'US country scoped top list',documentation_url:'https://doc.wikimedia.org/generated-data-platform/aqs/'},
+    {source_id:'youtube_video_search',display_name:'YouTube',icon:'▶',category:'video_streaming',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in query-scoped video search results'},market_scope:'US region filter',documentation_url:'https://developers.google.com/youtube/v3/docs/search/list'},
+    {source_id:'google_web_serp',display_name:'Google Search',icon:'G',category:'search_engines',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in sampled web search results'},market_scope:'US localization filter',documentation_url:'https://serpapi.com/search-api'},
+    {source_id:'bing_web_serp',display_name:'Bing Search',icon:'B',category:'search_engines',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in sampled web search results'},market_scope:'US localization filter',documentation_url:'https://serpapi.com/search-api'}
+  ]}),{status:200}));
+  if(value==='/api/v1/analytics/overview')return Promise.resolve(new Response(JSON.stringify({keyword_totals:{unique:3,eligible:3,excluded:0,classified:2,ambiguous:0,unknown:1,ineligible:0,unclassified:1},active_sources:[],source_volume:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}],algorithm_distribution:[{algorithm_id:'observed-volume-rank',version:'v3',status:'COMPLETED',count:3}],algorithm_effectiveness:{status:'NOT_YET_EVALUATED',reason:'No comparable labeled historical evaluation is stored.'},source_operations:[],multi_source_coverage:{status:'INSUFFICIENT_SOURCES',sources:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}]},observations_over_time:[{source:'wikimedia_pageviews_top_per_country',observation_date:'2026-11-10',observed:3,unavailable:0}],top_observed:[{rank:1,keyword:'Example topic',metric:'views_ceil',unit:'approx_pageviews_upper_bound',observed_value:8400}],top_observed_context:{source:'wikimedia_pageviews_top_per_country',project:'en.wikipedia',observation_date:'2026-11-10',cohort_size:3,scope:['wikimedia_pageviews_top_per_country','US','all-access','en.wikipedia','views_ceil','approx_pageviews_upper_bound'],quality_flags:['CENSORED_TOP_LIST','SYNTHETIC_FIXTURE']},last_successful_fetch:{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',age_seconds:3600}}),{status:200}));
+  if(value==='/api/v1/sources/library')return Promise.resolve(new Response(JSON.stringify({audit_date:'2026-11-13',items:Array.from({length:81},(_,i)=>({source_id:'candidate_'+String(i+1).padStart(2,'0'),display_name:'Research candidate '+(i+1),category:'Research library'}))}),{status:200}));
+  if(value==='/api/v1/runtime')return Promise.resolve(new Response(JSON.stringify({embedding:{package:'fastembed',package_version:'0.9.1',model:'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',model_version:'fastembed-0.9.1',inference_device:'CPU',cache_vectors:3,vector_dimensions:'384',classification_policy_version:'contextual-classifier-v1.2',taxonomy_version:'topics-v1.4'},llm:{status:'NOT_CONFIGURED',usage_instrumented:false},scheduler:{status:'DISABLED',implemented:false,enabled:false,reason:'No persistent scheduler is connected; automatic Fetch is disabled.'}}),{status:200}));
+  if(value==='/api/v1/algorithms')return Promise.resolve(new Response(JSON.stringify({evaluation_status:'NOT_YET_EVALUATED',algorithms:[]}),{status:200}));
+  if(value==='/api/v1/algorithms/results')return Promise.resolve(new Response(JSON.stringify({summary:[],items:[]}),{status:200}));
+  if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[],suggestions:[],mode:'SUGGEST_ONLY',summary:{}}),{status:200}));
+  if(value==='/api/v1/collections/inbox')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
+  if(value==='/api/v1/research')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
+  if(value==='/api/v1/runs/history')return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
+  if(value==='/api/v1/datasets/latest/keywords')return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
   if(value==='/api/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')return Promise.resolve(new Response(JSON.stringify({
     run_id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',status:'COMPLETED',keyword_count:124,
     scored_count:28,data_date:'2026-11-10',mode:'synthetic',fetched_at:'2026-11-11T03:00:00Z',
@@ -108,7 +124,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         "width": width,
                         "height": height,
                         "deviceScaleFactor": 1,
-                        "mobile": width <= 500,
+                        "mobile": False,
                     },
                     session,
                 )
@@ -120,7 +136,8 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         "viewport mismatch: wanted " + str(width) + ", got " + str(actual)
                     )
                 if overflow:
-                    raise RuntimeError(str(width) + "px horizontal overflow")
+                    details = evaluate("JSON.stringify([...document.querySelectorAll('body *')].map(e=>({tag:e.tagName,id:e.id,cls:String(e.className).slice(0,45),right:Math.round(e.getBoundingClientRect().right),width:Math.round(e.getBoundingClientRect().width)})).filter(x=>x.right>innerWidth+2).slice(0,8))")
+                    raise RuntimeError(str(width) + "px horizontal overflow: " + str(details))
 
             def set_preferences(theme, locale):
                 current_theme = evaluate("document.documentElement.dataset.theme")
@@ -169,6 +186,13 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                     + str(destination.stat().st_size)
                     + " bytes"
                 )
+
+            for width in (320, 390, 768, 1024, 1440, 1920):
+                for locale, theme in (("vi", "light"), ("vi", "dark"), ("en", "light"), ("en", "dark")):
+                    set_viewport(width, 900 if width > 500 else 820)
+                    set_preferences(theme, locale)
+                    go("overview")
+                    capture(f"overview-{width}-{locale}-{theme}.webp", width, configure=False)
 
             set_viewport(1280)
             set_preferences("light", "vi")

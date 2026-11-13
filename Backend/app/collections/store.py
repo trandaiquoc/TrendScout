@@ -121,6 +121,15 @@ CREATE TABLE IF NOT EXISTS membership_reconciliation_items (
  origin TEXT NOT NULL, pinned INTEGER NOT NULL, score REAL, reason TEXT NOT NULL,
  created_at TEXT NOT NULL, PRIMARY KEY(run_id,collection_id,keyword_id)
 );
+CREATE TABLE IF NOT EXISTS research_records (
+ id TEXT PRIMARY KEY, keyword_id TEXT REFERENCES keywords(id) ON DELETE SET NULL,
+ subject TEXT NOT NULL, hypothesis TEXT NOT NULL, product_category TEXT NOT NULL DEFAULT '',
+ niche TEXT NOT NULL DEFAULT '', competitor_notes TEXT NOT NULL DEFAULT '',
+ market_evidence TEXT NOT NULL DEFAULT '', ip_notes TEXT NOT NULL DEFAULT '',
+ risk_notes TEXT NOT NULL DEFAULT '', findings TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL CHECK(status IN ('DRAFT','RESEARCHING','NEEDS_REVIEW','VALIDATED','ARCHIVED')),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 """
 
 

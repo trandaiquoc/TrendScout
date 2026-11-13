@@ -1,12 +1,5 @@
 import { getJson } from './api.js';
 
-const SOURCE_CARDS = new Map([
-  ['wikimedia_pageviews_top_per_country', 'wikimedia'],
-  ['youtube_video_search', 'youtube'],
-  ['google_web_serp', 'google-search'],
-  ['bing_web_serp', 'bing-search'],
-]);
-
 const STATUS_FIELDS = [
   ['sources.adapter', 'adapter_status'],
   ['sources.configuration', 'configuration_status'],
@@ -46,50 +39,34 @@ function localizedStatus(value, translate) {
   return translate('source.status.' + value.toLowerCase());
 }
 
-function renderDescriptor(card, descriptor, translate) {
-  const list = card.querySelector('[data-source-capabilities]');
-  if (list) {
-    list.replaceChildren();
-    for (const [labelKey, field] of STATUS_FIELDS) {
-      const row = document.createElement('div');
-      const label = document.createElement('dt');
-      const value = document.createElement('dd');
-      label.textContent = translate(labelKey);
-      value.textContent = field === null
-        ? translate('source.health-unreported')
-        : localizedStatus(descriptor?.[field], translate);
-      row.append(label, value);
-      list.append(row);
-    }
-  }
-  const badge = card.querySelector('.source-card-head .pill');
-  const enabled = descriptor?.enabled_for_current_operation === true;
-  card.classList.toggle('source-card--active', enabled);
-  if (badge) {
-    const verified = descriptor?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED';
-    const key = enabled ? (verified ? 'source.enabled-local-verified' : 'source.enabled')
-      : descriptor ? 'source.disabled' : 'source.status-unknown';
-    badge.textContent = translate(key);
-    badge.classList.toggle('pill--green', enabled);
-    badge.classList.toggle('pill--gray', !enabled);
-  }
-}
-
 export function renderSourceCapabilities(capabilities, translate) {
-  const descriptors = new Map(
-    (Array.isArray(capabilities?.sources) ? capabilities.sources : [])
-      .filter((source) => SOURCE_CARDS.has(source.source_id))
-      .map((source) => [source.source_id, source]),
-  );
-
-  for (const [sourceId, cardId] of SOURCE_CARDS) {
-    const card = document.querySelector(`[data-source="${cardId}"]`);
-    if (!card) continue;
-    const descriptor = descriptors.get(sourceId);
-    card.dataset.sourceStatus = descriptor
-      ? `${descriptor.adapter_status || 'UNKNOWN'}-${descriptor.local_live_verification_status || 'UNKNOWN'}`.toLowerCase()
-      : 'unknown';
-    renderDescriptor(card, descriptor, translate);
+  const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
+  const grid = document.querySelector('#source-registry-list');
+  if (grid) {
+    grid.replaceChildren();
+    for (const descriptor of descriptors.values()) {
+      const card=document.createElement('article'); card.className='panel source-card';
+      const head=document.createElement('div'); head.className='source-card-head';
+      const icon=document.createElement('span'); icon.className='source-monogram'; icon.textContent=descriptor.icon || '•';
+      const badge=document.createElement('span'); badge.className='pill pill--gray';
+      head.append(icon,badge); card.append(head);
+      const title=document.createElement('h2'); title.textContent=descriptor.display_name || descriptor.source_id; card.append(title);
+      const summary=document.createElement('p'); summary.textContent=descriptor.metric?.meaning || ''; card.append(summary);
+      const list=document.createElement('dl'); list.className='detail-list';
+      for (const [labelKey,field] of STATUS_FIELDS) {
+        const label=document.createElement('dt'); label.textContent=translate(labelKey);
+        const value=document.createElement('dd'); value.textContent=field===null ? translate('source.health-unreported') : localizedStatus(descriptor[field],translate);
+        const row=document.createElement('div'); row.append(label,value); list.append(row);
+      }
+      const categoryLabel=translate(`sources.category.${descriptor.category}`);
+      for (const [label,value] of [[translate('sources.category'),categoryLabel.startsWith('sources.category.')?descriptor.category:categoryLabel],[translate('sources.metric'),`${descriptor.metric?.name || '—'} (${descriptor.metric?.unit || '—'})`],[translate('sources.scope'),descriptor.market_scope || '—'],[translate('sources.quota'),translate('sources.quota-unknown')]]) {
+        const dt=document.createElement('dt'); dt.textContent=label; const dd=document.createElement('dd'); dd.textContent=value; const row=document.createElement('div'); row.append(dt,dd); list.append(row);
+      }
+      const link=document.createElement('a'); link.textContent=translate('sources.official-docs'); link.href=descriptor.documentation_url || '#'; link.target='_blank'; link.rel='noopener noreferrer'; card.append(list,link);
+      const enabled=descriptor.enabled_for_current_operation===true; card.classList.toggle('source-card--active',enabled);
+      badge.textContent=translate(enabled?'source.enabled':'source.disabled'); badge.classList.toggle('pill--green',enabled);
+      grid.append(card);
+    }
   }
 
   const wikimedia = descriptors.get('wikimedia_pageviews_top_per_country');

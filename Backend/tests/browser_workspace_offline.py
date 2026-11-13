@@ -99,14 +99,14 @@ CHECK = r"""<script>
     check(document.querySelector('#open-fetch').disabled,'fetch disabled');
     check(!document.querySelector('#operator-token'),'no token input');
     check(!document.querySelector('#fetch-form'),'no fetch submit form');
-    check(document.querySelectorAll('[data-source]').length===4,'four source cards');
-    check(document.querySelectorAll('[data-source-capabilities]').length===4,'runtime-backed source status axes');
+    check(document.querySelectorAll('#source-registry-list .source-card').length===4,'four runtime source descriptors rendered from metadata');
     check(document.querySelectorAll('[data-dashboard-tab]').length===2,'two semantic dashboard tabs');
     check(document.querySelector('#metric-active-sources').textContent==='0','active source count comes from runtime capabilities');
-    check(document.querySelector('[data-source=wikimedia]').dataset.sourceStatus==='implemented-local_live_verified','Wikimedia reflects historical local verification');
-    check(document.querySelector('[data-source=wikimedia]').textContent.includes('\u0110\u00e3 x\u00e1c minh trong l\u1ea7n ch\u1ea1y LIVE local tr\u01b0\u1edbc \u0111\u00e2y'),'historical verification status is localized');
-    check(document.querySelector('[data-source=wikimedia]').textContent.includes('Ch\u01b0a s\u1eb5n s\u00e0ng production'),'production readiness stays separate');
-    check([...document.querySelectorAll('[data-source]:not([data-source=wikimedia])')].every(card=>card.dataset.sourceStatus.includes('implemented_offline_verified')),'offline adapters are reported from runtime capabilities');
+    const wikimediaCard=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent.includes('wikimedia_pageviews'));
+    check(Boolean(wikimediaCard),'runtime metadata includes Wikimedia');
+    check(wikimediaCard?.textContent.includes('\u0110\u00e3 x\u00e1c minh trong l\u1ea7n ch\u1ea1y LIVE local tr\u01b0\u1edbc \u0111\u00e2y'),'historical verification status is localized');
+    check(wikimediaCard?.textContent.includes('Ch\u01b0a s\u1eb5n s\u00e0ng production'),'production readiness stays separate');
+    check([...document.querySelectorAll('#source-registry-list .source-card')].filter(card=>!card.querySelector('h2')?.textContent.includes('wikimedia_pageviews')).every(card=>card.textContent.includes('Đã xác minh adapter ngoại tuyến')),'offline adapter states are reported from runtime metadata');
     const go=async name=>{
       if(innerWidth<=900 && !document.querySelector('#app-shell').classList.contains('menu-open'))document.querySelector('#menu-toggle').click();
       const link=document.querySelector('[data-nav="'+name+'"]');
@@ -165,7 +165,8 @@ CHECK = r"""<script>
     check(!document.querySelector('#empty').hidden,'empty search state');
 
     await go('research');
-    check(document.querySelector('[data-view=research]').textContent.includes('Tín hiệu tổng hợp'),'synthetic product research disclosure');
+    check(Boolean(document.querySelector('#research-form')&&document.querySelector('#research-records')),'persistent research workflow form and saved-record list');
+    check(document.querySelector('[data-view=research]').textContent.includes('nhu cầu thị trường'),'research page keeps commercial evidence boundaries visible');
     check(!document.querySelector('[data-nav=refresh]'),'scheduler navigation is absent');
     check(!document.querySelector('[data-nav=usage]'),'unmeasured AI usage navigation is absent');
     await go('overview');
@@ -259,7 +260,7 @@ def main():
     check = check.replace("I18N_MODULE_URI", json.dumps((PUBLIC / "modules" / "i18n.js").as_uri()))
     with tempfile.TemporaryDirectory(prefix="trendscout-browser-") as directory:
         page = Path(directory) / "index.html"
-        for width in (768, 1024, 1280, 1440):
+        for width in (320, 390, 768, 1024, 1440, 1920):
             page_html = html
             if width == 768:
                 page_html = page_html.replace(

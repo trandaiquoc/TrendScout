@@ -117,11 +117,16 @@ class D2DashboardContractTests(unittest.TestCase):
 
     def test_source_cards_are_truthful_for_all_four_requested_sources(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-        for source in ("wikimedia", "youtube", "google-search", "bing-search"):
-            with self.subTest(source=source):
-                self.assertIn(f'data-source="{source}"', html)
-        self.assertEqual(html.count('data-source-status="unknown"'), 4)
-        self.assertIn('data-source-capabilities="wikimedia"', html)
+        registry = (PUBLIC / "modules" / "capabilities.js").read_text(encoding="utf-8")
+        catalog_path = ROOT / "Backend" / "app" / "sources" / "research_catalog.json"
+        import json
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        self.assertIn('id="source-registry-list"', html)
+        self.assertIn("descriptors.values()", registry)
+        self.assertNotIn("const SOURCE_CARDS", registry)
+        self.assertEqual(len(catalog["items"]), 81)
+        self.assertTrue(all(item["runtime_adapter"] is False for item in catalog["items"]))
+        self.assertIn("sources/library", (ROOT / "Backend" / "app" / "api" / "capabilities.py").read_text(encoding="utf-8"))
 
     def test_theme_status_and_secondary_text_tokens_meet_aa_contrast(self):
         for theme in ("light", "dark"):

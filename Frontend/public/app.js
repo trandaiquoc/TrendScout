@@ -51,6 +51,11 @@ const state = {
   selectedKeywordIds: new Set(),
   selectAllFiltered: false,
   latestKeywordTotal: 0,
+  analytics: null,
+  runHistoryOffset: 0,
+  runHistoryQuery: '',
+  sourceLibrary: [],
+  researchKeywords: [],
 };
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
@@ -98,6 +103,243 @@ function setNotice(target, message, kind = 'warning') {
   }
   box.append(element('span', kind === 'error' ? '!' : 'i', 'notice-icon'));
   box.append(element('p', message));
+}
+
+function renderDataTable(root, headers, rows, note = '') {
+  if (!root) return;
+  root.replaceChildren();
+  if (note) root.append(element('p', note, 'fine-print'));
+  if (!rows.length) {
+    root.append(element('p', t('analysis.no-data'), 'analysis-state--empty'));
+    return;
+  }
+  const table = element('table', null, 'data-table');
+  const head = element('thead'); const headRow = element('tr');
+  headers.forEach((label) => headRow.append(element('th', label)));
+  head.append(headRow); table.append(head);
+  const body = element('tbody');
+  rows.forEach((values) => { const tr = element('tr'); values.forEach((value) => tr.append(element('td', value == null ? t('common.unavailable') : value))); body.append(tr); });
+  table.append(body); const wrap=element('div',null,'table-wrap'); wrap.append(table); root.append(wrap);
+}
+
+async function loadAnalytics() {
+  try {
+    const data = await getJson('/api/v1/analytics/overview', { locale: getLocale() });
+    state.analytics = data;
+    const totals = data.keyword_totals || {};
+    $('#metric-records-stored').textContent = number(totals.unique);
+    $('#metric-records-stored-note').textContent = t('analysis.unique-keywords');
+    $('#metric-topics-found').textContent = number(totals.classified);
+    $('#metric-topics-found-note').textContent = t('analysis.classified-keywords');
+    $('#metric-unclassified').textContent = number(totals.unclassified);
+    $('#metric-unclassified-note').textContent = t('analysis.unclassified-breakdown',{ambiguous:number(totals.ambiguous),unknown:number(totals.unknown)});
+    $('#metric-active-sources').textContent = number((data.active_sources || []).length);
+    $('#metric-active-sources-note').textContent = t('analysis.sources-in-ledger');
+    const latest = data.latest_dataset;
+    const successful = data.last_successful_fetch;
+    if (successful?.fetched_at) {
+      $('#metric-last-fetch').textContent = compactTimestamp(successful.fetched_at);
+      $('#metric-last-fetch-note').textContent = t('analysis.latest-fetch-status', { status: successful.status || 'UNKNOWN' })
+        + ' · ' + t('analysis.fetch-age',{age:formatAge(successful.age_seconds)});
+    }
+    renderDataTable($('#analysis-source-volume'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
+      (data.source_volume || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]), t('analysis.source-volume-note'));
+    renderDataTable($('#analysis-algorithms'), [t('analysis.algorithm'), t('analysis.result-state'), t('analysis.count')],
+      (data.algorithm_distribution || []).map(row => [`${row.algorithm_id} · ${row.version}`, row.status, number(row.count)]), t('analysis.algorithm-distribution-note'));
+    renderDataTable($('#analysis-effectiveness'), [t('analysis.evaluation'), t('analysis.reason')],
+      [[data.algorithm_effectiveness?.status || 'NOT_YET_EVALUATED', data.algorithm_effectiveness?.reason || t('analysis.no-comparable-evaluation')]], t('analysis.effectiveness-note'));
+    renderDataTable($('#analysis-source-operations'), [t('analysis.fetch-time'), t('analysis.source'), t('analysis.result-state'), t('analysis.records')],
+      (data.source_operations || []).flatMap(run => (run.source_manifest || []).map(source => [run.fetched_at || '—', source.source_id || '—', source.status || run.status || '—', source.accepted_records ?? source.record_count ?? '—'])), t('analysis.source-operations-note'));
+    renderDataTable($('#analysis-coverage'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
+      (data.multi_source_coverage?.sources || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]),
+      data.multi_source_coverage?.status === 'INSUFFICIENT_SOURCES' ? t('analysis.coverage-insufficient') : t('analysis.coverage-caveat'));
+    renderDataTable($('#analysis-history'), [t('analysis.date'), t('analysis.source'), t('analysis.observed'), t('analysis.unavailable')],
+      (data.observations_over_time || []).map(row => [row.observation_date, row.source, number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
+    const top = data.top_observed || [];
+    const target = $('#overview-top-keywords');
+    if (target) {
+      const c=data.top_observed_context || {};
+      const scope=Array.isArray(c.scope) ? c.scope.slice(1,4).join(' · ') : '—';
+      const note=t('analysis.top-observed-context',{source:c.source || '—',scope,date:c.observation_date || '—',cohort:number(c.cohort_size),flags:(c.quality_flags || []).join(', ')});
+      renderDataTable(target, [t('analysis.rank'),t('analysis.keyword'),t('analysis.metric'),t('analysis.value')], top.map(row => [number(row.rank),row.keyword,`${row.metric || '—'} (${row.unit || '—'})`,number(row.observed_value)]), note);
+    }
+  } catch (error) {
+    for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
+      const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
+    }
+  }
+}
+
+function formatAge(seconds) {
+  if (!Number.isFinite(seconds)) return t('common.unavailable');
+  if (seconds < 3600) return t('time.age-minutes',{count:Math.floor(seconds/60)});
+  if (seconds < 86400) return t('time.age-hours',{count:Math.floor(seconds/3600)});
+  return t('time.age-days',{count:Math.floor(seconds/86400)});
+}
+
+async function loadRunHistory({ append = false } = {}) {
+  const root = $('#run-history');
+  if (!root) return;
+  if (!append) state.runHistoryOffset = 0;
+  const params = new URLSearchParams({ limit: '20', offset: String(state.runHistoryOffset) });
+  const q = $('#run-history-search')?.value.trim() || '';
+  const status = $('#run-history-status')?.value || '';
+  if (q) params.set('q', q); if (status) params.set('status', status);
+  try {
+    const data = await getJson('/api/v1/runs/history?' + params.toString(), { locale: getLocale() });
+    const list = append ? root.querySelector('tbody') : null;
+    if (!append) root.replaceChildren();
+    let table = root.querySelector('table');
+    if (!table) {
+      table = element('table', null, 'data-table'); const thead=element('thead'); const tr=element('tr');
+      [t('runs.date'),t('runs.type'),t('runs.sources'),t('runs.status'),t('runs.records'),t('runs.mode'),t('runs.outcome'),t('runs.actions')].forEach(label=>tr.append(element('th',label)));
+      thead.append(tr); table.append(thead,element('tbody')); root.append(table);
+    }
+    const body=table.querySelector('tbody');
+    (data.items || []).forEach(run => {
+      const tr=element('tr');
+      const received=run.received_record_count ?? run.available;
+      const retained=run.retained_keyword_count ?? run.processed;
+      const recordSummary=[received == null ? null : `${t('runs.received')}: ${number(received)}`,
+        retained == null ? null : `${t('runs.retained')}: ${number(retained)}`,
+        run.rejected_record_count == null ? null : `${t('runs.rejected')}: ${number(run.rejected_record_count)}`].filter(Boolean).join(' · ') || '—';
+      const outcomes=[run.error_code,run.stage,run.quality_flags?.join(', ')].filter(Boolean).join(' · ') || '—';
+      [run.run_at || '—',run.run_type, (run.sources || []).join(', ') || '—',run.status,recordSummary,run.mode || '—',outcomes].forEach(value=>tr.append(element('td',value)));
+      const actions=element('td');
+      if (run.fetch_id) { const button=element('button',t('runs.details'),'button button-secondary'); button.type='button'; button.addEventListener('click',()=>loadRunHistoryDetail(run.fetch_id)); actions.append(button); }
+      else actions.textContent='—';
+      tr.append(actions); body.append(tr);
+    });
+    state.runHistoryOffset = data.next_offset ?? data.total;
+    $('#run-history-more').hidden = data.next_offset == null;
+    if (!data.items?.length && !append) root.append(element('p',t('runs.no-history')));
+  } catch (error) { root.replaceChildren(element('p',getErrorMessage(error,'runs.history-error'))); }
+}
+
+async function loadRunHistoryDetail(fetchId) {
+  const root=$('#run-history-detail'); root.hidden=false; root.replaceChildren(element('p',t('common.loading')));
+  try {
+    const response=await getJson('/api/v1/runs/history/'+encodeURIComponent(fetchId),{locale:getLocale()});
+    const item=response.item || {}; root.replaceChildren();
+    root.append(element('h2',t('runs.detail-title')));
+    const list=element('dl','', 'detail-list detail-list--grid');
+    const sourceSummary=(item.source_manifest || []).map(source=>`${source.source_id}: ${source.status || '—'} (${source.record_count ?? '—'})`).join(' · ') || '—';
+    const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),item.status],[t('runs.mode'),item.data_mode || '—'],
+      [t('runs.sources'),sourceSummary],[t('runs.received'),item.received_record_count ?? item.available],
+      [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
+      [t('runs.error'),item.error_code],[t('runs.quality'),(item.quality_flags || []).join(', ') || '—'],
+      [t('runs.duration'),t('runs.duration-unavailable')],[t('runs.date'),item.fetched_at || item.updated_at || '—']];
+    for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',value == null ? t('common.unavailable') : value));list.append(row);}
+    root.append(list);
+  } catch(error) { root.replaceChildren(element('p',getErrorMessage(error,'runs.history-error'))); }
+}
+
+async function loadSourceLibrary() {
+  const body=$('#source-library-rows'); if (!body) return;
+  try {
+    const data=await getJson('/api/v1/sources/library',{locale:getLocale()});
+    state.sourceLibrary=data.items || [];
+    $('#source-library-audit').textContent=t('sources.library-audit',{date:data.audit_date || '—',count:number(state.sourceLibrary.length)});
+    renderSourceLibrary();
+  } catch (error) { body.replaceChildren(); const row=element('tr'); row.append(element('td',getErrorMessage(error,'sources.library-error'))); body.append(row); }
+}
+
+async function loadRuntimeStatus() {
+  const root=$('#settings-runtime-details'); if (!root) return;
+  try {
+    const data=await getJson('/api/v1/runtime',{locale:getLocale()});
+    const e=data.embedding || {}; const l=data.llm || {}; const s=data.scheduler || {};
+    root.replaceChildren();
+    const fields=[
+      [t('settings.embedding-model'),e.model], [t('settings.embedding-version'),`${e.package || 'FastEmbed'} ${e.package_version || '—'} · ${e.model_version || '—'}`],
+      [t('settings.inference-device'),e.inference_device], [t('settings.embedding-cache'),`${number(e.cache_vectors || 0)} · ${e.vector_dimensions || '—'} ${t('settings.dimensions')}`],
+      [t('settings.classification-policy'),e.classification_policy_version], [t('settings.taxonomy-version'),e.taxonomy_version],
+      [t('settings.llm-state'),l.status], [t('settings.ai-usage'),l.usage_instrumented ? t('settings.measured') : t('settings.not-measured')],
+    ];
+    for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value ?? t('common.unavailable')));root.append(row);}
+    $('#settings-scheduler-reason').textContent=s.reason || t('settings.scheduler-help');
+  } catch(error) { root.replaceChildren(element('div',getErrorMessage(error,'settings.runtime-error'))); }
+}
+
+async function loadResearchWorkspace() {
+  await Promise.all([loadResearchKeywords(),loadResearchRecords()]);
+}
+
+async function loadResearchKeywords(query='') {
+  const select=$('#research-keyword'); if(!select)return;
+  const prior=select.value; const params=new URLSearchParams({limit:'100',sort:'recent'}); if(query)params.set('q',query);
+  try {
+    const data=await getJson('/api/v1/datasets/latest/keywords?'+params.toString(),{locale:getLocale()});
+    state.researchKeywords=data.items || [];
+    select.replaceChildren(new Option(t('research.no-linked-keyword'),''),...state.researchKeywords.map(item=>new Option(`${item.keyword} · ${item.source || '—'} · ${item.observed_at || item.observation_date || '—'}`,item.keyword_id || item.id)));
+    if(state.researchKeywords.some(item=>(item.keyword_id || item.id)===prior))select.value=prior;
+  } catch(error) { select.replaceChildren(new Option(t('research.keywords-unavailable'),'')); }
+}
+
+async function loadResearchRecords() {
+  const root=$('#research-records'); if(!root)return;
+  try { const result=await getJson('/api/v1/research?limit=50',{locale:getLocale()}); renderResearchRecords(result.items || []); }
+  catch(error) { root.replaceChildren(element('p',getErrorMessage(error,'research.load-error'))); }
+}
+
+function renderResearchRecords(items) {
+  const root=$('#research-records'); if(!root)return;
+  root.replaceChildren();
+  if(!items.length){root.append(element('p',t('research.empty')));return;}
+  for(const item of items){
+    const card=element('article',null,'research-record');
+    const heading=element('div',null,'research-record-heading');
+    heading.append(element('h3',item.subject));
+    const status=element('select'); status.setAttribute('aria-label',t('research.status-for',{subject:item.subject}));
+    for(const value of ['DRAFT','RESEARCHING','NEEDS_REVIEW','VALIDATED','ARCHIVED'])status.add(new Option(t(['research','status',value.toLowerCase()].join('.')),value));
+    status.value=item.status; status.addEventListener('change',async()=>{
+      status.disabled=true;
+      try { await requestJson('/api/v1/research/'+encodeURIComponent(item.id),{method:'PATCH',body:{status:status.value},locale:getLocale()}); }
+      catch(error){status.value=item.status;announce(getErrorMessage(error,'research.save-error'),true);}
+      finally{status.disabled=false;}
+    });
+    heading.append(status); card.append(heading);
+    const sourceMeta=item.keyword ? `${item.source || ''} · ${item.project || ''} · ${item.observed_at || ''} · ${item.data_mode || ''}` : t('research.no-linked-keyword');
+    card.append(element('p',sourceMeta,'fine-print'));
+    card.append(element('p',item.hypothesis));
+    const details=element('details'); details.append(element('summary',t('research.evidence-details')));
+    const list=element('dl','', 'detail-list');
+    for(const [key,value] of [['research.category',item.product_category],['research.niche',item.niche],['research.competitors',item.competitor_notes],['research.market-evidence',item.market_evidence],['research.ip-notes',item.ip_notes],['research.risks',item.risk_notes],['research.findings',item.findings]]){
+      if(!value)continue; const row=element('div'); row.append(element('dt',t(key)),element('dd',value)); list.append(row);
+    }
+    details.append(list); card.append(details); root.append(card);
+  }
+}
+
+async function saveResearchRecord(event) {
+  event.preventDefault();
+  const selected=$('#research-keyword').selectedOptions[0];
+  const inputSubject=$('#research-subject').value.trim();
+  const payload={keyword_id:$('#research-keyword').value || null,
+    subject:inputSubject || (selected?.value ? selected.textContent.split(' · ')[0] : ''),
+    hypothesis:$('#research-hypothesis').value.trim(),product_category:$('#research-category').value.trim(),
+    niche:$('#research-niche').value.trim(),competitor_notes:$('#research-competitors').value.trim(),
+    market_evidence:$('#research-market-evidence').value.trim(),ip_notes:$('#research-ip').value.trim(),
+    risk_notes:$('#research-risks').value.trim(),findings:$('#research-findings').value.trim(),status:$('#research-status').value};
+  const status=$('#research-form-status');
+  try { await requestJson('/api/v1/research',{method:'POST',body:payload,locale:getLocale()});
+    status.textContent=t('research.saved'); $('#research-hypothesis').value=''; $('#research-competitors').value='';
+    $('#research-market-evidence').value=''; $('#research-ip').value=''; $('#research-risks').value=''; $('#research-findings').value='';
+    await loadResearchRecords();
+  } catch(error) { status.textContent=getErrorMessage(error,'research.save-error'); }
+}
+
+function renderSourceLibrary() {
+  const body=$('#source-library-rows'); if (!body) return;
+  const query=($('#source-library-search')?.value || '').trim().toLocaleLowerCase();
+  const items=state.sourceLibrary.filter(item=>`${item.source_id} ${item.display_name} ${item.category}`.toLocaleLowerCase().includes(query));
+  body.replaceChildren();
+  for (const item of items) {
+    const row=element('tr');
+    [item.display_name || item.source_id,item.category,t('sources.candidate-locked'),t('sources.candidate-not-integrated')].forEach(value=>row.append(element('td',value)));
+    body.append(row);
+  }
+  if (!items.length) { const row=element('tr'); row.append(element('td',t('sources.no-candidates'))); body.append(row); }
 }
 
 function announce(message, error = false) {
@@ -1178,6 +1420,10 @@ function showView(name) {
   $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
   if (selected === 'collections') loadCollections();
   if (selected === 'algorithms') loadAlgorithmCatalog();
+  if (selected === 'runs') loadRunHistory();
+  if (selected === 'sources') loadSourceLibrary();
+  if (selected === 'settings') loadRuntimeStatus();
+  if (selected === 'research') loadResearchWorkspace();
   closeMobileNav();
 }
 
@@ -1263,7 +1509,7 @@ async function loadAlgorithmCatalog() {
     state.runtimeCapabilities = runtimeCapabilities;
     populateAlgorithmFilters(state.algorithmCatalog.algorithms || []);
     renderAlgorithmCatalog();
-    $('#algorithm-evaluation-status').textContent = `${state.algorithmCatalog.evaluation_status}: ${state.algorithmCatalog.evaluation_reason}`;
+    $('#algorithm-evaluation-status').textContent = `${translatedAlgorithmCode('evaluation',state.algorithmCatalog.evaluation_status)} · ${t('algorithms.evaluation-note')}`;
   } catch (error) {
     root.replaceChildren(element('p', getErrorMessage(error, 'error.detail-fetch')));
   }
@@ -1276,8 +1522,8 @@ function populateAlgorithmFilters(items) {
   const priorSource = source.value;
   const families = [...new Set(items.map((item) => item.family))].sort();
   const sources = [...new Set(items.flatMap((item) => item.sources.map((entry) => entry.source_id)))].sort();
-  family.replaceChildren(new Option('All families', ''), ...families.map((value) => new Option(value, value)));
-  source.replaceChildren(new Option('All sources', ''), ...sources.map((value) => new Option(value, value)));
+  family.replaceChildren(new Option(t('algorithms.all-families'), ''), ...families.map((value) => new Option(translatedAlgorithmCode('family',value), value)));
+  source.replaceChildren(new Option(t('algorithms.all-sources'), ''), ...sources.map((value) => new Option(value.replaceAll('_',' '), value)));
   family.value = priorFamily;
   source.value = priorSource;
 }
@@ -1301,29 +1547,28 @@ function renderAlgorithmCatalog() {
     const card = element('article', null, 'panel algorithm-card');
     const heading = element('div', null, 'panel-heading');
     const title = element('div');
-    title.append(element('p', item.family.toUpperCase(), 'section-kicker'));
+    title.append(element('p', translatedAlgorithmCode('family', item.family), 'section-kicker'));
     title.append(element('h2', item.name));
-    title.append(element('code', item.key));
     heading.append(title);
     const compatible = item.sources.filter((entry) => entry.status !== 'INCOMPATIBLE');
-    heading.append(element('span', compatible.length ? compatible[0].status : 'INCOMPATIBLE', 'pill pill--gray'));
+    heading.append(element('span', translatedAlgorithmCode('status', compatible.length ? compatible[0].status : 'INCOMPATIBLE'), 'pill pill--gray'));
     card.append(heading);
     card.append(element('p', item.description));
     const counts = (state.algorithmResults?.summary || []).find((entry) => entry.algorithm_id === item.algorithm_id);
     card.append(element('p', counts
-      ? `Persisted results: ${counts.completed} completed · ${counts.skipped} skipped · ${counts.failed} failed`
-      : 'Persisted results: none yet', 'algorithm-execution-summary'));
+      ? t('algorithms.execution-summary', { completed: number(counts.completed), skipped: number(counts.skipped), failed: number(counts.failed) })
+      : t('algorithms.no-results'), 'algorithm-execution-summary'));
     const examples = (state.algorithmResults?.items || []).filter((entry) => entry.algorithm_id === item.algorithm_id).slice(0, 3);
     if (examples.length) {
       const outputDetails = element('details', null, 'algorithm-details');
-      outputDetails.append(element('summary', 'Latest persisted keyword results'));
+      outputDetails.append(element('summary', t('algorithms.latest-results')));
       const outputList = element('ul');
       examples.forEach((entry) => {
         let result = {};
         try { result = JSON.parse(entry.result_json || '{}'); } catch { /* malformed old rows remain display-safe */ }
         const flags = Array.isArray(result.quality_flags) ? result.quality_flags.join(', ') : '';
-        const message = [entry.keyword, entry.status,
-          entry.value === null ? entry.reason_code : `${entry.value} ${entry.unit}`,
+      const message = [entry.keyword, translatedAlgorithmCode('result', entry.status),
+          entry.value === null ? translatedAlgorithmCode('reason', entry.reason_code) : `${entry.value} ${entry.unit}`,
           flags].filter(Boolean).join(' · ');
         outputList.append(element('li', message));
       });
@@ -1350,20 +1595,27 @@ function renderAlgorithmCatalog() {
     });
     card.append(sourceRow);
     const detail = element('details', null, 'algorithm-details');
-    detail.append(element('summary', 'Requirements, output and limitations'));
+    detail.append(element('summary', t('algorithms.requirements')));
     const list = element('dl', null, 'detail-list');
-    addAlgorithmDetail(list, 'Input', `${item.input_metric} (${item.input_unit})`);
-    addAlgorithmDetail(list, 'Output', `${item.metric} (${item.unit})`);
-    addAlgorithmDetail(list, 'Minimum samples', item.minimum_samples);
-    addAlgorithmDetail(list, 'Windows (days)', (item.supported_windows || []).join(', '));
-    addAlgorithmDetail(list, 'Missing data', item.missing_data);
-    addAlgorithmDetail(list, 'Runtime', item.runtime_limit);
-    addAlgorithmDetail(list, 'Interpretation', item.interpretation || 'Descriptive output.');
-    addAlgorithmDetail(list, 'Limitations', (item.limitations || []).join(' '));
+    addAlgorithmDetail(list, t('algorithms.input'), `${item.input_metric} (${item.input_unit})`);
+    addAlgorithmDetail(list, t('algorithms.output'), `${item.metric} (${item.unit})`);
+    addAlgorithmDetail(list, t('algorithms.minimum-samples'), item.minimum_samples);
+    addAlgorithmDetail(list, t('algorithms.windows'), (item.supported_windows || []).join(', '));
+    addAlgorithmDetail(list, t('algorithms.missing-data'), item.missing_data);
+    addAlgorithmDetail(list, t('algorithms.runtime'), item.runtime_limit);
+    addAlgorithmDetail(list, t('algorithms.interpretation'), item.interpretation || t('algorithms.descriptive-output'));
+    addAlgorithmDetail(list, t('algorithms.limitations'), (item.limitations || []).join(' '));
     detail.append(list);
     card.append(detail);
     root.append(card);
   });
+}
+
+function translatedAlgorithmCode(kind, code) {
+  if (!code) return t('common.unavailable');
+  const key = `algorithms.${kind}.${String(code).toLowerCase()}`;
+  const translated = t(key);
+  return translated === key ? String(code).toLowerCase().replaceAll('_', ' ') : translated;
 }
 
 function renderAlgorithmSignalStatus(algorithms) {
@@ -1391,7 +1643,7 @@ function renderAlgorithmSignalStatus(algorithms) {
       ? 'INSUFFICIENT_DATA' : totals.completed ? 'OBSERVED' : 'NOT_RUN';
     const card = element('article', null, 'algorithm-signal-card');
     card.append(element('h2', t(`algorithms.signal.${key}`)));
-    card.append(element('strong', status, `algorithm-signal-status algorithm-signal-status--${status.toLowerCase()}`));
+    card.append(element('strong', translatedAlgorithmCode('evaluation',status), `algorithm-signal-status algorithm-signal-status--${status.toLowerCase()}`));
     card.append(element('p', t(`algorithms.signal-counts.${key}`, {
       methods: methods.length, completed: totals.completed, skipped: totals.skipped,
     })));
@@ -1475,6 +1727,14 @@ function bindEvents() {
   });
 
   $('#load-run').addEventListener('click', () => loadRun($('#run-id').value));
+  $('#run-history-refresh').addEventListener('click', () => loadRunHistory());
+  $('#run-history-more').addEventListener('click', () => loadRunHistory({ append: true }));
+  $('#run-history-search').addEventListener('input', () => { clearTimeout(window.runHistoryTimer); window.runHistoryTimer=setTimeout(()=>loadRunHistory(),250); });
+  $('#run-history-status').addEventListener('change', () => loadRunHistory());
+  $('#source-library-search').addEventListener('input', renderSourceLibrary);
+  $('#research-form').addEventListener('submit',saveResearchRecord);
+  $('#research-keyword-search').addEventListener('input',()=>{clearTimeout(window.researchSearchTimer);window.researchSearchTimer=setTimeout(()=>loadResearchKeywords($('#research-keyword-search').value.trim()),250);});
+  $('#research-keyword').addEventListener('change',event=>{const item=state.researchKeywords.find(value=>(value.keyword_id || value.id)===event.currentTarget.value);if(item&&!$('#research-subject').value.trim())$('#research-subject').value=item.keyword;});
   $('#open-fetch').addEventListener('click', () => {
     if (state.fetchReady) {
       fetchController.activate();
@@ -1620,6 +1880,11 @@ function bindEvents() {
       renderSourceCapabilities(state.capabilities, t);
     }
     if (state.persistedDataset) renderPersistedDataset(state.persistedDataset);
+    if (state.analytics) loadAnalytics();
+    if (window.location.hash === '#runs') loadRunHistory();
+    if (window.location.hash === '#sources') loadSourceLibrary();
+    if (window.location.hash === '#settings') loadRuntimeStatus();
+    if (window.location.hash === '#research') loadResearchWorkspace();
     renderFetchPresentation();
     $('#breadcrumb-current').textContent = t(window.location.hash === '#analysis'
       ? 'dashboard.analysis' : 'nav.' + (window.location.hash.slice(1) || 'overview'));
@@ -1649,6 +1914,6 @@ showView(window.location.hash.slice(1));
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();
-void loadPublicCapabilities().then(() => loadLatestDataset()).then(() => {
+void loadPublicCapabilities().then(() => Promise.all([loadLatestDataset(), loadAnalytics()])).then(() => {
   if (state.persistedDatasetAvailable) loadKeywords();
 });

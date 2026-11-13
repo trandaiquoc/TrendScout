@@ -1,12 +1,26 @@
 """Public, non-secret view of runtime and source capabilities."""
 
-from fastapi import APIRouter, Request, Response
+import json
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.ports.storage import StorageError
 from app.sources.catalog import SOURCE_CAPABILITIES
 from app.sources.query_plan import get_query_plan
 
 router = APIRouter()
+_RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_catalog.json"
+
+
+@router.get("/sources/library")
+def source_library():
+    """Return the dated research inventory separately from runtime adapters."""
+    try:
+        payload = json.loads(_RESEARCH_CATALOG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(503, "Source research catalog is unavailable") from None
+    return payload
 
 
 @router.get("/capabilities")
@@ -106,6 +120,9 @@ async def capabilities(request: Request, response: Response):
                 "display_name": item.display_name,
                 "icon": item.icon,
                 "provider_id": item.provider_id,
+                "category": ("trends_search_interest" if item.source_id == "wikimedia_pageviews_top_per_country" else "video_streaming" if item.source_id == "youtube_video_search" else "search_engines"),
+                "documentation_url": ("https://doc.wikimedia.org/generated-data-platform/aqs/" if item.source_id == "wikimedia_pageviews_top_per_country" else "https://developers.google.com/youtube/v3/docs/search/list" if item.source_id == "youtube_video_search" else "https://serpapi.com/search-api"),
+                "quota": {"status": "UNKNOWN", "remaining": None, "total": None, "reset_at": None},
                 "adapter_status": item.adapter_status,
                 "approval_status": item.approval_status,
                 "configuration_status": item.configuration_status,

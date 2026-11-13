@@ -88,6 +88,54 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(summary["unknown_keywords"], 0)
         self.assertEqual(summary["excluded_keywords"], 1)
 
+    def test_analytics_and_runtime_are_read_only_and_use_saved_evidence(self):
+        analytics = self._request("GET", "/api/v1/analytics/overview").json()
+        self.assertEqual(analytics["keyword_totals"]["unique"], 4)
+        self.assertEqual(analytics["keyword_totals"]["classified"], 1)
+        self.assertEqual(analytics["top_observed"][0]["keyword"], "Recycled denim")
+        self.assertEqual(analytics["algorithm_effectiveness"]["status"], "NOT_YET_EVALUATED")
+        runtime = self._request("GET", "/api/v1/runtime").json()
+        self.assertEqual(runtime["llm"]["status"], "NOT_CONFIGURED")
+        self.assertEqual(runtime["scheduler"]["status"], "DISABLED")
+
+    def test_source_library_exposes_research_candidates_as_locked(self):
+        response = self._request("GET", "/api/v1/sources/library")
+        self.assertEqual(response.status_code, 200)
+        catalog = response.json()
+        self.assertEqual(len(catalog["items"]), 81)
+        self.assertTrue(all(item["runtime_adapter"] is False for item in catalog["items"]))
+
+    def test_run_history_reads_only_persisted_jobs(self):
+        response = self._request("GET", "/api/v1/runs/history")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["items"], [])
+        self.assertFalse(response.json()["duration_available"])
+
+    def test_product_research_is_persisted_and_status_changes_are_auditable(self):
+        created = self._request("POST", "/api/v1/research", json={
+            "keyword_id": "k-classified", "subject": "Recycled denim",
+            "hypothesis": "Investigate a repair and resale kit for denim owners.",
+            "product_category": "Apparel care", "niche": "Repair kits",
+            "competitor_notes": "Manual comparison pending", "market_evidence": "No commercial source entered yet",
+            "ip_notes": "Trademark review not completed", "risk_notes": "Demand not measured",
+            "findings": "Interview target users", "status": "DRAFT",
+        })
+        self.assertEqual(created.status_code, 201)
+        identifier = created.json()["id"]
+        self.assertEqual(self._request("GET", "/api/v1/research").json()["total"], 1)
+        row = self._request("GET", "/api/v1/research").json()["items"][0]
+        self.assertEqual(row["keyword"], "Recycled denim")
+        self.assertEqual(row["source"], "wikimedia_pageviews_top_per_country")
+        updated = self._request("PATCH", f"/api/v1/research/{identifier}", json={"status": "NEEDS_REVIEW"})
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["status"], "NEEDS_REVIEW")
+
+    def test_research_cannot_link_a_nonexistent_keyword(self):
+        response = self._request("POST", "/api/v1/research", json={
+            "keyword_id": "missing", "subject": "Idea", "hypothesis": "Test this idea",
+        })
+        self.assertEqual(response.status_code, 422)
+
     def test_search_filters_use_server_totals_and_zero_is_available_metric(self):
         ambiguous = self.store.search_keywords(classification="AMBIGUOUS", limit=1)
         self.assertEqual((ambiguous["total"], ambiguous["items"][0]["id"], ambiguous["next_offset"]),
