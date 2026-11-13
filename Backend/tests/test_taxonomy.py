@@ -14,12 +14,12 @@ SOURCE = 'wikimedia_pageviews_top_per_country'
 class TaxonomyRegistryTests(unittest.TestCase):
     def test_parents_subcategories_and_unique_ids(self):
         parents = [x for x in CATEGORIES.values() if x.parent_id is None]
-        self.assertEqual(len(parents), 15)
+        self.assertEqual(len(parents), 16)
         self.assertEqual(len(CATEGORIES), len({x.id for x in CATEGORIES.values()}))
         self.assertEqual({x.id for x in children('fashion')}, {'fashion.clothing','fashion.footwear','fashion.accessories','fashion.jewelry'})
         self.assertTrue(all(x.parent_id in CATEGORIES for x in CATEGORIES.values() if x.parent_id))
         self.assertTrue(all(x.status == 'active' for x in CATEGORIES.values()))
-        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.0')
+        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.1')
         for rule in RULES:
             self.assertIsNone(resolve(rule.category_id).parent_id)
             if rule.subcategory_id:
@@ -38,7 +38,7 @@ class TaxonomyRegistryTests(unittest.TestCase):
 
     def test_all_required_topics_have_expected_children(self):
         expected = {
-            'entertainment':4, 'celebrity_public_figures':4, 'fashion':4, 'home_living':4,
+            'entertainment':4, 'celebrity_public_figures':11, 'arts_culture':3, 'fashion':4, 'home_living':4,
             'technology':4, 'gaming':3, 'beauty_personal_care':3, 'sports':4,
             'food_beverage':3, 'health_fitness':3, 'travel_lifestyle':3,
             'business_finance':3, 'news_politics':4, 'other':0, 'unclassified':0,
@@ -75,7 +75,8 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.topic_categories, ('entertainment',))
         self.assertEqual(result.subcategories, ('entertainment.film',))
         self.assertEqual(result.rule_evidence[0].rule_id, 'film_qualifier')
-        self.assertEqual(self.classify('Fashion Week (song)').topic_categories, ('unclassified',))
+        self.assertEqual(self.classify('Fashion Week (song)').topic_categories, ('entertainment',))
+        self.assertEqual(self.classify('Fashion Week (song)').subcategories, ('entertainment.music',))
 
     def test_context_ambiguous_and_unicode_do_not_invent_evidence(self):
         for title in ('Stephen Miller','Apple','Fashion','Home','Fashion weekends','洗濯機'):
@@ -90,11 +91,29 @@ class ClassificationTests(unittest.TestCase):
         self.assertNotIn('other', self.classify('Stephen Miller').topic_categories)
 
     def test_election_and_input_validation(self):
-        result = self.classify('2024 United States presidential election')
+        result = self.classify('2028 United States Senate elections')
         self.assertEqual(result.topic_categories, ('news_politics',))
         self.assertEqual(result.subcategories, ('news_politics.elections',))
         with self.assertRaises(ValueError): self.classify('')
         with self.assertRaises(ValueError): classify('', 'film', source=SOURCE, project='en.wikipedia')
+
+    def test_work_types_require_explicit_media_context_and_persons_stay_unknown(self):
+        expected = {
+            'Godzilla (2024 film)': ('entertainment', 'entertainment.film'),
+            'Dancing with the Stars (television program)': ('entertainment', 'entertainment.television'),
+            'Game Title (video game)': ('gaming', 'gaming.video_games'),
+        }
+        for title, (category, subcategory) in expected.items():
+            with self.subTest(title=title):
+                result = self.classify(title)
+                self.assertEqual(result.topic_categories, (category,))
+                self.assertEqual(result.subcategories, (subcategory,))
+                self.assertEqual(result.entity_type, 'unknown')
+        for title in ('Amanda Seyfried', 'Alexandria Ocasio-Cortez', 'Ansel Adams', 'Alina Habba'):
+            with self.subTest(title=title):
+                result = self.classify(title)
+                self.assertEqual(result.entity_type, 'unknown')
+                self.assertEqual(result.topic_categories, ('unclassified',))
 
     def test_legacy_behavior_and_serialization_unchanged(self):
         titles = ('Paris Fashion Week', 'washing machine', 'General election', 'Stephen Miller')

@@ -190,6 +190,13 @@ function refreshCollectionJob(fetchId) {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
       if (job.status === 'PROCESSING' && attempt < 120) {
+        $('#collections-status').textContent = t('collections.progress', {
+          stage: t(`collections.stage-${job.stage || 'CLEANING'}`), eligible: number(job.eligible || 0),
+          processed: number(job.processed || 0), cached: number(job.cached_embeddings || 0),
+          inferred: number(job.inferred_embeddings || 0), assigned: number(job.assigned || 0),
+          created: number(job.created_collections || 0), unassigned: number(job.unassigned || 0),
+          rejected: number(job.skipped || 0),
+        });
         window.setTimeout(() => poll(attempt + 1), 1000);
         return;
       }
@@ -197,11 +204,29 @@ function refreshCollectionJob(fetchId) {
       if (job.status === 'MODEL_UNAVAILABLE') {
         $('#collections-status').textContent = t('collections.model-unavailable');
       } else if (job.status === 'COMPLETED') {
-        $('#collections-status').textContent = t('collections.coverage', job);
+        await loadCollections();
+        const summary = $('#collections-status');
+        summary.replaceChildren(element('span', t('collections.completed', {
+          assigned: number(job.assigned || 0), collections: state.collections.filter((item) => item.membership_count > 0).length,
+          created: number(job.created_collections || 0), eligible: number(job.eligible || 0),
+          processed: number(job.processed || 0), cached: number(job.cached_embeddings || 0),
+          unassigned: number(job.unassigned || 0), rejected: number(job.skipped || 0),
+        })));
+        (job.created_collection_names || []).forEach((name) => {
+          const collection = state.collections.find((item) => item.name === name);
+          if (!collection) return;
+          const link = element('a', name);
+          link.href = '#collections';
+          link.addEventListener('click', () => {
+            const details = $(`[data-collection-id="${CSS.escape(collection.id)}"]`, $('#collection-list'));
+            if (details) { details.open = true; details.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+          });
+          summary.append(document.createTextNode(' '), link);
+        });
       }
       await loadLatestDataset();
       if (state.persistedDatasetAvailable) loadKeywords();
-      if (window.location.hash === '#collections') loadCollections();
+      if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
   };
   poll();
@@ -1109,7 +1134,7 @@ async function loadCollections({ appendInbox = false } = {}) {
     state.collectionSuggestions = data.suggestions || [];
     state.collectionInbox = appendInbox ? [...state.collectionInbox, ...(inbox.items || [])] : (inbox.items || []);
     state.collectionInboxTotal = inbox.total || 0;
-    $('#collection-mode').value = data.mode || 'SUGGEST';
+    $('#collection-mode').value = data.mode || 'AUTO_CREATE';
     renderCollections();
     renderCollectionFilters();
   } catch {
@@ -1127,6 +1152,7 @@ function renderCollections() {
   if (!items.length) container.append(element('p', t('collections.empty'), 'collection-empty'));
   items.forEach((item) => {
     const card = element('article', null, 'panel collection-card');
+    card.dataset.collectionId = item.id;
     const head = element('div', null, 'collection-card-head');
     const title = element('h2', item.name);
     const badge = element('span', t(item.created_by === 'AI' ? 'collections.ai' : 'collections.user'), 'pill pill--blue');
@@ -1152,11 +1178,24 @@ function renderCollections() {
     remove.type = 'button';
     remove.addEventListener('click', async () => {
       if (!window.confirm(t('collections.confirm-delete'))) return;
-      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, { method: 'DELETE', locale: getLocale() });
-      await loadCollections();
+      remove.disabled = true;
+      try {
+        await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, { method: 'DELETE', locale: getLocale() });
+        state.collections = state.collections.filter((collection) => collection.id !== item.id);
+        renderCollections();
+        await loadCollections();
+        $('#collections-status').textContent = t('collections.deleted', { name: item.name });
+        $('#collections-status').classList.remove('notice--error');
+      } catch (error) {
+        remove.disabled = false;
+        $('#collections-status').textContent = t('collections.delete-error', { name: item.name, error: getErrorMessage(error, 'collections.error') });
+        $('#collections-status').classList.add('notice--error');
+      }
     });
     actions.append(edit, remove);
     card.append(actions);
+    const membershipDetails = element('details', null, 'collection-members-panel');
+    membershipDetails.append(element('summary', t('collections.open')));
     const keywords = element('div', null, 'collection-keywords');
     const selectedIds = state.collectionMembershipSelected[item.id]
       || (state.collectionMembershipSelected[item.id] = new Set());
@@ -1189,8 +1228,8 @@ function renderCollections() {
     rejectSelected.addEventListener('click', () => bulkAction('REJECT'));
     bulkControls.append(selectAll, element('span', t('collections.select-page')),
       approveSelected, rejectSelected);
-    card.append(bulkControls);
-    card.append(keywords);
+    membershipDetails.append(bulkControls, keywords);
+    card.append(membershipDetails);
     getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() })
       .then((result) => (result.items || []).forEach((keyword) => {
         const row = element('div', null, 'collection-keyword');
@@ -1207,7 +1246,13 @@ function renderCollections() {
         try { evidence = JSON.parse(keyword.evidence || '{}'); } catch {}
         const details = [keyword.source, keyword.project, keyword.observed_at,
           Number.isFinite(evidence.views_ceil) ? `${number(evidence.views_ceil)} views` : ''].filter(Boolean).join(' · ');
-        const label = element('span', `${keyword.keyword} · ${keyword.origin} · ${keyword.reason || ''} · ${details}`);
+        const label = element('span', `${keyword.keyword} · ${t(keyword.origin === 'LOCAL_AI' ? 'collections.assigned-ai' : 'collections.assigned-manual')}`);
+        if (keyword.reason || details) {
+          const evidenceDetails = element('details', null, 'collection-keyword-evidence');
+          evidenceDetails.append(element('summary', t('collections.evidence-details')),
+            element('span', [keyword.reason, details].filter(Boolean).join(' · ')));
+          label.append(evidenceDetails);
+        }
         const destination = element('select');
         destination.setAttribute('aria-label', t('collections.copy'));
         state.collections.filter((value) => value.id !== item.id).forEach((collection) => {
@@ -1644,7 +1689,16 @@ function bindEvents() {
     renderCollections();
   });
   $('#collection-mode').addEventListener('change', async (event) => {
-    await requestJson('/api/v1/collections/mode', { method: 'POST', body: { mode: event.currentTarget.value }, locale: getLocale() });
+    const select = event.currentTarget;
+    try {
+      const result = await requestJson('/api/v1/collections/mode', { method: 'POST', body: { mode: select.value }, locale: getLocale() });
+      $('#collections-status').textContent = t('collections.mode-saved', { mode: t(`collections.mode-${result.mode}`) });
+      $('#collections-status').classList.remove('notice--error');
+    } catch (error) {
+      $('#collections-status').textContent = getErrorMessage(error, 'collections.error');
+      $('#collections-status').classList.add('notice--error');
+      await loadCollections();
+    }
   });
   $('#collections-refresh').addEventListener('click', async () => {
     const result = await requestJson('/api/v1/collections/organize', { method: 'POST', locale: getLocale() });

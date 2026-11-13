@@ -6,11 +6,12 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
 from app.discovery.contracts import ProcessingGrant
+from app.collections.store import CollectionStore
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.shared_cache import CacheGrant, SharedCache
@@ -197,27 +198,29 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
             }),
         )
         inner = app.app
-        async with inner.router.lifespan_context(inner):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1234)),
-                base_url="http://127.0.0.1",
-            ) as client:
-                response = await client.post("/api/v1/fetches", json={}, headers={
-                    "Idempotency-Key": "normal-wikimedia-http-test-0001",
-                })
-                self.assertEqual(response.status_code, 202, response.text)
-                status = await client.get(response.json()["status_url"])
-                self.assertEqual(status.status_code, 200, status.text)
-                body = status.json()
-                self.assertEqual(body["data_mode"], "LIVE")
-                self.assertEqual(len(body["sources"]), 1)
-                evidence = body["discovery"]["candidates"][0]["evidence"][0]
-                self.assertEqual(evidence["article"], "Coffee")
-                self.assertEqual(evidence["project"], "en.wikipedia")
-                self.assertEqual(evidence["provider_rank"], 1)
-                self.assertEqual(evidence["approximate_views"], 100)
-                self.assertEqual(evidence["data_mode"], "LIVE")
-                self.assertEqual(evidence["source_url"].split("/")[:3], ["https:", "", "en.wikipedia.org"])
+        isolated_collections = CollectionStore(self.directory.name + "/collections.sqlite")
+        with patch("app.collections.store.CollectionStore.local", return_value=isolated_collections):
+            async with inner.router.lifespan_context(inner):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1234)),
+                    base_url="http://127.0.0.1",
+                ) as client:
+                    response = await client.post("/api/v1/fetches", json={}, headers={
+                        "Idempotency-Key": "normal-wikimedia-http-test-0001",
+                    })
+                    self.assertEqual(response.status_code, 202, response.text)
+                    status = await client.get(response.json()["status_url"])
+                    self.assertEqual(status.status_code, 200, status.text)
+                    body = status.json()
+                    self.assertEqual(body["data_mode"], "LIVE")
+                    self.assertEqual(len(body["sources"]), 1)
+                    evidence = body["discovery"]["candidates"][0]["evidence"][0]
+                    self.assertEqual(evidence["article"], "Coffee")
+                    self.assertEqual(evidence["project"], "en.wikipedia")
+                    self.assertEqual(evidence["provider_rank"], 1)
+                    self.assertEqual(evidence["approximate_views"], 100)
+                    self.assertEqual(evidence["data_mode"], "LIVE")
+                    self.assertEqual(evidence["source_url"].split("/")[:3], ["https:", "", "en.wikipedia.org"])
 
 
 if __name__ == "__main__":

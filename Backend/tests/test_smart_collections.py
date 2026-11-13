@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.api.collections import _mode
 from app.collections import embeddings
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, keyword_record
@@ -154,6 +155,31 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertFalse(restarted.delete(collection_id) is False)
         self.assertTrue(restarted.connect().execute("SELECT 1 FROM suppression").fetchone())
 
+    def test_mode_default_and_legacy_setting_migration(self):
+        self.assertEqual(_mode(self.service), "AUTO_CREATE")
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST')")
+        self.assertEqual(_mode(self.service), "SUGGEST_ONLY")
+        self.assertEqual(_mode(self.service), "SUGGEST_ONLY")
+
+    def test_reconciliation_archives_only_unpinned_ai_and_rolls_back(self):
+        collection = self.store.create({"name": "Fashion"})
+        first = keyword_record({"article_display": "Denim jacket", "article_original": "Denim_jacket",
+            "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z",
+            "provider_rank": 1, "views_ceil": 1000}, "wikimedia_pageviews_top_per_country", "LIVE")
+        second = {**first, "id": "second", "keyword": "Manual keyword"}
+        with self.store.connect() as db:
+            for row in (first, second):
+                db.execute("INSERT INTO keywords VALUES(?,?,?,?,?,?,?,?,?,1,NULL)", tuple(row[key] for key in (
+                    "id", "keyword", "normalized", "source", "project", "observed_at", "data_mode", "evidence", "context")))
+            db.execute("INSERT INTO memberships VALUES(?,?, 'LOCAL_AI',0,0.8,'old match',?)", (collection, first["id"], "old"))
+            db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'manual pin',?)", (collection, second["id"], "old"))
+        self.assertEqual(self.store.archive_unpinned_ai_memberships("reconcile-test", "threshold update"), 1)
+        self.assertEqual(len(self.store.keywords_for(collection)), 1)
+        self.assertEqual(self.store.keywords_for(collection)[0]["origin"], "USER")
+        self.assertTrue(self.store.rollback_membership_reconciliation("reconcile-test"))
+        self.assertEqual({row["origin"] for row in self.store.keywords_for(collection)}, {"LOCAL_AI", "USER"})
+
     def test_multiple_membership_semantic_match_negative_feedback_and_replay(self):
         first = self.store.create({"name": "Sustainable fashion", "description": "Recycled denim and eco clothing"})
         second = self.store.create({"name": "Fashion", "description": "Denim clothing", "auto_match": False})
@@ -181,6 +207,8 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(replay["assigned"], 1)
 
     def test_full_record_input_and_cache_reuse(self):
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','OFF')")
         records = [{"article_display": f"Mars Rover {i}", "article_original": f"Mars_Rover_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(212)]
@@ -224,6 +252,8 @@ class SmartCollectionsTests(unittest.TestCase):
                 self.assertIsNotNone(collection_technical_reason(project, title))
 
     def test_proposals_require_pairwise_cohesion(self):
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST_ONLY')")
         titles = ["A topic", "B topic", "C topic", "D topic"]
         records = [("id-" + title[0], title) for title in titles]
         vectors = [[float(index)] for index in range(4)]
@@ -247,6 +277,8 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(self.store.suggestions(), [])
 
     def test_suggestion_acceptance_and_deleted_name_suppression(self):
+        with self.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST_ONLY')")
         rows = [{"article_display": f"Sustainable fashion item {i}", "article_original": f"Sustainable_fashion_item_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(3)]
@@ -260,8 +292,6 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(self.store.resolve_proposal(proposal["id"], False), None)
 
     def test_auto_create_requires_three_supports_and_delete_is_suppressed(self):
-        with self.store.connect() as db:
-            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','AUTO_CREATE')")
         rows = [{"article_display": f"Sustainable fashion item {i}", "article_original": f"Sustainable_fashion_item_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(3)]

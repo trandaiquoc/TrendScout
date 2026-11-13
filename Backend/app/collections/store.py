@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS fetch_jobs (
  processed INTEGER NOT NULL DEFAULT 0, assigned INTEGER NOT NULL DEFAULT 0,
  unassigned INTEGER NOT NULL DEFAULT 0, created_collections INTEGER NOT NULL DEFAULT 0,
  suggestions INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
- error_code TEXT, updated_at TEXT NOT NULL
+ error_code TEXT, updated_at TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'QUEUED',
+ eligible INTEGER NOT NULL DEFAULT 0, cached_embeddings INTEGER NOT NULL DEFAULT 0,
+ inferred_embeddings INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS algorithm_observations (
  keyword_id TEXT NOT NULL, source TEXT NOT NULL, observation_date TEXT NOT NULL,
@@ -89,6 +91,14 @@ CREATE TABLE IF NOT EXISTS keyword_decisions (
  decision TEXT NOT NULL CHECK(decision IN ('EXCLUDED','RESTORED')),
  reason TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS membership_reconciliation_runs (
+ id TEXT PRIMARY KEY, created_at TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS membership_reconciliation_items (
+ run_id TEXT NOT NULL, collection_id TEXT NOT NULL, keyword_id TEXT NOT NULL,
+ origin TEXT NOT NULL, pinned INTEGER NOT NULL, score REAL, reason TEXT NOT NULL,
+ created_at TEXT NOT NULL, PRIMARY KEY(run_id,collection_id,keyword_id)
+);
 """
 
 
@@ -115,6 +125,13 @@ class CollectionStore:
                 db.execute("ALTER TABLE keywords ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1")
             if "rejection_reason" not in keyword_columns:
                 db.execute("ALTER TABLE keywords ADD COLUMN rejection_reason TEXT")
+            job_columns = {row["name"] for row in db.execute("PRAGMA table_info(fetch_jobs)")}
+            for name, declaration in (("stage", "TEXT NOT NULL DEFAULT 'QUEUED'"),
+                                      ("eligible", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("cached_embeddings", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("inferred_embeddings", "INTEGER NOT NULL DEFAULT 0")):
+                if name not in job_columns:
+                    db.execute(f"ALTER TABLE fetch_jobs ADD COLUMN {name} {declaration}")
         if self.path.is_symlink():
             raise ValueError("collection database must not be a symlink")
         try:
@@ -311,6 +328,44 @@ class CollectionStore:
             db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
                        (fingerprint(row["name"]), "DELETED_COLLECTION", now(), row["name"]))
             db.execute("DELETE FROM collections WHERE id=?", (identifier,))
+            return True
+
+    def archive_unpinned_ai_memberships(self, run_id: str, reason: str):
+        """Archive automatic memberships before reconciliation so they can be restored exactly."""
+        stamp = now()
+        with self.connect() as db:
+            db.execute("INSERT INTO membership_reconciliation_runs VALUES(?,?,?,'APPLYING')",
+                       (run_id, stamp, reason))
+            db.execute("""INSERT INTO membership_reconciliation_items
+                SELECT ?,collection_id,keyword_id,origin,pinned,score,reason,created_at
+                FROM memberships WHERE origin='LOCAL_AI' AND pinned=0""", (run_id,))
+            archived = db.execute("SELECT changes()").fetchone()[0]
+            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0")
+            db.execute("UPDATE membership_reconciliation_runs SET status='APPLIED' WHERE id=?", (run_id,))
+            return archived
+
+    def rollback_membership_reconciliation(self, run_id: str):
+        with self.connect() as db:
+            run = db.execute("SELECT status FROM membership_reconciliation_runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run["status"] != "APPLIED":
+                return False
+            # Remove automatic Collections created during this run if the user has not
+            # adopted them with a manual membership. Avoid creating a deletion suppression
+            # because this operation is a migration rollback, not a user delete action.
+            created = db.execute("SELECT id FROM collections WHERE created_by='AI' AND reason LIKE ?",
+                                 (f"%{run_id}%",)).fetchall()
+            for item in created:
+                user_membership = db.execute("SELECT 1 FROM memberships WHERE collection_id=? AND origin='USER' LIMIT 1",
+                                             (item["id"],)).fetchone()
+                feedback = db.execute("SELECT 1 FROM feedback WHERE collection_id=? LIMIT 1", (item["id"],)).fetchone()
+                if not user_membership and not feedback:
+                    db.execute("DELETE FROM collections WHERE id=?", (item["id"],))
+            db.execute("""INSERT OR IGNORE INTO memberships(collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                SELECT i.collection_id,i.keyword_id,i.origin,i.pinned,i.score,i.reason,i.created_at
+                FROM membership_reconciliation_items i
+                JOIN collections c ON c.id=i.collection_id
+                JOIN keywords k ON k.id=i.keyword_id WHERE i.run_id=?""", (run_id,))
+            db.execute("UPDATE membership_reconciliation_runs SET status='ROLLED_BACK' WHERE id=?", (run_id,))
             return True
 
     def keywords_for(self, collection_id):

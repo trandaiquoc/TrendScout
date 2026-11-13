@@ -55,9 +55,12 @@ RULES = (
     Rule('fashion_week', '1', 'fashion', None, r'\bfashion week\b', 'Explicit fashion-week phrase', exclude_media_title=True),
     Rule('washing_machine', '1', 'home_living', 'home_living.appliances', r'\bwashing machines?\b', 'Explicit appliance phrase', exclude_media_title=True),
     Rule('film_qualifier', '1', 'entertainment', 'entertainment.film', r'\((?:\d{4}\s+)?film\)\s*$', 'Explicit film qualifier', priority=100),
-    Rule('election', '1', 'news_politics', 'news_politics.elections', r'\b(?:presidential|general|mayoral|parliamentary|senate) election\b', 'Explicit election phrase', exclude_media_title=True),
+    Rule('television_qualifier', '1', 'entertainment', 'entertainment.television', r'\((?:television|tv) (?:series|program|show)\)\s*$', 'Explicit television program qualifier', priority=100),
+    Rule('music_qualifier', '1', 'entertainment', 'entertainment.music', r'\((?:song|album|music work)\)\s*$', 'Explicit music-work qualifier', priority=100),
+    Rule('video_game_qualifier', '1', 'gaming', 'gaming.video_games', r'\((?:video game|game)\)\s*$', 'Explicit video-game qualifier', priority=100),
+    Rule('election', '1', 'news_politics', 'news_politics.elections', r'\b(?:presidential|general|mayoral|parliamentary|senate) elections?\b', 'Explicit election phrase', exclude_media_title=True),
 )
-_MEDIA = re.compile(r'\((?:\d{4}\s+)?(?:film|song|album|television series|tv series|tv show)\)\s*$', re.IGNORECASE)
+_MEDIA = re.compile(r'\((?:\d{4}\s+)?(?:film|song|album|television series|television program|television show|tv series|tv program|tv show|video game|game)\)\s*$', re.IGNORECASE)
 _COMPILED = tuple((rule, re.compile(rule.pattern, re.IGNORECASE)) for rule in RULES)
 
 

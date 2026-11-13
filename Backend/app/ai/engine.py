@@ -8,6 +8,7 @@ import math
 import threading
 from .contracts import Request, Result, Task, Usage, ProviderFailure
 from .validation import InvalidOutput, validate
+from app.taxonomy.registry import TAXONOMY_VERSION
 
 # Only predefined synthetic fixture values may enter this demonstrative cache.
 CACHE_SAFE_VALUES = frozenset({'café', 'synthetic fixture'})
@@ -145,7 +146,7 @@ class Engine:
                                 and req.schema_version == ('classification-v1' if req.task is Task.CLASSIFICATION else 'ner-v1')
                                 and req.request_version == ('classification-request-v1' if req.task is Task.CLASSIFICATION else 'ner-request-v1')
                                 and isinstance(req.entity_id, str) and 0 < len(req.entity_id) <= 256
-                                and req.source_language in ('en', 'vi') and req.taxonomy_version == 'topics-v1.0'
+                                and req.source_language in ('en', 'vi') and req.taxonomy_version == TAXONOMY_VERSION
                                 and type(req.evidence_ids) is tuple and 0 < len(req.evidence_ids) <= 10
                                 and all(isinstance(x, str) and 0 < len(x) <= 128 for x in req.evidence_ids)
                                 and isinstance(req.model_version, str) and 0 < len(req.model_version) <= 128)

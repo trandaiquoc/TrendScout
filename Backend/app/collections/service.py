@@ -11,6 +11,7 @@ import uuid
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import date
+from threading import local
 
 from app.collections import embeddings
 from app.collections.store import (
@@ -21,12 +22,12 @@ from app.collections.store import (
     now,
 )
 
-ASSIGN_THRESHOLD = 0.46
-ASSIGN_MARGIN = 0.06
+ASSIGN_THRESHOLD = 0.68
+ASSIGN_MARGIN = 0.08
 PROPOSAL_THRESHOLD = 0.82
-EXCLUSION_THRESHOLD = 0.46
-MIN_PROPOSAL_SUPPORT = 3
-MAX_AUTO_CREATE_PER_FETCH = 2
+EXCLUSION_THRESHOLD = 0.68
+MIN_PROPOSAL_SUPPORT = 2
+PAIR_PROPOSAL_THRESHOLD = 0.92
 
 # Small, explicit domain anchors let a named Collection work before the user has
 # supplied examples. They are semantic model inputs, never assignment decisions.
@@ -45,6 +46,7 @@ def cosine(left, right):
 class CollectionService:
     def __init__(self, store: CollectionStore):
         self.store = store
+        self._thread_state = local()
 
     async def process_fetch(self, fetch_id: str, sources: list[dict]):
         try:
@@ -59,14 +61,16 @@ class CollectionService:
             return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "COLLECTION_PROCESSING_FAILED"}
 
     def _process_fetch(self, fetch_id, sources):
+        self._thread_state.embedding_counts = {"cached_embeddings": 0, "inferred_embeddings": 0}
         with self.store.connect() as db:
             prior = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
             if prior and prior["status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}:
                 return dict(prior)
-            db.execute("INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
-                       (fetch_id, "PROCESSING", now()))
+            db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at)
+                VALUES(?,'PROCESSING','CLEANING',?)""", (fetch_id, now()))
         records, skipped, rejected = [], 0, []
         available = sum(len(source.get("records", [])) for source in sources if isinstance(source.get("records"), list))
+        self._update_job(fetch_id, stage="EXTRACTING_KEYWORDS", available=available, skipped=skipped)
         for source in sources:
             source_id, mode = source.get("source_id", ""), source.get("data_mode", "")
             snapshot_status = source.get("status", "SUCCESS")
@@ -100,17 +104,17 @@ class CollectionService:
                     WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
+        self._update_job(fetch_id, stage="ANALYZING_SEMANTIC_MEANING", skipped=skipped)
         if sources and not fetch_id.startswith("organize-"):
             self._persist_dataset_snapshot(fetch_id, sources, records, available, skipped)
         analysis = self._analyze_persisted_keywords(records)
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.
         with self.store.connect() as db:
-            persisted = db.execute("""SELECT k.* FROM keywords k
-                WHERE k.eligible=1 AND NOT EXISTS (
-                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
-                ) ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""").fetchall()
+            persisted = db.execute("""SELECT k.* FROM keywords k WHERE k.eligible=1
+                ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""").fetchall()
             records = [dict(row) for row in persisted]
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
         # Do not claim inference succeeded if package/model is missing. Provider Fetch remains complete.
         try:
             collections = self.store.list_collections()
@@ -134,15 +138,25 @@ class CollectionService:
                 db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
                            (fetch_id,))
                 db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
-                    error_code,updated_at) VALUES(?,?,?,?,?,?,?)""",
+                    error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
+                    VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
                     (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped,
-                     "LOCAL_MODEL_UNAVAILABLE", now()))
+                     "LOCAL_MODEL_UNAVAILABLE", now(), eligible,
+                     self._thread_state.embedding_counts["cached_embeddings"],
+                     self._thread_state.embedding_counts["inferred_embeddings"]))
             return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
                     "processed": 0, "assigned": 0, "unassigned": len(records), "skipped": skipped}
 
         assigned = 0
         unassigned_rows = []
+        self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
+            processed=len(records), cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
+            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
+        self._update_job(fetch_id, stage="ASSIGNING_KEYWORDS")
         with self.store.connect() as db:
+            # Recompute automatic memberships from the complete eligible ledger after
+            # inference succeeds. Pinned USER memberships and explicit REMOVE feedback stay intact.
+            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0")
             for record, vector, topic_vector in zip(records, vectors, topic_vectors):
                 scores = []
                 fits_existing_collection = False
@@ -195,23 +209,44 @@ class CollectionService:
                                           (record["id"],)).fetchone()
                     if not rejected and not fits_existing_collection:
                         unassigned_rows.append((record, topic_vector))
+        self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
         created, suggestions = self._propose(fetch_id, unassigned_rows, collections)
+        with self.store.connect() as db:
+            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships WHERE origin='LOCAL_AI'").fetchone()[0]
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                    "processed": len(records), "assigned": assigned,
                    "unassigned": self._unassigned_count(), "created_collections": created,
                    "suggestions": suggestions, "skipped": skipped,
+                   "eligible": eligible,
+                   "cached_embeddings": self._thread_state.embedding_counts["cached_embeddings"],
+                   "inferred_embeddings": self._thread_state.embedding_counts["inferred_embeddings"],
                    "algorithms": analysis}
+        self._update_job(fetch_id, stage="SAVING_RESULTS", assigned=assigned, created_collections=created,
+            unassigned=outcome["unassigned"])
+        self._update_job(fetch_id, stage="COMPLETED", status="COMPLETED", available=available,
+            eligible=eligible, processed=outcome["processed"], assigned=assigned,
+            unassigned=outcome["unassigned"], created_collections=created,
+            suggestions=suggestions, skipped=skipped,
+            cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
+            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
         with self.store.connect() as db:
-            db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,assigned,
-                unassigned,created_collections,suggestions,skipped,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (fetch_id, "COMPLETED", outcome["available"], outcome["processed"], assigned,
-                 outcome["unassigned"], created, suggestions, skipped, now()))
             db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
                 eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1),
                 assigned_keyword_count=(SELECT count(DISTINCT keyword_id) FROM memberships),
                 unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
                     (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) WHERE dataset_id=?""", (fetch_id,))
         return outcome
+
+    def _update_job(self, fetch_id, **values):
+        allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
+                   "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings"}
+        changes = {key: value for key, value in values.items() if key in allowed}
+        assignments = [f"{key}=?" for key in changes]
+        parameters = list(changes.values())
+        assignments.append("updated_at=?")
+        parameters.extend([now(), fetch_id])
+        with self.store.connect() as db:
+            db.execute(f"UPDATE fetch_jobs SET {','.join(assignments)} WHERE fetch_id=?", parameters)
 
     def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped):
         manifests, flags, modes = [], [], set()
@@ -393,10 +428,12 @@ class CollectionService:
                     (key, embeddings.MODEL_VERSION, version, text_hash)).fetchone()
                 if row:
                     results[index] = list(struct.unpack(f"<{row['dimension']}f", row["vector"]))
+                    self._thread_state.embedding_counts["cached_embeddings"] += 1
                 else:
                     pending.append(text)
                     keys.append((index, key, text_hash, version))
         if pending:
+            self._thread_state.embedding_counts["inferred_embeddings"] += len(pending)
             vectors = []
             for offset in range(0, len(pending), 256):
                 vectors.extend(embeddings.embed(pending[offset:offset + 256]))
@@ -455,7 +492,9 @@ class CollectionService:
             return 0, 0
         with self.store.connect() as db:
             setting = db.execute("SELECT value FROM settings WHERE key='creation_mode'").fetchone()
-        mode = setting["value"] if setting else "SUGGEST"
+        mode = setting["value"] if setting else "AUTO_CREATE"
+        if mode == "OFF":
+            return 0, 0
         # Require a cohesive group: every pair must clear the reviewed cosine cutoff.
         groups, used = [], set()
         for index, (record, vector) in enumerate(unassigned[:256]):
@@ -470,37 +509,47 @@ class CollectionService:
                 ):
                     used.add(other_index)
                     group.append(unassigned[other_index])
-            if len(group) >= MIN_PROPOSAL_SUPPORT:
+            if len(group) >= MIN_PROPOSAL_SUPPORT and (len(group) > 2 or all(
+                cosine(group[0][1], member[1]) >= PAIR_PROPOSAL_THRESHOLD for member in group[1:]
+            )):
                 groups.append(group)
         created = suggestions = 0
-        for group in groups[:MAX_AUTO_CREATE_PER_FETCH]:
+        for group in groups:
             titles = [row[0]["keyword"] for row in group]
             if self._contains_platform_noise(titles):
                 continue
             name = self._representative_name(titles)
+            if len(name.strip()) < 3:
+                continue
             key = fingerprint(name)
             if any(fingerprint(item["name"]) == key for item in collections):
                 continue
             if self._near_duplicate_name(name, collections):
                 continue
             support = [row[0]["id"] for row in group]
-            description = "Related Wikimedia pageview topics grouped by local semantic similarity: " + "; ".join(titles[:5])
+            description = self._group_description(name, titles)
             reason = f"{len(group)} unassigned keyword records formed a local semantic group in fetch {fetch_id}."
             if mode == "AUTO_CREATE":
                 identifier = self.store.create({"name": name, "description": description,
                     "examples": titles[:5]}, created_by="AI", reason=reason)
+                assignment_reason = f"Grouped with {len(group)} locally matched topics: " + "; ".join(titles[:3])
                 with self.store.connect() as db:
                     for keyword_id in support:
                         db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,NULL,?,?)",
-                                   (identifier, keyword_id, "Representative keyword in AI-created group", now()))
+                                   (identifier, keyword_id, assignment_reason, now()))
                 created += 1
-            else:
+            elif mode == "SUGGEST_ONLY":
                 stamp, proposal_id = now(), str(uuid.uuid4())
                 with self.store.connect() as db:
                     db.execute("INSERT INTO proposals VALUES(?,?,?,?,?,'PENDING',?,?)",
                                (proposal_id, name, description, json.dumps(support), reason, stamp, stamp))
                 suggestions += 1
         return created, suggestions
+
+    @staticmethod
+    def _group_description(name, titles):
+        examples = ", ".join(titles[:4])
+        return f"{name} topics, including {examples}. Identified from saved keyword evidence."
 
     @staticmethod
     def _contains_platform_noise(titles):
@@ -535,12 +584,29 @@ class CollectionService:
 
     @staticmethod
     def _representative_name(titles):
-        # Bounded deterministic phrase selection from observed titles only.
-        words = Counter()
-        for title in titles:
-            parts = [part for part in title.replace("_", " ").split() if len(part) > 2]
-            for index in range(max(1, len(parts) - 1)):
-                phrase = " ".join(parts[index:index + 2])
-                if phrase:
-                    words[phrase] += 1
-        return (words.most_common(1)[0][0] if words else "Related Wikimedia topics")[:80]
+        # Use a title phrase shared by the actual group; remove parenthetical metadata
+        # such as language or format before finding the common prefix.
+        cleaned = [" ".join(title.split("(", 1)[0].replace("_", " ").split()).strip(" -:") for title in titles]
+        tokens = [title.split() for title in cleaned]
+        prefix = []
+        for group in zip(*tokens):
+            if len({word.casefold() for word in group}) != 1:
+                break
+            prefix.append(group[0])
+        name = " ".join(prefix).strip(" -:")
+        if name.casefold().endswith(" minus"):
+            name = name.rsplit(" ", 1)[0]
+        if name and all("film" in title.casefold() or "movie" in title.casefold() for title in titles):
+            name = f"{name} films"
+        if len(name) < 3:
+            # Fall back to a repeated observed bigram, never a fabricated generic label.
+            phrases = Counter()
+            for title in cleaned:
+                parts = [part for part in title.split() if len(part) > 2]
+                for index in range(max(1, len(parts) - 1)):
+                    phrase = " ".join(parts[index:index + 2])
+                    if phrase:
+                        phrases[phrase] += 1
+            shared = [(phrase, count) for phrase, count in phrases.items() if count >= len(titles)]
+            name = max(shared, key=lambda item: (len(item[0].split()), len(item[0])))[0] if shared else ""
+        return name[:80]

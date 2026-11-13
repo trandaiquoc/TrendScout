@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 
-TAXONOMY_VERSION = 'topics-v1.0'
+TAXONOMY_VERSION = 'topics-v1.1'
 
 
 @dataclass(frozen=True)
@@ -14,8 +14,16 @@ class Category:
 
 
 _DEFINITIONS = (
-    ('entertainment', 'Entertainment', (('film','Film'),('music','Music'),('television','Television'),('anime','Anime'))),
-    ('celebrity_public_figures', 'Celebrity & Public Figures', (('performers','Actors / Performers'),('musicians','Musicians'),('creators','Content Creators'),('public_figures','Public Figures'))),
+    ('entertainment', 'Entertainment', (('film','Movies'),('music','Music'),('television','Television'),('anime','Anime'))),
+    ('celebrity_public_figures', 'People & Public Figures', (
+        ('performers','Actors & Performers'),('musicians','Musicians & Singers'),
+        ('creators','Content Creators'),('politicians','Politicians & Public Officials'),
+        ('athletes','Athletes'),('photographers','Photographers & Artists'),
+        ('scientists','Scientists & Researchers'),('health_professionals','Health Professionals'),
+        ('legal_professionals','Legal Professionals'),('business_leaders','Business Leaders'),
+        ('public_figures','Other Public Figures'))),
+    ('arts_culture', 'Arts & Culture', (
+        ('photography','Photography'),('visual_arts','Visual Arts'),('literature','Literature'))),
     ('fashion', 'Fashion', (('clothing','Clothing'),('footwear','Footwear'),('accessories','Accessories'),('jewelry','Jewelry'))),
     ('home_living', 'Home & Living', (('appliances','Home Appliances'),('kitchen','Kitchen'),('furniture','Furniture'),('decor','Home Decor'))),
     ('technology', 'Technology', (('ai','AI'),('software','Software'),('gadgets','Gadgets'),('electronics','Electronics'))),

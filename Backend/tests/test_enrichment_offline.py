@@ -3,6 +3,7 @@ import unittest
 from app.ai.contracts import Request, Task, Reply
 from app.ai.engine import fingerprint
 from app.ai.validation import validate, InvalidOutput
+from app.taxonomy.registry import TAXONOMY_VERSION
 
 class ClassificationContractTests(unittest.TestCase):
     def test_schema_requires_evidence_and_task_binding(self):
@@ -10,10 +11,10 @@ class ClassificationContractTests(unittest.TestCase):
                       'policy', 'request', 'audit', 'the history of the fashion week',
                       fingerprint('the history of the fashion week'), frozenset({'public'}), True,
                       100, 100, 100, request_version='classification-request-v1', entity_id='e1',
-                      taxonomy_version='topics-v1.0', source_language='en', evidence_ids=('ev1',), model_version='1', allowed_categories=('fashion',))
+                      taxonomy_version=TAXONOMY_VERSION, source_language='en', evidence_ids=('ev1',), model_version='1', allowed_categories=('fashion',))
         import json
         obj = {'schema':'classification-v1', 'entity_id':'e1', 'input_fingerprint':req.input_fingerprint,
-               'request_id':'request', 'taxonomy_version':'topics-v1.0', 'source_language':'en', 'model_version':'1',
+               'request_id':'request', 'taxonomy_version':TAXONOMY_VERSION, 'source_language':'en', 'model_version':'1',
                'labels':[{'category':'fashion','subcategory':None,'evidence_id':'ev1','start':19,'end':31,'span':'fashion week','reason':'DIRECT_MENTION'}],
                'entity_type':'unknown', 'confidence':0.95}
         self.assertEqual(validate(Reply(json.dumps(obj)), 'classification-v1', req)['labels'][0]['category'], 'fashion')
@@ -29,7 +30,6 @@ from app.ai.provider import FakeProvider, Registry
 from app.enrichment.offline import EnrichmentPolicy, EnrichmentService, Evidence, VERSION, digest
 from app.enrichment.review import ReviewerAuthority, ReviewStore
 from app.enrichment.semantic import Vector, candidate
-from app.taxonomy.registry import TAXONOMY_VERSION
 from test_golden_contract import build_golden
 
 class EnrichmentIntegrationTests(unittest.IsolatedAsyncioTestCase):

@@ -51,7 +51,7 @@ class MembershipInput(BaseModel):
 
 class ModeInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["SUGGEST", "AUTO_CREATE"]
+    mode: Literal["SUGGEST_ONLY", "AUTO_CREATE", "OFF"]
 
 
 class BulkMembershipInput(BaseModel):
@@ -96,7 +96,14 @@ def list_collections(request: Request):
 def _mode(service):
     with service.store.connect() as db:
         row = db.execute("SELECT value FROM settings WHERE key='creation_mode'").fetchone()
-        return row["value"] if row else "SUGGEST"
+        if row:
+            # Preserve an explicit legacy choice while making the old label unambiguous.
+            if row["value"] == "SUGGEST":
+                db.execute("UPDATE settings SET value='SUGGEST_ONLY' WHERE key='creation_mode'")
+                return "SUGGEST_ONLY"
+            return row["value"]
+        db.execute("INSERT INTO settings(key,value) VALUES('creation_mode','AUTO_CREATE')")
+        return "AUTO_CREATE"
 
 
 @router.post("/collections", status_code=201)
@@ -265,6 +272,8 @@ def get_job(fetch_id: str, request: Request):
     service = _service(request)
     with service.store.connect() as db:
         row = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+        created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? ORDER BY created_at",
+                             (f"%{fetch_id}%",)).fetchall()
     if row is None:
         return {"status": "NOT_PROCESSED", "processed": 0, "available": 0}
-    return dict(row)
+    return {**dict(row), "created_collection_names": [item["name"] for item in created]}

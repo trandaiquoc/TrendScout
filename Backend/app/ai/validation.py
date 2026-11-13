@@ -63,7 +63,11 @@ def _translation(obj, request):
     return obj
 
 
-ENTITY_TYPES = frozenset({'person', 'organization', 'product', 'place', 'event', 'work', 'unknown'})
+ENTITY_TYPES = frozenset({
+    'person', 'creative_work', 'film', 'television_program', 'music_work',
+    'video_game', 'product', 'brand', 'organization', 'place',
+    'political_event', 'sports_event', 'technology', 'event', 'work', 'unknown',
+})
 REASONS = frozenset({'DIRECT_MENTION', 'CONTEXT', 'AMBIGUOUS'})
 
 def _enrichment(obj, request, schema):

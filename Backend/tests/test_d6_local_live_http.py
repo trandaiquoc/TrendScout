@@ -16,6 +16,7 @@ from test_d5_wikimedia_gateway import USER_AGENT
 from test_d6_local_live_composition import FixtureApprovals
 
 from app import local_ledger
+from app.collections.store import CollectionStore
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
@@ -97,6 +98,14 @@ def _live_facade(directory):
 
 
 class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.collection_directory = tempfile.TemporaryDirectory()
+        store = CollectionStore(Path(self.collection_directory.name) / "collections.sqlite")
+        self.addCleanup(self.collection_directory.cleanup)
+        patcher = patch("app.collections.store.CollectionStore.local", return_value=store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_wikimedia_only_http_flow_uses_one_provider_request(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(local_ledger, "DIRECTORY", Path(directory) / "local-live"), \
