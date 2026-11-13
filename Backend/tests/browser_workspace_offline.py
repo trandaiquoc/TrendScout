@@ -129,6 +129,7 @@ CHECK = r"""<script>
       check(link.getAttribute('aria-current')==='page','aria current '+link.dataset.nav);
       check(document.documentElement.scrollWidth<=innerWidth+1,'horizontal overflow '+link.dataset.nav);
     }
+    const {applyLocale}=await import(I18N_MODULE_URI);
     await go('collections');await wait(80);
     document.querySelector('.workbench-context-button')?.click();
     const picker=document.querySelector('.collection-picker');
@@ -141,6 +142,16 @@ CHECK = r"""<script>
     mergeSection?.querySelector('.button-primary')?.click();
     check(document.querySelector('#workbench-collection-dialog')?.textContent.includes('Fixture Collection B'),'selected merge destination reaches the review step');
     document.querySelector('#workbench-collection-dialog button')?.click();
+    applyLocale('en');document.documentElement.dataset.theme='dark';await wait(60);
+    document.querySelector('.workbench-context-button')?.click();
+    const darkPicker=document.querySelector('.collection-picker');
+    const darkTrigger=darkPicker?.querySelector('[role=combobox]');
+    check(darkPicker?.closest('dialog')?.open,'merge picker opens in the dark theme');
+    check(darkPicker?.closest('dialog')?.textContent.includes('Merge into another Collection'),'merge labels update in English');
+    darkTrigger?.click();darkPicker?.querySelector('[role=option]')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    check(darkTrigger?.getAttribute('aria-expanded')==='false','Escape closes the picker in the dark theme');
+    document.querySelector('#workbench-collection-dialog button')?.click();
+    applyLocale('vi');document.documentElement.dataset.theme='light';await wait(40);
     await go('runs');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
     check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
@@ -169,7 +180,6 @@ CHECK = r"""<script>
     check(!document.querySelector('#detail-content a'),'unsafe evidence link rejected');
     check(document.activeElement.closest('dialog')!==null,'dialog focus');
     check(document.querySelector('#detail-content').textContent.includes('Điểm / trạng thái'),'Vietnamese detail labels');
-    const {applyLocale}=await import(I18N_MODULE_URI);
     applyLocale('en');
     check(document.querySelector('#detail-content').textContent.includes('Score / status'),'open detail relocalizes to English');
     applyLocale('vi');
