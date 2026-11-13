@@ -43,12 +43,9 @@
         <details class="nav-advanced">
           <summary class="nav-link"><span class="nav-icon" aria-hidden="true">···</span><span data-i18n="nav.advanced"></span></summary>
           <nav class="nav-advanced-list" aria-label="Advanced views">
-            <a class="nav-link" href="#keywords" data-nav="keywords"><span class="nav-icon" aria-hidden="true">▤</span><span data-i18n="nav.keywords"></span></a>
             <a class="nav-link" href="#runs" data-nav="runs"><span class="nav-icon" aria-hidden="true">◷</span><span data-i18n="nav.runs"></span></a>
             <a class="nav-link" href="#algorithms" data-nav="algorithms"><span class="nav-icon" aria-hidden="true">⌁</span><span data-i18n="nav.algorithms"></span></a>
             <a class="nav-link" href="#quality" data-nav="quality"><span class="nav-icon" aria-hidden="true">◇</span><span data-i18n="nav.quality"></span></a>
-            <a class="nav-link" href="#refresh" data-nav="refresh"><span class="nav-icon" aria-hidden="true">↻</span><span data-i18n="nav.refresh"></span></a>
-            <a class="nav-link" href="#usage" data-nav="usage"><span class="nav-icon" aria-hidden="true">◴</span><span data-i18n="nav.usage"></span></a>
           </nav>
         </details>
       </nav>
@@ -65,6 +62,7 @@
       <header class="topbar">
         <div class="topbar-leading">
           <button class="icon-button menu-button" id="menu-toggle" type="button" aria-controls="workspace-nav-panel" aria-expanded="false" data-i18n-aria="a11y.open-nav" aria-label="Open navigation"><span aria-hidden="true">☰</span></button>
+          <button class="icon-button sidebar-collapse" id="sidebar-collapse" type="button" aria-controls="workspace-nav-panel" aria-expanded="true" data-i18n-aria="a11y.collapse-nav" aria-label="Collapse navigation"><span aria-hidden="true">⇤</span></button>
           <div class="breadcrumbs"><span data-i18n="nav.section"></span><span class="crumb-slash">/</span><strong id="breadcrumb-current" data-i18n="nav.overview"></strong></div>
         </div>
         <div class="topbar-actions">
@@ -78,6 +76,12 @@
       <div class="content">
         <div id="global-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
         <section data-view="overview" aria-labelledby="overview-heading">
+          <div class="panel" id="demo-discovery" hidden><h2 id="demo-discovery-title" data-i18n="demo.discovery-title"></h2><p id="demo-discovery-help" data-i18n="demo.discovery-help"></p><p id="demo-discovery-count"></p><ul id="demo-discovery-list"></ul></div>
+          <div class="dashboard-tabs" role="tablist" data-i18n-aria="dashboard.tablist" aria-label="Dashboard views">
+            <button id="dashboard-overview-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-overview-panel" aria-selected="true" tabindex="0" data-dashboard-tab="overview" data-i18n="dashboard.overview"></button>
+            <button id="dashboard-analysis-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-analysis-panel" aria-selected="false" tabindex="-1" data-dashboard-tab="analysis" data-i18n="dashboard.analysis"></button>
+          </div>
+          <div id="dashboard-overview-panel" role="tabpanel" aria-labelledby="dashboard-overview-tab" data-dashboard-panel="overview" tabindex="0">
           <div class="hero">
             <div class="hero-copy">
               <p class="hero-kicker" data-i18n="overview.kicker"></p>
@@ -91,11 +95,12 @@
               <p id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></p>
             </div>
           </div>
-          <div class="metrics-grid" aria-label="Wikimedia Fetch summary">
+          <div class="metrics-grid" aria-label="Wikimedia Fetch summary" data-i18n-aria="overview.metrics-label">
             <article class="metric-card"><div class="metric-label"><span data-i18n="metric.records-returned"></span><span aria-hidden="true">↙</span></div><strong id="metric-records-returned" class="metric-value">—</strong><span id="metric-records-returned-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
             <article class="metric-card"><div class="metric-label"><span data-i18n="metric.records-stored"></span><span aria-hidden="true">▣</span></div><strong id="metric-records-stored" class="metric-value">—</strong><span id="metric-records-stored-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
             <article class="metric-card"><div class="metric-label"><span data-i18n="metric.topics-found"></span><span aria-hidden="true">⌁</span></div><strong id="metric-topics-found" class="metric-value">—</strong><span id="metric-topics-found-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
-            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.observation-date"></span><span aria-hidden="true">◷</span></div><strong id="metric-observation-date" class="metric-value">—</strong><span id="metric-last-fetch" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.active-sources"></span><span aria-hidden="true">◎</span></div><strong id="metric-active-sources" class="metric-value">—</strong><span id="metric-active-sources-note" class="metric-foot" data-i18n="metric.active-sources-help"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.last-fetch-title"></span><span aria-hidden="true">◷</span></div><strong id="metric-last-fetch" class="metric-value">—</strong><span id="metric-last-fetch-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
           </div>
           <div class="discover-grid">
             <article class="panel chart-panel">
@@ -119,6 +124,18 @@
             <div id="keyword-bulk-toolbar" class="collection-bulk" hidden><label><input id="keyword-select-page" type="checkbox"><span data-i18n="dataset.select-page"></span></label><button class="button button-secondary" id="keyword-select-filtered" type="button" data-i18n="dataset.select-filtered"></button><span id="keyword-selection-count" aria-live="polite"></span><select id="keyword-bulk-action" data-i18n-aria="dataset.bulk-action"><option value="ADD" data-i18n="dataset.action-add"></option><option value="COPY" data-i18n="dataset.action-copy"></option><option value="MOVE" data-i18n="dataset.action-move"></option><option value="REMOVE" data-i18n="dataset.action-remove"></option><option value="APPROVE" data-i18n="dataset.action-approve"></option><option value="REJECT" data-i18n="dataset.action-reject"></option><option value="EXCLUDE" data-i18n="dataset.action-exclude"></option><option value="RESTORE" data-i18n="dataset.action-restore"></option></select><select id="keyword-bulk-target" data-i18n-aria="dataset.target-collection"></select><button class="button button-secondary" id="keyword-bulk-apply" type="button" data-i18n="dataset.apply"></button><span id="keyword-filter-total"></span></div>
             <div class="table-wrap"><table><thead><tr><th><span class="sr-only">Select</span></th><th data-i18n="table.topic"></th><th data-i18n="table.category"></th><th data-i18n="table.evidence"></th><th data-i18n="table.date"></th><th data-i18n="table.status"></th><th><span class="sr-only" data-i18n="table.details"></span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty-state"><span class="empty-art" aria-hidden="true">⌁</span><strong data-i18n="keywords.empty-title"></strong><p data-i18n="keywords.empty-help"></p><button id="empty-fetch" class="button button-secondary" type="button" data-i18n="fetch.cta"></button></div></div>
             <div class="table-footer"><span id="pagination-info" data-i18n="keywords.no-results"></span><div class="pagination"><button id="prev" type="button" disabled data-i18n-aria="a11y.previous-page" aria-label="Previous page">←</button><button id="next" type="button" disabled data-i18n-aria="a11y.next-page" aria-label="Next page">→</button></div></div>
+          </div>
+          </div>
+          <div id="dashboard-analysis-panel" class="analysis-panel" role="tabpanel" aria-labelledby="dashboard-analysis-tab" data-dashboard-panel="analysis" tabindex="0" hidden>
+            <div class="page-heading"><div><p class="section-kicker" data-i18n="analysis.kicker"></p><h1 data-i18n="analysis.title"></h1><p data-i18n="analysis.description"></p></div></div>
+            <div class="analysis-filters panel" data-i18n-aria="analysis.filters" aria-label="Analysis filters"><label for="analysis-source-filter" data-i18n="analysis.source"></label><select id="analysis-source-filter" disabled><option data-i18n="analysis.all-sources"></option></select><label for="analysis-period-filter" data-i18n="analysis.period"></label><select id="analysis-period-filter" disabled><option data-i18n="analysis.available-window"></option></select><span class="pill pill--gray" data-i18n="analysis.filters-unavailable"></span></div>
+            <div class="analysis-grid">
+              <article class="panel analysis-card"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.source-volume-kicker"></p><h2 data-i18n="analysis.source-volume-title"></h2></div></div><div id="analysis-source-volume" class="analysis-state" role="status" aria-live="polite"><span class="skeleton-line" aria-hidden="true"></span><p data-i18n="analysis.loading"></p></div></article>
+              <article class="panel analysis-card"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.algorithm-kicker"></p><h2 data-i18n="analysis.algorithm-title"></h2></div></div><div class="analysis-state analysis-state--empty"><span class="empty-art" aria-hidden="true">⌁</span><p data-i18n="analysis.algorithm-empty"></p></div></article>
+              <article class="panel analysis-card"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.source-effectiveness-kicker"></p><h2 data-i18n="analysis.source-effectiveness-title"></h2></div></div><div class="analysis-state analysis-state--empty"><span class="empty-art" aria-hidden="true">◎</span><p data-i18n="analysis.source-effectiveness-empty"></p></div></article>
+              <article class="panel analysis-card"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.coverage-kicker"></p><h2 data-i18n="analysis.coverage-title"></h2></div></div><div class="analysis-state analysis-state--empty"><span class="empty-art" aria-hidden="true">◇</span><p data-i18n="analysis.coverage-empty"></p></div></article>
+              <article class="panel analysis-card analysis-card--wide"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.history-kicker"></p><h2 data-i18n="analysis.history-title"></h2></div></div><div class="analysis-state analysis-state--empty"><span class="empty-art" aria-hidden="true">◷</span><p data-i18n="analysis.history-empty"></p></div></article>
+            </div>
           </div>
         </section>
 
@@ -147,25 +164,25 @@
           <div class="page-heading"><div><p class="section-kicker" data-i18n="sources.kicker"></p><h1 id="sources-heading" data-i18n="sources.title"></h1><p data-i18n="sources.description"></p></div><span class="page-heading-mark" aria-hidden="true">◎</span></div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="sources.scope-note"></p></div>
           <div class="source-grid">
-            <article class="panel source-card source-card--active" data-source="wikimedia" data-source-status="adapter-implemented-live-unverified">
+            <article class="panel source-card" data-source="wikimedia" data-source-status="unknown">
               <div class="source-card-head"><span class="source-monogram">W</span><span class="pill pill--amber" data-i18n="source.adapter-status"></span></div>
               <h2>Wikimedia Pageviews</h2><p data-i18n="sources.wikimedia-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented"></dd></div><div><dt data-i18n="sources.live-status"></dt><dd id="wikimedia-live-status" class="text-amber" data-i18n="sources.not-verified"></dd></div><div><dt data-i18n="sources.coverage"></dt><dd>US · all-access · top pages</dd></div><div><dt data-i18n="sources.metric"></dt><dd>views_ceil · pageviews</dd></div><div><dt data-i18n="sources.window"></dt><dd data-i18n="sources.wikimedia-window"></dd></div><div><dt data-i18n="sources.limit"></dt><dd data-i18n="sources.wikimedia-limit"></dd></div></dl>
+              <dl class="detail-list" data-source-capabilities="wikimedia"></dl>
             </article>
-            <article class="panel source-card" data-source="youtube" data-source-status="not-configured">
-              <div class="source-card-head"><span class="source-monogram source-monogram--red">▶</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+            <article class="panel source-card" data-source="youtube" data-source-status="unknown">
+              <div class="source-card-head"><span class="source-monogram source-monogram--red">▶</span><span class="pill pill--gray" data-i18n="source.status-unknown"></span></div>
               <h2>YouTube</h2><p data-i18n="sources.youtube-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list" data-source-capabilities="youtube"></dl>
             </article>
-            <article class="panel source-card" data-source="google-search" data-source-status="not-configured">
-              <div class="source-card-head"><span class="source-monogram source-monogram--blue">G</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+            <article class="panel source-card" data-source="google-search" data-source-status="unknown">
+              <div class="source-card-head"><span class="source-monogram source-monogram--blue">G</span><span class="pill pill--gray" data-i18n="source.status-unknown"></span></div>
               <h2>Google Search</h2><p data-i18n="sources.google-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list" data-source-capabilities="google-search"></dl>
             </article>
-            <article class="panel source-card" data-source="bing-search" data-source-status="not-configured">
-              <div class="source-card-head"><span class="source-monogram source-monogram--cyan">b</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
+            <article class="panel source-card" data-source="bing-search" data-source-status="unknown">
+              <div class="source-card-head"><span class="source-monogram source-monogram--cyan">b</span><span class="pill pill--gray" data-i18n="source.status-unknown"></span></div>
               <h2>Bing Search</h2><p data-i18n="sources.bing-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented-offline"></dd></div><div><dt data-i18n="sources.credentials"></dt><dd data-i18n="sources.not-configured"></dd></div><div><dt data-i18n="sources.capability"></dt><dd data-i18n="sources.not-verified"></dd></div></dl>
+              <dl class="detail-list" data-source-capabilities="bing-search"></dl>
             </article>
           </div>
           <p class="fine-print" data-i18n="sources.no-aggregation"></p>
@@ -181,11 +198,6 @@
           <div id="notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
         </section>
 
-        <section class="view-panel" data-view="keywords" hidden aria-labelledby="keywords-heading">
-          <div class="page-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h1 id="keywords-heading" tabindex="-1" data-i18n="keywords.title"></h1><p data-i18n="keywords.description"></p></div></div>
-          <div class="panel" id="demo-discovery" hidden><h2 id="demo-discovery-title" data-i18n="demo.discovery-title"></h2><p id="demo-discovery-help" data-i18n="demo.discovery-help"></p><p id="demo-discovery-count"></p><ul id="demo-discovery-list"></ul></div>
-          <div class="panel"><h2 data-i18n="keywords.advanced-title"></h2><p data-i18n="keywords.advanced-help"></p><a class="button button-secondary" href="#overview" data-goto="overview"><span data-i18n="keywords.back-to-discover"></span><span aria-hidden="true">→</span></a></div>
-        </section>
 
         <section class="view-panel" data-view="algorithms" hidden aria-labelledby="algorithms-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="algorithms.kicker"></p><h1 id="algorithms-heading" data-i18n="nav.algorithms"></h1><p data-i18n="algorithms.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
@@ -200,10 +212,6 @@
           <div class="quality-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="quality.coverage-kicker"></p><h2 data-i18n="quality.coverage-title"></h2></div><span class="quality-icon" aria-hidden="true">◉</span></div><dl class="detail-list"><div><dt data-i18n="quality.source-days"></dt><dd id="quality-coverage">NOT_MEASURED</dd></div><div><dt data-i18n="quality.fetched"></dt><dd id="quality-fetched">NOT_AVAILABLE</dd></div><div><dt data-i18n="quality.staleness"></dt><dd id="quality-staleness" data-i18n="quality.no-run"></dd></div></dl></article><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="quality.integrity-kicker"></p><h2 data-i18n="quality.integrity-title"></h2></div><span class="quality-icon" aria-hidden="true">✓</span></div><dl class="detail-list"><div><dt data-i18n="quality.cleaning"></dt><dd data-i18n="quality.not-measured"></dd></div><div><dt data-i18n="quality.missing"></dt><dd data-i18n="quality.missing-help"></dd></div><div><dt data-i18n="quality.null-zero"></dt><dd data-i18n="quality.null-zero-help"></dd></div></dl></article></div>
         </section>
 
-        <section class="view-panel" data-view="refresh" hidden aria-labelledby="refresh-heading">
-          <div class="page-heading"><div><p class="section-kicker" data-i18n="refresh.kicker"></p><h1 id="refresh-heading" data-i18n="nav.refresh"></h1><p data-i18n="refresh.description"></p></div><span class="page-heading-mark" aria-hidden="true">↻</span></div>
-          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="refresh.status-kicker"></p><h2 data-i18n="refresh.status-title"></h2></div><span class="pill pill--gray">DISABLED</span></div><p data-i18n="refresh.unavailable"></p><dl class="detail-list detail-list--grid"><div><dt data-i18n="refresh.interval"></dt><dd>NOT_CONFIGURED</dd></div><div><dt data-i18n="refresh.next"></dt><dd>NOT_AVAILABLE</dd></div><div><dt data-i18n="refresh.lease"></dt><dd>NOT_MEASURED</dd></div><div><dt data-i18n="refresh.budget"></dt><dd>NOT_MEASURED</dd></div></dl><div class="button-row"><button class="button button-secondary" type="button" disabled data-i18n="refresh.start"></button><button class="button button-secondary" type="button" disabled data-i18n="refresh.pause"></button><button class="button button-secondary" type="button" disabled data-i18n="refresh.stop"></button></div></div>
-        </section>
 
         <section class="view-panel" data-view="research" hidden aria-labelledby="research-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="research.kicker"></p><h1 id="research-heading" data-i18n="nav.research"></h1><p data-i18n="research.description"></p></div><span class="page-heading-mark" aria-hidden="true">▧</span></div>
@@ -211,10 +219,6 @@
           <div class="research-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.example-kicker"></p><h2 data-i18n="research.example-title"></h2></div><span class="pill pill--gray">UNVERIFIED</span></div><dl class="detail-list"><div><dt data-i18n="research.attention-label"></dt><dd data-i18n="research.attention"></dd></div><div><dt data-i18n="research.commercial-label"></dt><dd data-i18n="research.unknown"></dd></div><div><dt data-i18n="research.opportunity-label"></dt><dd data-i18n="research.not-enough"></dd></div><div><dt data-i18n="research.coverage-label"></dt><dd>NOT_MEASURED</dd></div></dl></article><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.hypothesis-kicker"></p><h2 data-i18n="research.hypothesis-title"></h2></div><span class="quality-icon" aria-hidden="true">?</span></div><p data-i18n="research.hypothesis-help"></p><p data-i18n="research.risk"></p><p data-i18n="research.approved"></p><span class="pill pill--blue" data-i18n="research.preview-tag"></span></article></div><p class="fine-print" data-i18n="research.no-api"></p>
         </section>
 
-        <section class="view-panel" data-view="usage" hidden aria-labelledby="usage-heading">
-          <div class="page-heading"><div><p class="section-kicker" data-i18n="usage.kicker"></p><h1 id="usage-heading" data-i18n="nav.usage"></h1><p data-i18n="usage.description"></p></div><span class="page-heading-mark" aria-hidden="true">◴</span></div>
-          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="usage.status-kicker"></p><h2 data-i18n="usage.status-title"></h2></div><span class="pill pill--gray">DISABLED</span></div><dl class="detail-list detail-list--grid"><div><dt data-i18n="usage.ai"></dt><dd>DISABLED</dd></div><div><dt data-i18n="usage.measurement"></dt><dd>NOT_MEASURED</dd></div><div><dt data-i18n="usage.cost"></dt><dd>COST_UNKNOWN</dd></div><div><dt data-i18n="usage.budget"></dt><dd>NOT_CONFIGURED</dd></div></dl><p class="fine-print" data-i18n="usage.no-production"></p></div>
-        </section>
 
         <section class="view-panel" data-view="settings" hidden aria-labelledby="settings-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="settings.kicker"></p><h1 id="settings-heading" data-i18n="nav.settings"></h1><p data-i18n="settings.description"></p></div><span class="page-heading-mark" aria-hidden="true">⚙</span></div>

@@ -8,8 +8,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from browser_workspace_offline import FAKE, PUBLIC
 from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+from browser_workspace_offline import FAKE, PUBLIC
 
 if os.name != "nt":
     import fcntl
@@ -117,8 +117,8 @@ def main():
                 time.sleep(0.02)
             else:
                 raise RuntimeError("dashboard module did not finish loading")
-            if evaluate("innerWidth") != 375:
-                raise RuntimeError("viewport is not 375px")
+            if evaluate("visualViewport.width") != 375:
+                raise RuntimeError("visual viewport is not 375px: " + str(evaluate("visualViewport.width")))
             if evaluate("document.documentElement.scrollWidth > innerWidth"):
                 raise RuntimeError("375px page has horizontal overflow")
 
@@ -138,8 +138,8 @@ def main():
                     },
                     session,
                 )
-            if evaluate("document.activeElement.dataset.nav") != "sources":
-                raise RuntimeError("Tab did not advance to Sources")
+            if evaluate("document.activeElement.dataset.nav") != "collections":
+                raise RuntimeError("Tab did not advance to Collections")
             for event in ("keyDown", "keyUp"):
                 call(
                     "Input.dispatchKeyEvent",
@@ -153,11 +153,11 @@ def main():
                     session,
                 )
             for _ in range(60):
-                if evaluate("!document.querySelector('[data-view=sources]').hidden"):
+                if evaluate("!document.querySelector('[data-view=collections]').hidden"):
                     break
                 time.sleep(0.01)
             else:
-                raise RuntimeError("Enter did not navigate to Sources")
+                raise RuntimeError("Enter did not navigate to Collections")
             if evaluate("document.querySelector('#app-shell').classList.contains('menu-open')"):
                 raise RuntimeError("navigation did not close the mobile menu")
 
@@ -179,6 +179,10 @@ def main():
             if evaluate("document.querySelector('#detail-dialog').open"):
                 raise RuntimeError("Escape did not close the dialog")
 
+            evaluate("location.hash='#overview';document.querySelector('[data-dashboard-tab=overview]').focus()")
+            call("Input.dispatchKeyEvent", {"type":"keyDown","key":"ArrowRight","code":"ArrowRight","windowsVirtualKeyCode":39,"nativeVirtualKeyCode":39}, session)
+            if not evaluate("document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true'"):
+                raise RuntimeError("ArrowRight did not select Analysis tab")
             for width in (320, 375):
                 call(
                     "Emulation.setDeviceMetricsOverride",
@@ -187,14 +191,13 @@ def main():
                 )
                 for view in (
                     "overview",
+                    "analysis",
+                    "collections",
                     "sources",
                     "runs",
-                    "keywords",
                     "algorithms",
                     "quality",
-                    "refresh",
                     "research",
-                    "usage",
                     "settings",
                 ):
                     evaluate(

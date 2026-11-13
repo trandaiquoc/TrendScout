@@ -11,19 +11,22 @@ class WorkspaceStructureTests(unittest.TestCase):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (
             "overview",
+            "collections",
             "sources",
             "runs",
-            "keywords",
             "algorithms",
             "quality",
-            "refresh",
             "research",
-            "usage",
             "settings",
         ):
             with self.subTest(name=name):
                 self.assertIn('data-view="' + name + '"', html)
         self.assertIn('data-i18n="common.synthetic"', html)
+        self.assertIn('role="tablist"', html)
+        self.assertIn('data-dashboard-tab="analysis"', html)
+        self.assertNotIn('data-view="keywords"', html)
+        self.assertNotIn('data-view="refresh"', html)
+        self.assertNotIn('data-view="usage"', html)
 
     def test_all_browser_http_access_uses_the_shared_client(self):
         source = "\n".join(

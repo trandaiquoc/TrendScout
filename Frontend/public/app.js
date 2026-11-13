@@ -50,6 +50,7 @@ const state = {
   selectAllFiltered: false,
   latestKeywordTotal: 0,
 };
+state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
   return formatNumber(value, getLocale());
@@ -62,6 +63,12 @@ function date(value) {
 function timestamp(value) {
   const rendered = formatTimestamp(value, getLocale());
   return rendered === '—' ? rendered : rendered + ' · ' + t('time.local');
+}
+
+function compactTimestamp(value) {
+  const instant = new Date(value);
+  if (!Number.isFinite(instant.valueOf())) return '—';
+  return new Intl.DateTimeFormat(getLocale(), { dateStyle: 'short', timeStyle: 'short' }).format(instant);
 }
 
 function element(tagName, text = null, className = '') {
@@ -377,8 +384,8 @@ function updateRun(run) {
   $('#metric-records-stored-note').textContent = t('metric.not-reported');
   $('#metric-topics-found').textContent = number(run.keyword_count);
   $('#metric-topics-found-note').textContent = t('metric.from-analysis');
-  $('#metric-observation-date').textContent = date(run.data_date);
-  $('#metric-last-fetch').textContent = run.fetched_at ? t('metric.last-fetch', { value: timestamp(run.fetched_at) }) : t('metric.not-reported');
+  $('#metric-last-fetch').textContent = run.fetched_at ? compactTimestamp(run.fetched_at) : '—';
+  $('#metric-last-fetch-note').textContent = run.fetched_at ? t('metric.from-analysis') : t('metric.not-reported');
 
   const coverage = Array.isArray(run.coverage)
     ? run.coverage.map((item) => (item.date || '—') + ': ' + (item.status || 'NOT_AVAILABLE')
@@ -470,10 +477,9 @@ function updatePublicDiscoverySummary(discovery, sources) {
     : t('metric.storage-omitted', { count: number(omitted) });
   $('#metric-topics-found').textContent = number(discovery?.candidate_count ?? 0);
   $('#metric-topics-found-note').textContent = t('metric.candidates-shown', { count: number(discovery?.shown_count ?? candidates.length) });
-  $('#metric-observation-date').textContent = date(observedDate);
   const lastFetch = state.publicFetchFinishedAt || fetchedAt;
-  $('#metric-last-fetch').textContent = lastFetch
-    ? t('metric.last-fetch', { value: timestamp(lastFetch) }) : t('metric.fetch-to-begin');
+  $('#metric-last-fetch').textContent = lastFetch ? compactTimestamp(lastFetch) : '—';
+  $('#metric-last-fetch-note').textContent = lastFetch ? t('metric.last-fetch-context') : t('metric.fetch-to-begin');
   const context = [t('chart.scope'), 'LIVE', delivery, observedDate ? date(observedDate) : '—',
     fetchedAt ? t('overview.context-source-fetched', { value: timestamp(fetchedAt) }) : '—'].join(' · ');
   $('#overview-context').replaceChildren(element('span', '◉', 'meta-mark'), element('span', context));
@@ -485,7 +491,7 @@ function updatePublicDiscoverySummary(discovery, sources) {
     const key = [item.project, item.article, item.observed_at, item.scope].join('|');
     if (!unique.has(key)) unique.set(key, item);
   }
-  const chartRows = [...unique.values()].sort((a, b) => (a.provider_rank ?? 9999) - (b.provider_rank ?? 9999)).slice(0, 8);
+  const chartRows = [...unique.values()].sort((a, b) => (a.provider_rank ?? 9999) - (b.provider_rank ?? 9999)).slice(0, 5);
   const chart = $('#pageviews-chart');
   chart.replaceChildren();
   $('#pageviews-empty').hidden = chartRows.length > 0;
@@ -727,44 +733,103 @@ function renderCollectionFilters() {
 }
 
 async function loadLatestDataset() {
-  if (!isLocalLiveDemo(state.capabilities)) return null;
+  if (!isLocalLiveDemo(state.capabilities)) {
+    renderAnalysisSourceVolume(null);
+    return null;
+  }
   try {
     const response = await getJson('/api/v1/datasets/latest', { locale: getLocale() });
     state.persistedDataset = response.item || null;
     state.persistedDatasetAvailable = Boolean(response.item);
     if (response.item) {
       const item = response.item;
-      const sources = (item.sources || []).join(', ') || 'Unknown source';
-      const status = item.status === 'LEGACY_CACHED'
-        ? 'Legacy cached local ledger; historical coverage is unknown.' : `${item.status} snapshot`;
-      const snapshotCoverage = item.snapshot_retained_keyword_count == null ? ''
-        : ` · latest batch ${number(item.snapshot_retained_keyword_count)}; ledger ${number(item.retained_keyword_count || 0)}`;
-      const ledgerCaveat = item.ledger_coverage_status === 'MIXED_OR_UNKNOWN'
-        || item.status === 'LEGACY_CACHED' ? ' · earlier ledger coverage is unknown' : '';
-      $('#overview-context').textContent = `${status}${snapshotCoverage}${ledgerCaveat} · ${sources} · ${number(item.eligible_keyword_count || 0)} eligible · ${number(item.unassigned_keyword_count || 0)} unassigned · ${item.fetched_at || 'collection time unavailable'}`;
-      $('#metric-records-returned').textContent = item.provider_record_count == null ? 'Unknown' : number(item.provider_record_count);
-      $('#metric-records-returned-note').textContent = item.status === 'LEGACY_CACHED' ? 'Legacy fetch count; coverage may be incomplete' : 'Provider-reported for this snapshot';
-      $('#metric-records-stored').textContent = number(item.retained_keyword_count || 0);
-      $('#metric-records-stored-note').textContent = 'Cached in the local keyword ledger';
-      $('#metric-topics-found').textContent = number(item.eligible_keyword_count || 0);
-      $('#metric-topics-found-note').textContent = `${number(item.assigned_keyword_count || 0)} assigned · ${number(item.unassigned_keyword_count || 0)} unassigned`;
-      $('#metric-observation-date').textContent = [item.observation_start, item.observation_end].filter(Boolean).join(' – ') || 'Unknown';
-      $('#metric-last-fetch').textContent = item.fetched_at ? `Cached snapshot · ${item.fetched_at}` : 'Cached ledger; time unavailable';
-      $('#main-source-status').textContent = item.status === 'LEGACY_CACHED' ? 'LEGACY CACHE' : item.status;
-      $('#keyword-count').textContent = number(item.retained_keyword_count || 0);
-      $('#scored-count').textContent = number(item.assigned_keyword_count || 0);
-      $('#results-count').textContent = number(item.eligible_keyword_count || 0);
+      renderPersistedDataset(item);
       await loadCollections();
       renderCollectionFilters();
       return item;
     }
     $('#overview-context').textContent = t('overview.no-fetch-context');
+    renderAnalysisSourceVolume(null);
     return null;
   } catch (error) {
     state.persistedDatasetAvailable = false;
+    $('#analysis-source-volume').replaceChildren(element('p', t('analysis.error')));
     setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'));
     return null;
   }
+}
+
+function renderPersistedDataset(item) {
+  renderAnalysisSourceVolume(item);
+  const sourceNames = {
+    wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
+    youtube_video_search: 'source.name.youtube',
+    google_web_serp: 'source.name.google',
+    bing_web_serp: 'source.name.bing',
+  };
+  const sources = (Array.isArray(item.sources) ? item.sources : [])
+    .map((source) => t(sourceNames[source] || 'source.status-unknown')).join(', ') || t('common.unavailable');
+  const status = item.status === 'LEGACY_CACHED'
+    ? t('dataset.legacy-cached') : t('dataset.snapshot-status', { status: localizedStatus('status.', item.status) });
+  const snapshotCoverage = item.snapshot_retained_keyword_count == null ? ''
+    : t('dataset.latest-batch', {
+      batch: number(item.snapshot_retained_keyword_count),
+      ledger: item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count),
+    });
+  const ledgerCaveat = item.ledger_coverage_status === 'MIXED_OR_UNKNOWN'
+    || item.status === 'LEGACY_CACHED' ? t('dataset.ledger-coverage-unknown') : '';
+  const eligible = item.eligible_keyword_count == null ? t('common.unavailable') : number(item.eligible_keyword_count);
+  const unassigned = item.unassigned_keyword_count == null ? t('common.unavailable') : number(item.unassigned_keyword_count);
+  const fetchedAt = item.fetched_at ? timestamp(item.fetched_at) : t('common.unavailable');
+  const observationWindow = item.observation_start || item.observation_end
+    ? t('dataset.observation-window', {
+      dates: [item.observation_start, item.observation_end].filter(Boolean).map(date).join(' – '),
+    }) : '';
+  $('#overview-context').textContent = [status, snapshotCoverage, ledgerCaveat, sources,
+    t('dataset.eligible-count', { count: eligible }),
+    t('dataset.unassigned-count', { count: unassigned }),
+    observationWindow,
+    fetchedAt].filter(Boolean).join(' · ');
+  $('#metric-records-returned').textContent = item.provider_record_count == null ? t('common.unavailable') : number(item.provider_record_count);
+  $('#metric-records-returned-note').textContent = item.status === 'LEGACY_CACHED'
+    ? t('metric.legacy-fetch-count') : t('metric.provider-snapshot');
+  $('#metric-records-stored').textContent = item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count);
+  $('#metric-records-stored-note').textContent = t('metric.ledger-stored');
+  $('#metric-topics-found').textContent = eligible;
+  $('#metric-topics-found-note').textContent = t('metric.topic-assignment', {
+    assigned: item.assigned_keyword_count == null ? t('common.unavailable') : number(item.assigned_keyword_count),
+    unassigned,
+  });
+  $('#metric-last-fetch').textContent = item.fetched_at ? compactTimestamp(item.fetched_at) : '—';
+  $('#metric-last-fetch-note').textContent = item.fetched_at
+    ? t('metric.cached-snapshot-note') : t('metric.cached-time-unavailable');
+  $('#keyword-count').textContent = item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count);
+  $('#scored-count').textContent = item.assigned_keyword_count == null ? t('common.unavailable') : number(item.assigned_keyword_count);
+  $('#results-count').textContent = eligible;
+}
+
+function renderAnalysisSourceVolume(dataset) {
+  const root = $('#analysis-source-volume');
+  if (!dataset) {
+    root.replaceChildren(element('p', t('analysis.no-snapshot')));
+    return;
+  }
+  const sources = Array.isArray(dataset.sources) ? dataset.sources : [];
+  if (sources.length !== 1 || dataset.snapshot_retained_keyword_count == null) {
+    root.replaceChildren(element('p', t('analysis.insufficient-source-volume')));
+    return;
+  }
+  const sourceId = sources[0];
+  const sourceNames = {
+    wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
+    youtube_video_search: 'source.name.youtube',
+    google_web_serp: 'source.name.google',
+    bing_web_serp: 'source.name.bing',
+  };
+  root.replaceChildren(
+    element('strong', number(dataset.snapshot_retained_keyword_count), 'analysis-value'),
+    element('p', t('analysis.source-volume-note', { source: t(sourceNames[sourceId] || 'source.status-unknown') })),
+  );
 }
 
 function showEmpty(title, detail) {
@@ -1098,12 +1163,13 @@ async function openDetail(id) {
 }
 
 function showView(name) {
-  const view = name === 'results' || name === 'keywords' ? 'overview' : name;
-  if ((name === 'keywords' || name === 'results') && window.location.hash !== '#overview') {
-    window.history.replaceState(null, '', '#overview');
+  const legacyOverview = name === 'results' || name === 'keywords';
+  const dashboardTab = name === 'analysis' ? 'analysis' : 'overview';
+  const valid = new Set(['overview', 'analysis', 'collections', 'sources', 'runs', 'algorithms', 'quality', 'research', 'settings']);
+  const selected = legacyOverview || !valid.has(name) ? 'overview' : name === 'analysis' ? 'overview' : name;
+  if (name && !legacyOverview && !valid.has(name)) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#overview`);
   }
-  const valid = new Set(['overview', 'collections', 'sources', 'runs', 'keywords', 'algorithms', 'quality', 'refresh', 'research', 'usage', 'settings']);
-  const selected = valid.has(view) ? view : 'overview';
   $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
   $$('[data-nav]').forEach((link) => {
     const active = link.dataset.nav === selected;
@@ -1114,14 +1180,43 @@ function showView(name) {
       link.removeAttribute('aria-current');
     }
   });
-  $('#breadcrumb-current').textContent = t('nav.' + selected);
-  if (selected === 'keywords' && !state.dataRunId && !state.publicFetchDiscovery && !state.persistedDatasetAvailable) {
-    showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
-  }
+  $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
+  setDashboardTab(dashboardTab, false);
   if (selected === 'collections') loadCollections();
-  if (selected === 'keywords') loadKeywords();
   if (selected === 'algorithms') loadAlgorithmCatalog();
   closeMobileNav();
+}
+
+function setDashboardTab(tab, updateRoute = true, focus = false) {
+  const selected = tab === 'analysis' ? 'analysis' : 'overview';
+  $$('[data-dashboard-tab]').forEach((button) => {
+    const active = button.dataset.dashboardTab === selected;
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+    if (focus && active) button.focus();
+  });
+  $$('[data-dashboard-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.dashboardPanel !== selected;
+  });
+  if (updateRoute && window.location.hash !== `#${selected}`) {
+    window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#${selected}`);
+  }
+  $('#breadcrumb-current').textContent = t(`dashboard.${selected}`);
+}
+
+function updateNavigationLabels() {
+  $$('[data-nav]').forEach((link) => {
+    const label = t('nav.' + link.dataset.nav);
+    link.setAttribute('aria-label', label);
+    link.title = label;
+  });
+  const advanced = $('.nav-advanced summary');
+  if (advanced) {
+    advanced.setAttribute('aria-label', t('nav.advanced'));
+    advanced.title = t('nav.advanced');
+  }
+  const collapsed = $('#app-shell').classList.contains('sidebar-collapsed');
+  $('#sidebar-collapse').setAttribute('aria-label', t(collapsed ? 'a11y.expand-nav' : 'a11y.collapse-nav'));
 }
 
 async function loadCollections({ appendInbox = false } = {}) {
@@ -1543,11 +1638,17 @@ function setMobileNav(open) {
   toggle.setAttribute('aria-label', t(visible ? 'a11y.close-nav' : 'a11y.open-nav'));
   scrim.hidden = !visible;
   panel.inert = isMobileNav() && !visible;
+  if (visible) {
+    const firstLink = panel.querySelector('a[href], button:not(:disabled), summary');
+    firstLink?.focus();
+  }
 }
 
 function closeMobileNav() {
   if (isMobileNav()) {
+    const wasOpen = $('#app-shell').classList.contains('menu-open');
     setMobileNav(false);
+    if (wasOpen) $('#menu-toggle').focus();
   }
 }
 
@@ -1717,14 +1818,61 @@ function addAlgorithmDetail(list, label, value) {
 
 function bindEvents() {
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
+  $('#sidebar-collapse').addEventListener('click', () => {
+    if (isMobileNav()) return;
+    const shell = $('#app-shell');
+    const collapsed = shell.classList.toggle('sidebar-collapsed');
+    $('#sidebar-collapse').setAttribute('aria-expanded', String(!collapsed));
+    $('#sidebar-collapse').setAttribute('aria-label', t(collapsed ? 'a11y.expand-nav' : 'a11y.collapse-nav'));
+    try { localStorage.setItem('trendscout.sidebar-collapsed', String(collapsed)); } catch {}
+    updateNavigationLabels();
+  });
+  try {
+    const collapsed = localStorage.getItem('trendscout.sidebar-collapsed') === 'true';
+    $('#app-shell').classList.toggle('sidebar-collapsed', collapsed);
+    $('#sidebar-collapse').setAttribute('aria-expanded', String(!collapsed));
+    $('#sidebar-collapse').setAttribute('aria-label', t(collapsed ? 'a11y.expand-nav' : 'a11y.collapse-nav'));
+  } catch {}
+  updateNavigationLabels();
   $('#nav-scrim').addEventListener('click', closeMobileNav);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       closeMobileNav();
     }
+    if (isMobileNav() && $('#app-shell').classList.contains('menu-open') && event.key === 'Tab') {
+      const focusable = $$('a[href], button:not(:disabled), summary', $('#workspace-nav-panel'))
+        .filter((node) => !node.closest('[hidden]') && node.getClientRects().length > 0);
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
   });
   window.addEventListener('resize', () => setMobileNav($('#app-shell').classList.contains('menu-open')));
   window.addEventListener('hashchange', () => showView(window.location.hash.slice(1)));
+  window.addEventListener('popstate', () => showView(window.location.hash.slice(1)));
+  $$('[data-dashboard-tab]').forEach((button) => {
+    button.addEventListener('click', () => setDashboardTab(button.dataset.dashboardTab));
+    button.addEventListener('keydown', (event) => {
+      const buttons = $$('[data-dashboard-tab]');
+      const index = buttons.indexOf(button);
+      let target = null;
+      if (event.key === 'ArrowRight') target = buttons[(index + 1) % buttons.length];
+      if (event.key === 'ArrowLeft') target = buttons[(index - 1 + buttons.length) % buttons.length];
+      if (event.key === 'Home') target = buttons[0];
+      if (event.key === 'End') target = buttons.at(-1);
+      if (target) {
+        event.preventDefault();
+        setDashboardTab(target.dataset.dashboardTab, true, true);
+      }
+    });
+  });
   $$('[data-nav]').forEach((link) => link.addEventListener('click', closeMobileNav));
   $$('[data-goto]').forEach((link) => link.addEventListener('click', closeMobileNav));
   $$('[data-close]').forEach((button) => {
@@ -1761,11 +1909,17 @@ function bindEvents() {
     loadKeywords();
   }));
   let searchTimer;
+  $('#search').value = state.query;
   $('#search').addEventListener('input', (event) => {
     clearTimeout(searchTimer);
     const query = event.currentTarget.value;
     searchTimer = setTimeout(() => {
       state.query = query;
+      const params = new URLSearchParams(window.location.search);
+      if (query) params.set('q', query);
+      else params.delete('q');
+      const search = params.toString();
+      window.history.replaceState(null, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
       state.offset = 0;
       state.selectedKeywordIds.clear();
       state.selectAllFiltered = false;
@@ -1915,6 +2069,7 @@ function bindEvents() {
     fetchController.dispose();
   });
   document.addEventListener('trendscout:locale', () => {
+    updateNavigationLabels();
     if (window.location.hash === '#collections') {
       renderCollections();
     }
@@ -1934,7 +2089,10 @@ function bindEvents() {
     if (state.capabilities) {
       renderSourceCapabilities(state.capabilities, t);
     }
+    if (state.persistedDataset) renderPersistedDataset(state.persistedDataset);
     renderFetchPresentation();
+    $('#breadcrumb-current').textContent = t(window.location.hash === '#analysis'
+      ? 'dashboard.analysis' : 'nav.' + (window.location.hash.slice(1) || 'overview'));
   });
 }
 

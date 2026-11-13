@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+
 from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +27,15 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/status-500')return Promise.resolve(new Response('{}',{status:500}));
   if(p==='/api/status-503')return Promise.resolve(new Response('{}',{status:503}));
   if(p==='/api/invalid-json')return Promise.resolve(new Response('{',{status:200}));
+  if(p==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({
+    data_mode:'LIVE',local_live_demo:true,environment_mode:'local',read_only:false,
+    fetch_enabled:false,public_fetch_enabled:false,authentication_required:false,
+    sources:[
+      {source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false},
+      {source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
+      {source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
+      {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
+    ]}),{status:200}));
   if(p==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
   if(p==='/api/runs/'+'d'.repeat(32))return Promise.resolve(new Response('{}',{status:404}));
   if(p.includes('/keywords/'))return Promise.resolve(new Response(JSON.stringify({
@@ -68,7 +78,7 @@ CHECK = r"""<script>
   const errors=[];const check=(value,message)=>{if(!value)errors.push(message)};
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   try{
-    await wait(100);
+    await wait(300);
     if(window.name==='d2-reload'){
       check(document.documentElement.dataset.theme==='dark','theme persisted after reload');
       check(document.documentElement.lang==='en','locale persisted after reload');
@@ -83,29 +93,41 @@ CHECK = r"""<script>
     }
     check(document.documentElement.dataset.theme==='light','light default');
     check(document.documentElement.lang==='vi','Vietnamese default');
-    check(document.querySelectorAll('[data-nav]').length===10,'ten destination views remain available');
-    check(document.querySelectorAll('#workspace-nav > .nav-link[data-nav]').length===4,'four primary navigation items');
+    check(document.querySelectorAll('[data-nav]').length===8,'eight supported destination views remain available');
+    check(document.querySelectorAll('#workspace-nav > .nav-link[data-nav]').length===5,'five primary navigation items');
     check(document.querySelector('.nav-advanced summary').textContent.includes('Nâng cao'),'technical navigation grouped under Advanced');
     check(document.querySelector('#open-fetch').disabled,'fetch disabled');
     check(!document.querySelector('#operator-token'),'no token input');
     check(!document.querySelector('#fetch-form'),'no fetch submit form');
     check(document.querySelectorAll('[data-source]').length===4,'four source cards');
-    check(document.querySelector('[data-source=wikimedia]').dataset.sourceStatus==='unknown','Wikimedia status unknown when capabilities are unavailable');
-    check([...document.querySelectorAll('[data-source]:not([data-source=wikimedia])')].every(card=>card.dataset.sourceStatus==='unknown'),'future source status unknown when capabilities are unavailable');
-    const go=name=>{
-      if(innerWidth<=900)document.querySelector('#menu-toggle').click();
-      const link=document.querySelector('[data-nav=\"'+name+'\"]');
+    check(document.querySelectorAll('[data-source-capabilities]').length===4,'runtime-backed source status axes');
+    check(document.querySelectorAll('[data-dashboard-tab]').length===2,'two semantic dashboard tabs');
+    check(document.querySelector('#metric-active-sources').textContent==='0','active source count comes from runtime capabilities');
+    check(document.querySelector('[data-source=wikimedia]').dataset.sourceStatus==='implemented-local_live_verified','Wikimedia reflects historical local verification');
+    check(document.querySelector('[data-source=wikimedia]').textContent.includes('\u0110\u00e3 x\u00e1c minh trong l\u1ea7n ch\u1ea1y LIVE local tr\u01b0\u1edbc \u0111\u00e2y'),'historical verification status is localized');
+    check(document.querySelector('[data-source=wikimedia]').textContent.includes('Ch\u01b0a s\u1eb5n s\u00e0ng production'),'production readiness stays separate');
+    check([...document.querySelectorAll('[data-source]:not([data-source=wikimedia])')].every(card=>card.dataset.sourceStatus.includes('implemented_offline_verified')),'offline adapters are reported from runtime capabilities');
+    const go=async name=>{
+      if(innerWidth<=900 && !document.querySelector('#app-shell').classList.contains('menu-open'))document.querySelector('#menu-toggle').click();
+      const link=document.querySelector('[data-nav="'+name+'"]');
+      const group=link.closest('details');if(group)group.open=true;
       link.click();
       if(location.hash!=='#'+name)location.hash='#'+name;
       window.dispatchEvent(new Event('hashchange'));
+      await wait(40);
     };
     for(const link of document.querySelectorAll('[data-nav]')){
-      go(link.dataset.nav);
+      await go(link.dataset.nav);
       check(!document.querySelector('[data-view=\"'+link.dataset.nav+'\"]')?.hidden,'view '+link.dataset.nav);
       check(link.getAttribute('aria-current')==='page','aria current '+link.dataset.nav);
       check(document.documentElement.scrollWidth<=innerWidth+1,'horizontal overflow '+link.dataset.nav);
     }
-    go('runs');
+    await go('runs');
+    history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
+    check(!document.querySelector('[data-view=overview]').hidden,'legacy keyword deep link opens Overview');
+    check(document.querySelector('[data-dashboard-panel=overview]').hidden===false,'legacy keyword deep link keeps explorer available');
+    check(location.search==='?q=renewables','legacy route preserves query string');
+    history.replaceState(null,'',location.pathname+'#runs');window.dispatchEvent(new Event('hashchange'));
     document.querySelector('#run-id').value=RUN_A;document.querySelector('#load-run').click();await wait(180);
     check(document.querySelector('#runs-current').textContent===RUN_A,'run lookup');
     check(document.querySelector('#run-note').textContent.includes('Lần phân tích'),'Vietnamese dynamic run label');
@@ -115,7 +137,7 @@ CHECK = r"""<script>
     check(document.querySelector('#quality-staleness').textContent.includes('3 ngày'),'stale observation');
     check(document.querySelector('#global-notice').textContent.includes('SYNTHETIC'),'synthetic mode warning');
 
-    go('overview');await wait(20);
+    await go('overview');await wait(20);
     check(document.querySelector('#rows').textContent.includes('<img'),'untrusted keyword rendered as text');
     check(!window.pwned&&!document.querySelector('#rows img'),'keyword XSS blocked');
     check(document.querySelector('#rows').textContent.includes('—'),'null score remains missing');
@@ -136,26 +158,33 @@ CHECK = r"""<script>
 
     document.querySelector('#next').click();await wait(20);
     check(testRequests.some(request=>request.path.includes('offset=20')),'pagination request');
-    document.querySelector('[data-category=fashion]').click();await wait(20);
-    check(testRequests.some(request=>request.path.includes('category=fashion')),'category filter');
     const search=document.querySelector('#search');search.value='empty';
     search.dispatchEvent(new Event('input',{bubbles:true}));await wait(430);
     check(!document.querySelector('#empty').hidden,'empty search state');
 
-    go('research');
+    await go('research');
     check(document.querySelector('[data-view=research]').textContent.includes('Tín hiệu tổng hợp'),'synthetic product research disclosure');
-    go('refresh');
-    check([...document.querySelectorAll('[data-view=refresh] button')].every(button=>button.disabled),'refresh unavailable');
-    go('settings');
+    check(!document.querySelector('[data-nav=refresh]'),'scheduler navigation is absent');
+    check(!document.querySelector('[data-nav=usage]'),'unmeasured AI usage navigation is absent');
+    await go('overview');
+    const requestsBeforeTab=testRequests.length;
+    document.querySelector('[data-dashboard-tab=analysis]').click();
+    check(document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true','Analysis semantic tab selected');
+    check(new URLSearchParams(location.search).get('q')==='empty','tab route preserves the active query parameter');
+    check(testRequests.length===requestsBeforeTab,'dashboard tab does not request data');
+    document.querySelector('[data-dashboard-tab=overview]').focus();
+    document.querySelector('[data-dashboard-tab=overview]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
+    check(document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true','ArrowRight changes tabs');
+    await go('settings');
     document.querySelector('[data-theme-toggle]').click();
     document.querySelector('[data-locale-toggle]').click();
-    await wait(100);
+    await wait(300);
     check(document.documentElement.dataset.theme==='dark','dark theme toggle');
     check(document.documentElement.lang==='en','English toggle');
     check(document.querySelector('#keyword-count').textContent==='1,234','English number format');
     check(document.querySelector('#run-note').textContent.includes('Run '),'English dynamic run label');
     check(document.querySelector('[data-nav=overview]').textContent.includes('Overview'),'English navigation translation');
-    check(document.querySelector('#rows').closest('table').querySelector('th').textContent.includes('TOPIC'),'English Discover table translation');
+    check(document.querySelector('#rows').closest('table').querySelector('th[data-i18n="table.topic"]').textContent.includes('TOPIC'),'English Discover table translation');
 
     document.querySelector('[data-locale-toggle]').click();
     check(document.documentElement.lang==='vi','switch back to Vietnamese');

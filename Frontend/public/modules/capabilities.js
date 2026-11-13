@@ -7,6 +7,16 @@ const SOURCE_CARDS = new Map([
   ['bing_web_serp', 'bing-search'],
 ]);
 
+const STATUS_FIELDS = [
+  ['sources.adapter', 'adapter_status'],
+  ['sources.configuration', 'configuration_status'],
+  ['sources.approval', 'approval_status'],
+  ['sources.local-verification', 'local_live_verification_status'],
+  ['sources.current-operation', 'enabled_for_current_operation'],
+  ['sources.current-health', null],
+  ['sources.production-readiness', 'production_readiness'],
+];
+
 export function loadCapabilities(locale = 'vi') {
   return getJson('/api/v1/capabilities', { locale });
 }
@@ -29,6 +39,42 @@ export function acceptsDiscovery(capabilities, discovery) {
     || (isLocalLiveDemo(capabilities) && ['LIVE', 'MIXED'].includes(discovery?.data_mode));
 }
 
+function localizedStatus(value, translate) {
+  if (value === true) return translate('common.enabled');
+  if (value === false) return translate('common.disabled');
+  if (typeof value !== 'string' || !value) return translate('source.status-unknown');
+  return translate('source.status.' + value.toLowerCase());
+}
+
+function renderDescriptor(card, descriptor, translate) {
+  const list = card.querySelector('[data-source-capabilities]');
+  if (list) {
+    list.replaceChildren();
+    for (const [labelKey, field] of STATUS_FIELDS) {
+      const row = document.createElement('div');
+      const label = document.createElement('dt');
+      const value = document.createElement('dd');
+      label.textContent = translate(labelKey);
+      value.textContent = field === null
+        ? translate('source.health-unreported')
+        : localizedStatus(descriptor?.[field], translate);
+      row.append(label, value);
+      list.append(row);
+    }
+  }
+  const badge = card.querySelector('.source-card-head .pill');
+  const enabled = descriptor?.enabled_for_current_operation === true;
+  card.classList.toggle('source-card--active', enabled);
+  if (badge) {
+    const verified = descriptor?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED';
+    const key = enabled ? (verified ? 'source.enabled-local-verified' : 'source.enabled')
+      : descriptor ? 'source.disabled' : 'source.status-unknown';
+    badge.textContent = translate(key);
+    badge.classList.toggle('pill--green', enabled);
+    badge.classList.toggle('pill--gray', !enabled);
+  }
+}
+
 export function renderSourceCapabilities(capabilities, translate) {
   const descriptors = new Map(
     (Array.isArray(capabilities?.sources) ? capabilities.sources : [])
@@ -38,45 +84,41 @@ export function renderSourceCapabilities(capabilities, translate) {
 
   for (const [sourceId, cardId] of SOURCE_CARDS) {
     const card = document.querySelector(`[data-source="${cardId}"]`);
+    if (!card) continue;
     const descriptor = descriptors.get(sourceId);
-    if (!card) {
-      continue;
-    }
-    const status = descriptor
-      ? String(descriptor.adapter_status || 'UNKNOWN').toLowerCase()
-        + '-' + String(descriptor.live_verification_status || 'UNKNOWN').toLowerCase()
+    card.dataset.sourceStatus = descriptor
+      ? `${descriptor.adapter_status || 'UNKNOWN'}-${descriptor.local_live_verification_status || 'UNKNOWN'}`.toLowerCase()
       : 'unknown';
-    card.dataset.sourceStatus = status;
-    const badge = card.querySelector('.source-card-head .pill');
-    if (badge) {
-      const available = canStartFetch(capabilities) && descriptor?.enabled_for_current_operation === true;
-      const key = available
-        ? (isLocalLiveDemo(capabilities) ? 'source.live-enabled' : 'source.offline-enabled')
-        : descriptor?.adapter_status === 'IMPLEMENTED'
-          ? 'source.live-unverified'
-          : descriptor?.approval_status === 'PENDING_APPROVAL'
-            ? 'source.pending'
-            : 'source.unknown';
-      badge.textContent = translate(key);
-      badge.classList.toggle('pill--green', available);
-    }
+    renderDescriptor(card, descriptor, translate);
   }
 
-  const liveReady = isLocalLiveDemo(capabilities) && canStartFetch(capabilities);
+  const wikimedia = descriptors.get('wikimedia_pageviews_top_per_country');
+  const activeCount = document.querySelector('#metric-active-sources');
+  const activeNote = document.querySelector('#metric-active-sources-note');
+  if (activeCount) {
+    const count = Array.isArray(capabilities?.sources)
+      ? capabilities.sources.filter((source) => source.enabled_for_current_operation === true).length
+      : null;
+    activeCount.textContent = count == null ? '—'
+      : new Intl.NumberFormat(document.documentElement.lang || 'vi').format(count);
+    if (activeNote) activeNote.textContent = translate('metric.active-sources-help');
+  }
+  const enabled = wikimedia?.enabled_for_current_operation === true;
   const sidebarStatus = document.querySelector('#sidebar-source-status');
   const sidebarDot = document.querySelector('#sidebar-source-dot');
   const mainStatus = document.querySelector('#main-source-status');
-  const wikimediaStatus = document.querySelector('#wikimedia-live-status');
-  if (wikimediaStatus) {
-    wikimediaStatus.textContent = translate(liveReady ? 'sources.live-available' : 'sources.not-verified');
-    wikimediaStatus.classList.toggle('text-amber', !liveReady);
+  if (wikimedia?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED') {
+    for (const badge of [sidebarStatus, mainStatus]) {
+      if (badge) badge.textContent = translate(enabled ? 'source.enabled-local-verified' : 'source.historical-local-verified');
+    }
+  } else {
+    for (const badge of [sidebarStatus, mainStatus]) {
+      if (badge) badge.textContent = translate(enabled ? 'source.enabled' : 'source.disabled');
+    }
   }
-  for (const badge of [sidebarStatus, mainStatus]) {
-    if (badge) badge.textContent = translate(liveReady ? 'source.live-enabled' : 'source.live-unverified');
-  }
-  if (sidebarDot) sidebarDot.className = `status-dot ${liveReady ? 'status-dot--green' : 'status-dot--muted'}`;
+  if (sidebarDot) sidebarDot.className = `status-dot ${enabled ? 'status-dot--green' : 'status-dot--muted'}`;
   if (mainStatus) {
-    mainStatus.classList.toggle('pill--green', liveReady);
-    mainStatus.classList.toggle('pill--gray', !liveReady);
+    mainStatus.classList.toggle('pill--green', enabled);
+    mainStatus.classList.toggle('pill--gray', !enabled);
   }
 }

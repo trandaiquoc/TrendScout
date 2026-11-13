@@ -41,23 +41,22 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn('data-theme="light"', html)
         self.assertIn("data-theme-toggle", html)
         self.assertIn("data-locale-toggle", html)
-        self.assertEqual(html.count("data-nav="), 11)
+        self.assertEqual(html.count("data-nav="), 8)
         self.assertIn('<nav id="workspace-nav"', html)
         self.assertEqual(len(re.findall(r'<a class="nav-link[^>]*data-nav=', html.split('<details class="nav-advanced">')[0])), 5)
         self.assertIn('<details class="nav-advanced">', html)
         self.assertIn('data-view="overview"', html)
+        self.assertIn('role="tablist"', html)
+        self.assertIn('data-dashboard-tab="analysis"', html)
         self.assertIn('id="rows"', html[: html.index('data-view="sources"')])
         for view in (
             "overview",
             "collections",
             "sources",
             "runs",
-            "keywords",
             "algorithms",
             "quality",
-            "refresh",
             "research",
-            "usage",
             "settings",
         ):
             with self.subTest(view=view):
@@ -71,7 +70,7 @@ class D2DashboardContractTests(unittest.TestCase):
             re.findall(
                 r"['\"]((?:a11y|algorithms|common|connection|detail|error|fetch|filter|keywords|"
                 r"locale|nav|overview|quality|run|runs|settings|source|sources|status|table|"
-                r"theme|time|sort|refresh|research|usage)\.[^'\"]+)['\"]",
+                r"theme|time|sort|refresh|research|usage|dashboard|analysis|dataset|metric)\.[^'\"]+)['\"]",
                 app,
             )
         )
@@ -121,8 +120,8 @@ class D2DashboardContractTests(unittest.TestCase):
         for source in ("wikimedia", "youtube", "google-search", "bing-search"):
             with self.subTest(source=source):
                 self.assertIn(f'data-source="{source}"', html)
-        self.assertIn('data-source-status="adapter-implemented-live-unverified"', html)
-        self.assertGreaterEqual(html.count('data-source-status="not-configured"'), 3)
+        self.assertEqual(html.count('data-source-status="unknown"'), 4)
+        self.assertIn('data-source-capabilities="wikimedia"', html)
 
     def test_theme_status_and_secondary_text_tokens_meet_aa_contrast(self):
         for theme in ("light", "dark"):
