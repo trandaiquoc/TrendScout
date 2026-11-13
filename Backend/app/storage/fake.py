@@ -25,6 +25,12 @@ class FakeStorage:
         validate_id(run_id)
         return deepcopy(self._runs.get(run_id))
 
+    async def list_runs(self, *, limit: int = 100, offset: int = 0) -> list[Record]:
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
+            raise ValueError("Invalid run history page")
+        runs = sorted(self._runs.values(), key=lambda run: str(run.get("created_at") or ""), reverse=True)
+        return deepcopy(runs[offset : offset + limit])
+
     async def update_run(self, run_id: str, fields: Mapping[str, Any]) -> None:
         validate_id(run_id)
         validate_fields(fields, update=True)

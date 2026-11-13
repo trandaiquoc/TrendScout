@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.collections import _service
 from app.collections import embeddings
+from app.ports.storage import StorageError
 from app.taxonomy.classification_policy import VERSION as CLASSIFICATION_POLICY_VERSION
 from app.taxonomy.registry import TAXONOMY_VERSION
 
@@ -234,8 +235,25 @@ def overview(request: Request):
     }
 
 
+def _history_storage(request):
+    if getattr(request.app.state, "read_only", False):
+        factory = getattr(request.app.state, "read_storage_factory", None)
+        if not factory:
+            return None
+        try:
+            return factory(request.headers.get("x-vercel-oidc-token"))
+        except (ValueError, OSError):
+            return None
+    service = getattr(request.app.state, "run_service", None)
+    return getattr(service, "storage", None)
+
+
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 @router.get("/runs/history")
-def run_history(
+async def run_history(
     request: Request,
     q: str = Query(default="", max_length=100),
     status: str = Query(default="", max_length=32),
@@ -243,13 +261,16 @@ def run_history(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100000),
 ):
-    service = _service(request)
-    with service.store.connect() as db:
-        rows = db.execute("""SELECT j.*,d.dataset_id,d.data_mode,d.source_manifest,d.provider_record_count,
-            d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-            d.quality_flags,d.processing_status
-            FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
-            ORDER BY j.updated_at DESC,j.fetch_id DESC""").fetchall()
+    service = getattr(request.app.state, "collection_service", None)
+    if service:
+        with service.store.connect() as db:
+            rows = db.execute("""SELECT j.*,d.dataset_id,d.data_mode,d.source_manifest,d.provider_record_count,
+                d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
+                d.quality_flags,d.processing_status
+                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
+                ORDER BY j.updated_at DESC,j.fetch_id DESC""").fetchall()
+    else:
+        rows = []
     items = []
     for row in rows:
         item = dict(row)
@@ -285,6 +306,57 @@ def run_history(
         ):
             continue
         items.append(item)
+    history_status = "AVAILABLE"
+    history_truncated = False
+    storage = _history_storage(request)
+    if storage is not None and hasattr(storage, "list_runs"):
+        try:
+            manual_runs = await storage.list_runs(limit=100, offset=0)
+        except StorageError:
+            manual_runs = []
+            history_status = "PARTIAL"
+        history_truncated = len(manual_runs) == 100
+        existing = {str(item.get("fetch_id")) for item in items}
+        for run in manual_runs:
+            run_id = str(run.get("run_id") or "")
+            if not run_id or run_id in existing:
+                continue
+            manifest = run.get("source_manifest") or run.get("sources") or []
+            if not isinstance(manifest, list):
+                manifest = []
+            sources = [entry.get("source_id") if isinstance(entry, dict) else str(entry) for entry in manifest]
+            mode_value = run.get("mode") or run.get("data_mode")
+            run_at = run.get("finished_at") or run.get("updated_at") or run.get("created_at")
+            item = {
+                "fetch_id": run_id,
+                "run_type": "MANUAL_ANALYSIS",
+                "status": run.get("status") or "UNKNOWN",
+                "mode": mode_value,
+                "data_mode": mode_value,
+                "sources": sources,
+                "source_manifest": json.dumps(manifest),
+                "quality_flags": run.get("quality_flags") or [],
+                "error_code": run.get("error_code") or run.get("error"),
+                "stage": run.get("status"),
+                "available": run.get("keyword_count"),
+                "processed": run.get("scored_count"),
+                "received_record_count": run.get("keyword_count"),
+                "retained_keyword_count": run.get("scored_count"),
+                "rejected_record_count": None,
+                "run_at": _iso(run_at),
+                "created_at": _iso(run.get("created_at")),
+                "updated_at": _iso(run.get("updated_at") or run.get("finished_at")),
+                "fetched_at": _iso(run.get("finished_at")),
+                "duration_seconds": None,
+            }
+            haystack = " ".join(str(item.get(key) or "") for key in ("fetch_id", "run_type", "status", "error_code", "mode", "source_manifest")).casefold()
+            if q.casefold() not in haystack or (status and item["status"] != status) or (mode and item["mode"] != mode):
+                continue
+            items.append(item)
+            existing.add(run_id)
+    else:
+        history_status = "LOCAL_LEDGER_ONLY"
+    items.sort(key=lambda item: str(item.get("run_at") or item.get("updated_at") or ""), reverse=True)
     return {
         "items": items[offset : offset + limit],
         "total": len(items),
@@ -292,25 +364,56 @@ def run_history(
         "limit": limit,
         "next_offset": offset + limit if offset + limit < len(items) else None,
         "duration_available": False,
-        "history_source": "local_sqlite_fetch_jobs",
+        "history_source": "local_sqlite_and_analysis_storage" if history_status == "AVAILABLE" else "local_sqlite_fetch_jobs",
+        "manual_history_status": history_status,
+        "history_truncated": history_truncated,
     }
 
 
 @router.get("/runs/history/{fetch_id}")
-def run_history_detail(fetch_id: str, request: Request):
+async def run_history_detail(fetch_id: str, request: Request):
     if not fetch_id or len(fetch_id) > 64:
         raise HTTPException(404, "Run not found")
-    service = _service(request)
-    with service.store.connect() as db:
-        row = db.execute(
-            """SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,
-            d.provider_record_count,d.received_record_count,d.retained_keyword_count,d.rejected_record_count,
-            d.observation_start,d.observation_end,d.fetched_at,d.quality_flags,d.processing_status
-            FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id WHERE j.fetch_id=?""",
-            (fetch_id,),
-        ).fetchone()
+    service = getattr(request.app.state, "collection_service", None)
+    if service:
+        with service.store.connect() as db:
+            row = db.execute(
+                """SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,
+                d.provider_record_count,d.received_record_count,d.retained_keyword_count,d.rejected_record_count,
+                d.observation_start,d.observation_end,d.fetched_at,d.quality_flags,d.processing_status
+                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id WHERE j.fetch_id=?""",
+                (fetch_id,),
+            ).fetchone()
+    else:
+        row = None
     if row is None:
-        raise HTTPException(404, "Run not found")
+        storage = _history_storage(request)
+        if storage is None or len(fetch_id) != 32 or any(character not in "0123456789abcdef" for character in fetch_id):
+            raise HTTPException(404, "Run not found")
+        try:
+            run = await storage.get_run(fetch_id)
+        except StorageError:
+            raise HTTPException(503, "Run history is temporarily unavailable") from None
+        if run is None:
+            raise HTTPException(404, "Run not found")
+        manifest = run.get("source_manifest") or run.get("sources") or []
+        return {
+            "item": {
+                "fetch_id": fetch_id,
+                "status": run.get("status"),
+                "data_mode": run.get("mode") or run.get("data_mode"),
+                "source_manifest": manifest,
+                "quality_flags": run.get("quality_flags") or [],
+                "error_code": run.get("error_code") or run.get("error"),
+                "available": run.get("keyword_count"),
+                "retained_keyword_count": run.get("scored_count"),
+                "duration_seconds": None,
+                "created_at": _iso(run.get("created_at")),
+                "updated_at": _iso(run.get("updated_at") or run.get("finished_at")),
+                "fetched_at": _iso(run.get("finished_at")),
+            },
+            "duration_available": False,
+        }
     item = dict(row)
     for key in ("source_manifest", "quality_flags"):
         try:

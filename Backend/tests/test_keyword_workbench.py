@@ -10,6 +10,7 @@ from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.main import create_app
 from app.settings import Settings
+from app.storage.fake import FakeStorage
 
 
 class KeywordWorkbenchTests(unittest.TestCase):
@@ -110,6 +111,25 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["items"], [])
         self.assertFalse(response.json()["duration_available"])
+
+    def test_run_history_includes_persisted_analysis_storage_runs(self):
+        storage = FakeStorage()
+        import asyncio
+        asyncio.run(storage.create_run("a" * 32, {
+            "run_id": "a" * 32, "status": "PARTIAL", "mode": "synthetic",
+            "created_at": "2026-11-13T01:00:00+00:00", "keyword_count": 12,
+            "scored_count": 8, "source_manifest": [{"source_id": "wikimedia_pageviews_top_per_country"}],
+        }))
+        self.app.state.read_storage_factory = lambda _token: storage
+        response = self._request("GET", "/api/v1/runs/history")
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["items"][0]
+        self.assertEqual(item["fetch_id"], "a" * 32)
+        self.assertEqual(item["run_type"], "MANUAL_ANALYSIS")
+        self.assertEqual(item["sources"], ["wikimedia_pageviews_top_per_country"])
+        detail = self._request("GET", "/api/v1/runs/history/" + "a" * 32)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["item"]["status"], "PARTIAL")
 
     def test_product_research_is_persisted_and_status_changes_are_auditable(self):
         created = self._request("POST", "/api/v1/research", json={

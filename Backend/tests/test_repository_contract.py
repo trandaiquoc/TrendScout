@@ -3,8 +3,8 @@
 This stub checks the SDK calls and old document layout. It does not emulate all
 Firestore semantics and does not contact Firestore, ADC or an emulator.
 """
-from copy import deepcopy
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 from google.api_core.exceptions import AlreadyExists, NotFound, PermissionDenied
@@ -50,15 +50,29 @@ class Document:
 
 
 class Collection:
-    def __init__(self, data, path):
+    def __init__(self, data, path, order=None, limit_value=None, offset_value=0):
         self.data, self.path = data, path
+        self.order, self.limit_value, self.offset_value = order, limit_value, offset_value
 
     def document(self, name):
         return Document(self.data, self.path + (name,))
 
+    def order_by(self, field, direction=None):
+        return Collection(self.data, self.path, (field, direction), self.limit_value, self.offset_value)
+
+    def offset(self, value):
+        return Collection(self.data, self.path, self.order, self.limit_value, value)
+
+    def limit(self, value):
+        return Collection(self.data, self.path, self.order, value, self.offset_value)
+
     def stream(self):
-        return [Snapshot(value) for path, value in sorted(self.data.items())
-                if path[:-1] == self.path]
+        values = [value for path, value in self.data.items() if path[:-1] == self.path]
+        if self.order:
+            field, direction = self.order
+            values.sort(key=lambda value: str(value.get(field) or ""), reverse=direction == "DESCENDING")
+        values = values[self.offset_value : self.offset_value + self.limit_value if self.limit_value is not None else None]
+        return [Snapshot(value) for value in values]
 
 
 class StubFirestoreClient:
@@ -97,6 +111,14 @@ class ContractMixin:
             self.assertEqual(await self.store.list_records(RUN, kind), [data])
             self.assertIsNone(await self.store.get_record(RUN, kind, 'missing'))
         self.assertNotIn('ratio', (await self.store.get_record(RUN,'keyword_results','shard-00'))['items'][0])
+
+    async def test_run_history_is_ordered_and_paginated(self):
+        await self.store.create_run('a' * 32, {'status': 'COMPLETED', 'created_at': '2026-01-01T00:00:00+00:00'})
+        await self.store.create_run('b' * 32, {'status': 'PARTIAL', 'created_at': '2026-01-03T00:00:00+00:00'})
+        await self.store.create_run('c' * 32, {'status': 'FAILED', 'created_at': '2026-01-02T00:00:00+00:00'})
+        page = await self.store.list_runs(limit=2, offset=0)
+        self.assertEqual([item['status'] for item in page], ['PARTIAL', 'FAILED'])
+        self.assertEqual([item['status'] for item in await self.store.list_runs(limit=2, offset=2)], ['COMPLETED'])
 
     async def test_overwrite_error_and_paths(self):
         await self.store.put_record(RUN, 'observations', 'a', {'old':1})
@@ -138,7 +160,7 @@ class FirestoreRepositoryContract(ContractMixin, unittest.IsolatedAsyncioTestCas
 
 class CompatibilityTests(unittest.TestCase):
     def test_legacy_ports_reexport_same_objects(self):
-        from app.storage import base
         from app.ports import storage
+        from app.storage import base
         for symbol in ('AnalysisStorage', 'StorageError', 'RecordNotFound', 'RecordAlreadyExists', 'RecordKind'):
             self.assertIs(getattr(base, symbol), getattr(storage, symbol))

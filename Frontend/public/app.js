@@ -233,6 +233,9 @@ async function loadRunHistory({ append = false } = {}) {
       [t('runs.date'),t('runs.type'),t('runs.sources'),t('runs.status'),t('runs.records'),t('runs.mode'),t('runs.outcome'),t('runs.actions')].forEach(label=>tr.append(element('th',label)));
       thead.append(tr); table.append(thead,element('tbody')); root.append(table);
     }
+    if (!append && data.history_truncated) root.append(element('p', t('runs.history-limited'), 'fine-print'));
+    else if (!append && data.manual_history_status === 'PARTIAL') root.append(element('p', t('runs.manual-history-partial'), 'fine-print'));
+    else if (!append && data.manual_history_status === 'LOCAL_LEDGER_ONLY') root.append(element('p', t('runs.manual-history-unavailable'), 'fine-print'));
     const body=table.querySelector('tbody');
     (data.items || []).forEach(run => {
       const tr=element('tr');

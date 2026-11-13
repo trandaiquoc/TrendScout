@@ -31,14 +31,14 @@ class CountingStorage:
         self.delegate = delegate
         self.metrics = defaultdict(OperationMetrics)
 
-    async def _call(self, name, *args):
+    async def _call(self, name, *args, **kwargs):
         metric = self.metrics[name]
         metric.calls += 1
         start = perf_counter()
         if name in ('create_run', 'update_run', 'put_record'):
             metric.request_json_bytes += json_bytes(args[-1])
         try:
-            result = await getattr(self.delegate, name)(*args)
+            result = await getattr(self.delegate, name)(*args, **kwargs)
         except BaseException:
             metric.failures += 1
             raise
@@ -51,7 +51,7 @@ class CountingStorage:
                 metric.estimated_reads += 1
                 if result is not None:
                     metric.response_json_bytes += json_bytes(result)
-            elif name == 'list_records':
+            elif name in ('list_records', 'list_runs'):
                 metric.returned_documents += len(result)
                 metric.estimated_reads += max(1, len(result))
                 metric.response_json_bytes += sum(json_bytes(document) for document in result)
@@ -61,6 +61,7 @@ class CountingStorage:
 
     async def create_run(self, run_id, data): return await self._call('create_run', run_id, data)
     async def get_run(self, run_id): return await self._call('get_run', run_id)
+    async def list_runs(self, *, limit=100, offset=0): return await self._call('list_runs', limit=limit, offset=offset)
     async def update_run(self, run_id, fields): return await self._call('update_run', run_id, fields)
     async def put_record(self, run_id, kind, record_id, data): return await self._call('put_record', run_id, kind, record_id, data)
     async def get_record(self, run_id, kind, record_id): return await self._call('get_record', run_id, kind, record_id)
