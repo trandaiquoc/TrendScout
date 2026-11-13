@@ -5,9 +5,14 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from app.taxonomy.classification_policy import (
+    ENTITY_DESCRIPTION_RULES,
+    VERSION as CLASSIFICATION_VERSION,
+    is_verified_page_context,
+    permits_title_rules,
+)
 from app.taxonomy.registry import TAXONOMY_VERSION, resolve
 
-CLASSIFICATION_VERSION = 'contextual-classifier-v1.0'
 EntityType = Literal['person', 'organization', 'product', 'place', 'event', 'creative_work', 'brand', 'unknown']
 CommercialRelevance = Literal['unknown', 'not_assessed']
 
@@ -71,28 +76,6 @@ VI_RULES = (
     Rule('film_vi', '1', 'entertainment', 'entertainment.film', r'\((?:phim|phim truyện)(?: năm \d{4})?\)\s*$', 'Vietnamese film qualifier', priority=100),
     Rule('historical_event_vi', '1', 'events', 'events.historical', r'\b(?:chiến tranh thế giới|khủng hoảng|mất tích|vụ sát hại)\b', 'Vietnamese historical event wording', exclude_media_title=True),
 )
-DESCRIPTION_RULES = (
-    ("business_leader_description", r"\b(?:business executive|businessperson|businessman|businesswoman|chief executive|chief technology officer|founder|entrepreneur)\b", "celebrity_public_figures.business_leaders"),
-    ("entrepreneur_description", r"\bentrepreneur\b", "celebrity_public_figures.entrepreneurs"),
-    ("athlete_description", r"\b(?:athlete|football player|basketball player|baseball player|professional golfer|professional boxer)\b", "celebrity_public_figures.athletes"),
-    ("coach_description", r"\b(?:coach|manager of the .* team)\b", "celebrity_public_figures.coaches"),
-    ("comedian_description", r"\b(?:comedian|stand-up comic)\b", "celebrity_public_figures.comedians"),
-    ("actor_description", r"\b(?:actor|actress|film star)\b", "celebrity_public_figures.performers"),
-    ("musician_description", r"\b(?:musician|singer|songwriter)\b", "celebrity_public_figures.musicians"),
-    ("content_creator_description", r"\b(?:content creator|digital creator|youtuber|streamer)\b", "celebrity_public_figures.creators"),
-    ("scientist_description", r"\b(?:scientist|researcher)\b", "celebrity_public_figures.scientists"),
-    ("technology_professional_description", r"\b(?:technology (?:company|corporation|executive)|software engineer|computer scientist|technology entrepreneur|digital platform)\b", "technology"),
-    ("organization_description", r"\b(?:company|corporation|nonprofit organization|government agency|sports organization)\b", "organizations"),
-    ("brand_description", r"\b(?:brand|fashion label|cosmetics brand|food brand)\b", "products_brands"),
-    ("chemical_description", r"\bchemical compound\b", "science_nature.chemistry"),
-    ("species_description", r"\b(?:species|biological species)\b", "science_nature.biology"),
-    ("ship_description", r"\b(?:ship|vessel|freighter)\b", "places_transportation.ships"),
-    ("aircraft_description", r"\b(?:aircraft|airplane|aircraft type)\b", "places_transportation.aircraft"),
-    ("country_description", r"\bcountry\b", "places_transportation.countries"),
-    ("city_description", r"\bcity\b", "places_transportation.cities"),
-    ("place_description", r"\bgeographic location\b", "places_transportation.geographic_locations"),
-    ("software_description", r"\b(?:software product|software platform|operating system|web browser)\b", "technology.software"),
-)
 _MEDIA = re.compile(r'\((?:\d{4}\s+)?(?:film|song|album|television series|television program|television show|tv series|tv program|tv show|video game|game)\)\s*$', re.IGNORECASE)
 _COMPILED = tuple((rule, re.compile(rule.pattern, re.IGNORECASE)) for rule in RULES)
 
@@ -104,7 +87,7 @@ def classify(keyword_id: str, title: str, *, source: str, project: str) -> Class
     title = unicodedata.normalize('NFC', title)
     evidence = []
     # Explicit source/project gating avoids applying English rules to arbitrary providers.
-    if source == 'wikimedia_pageviews_top_per_country' and project.endswith('.wikipedia'):
+    if permits_title_rules(source, project):
         media = bool(_MEDIA.search(title))
         language = project.split('.', 1)[0]
         language_rules = _COMPILED if language == 'en' else tuple(
@@ -174,18 +157,20 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
     categories.update(rule_result.subcategories if rule_result else ())
     description = context.get("description", "")
     description_evidence = []
-    if context.get("entity_id") and isinstance(description, str):
-        for rule_id, expression, category_id in DESCRIPTION_RULES:
-            match = re.search(expression, description, re.IGNORECASE)
+    verified_page_context = is_verified_page_context(
+        context.get("method", ""), context.get("source_url", ""))
+    if (context.get("entity_id") or verified_page_context) and isinstance(description, str):
+        for rule in ENTITY_DESCRIPTION_RULES:
+            match = re.search(rule.expression, description, re.IGNORECASE)
             if match:
-                resolve(category_id)
-                categories.add(category_id)
-                description_evidence.append({"kind": "ENTITY_DESCRIPTION_RULE", "rule_id": rule_id,
-                    "matched_text": match.group(), "category_id": category_id,
+                resolve(rule.category_id)
+                categories.add(rule.category_id)
+                description_evidence.append({"kind": "ENTITY_DESCRIPTION_RULE", "rule_id": rule.rule_id,
+                    "matched_text": match.group(), "category_id": rule.category_id,
                     "source": context.get("source_url", "")})
         if entity_type == "unknown" and description_evidence:
             evidence_categories = {item["category_id"] for item in description_evidence}
-            if "organizations" in evidence_categories:
+            if evidence_categories & {"organizations", "organizations.nonprofits", "organizations.media"}:
                 entity_type = "organization"
             elif "products_brands" in evidence_categories:
                 entity_type = "brand"
@@ -208,8 +193,14 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
             "celebrity_public_figures.coaches": "person", "celebrity_public_figures.comedians": "person",
             "celebrity_public_figures.musicians": "person", "celebrity_public_figures.creators": "person",
             "celebrity_public_figures.scientists": "person", "organizations": "organization",
+            "celebrity_public_figures.health_professionals": "person",
+            "celebrity_public_figures.writers": "person",
             "products_brands": "brand", "science_nature.chemistry": "chemical_compound",
-            "science_nature.biology": "biological_species", "places_transportation.countries": "country",
+            "science_nature.biology": "scientific_concept", "science_nature.plants": "plant",
+            "creative_works.artwork": "artwork", "entertainment.film": "film",
+            "entertainment.television": "television_program", "technology.internet_services": "digital_platform",
+            "law_society.crime_justice": "person", "places_transportation.settlements": "settlement",
+            "places_transportation.monuments_memorials": "monument", "places_transportation.countries": "country",
             "places_transportation.cities": "city", "places_transportation.ships": "ship",
             "places_transportation.aircraft": "aircraft", "places_transportation.roads": "road",
         }
@@ -221,10 +212,13 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
     categories = {category for category in categories if not any(
         resolve(other).parent_id == category for other in categories if other != category
     )}
-    if record.get("eligible") is False:
+    namespace = context.get("page_namespace")
+    if record.get("eligible") is False or (type(namespace) is int and namespace != 0):
         status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
+    elif context.get("is_disambiguation"):
+        status, confidence, review = "AMBIGUOUS", "LOW", "NEEDS_REVIEW"
     elif not categories:
-        if entity_type != "unknown":
+        if entity_type != "unknown" or context.get("entity_id"):
             status, confidence, review = "AMBIGUOUS", "LOW", "NEEDS_REVIEW"
         else:
             status, confidence, review = "UNKNOWN", "NONE", "NEEDS_REVIEW"
@@ -254,6 +248,7 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         "confidence_level": confidence,
         "commercial_relevance": "NOT_ASSESSED",
         "classification_method": "WIKIDATA_P31_P106_AND_CONTEXT_RULES" if context.get("entity_id") else (
+            "WIKIMEDIA_PAGE_DESCRIPTION_RULES" if description_evidence else
             "CONTEXT_TITLE_RULES" if rule_result and rule_result.rule_evidence else "INSUFFICIENT_EVIDENCE"),
         "classification_version": CLASSIFICATION_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,
@@ -264,6 +259,10 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
                                 "country_scope", "access", "analysis_date", "observation_date", "data_mode",
                                 "provider_rank", "views_ceil", "source_quality"
                             ) if stored_evidence.get(key, record.get(key)) is not None},
+                            "page": {"namespace": namespace,
+                                     "is_disambiguation": bool(context.get("is_disambiguation")),
+                                     "redirected_from": context.get("redirected_from", ""),
+                                     "language": context.get("page_language", "")},
                             "source_url": context.get("source_url", "")},
         "review_status": review,
         "classified_at": None,

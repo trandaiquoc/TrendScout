@@ -80,6 +80,14 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(tree[self.root]["subtree_unique_keyword_count"], 2)
         self.assertEqual(tree[self.child]["subtree_unique_keyword_count"], 2)
 
+    def test_system_ineligible_is_distinct_from_user_exclusion_and_unknown_context(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE classification_results SET classification_status='INELIGIBLE' WHERE keyword_id='k-unknown'")
+        summary = self.store.workbench_summary()
+        self.assertEqual(summary["ineligible_topic_keywords"], 1)
+        self.assertEqual(summary["unknown_keywords"], 0)
+        self.assertEqual(summary["excluded_keywords"], 1)
+
     def test_search_filters_use_server_totals_and_zero_is_available_metric(self):
         ambiguous = self.store.search_keywords(classification="AMBIGUOUS", limit=1)
         self.assertEqual((ambiguous["total"], ambiguous["items"][0]["id"], ambiguous["next_offset"]),

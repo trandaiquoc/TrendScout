@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 
-TAXONOMY_VERSION = 'topics-v1.3'
+TAXONOMY_VERSION = 'topics-v1.4'
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ _DEFINITIONS = (
         ('photography','Photography'),('visual_arts','Visual Arts'),('literature','Literature'),('performing_arts','Performing Arts'))),
     ('fashion', 'Fashion', (('clothing','Clothing'),('footwear','Footwear'),('accessories','Accessories'),('jewelry','Jewelry'))),
     ('home_living', 'Home & Living', (('appliances','Home Appliances'),('kitchen','Kitchen'),('furniture','Furniture'),('decor','Home Decor'))),
-    ('technology', 'Technology', (('ai','AI'),('software','Software'),('gadgets','Gadgets'),('electronics','Electronics'))),
+    ('technology', 'Technology', (('ai','AI'),('software','Software'),('internet_services','Internet Services'),('digital_platforms','Digital Platforms'),('gadgets','Gadgets'),('electronics','Electronics'))),
     ('gaming', 'Gaming', (('video_games','Video Games'),('hardware','Gaming Hardware'),('esports','Esports'))),
     ('beauty_personal_care', 'Beauty & Personal Care', (('skincare','Skincare'),('cosmetics','Cosmetics'),('haircare','Haircare'))),
     ('sports', 'Sports', (('athletes','Athletes'),('teams','Teams'),('competitions','Competitions'),('equipment','Equipment'))),
@@ -40,9 +40,10 @@ _DEFINITIONS = (
     ('organizations', 'Organizations', (('nonprofits','Non-profit Organizations'),('government','Government Organizations'),('sports','Sports Organizations'),('media','Media Organizations'),('communities','Communities'))),
     ('products_brands', 'Products & Brands', (('consumer_products','Consumer Products'),('software','Software Products'),('technology','Technology Brands'),('fashion','Fashion Brands'),('beauty','Beauty Brands'),('food','Food Brands'))),
     ('events', 'Events', (('historical','Historical Events'),('festivals','Festivals & Commemorations'),('disasters','Disasters'))),
-    ('places_transportation', 'Places & Transportation', (('countries','Countries'),('cities','Cities'),('geographic_locations','Geographic Locations'),('roads','Roads'),('ships','Ships'),('aircraft','Aircraft'),('transportation_systems','Transportation Systems'))),
-    ('science_nature', 'Science & Nature', (('chemistry','Chemical Compounds'),('biology','Biological Species'),('animals','Animals'),('plants','Plants'),('concepts','Scientific Concepts'),('discoveries','Scientific Discoveries'),('natural_phenomena','Natural Phenomena'))),
+    ('places_transportation', 'Places & Transportation', (('countries','Countries'),('cities','Cities'),('settlements','Settlements'),('geographic_locations','Geographic Locations'),('roads','Roads'),('ships','Ships'),('aircraft','Aircraft'),('monuments_memorials','Monuments & Memorials'),('transportation_systems','Transportation Systems'))),
+    ('science_nature', 'Science & Nature', (('chemistry','Chemical Compounds'),('biology','Biology'),('animals','Animals'),('plants','Plants'),('concepts','Scientific Concepts'),('discoveries','Scientific Discoveries'),('natural_phenomena','Natural Phenomena'))),
     ('creative_works', 'Creative Works', (('books','Books'),('artwork','Artwork'))),
+    ('law_society', 'Law & Society', (('crime_justice','Crime & Justice'),('legal_cases','Legal Cases'))),
     ('other', 'Other', ()),
     ('unclassified', 'Unclassified', ()),
 )

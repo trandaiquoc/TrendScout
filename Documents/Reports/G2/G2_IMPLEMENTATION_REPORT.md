@@ -50,3 +50,7 @@ Reviewed the LucianLabs UXUI Prompt repository and its MIT license: [repository]
 ## Scope and limitations
 
 The workbench reflects the persisted local ledger and its source evidence. A zero count is valid when the server confirms no memberships for that Collection; missing or failed counts are shown as unavailable. Current pageview evidence is not a validated trend forecast. Synthetic discovery's two baseline test failures remain outside G2 scope and are documented above.
+
+## Residual contextual classification and full-ledger replay
+
+The remaining G2 classification and real-data replay are documented in [G2_CONTEXTUAL_CLASSIFICATION_REPLAY.md](G2_CONTEXTUAL_CLASSIFICATION_REPLAY.md). That phase added the consumed `contextual-classifier-v1.2` policy, taxonomy `topics-v1.4`, structured Wikimedia page metadata and a full saved-context replay for all 154 records. It records the verified pre-change backup, exact 25-case outcomes, database checks, resulting counts and remaining ambiguity.

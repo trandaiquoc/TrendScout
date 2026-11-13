@@ -13,6 +13,37 @@ def claim(identifier):
 
 
 class EntityContextTests(unittest.TestCase):
+    def test_project_host_is_allowlisted_and_special_namespace_is_retained(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url.host)
+            if request.url.host == "id.wiktionary.org":
+                return httpx.Response(200, json={"query": {"pages": [{"pageid": 3, "ns": -1,
+                    "title": "Istimewa:Pencarian", "pagelanguage": "id", "fullurl":
+                    "https://id.wiktionary.org/wiki/Istimewa:Pencarian", "pageprops": {}}]}}, request=request)
+            return httpx.Response(500, request=request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CollectionStore(Path(directory) / "collections.sqlite")
+            with store.connect() as db:
+                db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                    data_mode,evidence,context) VALUES('special','Istimewa:Pencarian','istimewa:pencarian',
+                    'wikimedia_pageviews_top_per_country','id.wiktionary','2026-11-13','LIVE','{}','')""")
+            records = [{"id":"special", "keyword":"Istimewa:Pencarian", "project":"id.wiktionary",
+                        "source":"wikimedia_pageviews_top_per_country"}]
+            result = WikimediaEntityContextResolver(store, transport=httpx.MockTransport(handler)).enrich(records)
+            special = result["special"]
+            self.assertEqual((special.page_namespace, special.page_language), (-1, "id"))
+            self.assertFalse(special.is_disambiguation)
+            self.assertEqual(calls, ["id.wiktionary.org"])
+
+            blocked = [{"id":"blocked", "keyword":"Some title", "project":"attacker.example.wikipedia",
+                        "source":"wikimedia_pageviews_top_per_country"}]
+            self.assertEqual(WikimediaEntityContextResolver(store,
+                transport=httpx.MockTransport(handler)).enrich(blocked), {})
+            self.assertEqual(calls, ["id.wiktionary.org"], "unlisted project strings must not create hosts")
+
     def test_wikipedia_page_binding_and_wikidata_roles_are_cached(self):
         titles = [
             ("amanda", "Amanda Seyfried", "Q100", "Q33999"),

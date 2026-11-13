@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS keyword_decisions (
 CREATE TABLE IF NOT EXISTS entity_context (
  keyword_id TEXT PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
  title TEXT NOT NULL, page_id INTEGER, entity_id TEXT, description TEXT NOT NULL DEFAULT '',
+ page_namespace INTEGER, is_disambiguation INTEGER NOT NULL DEFAULT 0,
+ redirected_from TEXT NOT NULL DEFAULT '', page_language TEXT NOT NULL DEFAULT '',
  entity_type TEXT NOT NULL, occupations TEXT NOT NULL DEFAULT '[]',
  category_ids TEXT NOT NULL DEFAULT '[]', instance_types TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL DEFAULT '',
  method TEXT NOT NULL, status TEXT NOT NULL, context_version TEXT NOT NULL,
@@ -172,6 +174,12 @@ class CollectionStore:
             context_columns = {row["name"] for row in db.execute("PRAGMA table_info(entity_context)")}
             if "instance_types" not in context_columns:
                 db.execute("ALTER TABLE entity_context ADD COLUMN instance_types TEXT NOT NULL DEFAULT '[]'")
+            for name, declaration in (("page_namespace", "INTEGER"),
+                                      ("is_disambiguation", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("redirected_from", "TEXT NOT NULL DEFAULT ''"),
+                                      ("page_language", "TEXT NOT NULL DEFAULT ''")):
+                if name not in context_columns:
+                    db.execute(f"ALTER TABLE entity_context ADD COLUMN {name} {declaration}")
             classification_columns = {row["name"] for row in db.execute("PRAGMA table_info(classification_results)")}
             if classification_columns and "commercial_relevance" not in classification_columns:
                 db.execute("ALTER TABLE classification_results ADD COLUMN commercial_relevance TEXT NOT NULL DEFAULT 'NOT_ASSESSED'")
@@ -414,6 +422,7 @@ class CollectionStore:
                 "classified_keywords": statuses.get("CLASSIFIED", 0),
                 "ambiguous_keywords": statuses.get("AMBIGUOUS", 0),
                 "unknown_keywords": statuses.get("UNKNOWN", 0),
+                "ineligible_topic_keywords": statuses.get("INELIGIBLE", 0),
                 "ai_assigned_keywords": assignment.get("LOCAL_AI", 0),
                 "manually_managed_keywords": assignment.get("USER", 0),
                 "mixed_origin_keywords": mixed,

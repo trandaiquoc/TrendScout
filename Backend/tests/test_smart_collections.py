@@ -88,7 +88,7 @@ class SmartCollectionsTests(unittest.TestCase):
         classification_response = __import__("asyncio").run(self._classification_request(app, keyword_response.json()["items"][0]["id"]))
         self.assertEqual(classification_response.status_code, 200)
         self.assertEqual(classification_response.json()["classification_status"], "UNKNOWN")
-        self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.3")
+        self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.4")
 
     async def _classification_request(self, app, keyword_id):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
@@ -233,8 +233,9 @@ class SmartCollectionsTests(unittest.TestCase):
                         "TEST_VERIFIED_CONTEXT", "CLASSIFIED" if recognized else "UNKNOWN", "2026-11-13T00:00:00Z")
                 with self.store.connect() as db:
                     db.executemany("""INSERT OR REPLACE INTO entity_context(keyword_id,title,page_id,entity_id,
-                        description,entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
+                        description,page_namespace,is_disambiguation,redirected_from,page_language,entity_type,
+                        occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
                 return self.contexts
 
             def cached(self, keyword_ids):

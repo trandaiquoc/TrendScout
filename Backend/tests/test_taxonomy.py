@@ -27,7 +27,7 @@ class TaxonomyRegistryTests(unittest.TestCase):
         self.assertEqual({x.id for x in children('fashion')}, {'fashion.clothing','fashion.footwear','fashion.accessories','fashion.jewelry'})
         self.assertTrue(all(x.parent_id in CATEGORIES for x in CATEGORIES.values() if x.parent_id))
         self.assertTrue(all(x.status == 'active' for x in CATEGORIES.values()))
-        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.3')
+        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.4')
         for rule in RULES:
             self.assertIsNone(resolve(rule.category_id).parent_id)
             if rule.subcategory_id:
@@ -209,6 +209,39 @@ class ClassificationTests(unittest.TestCase):
         film = classify_contextual({"id":"fixture-film", "keyword":"Wildwood (film)",
             "source":SOURCE, "project":"en.wikipedia", "eligible":1}, {})
         self.assertEqual(film["topic_category_ids"], ["entertainment.film"])
+
+    def test_owner_25_contextual_cases_use_saved_evidence_and_stay_conservative_without_it(self):
+        import json
+        from app.taxonomy.classifier import classify_contextual
+
+        fixture = Path(__file__).parent / "fixtures" / "contextual_classification_cases.json"
+        cases = json.loads(fixture.read_text(encoding="utf-8"))
+        self.assertEqual(len(cases), 25)
+        self.assertEqual(len({item["title"] for item in cases}), 25)
+        for index, item in enumerate(cases):
+            bare = classify_contextual({"id":f"bare-{index}", "keyword":item["title"],
+                "source":SOURCE, "project":item["project"], "eligible":1}, {})
+            self.assertEqual(bare["classification_status"], "UNKNOWN", item["title"])
+            self.assertEqual(bare["topic_category_ids"], [], item["title"])
+            if not item.get("description") and "expected_status" not in item:
+                continue
+            context = {"entity_type":item["entity_type"], "entity_id":item["entity_id"],
+                "description":item["description"], "occupations":tuple(item["occupations"]),
+                "instance_types":tuple(item["instance_types"]), "category_ids":(),
+                "source_url":item.get("source_url", ""), "method":item.get("method", ""),
+                "page_namespace":item.get("page_namespace")}
+            result = classify_contextual({"id":f"context-{index}", "keyword":item["title"],
+                "source":SOURCE, "project":item["project"], "eligible":1}, context)
+            self.assertEqual(result["classification_status"], item.get("expected_status", "CLASSIFIED"), item["title"])
+            self.assertTrue(set(item["expected_categories"]).issubset(result["topic_category_ids"]),
+                            (item["title"], result["topic_category_ids"]))
+            if result["classification_status"] == "CLASSIFIED":
+                self.assertTrue(result["rule_evidence"], item["title"])
+        special = next(item for item in cases if item["title"] == "Istimewa:Pencarian")
+        result = classify_contextual({"id":"special", "keyword":special["title"],
+            "source":SOURCE, "project":special["project"], "eligible":1},
+            {"page_namespace":-1, "entity_type":"unknown"})
+        self.assertEqual(result["classification_status"], "INELIGIBLE")
 
     def test_legacy_behavior_and_serialization_unchanged(self):
         titles = ('Paris Fashion Week', 'washing machine', 'General election', 'Stephen Miller')

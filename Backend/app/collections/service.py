@@ -147,6 +147,10 @@ class CollectionService:
                     record["entity_context_method"] = context.method
                     record["entity_context_status"] = context.status
                     record["entity_context_captured_at"] = context.captured_at
+                    record["page_namespace"] = context.page_namespace
+                    record["page_is_disambiguation"] = context.is_disambiguation
+                    record["redirected_from"] = context.redirected_from
+                    record["page_language"] = context.page_language
         with self.store.connect() as db:
             excluded_records = [dict(row) for row in db.execute(
                 "SELECT * FROM keywords WHERE eligible=0 ORDER BY observed_at DESC,keyword COLLATE NOCASE"
@@ -161,7 +165,9 @@ class CollectionService:
                         entity_id=context.entity_id, entity_category_ids=context.category_ids,
                         entity_occupations=context.occupations, entity_instance_types=context.instance_types,
                         entity_source_url=context.source_url, entity_context_method=context.method,
-                        entity_context_status=context.status)
+                        entity_context_status=context.status, page_namespace=context.page_namespace,
+                        page_is_disambiguation=context.is_disambiguation,
+                        redirected_from=context.redirected_from, page_language=context.page_language)
         from app.taxonomy.classifier import classify_contextual
         classified_at = now()
         for record in classification_records:
@@ -175,6 +181,10 @@ class CollectionService:
                 "source_url": record.get("entity_source_url", ""),
                 "method": record.get("entity_context_method", ""),
                 "status": record.get("entity_context_status", ""),
+                "page_namespace": record.get("page_namespace"),
+                "is_disambiguation": record.get("page_is_disambiguation", False),
+                "redirected_from": record.get("redirected_from", ""),
+                "page_language": record.get("page_language", ""),
             }
             result = classify_contextual(record, context)
             result["classified_at"] = classified_at
@@ -272,6 +282,8 @@ class CollectionService:
             # inference succeeds. Pinned USER memberships and explicit REMOVE feedback stay intact.
             db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0")
             for record, vector, topic_vector in zip(records, vectors, topic_vectors):
+                if record.get("classification_result", {}).get("classification_status") == "INELIGIBLE":
+                    continue
                 scores = []
                 fits_existing_collection = False
                 exclusion_cursor = 0

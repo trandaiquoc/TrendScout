@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
 
-CONTEXT_VERSION = "wikimedia-entity-context-v1"
+CONTEXT_VERSION = "wikimedia-entity-context-v3"
 MAX_TITLES_PER_REQUEST = 10
 MAX_TITLE_LENGTH = 256
 MAX_RESPONSE_BYTES = 4_000_000
@@ -28,6 +29,10 @@ OCCUPATION_CATEGORIES = {
     "Q177220": ("celebrity_public_figures.musicians",),       # singer
     "Q639669": ("celebrity_public_figures.musicians",),       # musician
     "Q2066131": ("celebrity_public_figures.athletes",),       # athlete
+    "Q11338576": ("celebrity_public_figures.athletes",),     # boxer
+    "Q10860242": ("celebrity_public_figures.athletes",),     # amateur boxer
+    "Q11607585": ("celebrity_public_figures.athletes",),     # mixed martial artist
+    "Q4009406": ("celebrity_public_figures.athletes",),      # track and field athlete
     "Q901": ("celebrity_public_figures.scientists",),         # scientist
     "Q41583": ("celebrity_public_figures.coaches",),           # coach
     "Q43845": ("celebrity_public_figures.business_leaders",),
@@ -40,6 +45,7 @@ OCCUPATION_CATEGORIES = {
     "Q1650915": ("celebrity_public_figures.scientists",),      # researcher
     "Q109459317": ("celebrity_public_figures.creators",),       # content creator
     "Q111263847": ("celebrity_public_figures.creators",),       # digital creator
+    "Q2906862": ("celebrity_public_figures.creators",),      # podcast host
 }
 
 INSTANCE_TYPES = {
@@ -76,6 +82,10 @@ INSTANCE_TYPES = {
     "Q756": "plant",
     "Q17537576": "scientific_concept",
     "Q571": "book",
+    "Q3305213": "artwork",
+    "Q17334923": "artwork",
+    "Q3947": "settlement",
+    "Q22698": "monument",
 }
 
 ENTITY_TYPE_CATEGORIES = {
@@ -99,6 +109,10 @@ ENTITY_TYPE_CATEGORIES = {
     "plant": "science_nature.plants",
     "scientific_concept": "science_nature.concepts",
     "book": "creative_works.books",
+    "artwork": "creative_works.artwork",
+    "settlement": "places_transportation.settlements",
+    "monument": "places_transportation.monuments_memorials",
+    "digital_platform": "technology.internet_services",
 }
 
 INSTANCE_TYPE_CATEGORIES = {
@@ -113,7 +127,8 @@ INSTANCE_TYPE_CATEGORIES = {
 
 
 def _normalize_title(value: str) -> str:
-    return " ".join(value.replace("_", " ").casefold().split())
+    normalized = unicodedata.normalize("NFC", value.replace("_", " "))
+    return " ".join(normalized.casefold().split())
 
 
 def _timestamp() -> str:
@@ -135,10 +150,15 @@ class EntityContext:
     status: str
     captured_at: str
     instance_types: tuple[str, ...] = ()
+    page_namespace: int | None = None
+    is_disambiguation: bool = False
+    redirected_from: str = ""
+    page_language: str = ""
 
     def as_row(self) -> tuple:
         return (
             self.keyword_id, self.title, self.page_id, self.entity_id, self.description,
+            self.page_namespace, int(self.is_disambiguation), self.redirected_from, self.page_language,
             self.entity_type, json.dumps(self.occupations), json.dumps(self.category_ids),
             json.dumps(self.instance_types), self.source_url, self.method, self.status, CONTEXT_VERSION, self.captured_at,
         )
@@ -159,6 +179,18 @@ class WikimediaEntityContextResolver:
         self.timeout = httpx.Timeout(timeout, connect=min(timeout, 3.0))
         self.last_stats = {"requested_titles": 0, "resolved_titles": 0, "failed_batches": 0}
 
+    # Exact project IDs observed in the source ledger and explicit official MediaWiki
+    # hosts. Never construct a hostname from an untrusted project string.
+    PROJECT_APIS = {
+        "en.wikipedia": ("https://en.wikipedia.org/w/api.php", "en"),
+        "fr.wikipedia": ("https://fr.wikipedia.org/w/api.php", "fr"),
+        "vi.wikipedia": ("https://vi.wikipedia.org/w/api.php", "vi"),
+        "id.wiktionary": ("https://id.wiktionary.org/w/api.php", "id"),
+        "foundation.wikimedia": ("https://foundation.wikimedia.org/w/api.php", "en"),
+        "mediawiki": ("https://www.mediawiki.org/w/api.php", "en"),
+        "thankyou.wikipedia": ("https://thankyou.wikipedia.org/w/api.php", "en"),
+    }
+
     def enrich(self, records: list[dict]) -> dict[str, EntityContext]:
         uncached = self._uncached_records(records)
         if not uncached:
@@ -168,13 +200,13 @@ class WikimediaEntityContextResolver:
         stats = {"requested_titles": len(uncached), "resolved_titles": 0, "failed_batches": 0}
         with httpx.Client(timeout=self.timeout, transport=self.transport,
                           headers={"User-Agent": self.user_agent}, follow_redirects=False) as client:
-            for project, group in self._groups(uncached).items():
-                language = project.split(".", 1)[0]
+            for project, (api, language, group) in self._groups(uncached).items():
                 for offset in range(0, len(group), MAX_TITLES_PER_REQUEST):
                     batch = group[offset:offset + MAX_TITLES_PER_REQUEST]
                     try:
-                        results.update(self._resolve_batch(client, language, batch))
-                        stats["resolved_titles"] += len(batch)
+                        resolved = self._resolve_batch(client, api, language, batch)
+                        results.update(resolved)
+                        stats["resolved_titles"] += len(resolved)
                     except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
                         stats["failed_batches"] += 1
                         _logger.warning("Wikimedia entity context batch failed",
@@ -198,6 +230,8 @@ class WikimediaEntityContextResolver:
                 row["description"], row["entity_type"], tuple(json.loads(row["occupations"])),
                 tuple(json.loads(row["category_ids"])), row["source_url"], row["method"],
                 row["status"], row["captured_at"], tuple(json.loads(row["instance_types"] or "[]")),
+                row["page_namespace"], bool(row["is_disambiguation"]), row["redirected_from"],
+                row["page_language"],
             )
         return found
 
@@ -213,7 +247,7 @@ class WikimediaEntityContextResolver:
             )}
         return [row for row in records if row["id"] not in cached_ids
                 and row.get("source") == "wikimedia_pageviews_top_per_country"
-                and row.get("project", "").endswith(".wikipedia")
+                and row.get("project") in WikimediaEntityContextResolver.PROJECT_APIS
                 and isinstance(row.get("keyword"), str)
                 and "|" not in row["keyword"]
                 and 1 <= len(row["keyword"]) <= MAX_TITLE_LENGTH]
@@ -222,15 +256,18 @@ class WikimediaEntityContextResolver:
     def _groups(records):
         groups = {}
         for row in records:
-            groups.setdefault(row["project"], []).append(row)
+            project = row["project"]
+            api, language = WikimediaEntityContextResolver.PROJECT_APIS[project]
+            entry = groups.setdefault(project, (api, language, []))
+            entry[2].append(row)
         return groups
 
-    def _resolve_batch(self, client, language, records):
-        api = f"https://{language}.wikipedia.org/w/api.php"
+    def _resolve_batch(self, client, api, language, records):
         titles = [row["keyword"] for row in records]
         page_data = self._get_json(client, api, {
             "action": "query", "format": "json", "formatversion": "2",
-            "prop": "pageprops|description", "ppprop": "wikibase_item",
+            "prop": "pageprops|description|info|extracts", "ppprop": "wikibase_item|disambiguation",
+            "inprop": "url", "exintro": "1", "explaintext": "1", "exchars": "1200",
             "redirects": "1", "titles": "|".join(titles),
         })
         query = page_data.get("query", {})
@@ -274,10 +311,13 @@ class WikimediaEntityContextResolver:
             description = (page or {}).get("description", "")
             if not isinstance(description, str):
                 description = ""
+            if not description and isinstance((page or {}).get("extract"), str):
+                description = page["extract"][:1200]
             page_title = page.get("title", record["keyword"]) if isinstance(page, dict) else record["keyword"]
             wikidata_descriptions = entity.get("descriptions", {})
             if isinstance(wikidata_descriptions, dict):
                 description = wikidata_descriptions.get("en", {}).get("value") or description
+            description = description[:1200]
             instance = self._claim_ids(entity, "P31")
             occupations = tuple(self._claim_ids(entity, "P106"))
             entity_type = next((INSTANCE_TYPES[value] for value in instance if value in INSTANCE_TYPES), "unknown")
@@ -295,13 +335,20 @@ class WikimediaEntityContextResolver:
                     else "news_politics.current_events")
                 categories = tuple(dict.fromkeys((*categories, political_category)))
             page_id = page.get("pageid") if isinstance(page, dict) else None
-            source_url = f"https://{language}.wikipedia.org/wiki/{quote(page_title.replace(' ', '_'))}"
+            source_url = page.get("fullurl") or (
+                api.rsplit("/w/api.php", 1)[0] + "/wiki/" + quote(page_title.replace(" ", "_"))
+            )
             status = "CLASSIFIED" if entity_type != "unknown" or categories else "UNKNOWN"
             method = "WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS" if qid else "WIKIPEDIA_PAGE_WITHOUT_QID"
             output[record["id"]] = EntityContext(
                 record["id"], page_title, page_id if type(page_id) is int else None,
                 qid if isinstance(qid, str) else None, description, entity_type,
                 occupations, categories, source_url, method, status, _timestamp(), instance,
+                page.get("ns") if type(page.get("ns")) is int else None,
+                "disambiguation" in (page.get("pageprops") or {}),
+                next((source_title for source_title, target_title in redirects.items()
+                      if _normalize_title(target_title) == _normalize_title(page_title)), ""),
+                page.get("pagelanguage") if isinstance(page.get("pagelanguage"), str) else language,
             )
         return output
 
@@ -333,10 +380,13 @@ class WikimediaEntityContextResolver:
             return
         with self.store.connect() as db:
             db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
-                entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
+                page_namespace,is_disambiguation,redirected_from,page_language,entity_type,occupations,
+                category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
                 title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
-                description=excluded.description,entity_type=excluded.entity_type,
+                description=excluded.description,page_namespace=excluded.page_namespace,
+                is_disambiguation=excluded.is_disambiguation,redirected_from=excluded.redirected_from,
+                page_language=excluded.page_language,entity_type=excluded.entity_type,
                 occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
                 source_url=excluded.source_url,method=excluded.method,status=excluded.status,
                 context_version=excluded.context_version,captured_at=excluded.captured_at""",

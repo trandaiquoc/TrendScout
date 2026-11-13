@@ -767,7 +767,7 @@ export const en = {
   'workbench.keywords': 'Tracked keywords',
   'workbench.in-collections': 'In Collections',
   'workbench.more-filters': 'More filters',
-  'workbench.summary-detail': 'Topic matches: {classified} clear, {ambiguous} need review, {unknown} lack enough information. Organized automatically: {automatic} · Added by you: {manual} · Collections created automatically: {created}.',
+  'workbench.summary-detail': 'Topic status: {classified} identified, {ambiguous} need review, {unknown} lack enough information, {ineligible} are not topics. Organized automatically: {automatic} · Added by you: {manual} · Collections created automatically: {created}.',
   'workbench.subtree-count': '{count} unique keywords in this Collection and its subcollections',
   'workbench.auto-assigned': 'Organized automatically',
   'workbench.user-added': 'Added by you',

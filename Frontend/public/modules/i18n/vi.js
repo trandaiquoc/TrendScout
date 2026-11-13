@@ -768,7 +768,7 @@ export const vi = {
   'workbench.keywords': 'Từ khóa đang theo dõi',
   'workbench.in-collections': 'Đã có trong Bộ sưu tập',
   'workbench.more-filters': 'Bộ lọc nâng cao',
-  'workbench.summary-detail': 'Nhận diện chủ đề: {classified} rõ ràng, {ambiguous} cần xem lại, {unknown} chưa đủ thông tin. Tự động xếp: {automatic} · Bạn đã thêm: {manual} · Bộ sưu tập tạo tự động: {created}.',
+  'workbench.summary-detail': 'Trạng thái chủ đề: {classified} đã nhận diện, {ambiguous} cần xem lại, {unknown} chưa đủ thông tin, {ineligible} không phải chủ đề. Tự động xếp: {automatic} · Bạn đã thêm: {manual} · Bộ sưu tập tạo tự động: {created}.',
   'workbench.subtree-count': '{count} từ khóa duy nhất trong Bộ sưu tập và các mục con',
   'workbench.auto-assigned': 'Tự động sắp xếp',
   'workbench.user-added': 'Bạn đã thêm',
