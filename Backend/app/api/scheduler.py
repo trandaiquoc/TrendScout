@@ -58,6 +58,7 @@ def _operator(request: Request) -> None:
 
 @router.get("/scheduler")
 def list_schedules(request: Request):
+    validate_public_request_origin(request, request.app.state.settings.environment_profile)
     store = _store(request)
     settings = request.app.state.settings
     worker = getattr(request.app.state, "scheduler_worker", None)

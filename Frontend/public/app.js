@@ -344,7 +344,42 @@ async function loadRuntimeStatus() {
     schedulerStatus.classList.toggle('pill--green',Boolean(s.worker_running));
     schedulerStatus.classList.toggle('pill--gray',!s.worker_running);
     $('#settings-scheduler-reason').textContent=t(s.worker_running?'settings.scheduler-running-help':s.enabled?'settings.scheduler-configured-help':'settings.scheduler-help');
+    await loadSchedulerList();
   } catch(error) { root.replaceChildren(element('div',getErrorMessage(error,'settings.runtime-error'))); }
+}
+
+async function loadSchedulerList() {
+  const root=$('#settings-schedules'); if(!root)return;
+  root.replaceChildren();
+  try {
+    const data=await getJson('/api/v1/scheduler');
+    if(!data.items?.length){root.append(element('li',t('settings.scheduler-no-items'),'schedule-empty'));return;}
+    for(const item of data.items){
+      const card=element('li',null,'schedule-item');
+      const heading=element('div',null,'schedule-item-heading');
+      heading.append(element('strong',item.name || t('common.unavailable')),
+        element('span',t(item.enabled?'settings.schedule-enabled':'settings.schedule-disabled'),'pill '+(item.enabled?'pill--green':'pill--gray')));
+      const details=element('dl',null,'schedule-item-details');
+      const values=[
+        [t('settings.schedule-frequency'),t(item.frequency==='WEEKLY'?'settings.schedule-weekly':'settings.schedule-daily')],
+        [t('settings.schedule-timezone'),item.timezone],
+        [t('settings.schedule-next'),formatScheduleTime(item.next_run_at,item.timezone)],
+        [t('settings.schedule-last'),item.last_run_at?`${formatScheduleTime(item.last_run_at,item.timezone)} · ${localizedStatus('status.',item.last_status || 'UNKNOWN')}`:t('common.unavailable')],
+        [t('settings.schedule-missed'),number(item.missed_runs || 0)],
+      ];
+      for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',value));details.append(row);}
+      card.append(heading,details);root.append(card);
+    }
+  } catch {
+    root.append(element('li',t('settings.scheduler-list-unavailable'),'schedule-empty'));
+  }
+}
+
+function formatScheduleTime(value,timezone) {
+  const date=new Date(value);
+  if(!Number.isFinite(date.getTime()))return t('common.unavailable');
+  try { return new Intl.DateTimeFormat(getLocale()==='vi'?'vi-VN':'en-US',{dateStyle:'medium',timeStyle:'short',timeZone:timezone}).format(date); }
+  catch { return t('common.unavailable'); }
 }
 
 async function loadResearchWorkspace() {
