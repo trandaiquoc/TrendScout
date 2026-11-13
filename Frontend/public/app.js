@@ -14,6 +14,7 @@ const state = {
   run: null,
   publicFetchDiscovery: null,
   publicFetchSources: [],
+  publicFetchFinishedAt: null,
   category: 'all',
   query: '',
   sort: 'score',
@@ -230,16 +231,19 @@ const fetchController = new PublicFetchController({
     if (runId) {
       state.publicFetchDiscovery = null;
       state.publicFetchSources = [];
+      state.publicFetchFinishedAt = null;
       loadRun(runId);
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
       state.publicFetchDiscovery = fetchStatus.discovery;
       state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
+      state.publicFetchFinishedAt = typeof fetchStatus.finished_at === 'string'
+        ? fetchStatus.finished_at : null;
       state.runId = null;
       state.dataRunId = null;
       state.run = null;
       state.offset = 0;
       renderPublicFetchDiscovery();
-      showView('keywords');
+      showView('overview');
       loadKeywords();
     }
     scheduleCapabilityRefresh(100);
@@ -294,6 +298,14 @@ function updateRun(run) {
   $('#runs-current').textContent = run.run_id || 'NOT_AVAILABLE';
   $('#runs-state').textContent = status ? localizedStatus('status.', status) : 'NOT_AVAILABLE';
   $('#runs-count').textContent = run.keyword_count == null ? 'NOT_AVAILABLE' : number(run.keyword_count);
+  $('#metric-records-returned').textContent = '—';
+  $('#metric-records-returned-note').textContent = t('metric.not-reported');
+  $('#metric-records-stored').textContent = '—';
+  $('#metric-records-stored-note').textContent = t('metric.not-reported');
+  $('#metric-topics-found').textContent = number(run.keyword_count);
+  $('#metric-topics-found-note').textContent = t('metric.from-analysis');
+  $('#metric-observation-date').textContent = date(run.data_date);
+  $('#metric-last-fetch').textContent = run.fetched_at ? t('metric.last-fetch', { value: timestamp(run.fetched_at) }) : t('metric.not-reported');
 
   const coverage = Array.isArray(run.coverage)
     ? run.coverage.map((item) => (item.date || '—') + ': ' + (item.status || 'NOT_AVAILABLE')
@@ -364,7 +376,59 @@ function renderPublicFetchDiscovery() {
   const bundle = state.publicFetchDiscovery
     ? { ...state.publicFetchDiscovery, sources: state.publicFetchSources }
     : null;
+  if (state.publicFetchDiscovery) updatePublicDiscoverySummary(state.publicFetchDiscovery, state.publicFetchSources);
   renderDiscoveryBundle(bundle);
+}
+
+function updatePublicDiscoverySummary(discovery, sources) {
+  const source = (Array.isArray(sources) ? sources : []).find((item) => item?.source_id === 'wikimedia_pageviews_top_per_country');
+  const recordCount = Number.isInteger(source?.record_count) ? source.record_count : null;
+  const omitted = Number.isInteger(source?.coverage?.records_omitted_storage_limit)
+    ? source.coverage.records_omitted_storage_limit : null;
+  const candidates = Array.isArray(discovery?.candidates) ? discovery.candidates : [];
+  const observations = candidates.flatMap((candidate) => Array.isArray(candidate.evidence) ? candidate.evidence : []);
+  const observedDate = observations.find((item) => typeof item.observed_at === 'string')?.observed_at?.slice(0, 10);
+  const fetchedAt = observations.find((item) => typeof item.fetched_at === 'string')?.fetched_at;
+  const delivery = source?.delivery_state || observations[0]?.delivery_mode || 'FRESH';
+  $('#metric-records-returned').textContent = recordCount == null ? '—' : number(recordCount + (omitted || 0));
+  $('#metric-records-returned-note').textContent = t('metric.provider-accepted');
+  $('#metric-records-stored').textContent = recordCount == null ? '—' : number(recordCount);
+  $('#metric-records-stored-note').textContent = omitted == null ? t('metric.local-storage')
+    : t('metric.storage-omitted', { count: number(omitted) });
+  $('#metric-topics-found').textContent = number(discovery?.candidate_count ?? 0);
+  $('#metric-topics-found-note').textContent = t('metric.candidates-shown', { count: number(discovery?.shown_count ?? candidates.length) });
+  $('#metric-observation-date').textContent = date(observedDate);
+  const lastFetch = state.publicFetchFinishedAt || fetchedAt;
+  $('#metric-last-fetch').textContent = lastFetch
+    ? t('metric.last-fetch', { value: timestamp(lastFetch) }) : t('metric.fetch-to-begin');
+  const context = [t('chart.scope'), 'LIVE', delivery, observedDate ? date(observedDate) : '—',
+    fetchedAt ? t('overview.context-source-fetched', { value: timestamp(fetchedAt) }) : '—'].join(' · ');
+  $('#overview-context').replaceChildren(element('span', '◉', 'meta-mark'), element('span', context));
+
+  const unique = new Map();
+  for (const item of observations) {
+    if (item.source_id !== 'wikimedia_pageviews_top_per_country'
+        || !Number.isInteger(item.approximate_views) || item.approximate_views < 0) continue;
+    const key = [item.project, item.article, item.observed_at, item.scope].join('|');
+    if (!unique.has(key)) unique.set(key, item);
+  }
+  const chartRows = [...unique.values()].sort((a, b) => (a.provider_rank ?? 9999) - (b.provider_rank ?? 9999)).slice(0, 8);
+  const chart = $('#pageviews-chart');
+  chart.replaceChildren();
+  $('#pageviews-empty').hidden = chartRows.length > 0;
+  if (chartRows.length) {
+    const max = Math.max(...chartRows.map((item) => item.approximate_views), 1);
+    for (const item of chartRows) {
+      const row = element('li', null, 'chart-row');
+      const label = element('span', item.article || '—', 'chart-label');
+      const track = element('span', null, 'chart-track');
+      const bar = element('span', null, 'chart-bar');
+      bar.style.width = `${Math.max(3, (item.approximate_views / max) * 100)}%`;
+      track.append(bar);
+      row.append(label, track, element('strong', number(item.approximate_views), 'chart-value'));
+      chart.append(row);
+    }
+  }
 }
 
 function renderDiscoveryBundle(bundle) {
@@ -444,6 +508,7 @@ async function loadRun(id, { poll = false } = {}) {
     state.detailSequence += 1;
     state.publicFetchDiscovery = null;
     state.publicFetchSources = [];
+    state.publicFetchFinishedAt = null;
     announce('');
   }
   const sequence = ++state.runSequence;
@@ -481,8 +546,9 @@ async function loadRun(id, { poll = false } = {}) {
   }
 }
 
-function appendCell(row, value, className = '') {
+function appendCell(row, value, className = '', label = '') {
   const cell = element('td');
+  if (label) cell.dataset.label = label;
   cell.append(element('span', value, className));
   row.append(cell);
 }
@@ -493,20 +559,22 @@ function renderRows(items) {
   for (const item of items) {
     const row = element('tr');
     const title = element('td');
+    title.dataset.label = t('table.topic');
     title.append(element('strong', item.display_keyword || item.canonical_keyword || '—'));
     title.append(element('small', item.project || '—'));
     row.append(title);
-    appendCell(row, item.score == null ? '—' : number(item.score) + ' / 100', 'score-cell');
+    const category = Array.isArray(item.categories) && item.categories.length
+      ? item.categories.map((value) => t('category.' + value)).join(', ') : t('category.unclassified');
+    appendCell(row, category, '', t('table.category'));
+    const evidence = item.current_views_ceil != null
+      ? t('table.views-evidence', { value: number(item.current_views_ceil), rank: item.provider_rank ?? '—' })
+      : item.score == null ? t('table.no-comparable-evidence') : number(item.score) + ' / 100';
+    appendCell(row, evidence, 'score-cell', t('table.evidence'));
+    appendCell(row, date(item.observation_date), '', t('table.date'));
     const status = item.status || '—';
     appendCell(row, localizedStatus('keywordstatus.', status), 'pill table-status ' + (
       ['EMERGING', 'STABLE', 'FALLING', 'INSUFFICIENT_DATA'].includes(status) ? 'pill--' + status.toLowerCase() : ''
-    ));
-    appendCell(row, number(item.current_views_ceil));
-    appendCell(row, number(item.baseline));
-    appendCell(row, item.ratio == null ? '—' : number(item.ratio) + '×');
-    appendCell(row, date(item.observation_date));
-    const flags = Array.isArray(item.quality_flags) ? item.quality_flags : [];
-    appendCell(row, flags.length ? t('table.flags', { count: number(flags.length) }) : '—');
+    ), t('table.status'));
     const action = element('td');
     const button = element('button', '↗', 'icon-button row-detail');
     button.type = 'button';
@@ -538,21 +606,40 @@ async function loadKeywords() {
           && (category === 'all' || categories.includes(category));
       })
       : [];
+    const visibleLimit = Number.isInteger(state.publicFetchDiscovery.shown_count)
+      ? state.publicFetchDiscovery.shown_count : candidates.length;
+    const totalCandidates = Number.isInteger(state.publicFetchDiscovery.candidate_count)
+      ? state.publicFetchDiscovery.candidate_count : candidates.length;
+    const coverageNote = $('#candidate-coverage-note');
+    coverageNote.hidden = totalCandidates <= visibleLimit;
+    if (!coverageNote.hidden) {
+      coverageNote.textContent = t('keywords.candidate-limit', {
+        shown: number(visibleLimit), total: number(totalCandidates),
+      });
+    }
     if (state.sort === 'keyword') {
       candidates = [...candidates].sort((left, right) => String(left.keyword).localeCompare(String(right.keyword)));
+    } else if (state.sort === 'views') {
+      const views = (candidate) => Math.max(0, ...(candidate.evidence || []).map((evidence) => evidence.approximate_views || 0));
+      candidates = [...candidates].sort((left, right) => views(right) - views(left));
     }
     const rows = candidates.map((candidate) => {
       const sources = [...new Set((candidate.evidence || []).map((item) => item.source_id))];
-      const firstEvidence = candidate.evidence?.[0];
+      const evidence = candidate.evidence?.find((item) => item.source_id === 'wikimedia_pageviews_top_per_country') || candidate.evidence?.[0];
+      const sourceLabel = sources.map((sourceId) => {
+        const key = FETCH_SOURCE_LABELS[sourceId];
+        return key ? t(key) : sourceId;
+      }).join(' · ');
       return {
         ...candidate,
         display_keyword: candidate.keyword,
         canonical_keyword: candidate.keyword,
-        project: sources.join(' · '),
-        observation_date: firstEvidence?.observed_at,
+        project: [sourceLabel, evidence?.project].filter(Boolean).join(' · '),
+        observation_date: evidence?.observed_at?.slice(0, 10),
         score: null,
         status: candidate.status || 'INSUFFICIENT_DATA',
-        current_views_ceil: null,
+        current_views_ceil: evidence?.approximate_views ?? null,
+        provider_rank: evidence?.provider_rank ?? null,
         baseline: null,
         ratio: null,
       };
@@ -578,6 +665,7 @@ async function loadKeywords() {
     setNotice('#keyword-notice', '');
     return;
   }
+  $('#candidate-coverage-note').hidden = true;
   if (!state.dataRunId) {
     renderRows([]);
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
@@ -861,6 +949,10 @@ function bindEvents() {
     if (state.fetchReady) {
       fetchController.activate();
     }
+  });
+  $('#empty-fetch').addEventListener('click', () => {
+    if (state.fetchReady) fetchController.activate();
+    else { showView('overview'); window.location.hash = 'overview'; }
   });
   $('#run-id').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

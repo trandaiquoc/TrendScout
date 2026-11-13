@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f7fb">
   <meta name="color-scheme" content="light dark">
-  <title>TrendScout — Insight workspace</title>
+  <meta name="description" content="Discover topics in Wikimedia Pageviews with clear source evidence and bounded local search.">
+  <title>TrendScout — Discover Wikimedia topics</title>
   <script>
     (() => {
       document.documentElement.classList.add('js-pending');
@@ -28,28 +29,33 @@
   <div class="shell" id="app-shell">
     <button class="scrim" id="nav-scrim" type="button" data-i18n-aria="a11y.close-nav" aria-label="Close navigation" hidden></button>
     <aside class="sidebar" id="workspace-nav-panel" data-i18n-aria="a11y.navigation" aria-label="Workspace navigation">
-      <a class="brand" href="#overview" data-i18n-aria="brand.home" aria-label="TrendScout overview">
-        <span class="brand-mark" aria-hidden="true">✳</span>
+      <a class="brand" href="#overview">
+        <span class="brand-mark" aria-hidden="true">⌖</span>
         <span class="brand-word">trend<span>scout</span><small data-i18n="brand.caption"></small></span>
       </a>
       <div class="nav-label" data-i18n="nav.section"></div>
       <nav id="workspace-nav" aria-label="Workspace">
         <a class="nav-link active" href="#overview" data-nav="overview" aria-current="page"><span class="nav-icon" aria-hidden="true">◈</span><span data-i18n="nav.overview"></span></a>
         <a class="nav-link" href="#sources" data-nav="sources"><span class="nav-icon" aria-hidden="true">◎</span><span data-i18n="nav.sources"></span></a>
-        <a class="nav-link" href="#runs" data-nav="runs"><span class="nav-icon" aria-hidden="true">◷</span><span data-i18n="nav.runs"></span></a>
-        <a class="nav-link" href="#keywords" data-nav="keywords"><span class="nav-icon" aria-hidden="true">▤</span><span data-i18n="nav.keywords"></span></a>
-        <a class="nav-link" href="#algorithms" data-nav="algorithms"><span class="nav-icon" aria-hidden="true">⌁</span><span data-i18n="nav.algorithms"></span></a>
-        <a class="nav-link" href="#quality" data-nav="quality"><span class="nav-icon" aria-hidden="true">◇</span><span data-i18n="nav.quality"></span></a>
-        <a class="nav-link" href="#refresh" data-nav="refresh"><span class="nav-icon" aria-hidden="true">↻</span><span data-i18n="nav.refresh"></span></a>
         <a class="nav-link" href="#research" data-nav="research"><span class="nav-icon" aria-hidden="true">▧</span><span data-i18n="nav.research"></span></a>
-        <a class="nav-link" href="#usage" data-nav="usage"><span class="nav-icon" aria-hidden="true">◴</span><span data-i18n="nav.usage"></span></a>
         <a class="nav-link" href="#settings" data-nav="settings"><span class="nav-icon" aria-hidden="true">⚙</span><span data-i18n="nav.settings"></span></a>
+        <details class="nav-advanced">
+          <summary class="nav-link"><span class="nav-icon" aria-hidden="true">···</span><span data-i18n="nav.advanced"></span></summary>
+          <nav class="nav-advanced-list" aria-label="Advanced views">
+            <a class="nav-link" href="#keywords" data-nav="keywords"><span class="nav-icon" aria-hidden="true">▤</span><span data-i18n="nav.keywords"></span></a>
+            <a class="nav-link" href="#runs" data-nav="runs"><span class="nav-icon" aria-hidden="true">◷</span><span data-i18n="nav.runs"></span></a>
+            <a class="nav-link" href="#algorithms" data-nav="algorithms"><span class="nav-icon" aria-hidden="true">⌁</span><span data-i18n="nav.algorithms"></span></a>
+            <a class="nav-link" href="#quality" data-nav="quality"><span class="nav-icon" aria-hidden="true">◇</span><span data-i18n="nav.quality"></span></a>
+            <a class="nav-link" href="#refresh" data-nav="refresh"><span class="nav-icon" aria-hidden="true">↻</span><span data-i18n="nav.refresh"></span></a>
+            <a class="nav-link" href="#usage" data-nav="usage"><span class="nav-icon" aria-hidden="true">◴</span><span data-i18n="nav.usage"></span></a>
+          </nav>
+        </details>
       </nav>
       <div class="policy-links"><a href="/dashboard/privacy.html" data-i18n="policy.privacy">Privacy Policy</a><a href="/dashboard/terms.html" data-i18n="policy.terms">Terms of Service</a></div>
       <div class="sidebar-source">
         <span class="source-monogram">W</span>
-        <span><strong>Wikimedia Pageviews</strong><small data-i18n="source.adapter"></small></span>
-        <span class="status-dot status-dot--amber" aria-hidden="true"></span>
+        <span><strong>Wikimedia</strong><small id="sidebar-source-status" data-i18n="source.checking"></small></span>
+        <span id="sidebar-source-dot" class="status-dot status-dot--muted" aria-hidden="true"></span>
       </div>
       <div class="sidebar-foot"><span data-i18n="brand.demo"></span><span class="foot-dot"></span></div>
     </aside>
@@ -69,10 +75,8 @@
       </header>
 
       <div class="content">
-        <div class="policy-notice" data-i18n="policy.notice">POLICY DRAFT · LOCAL / NOT YET PUBLIC | YouTube Data API: PENDING APPROVAL</div>
         <div id="global-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
         <section data-view="overview" aria-labelledby="overview-heading">
-          <div class="eyebrow"><span class="eyebrow-dot"></span><span data-i18n="overview.eyebrow"></span><span class="eyebrow-rule"></span><span class="eyebrow-market">US</span></div>
           <div class="hero">
             <div class="hero-copy">
               <p class="hero-kicker" data-i18n="overview.kicker"></p>
@@ -80,24 +84,39 @@
               <p data-i18n="overview.subtitle"></p>
             </div>
             <div class="fetch-card">
-              <div class="fetch-card-top"><span class="fetch-icon" aria-hidden="true">✦</span><span id="fetch-badge" class="pill pill--amber" data-i18n="fetch.unavailable"></span></div>
-              <button id="open-fetch" class="button button-primary" type="button" disabled aria-describedby="fetch-readiness"><span data-i18n="fetch.cta"></span><span aria-hidden="true">↗</span></button>
+              <div class="fetch-card-top"><span class="fetch-mode-mark" aria-hidden="true">W</span><span id="fetch-badge" class="pill pill--amber" data-i18n="fetch.unavailable"></span></div>
+              <button id="open-fetch" class="button button-primary" type="button" disabled aria-describedby="fetch-readiness"><span data-i18n="fetch.cta"></span><span aria-hidden="true">→</span></button>
               <p id="fetch-readiness" class="fetch-help" data-i18n="fetch.disabled"></p>
               <p id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></p>
             </div>
           </div>
-          <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="overview.disclaimer"></p></div>
-          <div class="section-row"><div><p class="section-kicker" data-i18n="overview.snapshot-kicker"></p><h2 data-i18n="overview.snapshot-title"></h2></div><a class="text-link" href="#runs" data-goto="runs"><span data-i18n="overview.open-runs"></span><span aria-hidden="true">→</span></a></div>
-          <div class="metrics-grid" aria-label="Run summary">
-            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.status"></span><span aria-hidden="true">◷</span></div><strong id="run-status" class="metric-value" data-i18n="run.none"></strong><span id="run-note" class="metric-foot" data-i18n="run.choose"></span></article>
-            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.data-date"></span><span aria-hidden="true">▦</span></div><strong id="data-date" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.data-date-help"></span></article>
-            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.keywords"></span><span aria-hidden="true">⌁</span></div><strong id="keyword-count" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.keywords-help"></span></article>
-            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.scored"></span><span aria-hidden="true">↗</span></div><strong id="scored-count" class="metric-value">—</strong><span class="metric-foot" data-i18n="metric.scored-help"></span></article>
+          <div class="metrics-grid" aria-label="Wikimedia Fetch summary">
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.records-returned"></span><span aria-hidden="true">↙</span></div><strong id="metric-records-returned" class="metric-value">—</strong><span id="metric-records-returned-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.records-stored"></span><span aria-hidden="true">▣</span></div><strong id="metric-records-stored" class="metric-value">—</strong><span id="metric-records-stored-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.topics-found"></span><span aria-hidden="true">⌁</span></div><strong id="metric-topics-found" class="metric-value">—</strong><span id="metric-topics-found-note" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
+            <article class="metric-card"><div class="metric-label"><span data-i18n="metric.observation-date"></span><span aria-hidden="true">◷</span></div><strong id="metric-observation-date" class="metric-value">—</strong><span id="metric-last-fetch" class="metric-foot" data-i18n="metric.fetch-to-begin"></span></article>
           </div>
-          <div class="snapshot-meta" id="overview-context"><span class="meta-mark" aria-hidden="true">◉</span><span data-i18n="run.no-context"></span></div>
-          <div class="overview-bottom">
-            <article class="panel mini-panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="overview.source-kicker"></p><h2 data-i18n="overview.source-title"></h2></div><a class="text-link" href="#sources" data-goto="sources"><span data-i18n="common.view-details"></span><span aria-hidden="true">→</span></a></div><div class="source-inline"><span class="source-monogram">W</span><div><strong>Wikimedia Pageviews</strong><small data-i18n="source.not-live"></small></div><span class="pill pill--amber" data-i18n="source.adapter-status"></span></div></article>
-            <article class="panel mini-panel signal-panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="overview.signal-kicker"></p><h2 data-i18n="overview.signal-title"></h2></div><span class="signal-glyph" aria-hidden="true">⌁</span></div><p data-i18n="overview.signal-help"></p><a class="button button-secondary" href="#keywords" data-goto="keywords"><span data-i18n="overview.open-keywords"></span><span aria-hidden="true">→</span></a></article>
+          <div class="discover-grid">
+            <article class="panel chart-panel">
+              <div class="panel-heading"><div><p class="section-kicker" data-i18n="chart.kicker"></p><h2 data-i18n="chart.title"></h2><p class="panel-subtitle" data-i18n="chart.help"></p></div><span class="source-scope-pill" data-i18n="chart.scope">US · all-access</span></div>
+              <ol id="pageviews-chart" class="pageviews-chart" aria-label="Top Wikimedia pageviews"></ol>
+              <p id="pageviews-empty" class="chart-empty" data-i18n="chart.empty"></p>
+            </article>
+            <article class="panel source-context-panel">
+              <div class="panel-heading"><div><p class="section-kicker" data-i18n="overview.source-kicker"></p><h2 data-i18n="overview.source-title"></h2></div><span id="main-source-status" class="pill pill--gray" data-i18n="source.checking"></span></div>
+              <p class="source-context-copy" data-i18n="overview.source-help"></p>
+              <div id="overview-context" class="snapshot-meta"><span class="meta-mark" aria-hidden="true">◉</span><span data-i18n="overview.no-fetch-context"></span></div>
+              <p class="data-limit-note" data-i18n="overview.disclaimer"></p>
+              <a class="text-link" href="#sources" data-goto="sources"><span data-i18n="overview.source-details"></span><span aria-hidden="true">→</span></a>
+            </article>
+          </div>
+          <div class="section-row discover-results-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h2 data-i18n="keywords.title"></h2></div><span id="results-count" class="count-chip">—</span></div>
+          <div id="candidate-coverage-note" class="notice notice--info candidate-coverage-note" role="status" aria-live="polite" hidden></div>
+          <div id="keyword-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
+          <div class="panel table-panel">
+            <div class="table-toolbar"><div class="filter-tabs" role="group" data-i18n-aria="keywords.filter-label" aria-label="Keyword categories"><button class="filter-tab active" type="button" data-category="all" aria-pressed="true" data-i18n="filter.all"></button><button class="filter-tab" type="button" data-category="fashion" aria-pressed="false" data-i18n="filter.fashion"></button><button class="filter-tab" type="button" data-category="home_goods" aria-pressed="false" data-i18n="filter.home"></button><button class="filter-tab" type="button" data-category="unclassified" aria-pressed="false" data-i18n="filter.unclassified"></button></div><div class="table-tools"><label class="search-field"><span aria-hidden="true">⌕</span><span class="sr-only" data-i18n="keywords.search-label"></span><input id="search" type="search" maxlength="100" aria-describedby="keyword-notice candidate-coverage-note" data-i18n-placeholder="keywords.search-placeholder"></label><label class="sr-only" for="sort" data-i18n="keywords.sort-label"></label><select id="sort"><option value="score" data-i18n="sort.score"></option><option value="views" data-i18n="sort.views"></option><option value="keyword" data-i18n="sort.keyword"></option></select></div></div>
+            <div class="table-wrap"><table><thead><tr><th data-i18n="table.topic"></th><th data-i18n="table.category"></th><th data-i18n="table.evidence"></th><th data-i18n="table.date"></th><th data-i18n="table.status"></th><th><span class="sr-only" data-i18n="table.details"></span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty-state"><span class="empty-art" aria-hidden="true">⌁</span><strong data-i18n="keywords.empty-title"></strong><p data-i18n="keywords.empty-help"></p><button id="empty-fetch" class="button button-secondary" type="button" data-i18n="fetch.cta"></button></div></div>
+            <div class="table-footer"><span id="pagination-info" data-i18n="keywords.no-results"></span><div class="pagination"><button id="prev" type="button" disabled data-i18n-aria="a11y.previous-page" aria-label="Previous page">←</button><button id="next" type="button" disabled data-i18n-aria="a11y.next-page" aria-label="Next page">→</button></div></div>
           </div>
         </section>
 
@@ -108,7 +127,7 @@
             <article class="panel source-card source-card--active" data-source="wikimedia" data-source-status="adapter-implemented-live-unverified">
               <div class="source-card-head"><span class="source-monogram">W</span><span class="pill pill--amber" data-i18n="source.adapter-status"></span></div>
               <h2>Wikimedia Pageviews</h2><p data-i18n="sources.wikimedia-summary"></p>
-              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented"></dd></div><div><dt data-i18n="sources.live-status"></dt><dd class="text-amber" data-i18n="sources.not-verified"></dd></div><div><dt data-i18n="sources.coverage"></dt><dd>US · all-access · top pages</dd></div><div><dt data-i18n="sources.metric"></dt><dd>views_ceil · pageviews</dd></div><div><dt data-i18n="sources.window"></dt><dd data-i18n="sources.wikimedia-window"></dd></div><div><dt data-i18n="sources.limit"></dt><dd data-i18n="sources.wikimedia-limit"></dd></div></dl>
+              <dl class="detail-list"><div><dt data-i18n="sources.adapter"></dt><dd data-i18n="sources.implemented"></dd></div><div><dt data-i18n="sources.live-status"></dt><dd id="wikimedia-live-status" class="text-amber" data-i18n="sources.not-verified"></dd></div><div><dt data-i18n="sources.coverage"></dt><dd>US · all-access · top pages</dd></div><div><dt data-i18n="sources.metric"></dt><dd>views_ceil · pageviews</dd></div><div><dt data-i18n="sources.window"></dt><dd data-i18n="sources.wikimedia-window"></dd></div><div><dt data-i18n="sources.limit"></dt><dd data-i18n="sources.wikimedia-limit"></dd></div></dl>
             </article>
             <article class="panel source-card" data-source="youtube" data-source-status="not-configured">
               <div class="source-card-head"><span class="source-monogram source-monogram--red">▶</span><span class="pill pill--gray" data-i18n="source.pending"></span></div>
@@ -132,6 +151,7 @@
 
         <section class="view-panel" data-view="runs" hidden aria-labelledby="runs-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="runs.kicker"></p><h1 id="runs-heading" data-i18n="runs.title"></h1><p data-i18n="runs.description"></p></div><span class="page-heading-mark" aria-hidden="true">◷</span></div>
+          <div class="sr-only" aria-live="polite"><span id="run-status"></span><span id="run-note"></span><span id="data-date"></span><span id="keyword-count"></span><span id="scored-count"></span></div>
           <div class="panel run-lookup"><div class="panel-heading"><div><p class="section-kicker" data-i18n="runs.open-kicker"></p><h2 data-i18n="runs.open-title"></h2></div><span class="pill pill--blue" data-i18n="runs.read-only"></span></div><p id="run-id-help" data-i18n="runs.open-help"></p><div class="lookup-form"><label for="run-id" data-i18n="runs.run-id"></label><div class="input-action"><input id="run-id" autocomplete="off" spellcheck="false" maxlength="32" aria-describedby="run-id-help global-notice" data-i18n-placeholder="runs.run-id-placeholder"><button id="load-run" class="button button-secondary" type="button"><span data-i18n="runs.open-action"></span><span aria-hidden="true">→</span></button></div></div></div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="runs.list-limitation"></p></div>
           <div class="panel run-summary"><div class="panel-heading"><div><p class="section-kicker" data-i18n="runs.current-kicker"></p><h2 data-i18n="runs.current-title"></h2></div><span id="runs-state" class="pill pill--gray">NOT_AVAILABLE</span></div><dl class="detail-list detail-list--grid"><div><dt data-i18n="runs.run-id"></dt><dd id="runs-current" class="mono">NOT_AVAILABLE</dd></div><div><dt data-i18n="runs.keyword-count"></dt><dd id="runs-count">NOT_AVAILABLE</dd></div><div class="wide"><dt data-i18n="runs.coverage"></dt><dd id="runs-coverage">NOT_MEASURED</dd></div></dl><div class="panel-actions"><a class="button button-secondary" href="#keywords" data-goto="keywords"><span data-i18n="runs.open-results"></span><span aria-hidden="true">→</span></a></div></div>
@@ -139,17 +159,9 @@
         </section>
 
         <section class="view-panel" data-view="keywords" hidden aria-labelledby="keywords-heading">
-          <div class="page-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h1 id="keywords-heading"><span data-i18n="nav.keywords"></span> <span class="count-chip" id="results-count">—</span></h1><p data-i18n="keywords.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
+          <div class="page-heading"><div><p class="section-kicker" data-i18n="keywords.kicker"></p><h1 id="keywords-heading" tabindex="-1" data-i18n="keywords.title"></h1><p data-i18n="keywords.description"></p></div></div>
           <div class="panel" id="demo-discovery" hidden><h2 id="demo-discovery-title" data-i18n="demo.discovery-title"></h2><p id="demo-discovery-help" data-i18n="demo.discovery-help"></p><p id="demo-discovery-count"></p><ul id="demo-discovery-list"></ul></div>
-          <div id="keyword-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
-          <div class="panel table-panel">
-            <div class="table-toolbar">
-          <div class="filter-tabs" role="group" data-i18n-aria="keywords.filter-label" aria-label="Keyword categories"><button class="filter-tab active" type="button" data-category="all" aria-pressed="true" data-i18n="filter.all"></button><button class="filter-tab" type="button" data-category="fashion" aria-pressed="false" data-i18n="filter.fashion"></button><button class="filter-tab" type="button" data-category="home_goods" aria-pressed="false" data-i18n="filter.home"></button><button class="filter-tab" type="button" data-category="unclassified" aria-pressed="false" data-i18n="filter.unclassified"></button></div>
-              <div class="table-tools"><label class="search-field"><span aria-hidden="true">⌕</span><span class="sr-only" data-i18n="keywords.search-label"></span><input id="search" type="search" maxlength="100" aria-describedby="keyword-notice" data-i18n-placeholder="keywords.search-placeholder"></label><label class="sr-only" for="sort" data-i18n="keywords.sort-label"></label><select id="sort"><option value="score" data-i18n="sort.score"></option><option value="views" data-i18n="sort.views"></option><option value="keyword" data-i18n="sort.keyword"></option></select></div>
-            </div>
-            <div class="table-wrap"><table><thead><tr><th data-i18n="table.keyword"></th><th data-i18n="table.score"></th><th data-i18n="table.status"></th><th data-i18n="table.views"></th><th data-i18n="table.baseline"></th><th data-i18n="table.ratio"></th><th data-i18n="table.date"></th><th data-i18n="table.warnings"></th><th><span class="sr-only" data-i18n="table.details"></span></th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty-state"><span class="empty-art" aria-hidden="true">⌁</span><strong data-i18n="keywords.empty-title"></strong><p data-i18n="keywords.empty-help"></p><a class="text-link" href="#runs" data-goto="runs"><span data-i18n="runs.open-action"></span><span aria-hidden="true">→</span></a></div></div>
-          <div class="table-footer"><span id="pagination-info" data-i18n="keywords.no-results"></span><div class="pagination"><button id="prev" type="button" disabled data-i18n-aria="a11y.previous-page" aria-label="Previous page">←</button><button id="next" type="button" disabled data-i18n-aria="a11y.next-page" aria-label="Next page">→</button></div></div>
-          </div>
+          <div class="panel"><h2 data-i18n="keywords.advanced-title"></h2><p data-i18n="keywords.advanced-help"></p><a class="button button-secondary" href="#overview" data-goto="overview"><span data-i18n="keywords.back-to-discover"></span><span aria-hidden="true">→</span></a></div>
         </section>
 
         <section class="view-panel" data-view="algorithms" hidden aria-labelledby="algorithms-heading">

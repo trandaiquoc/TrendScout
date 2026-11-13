@@ -21,31 +21,20 @@ Chạy offline regression, browser E2E và benchmark:
 
 Script chạy D6.1B security tests trên Windows, toàn bộ unittest, golden tests với hai hash seed, `pip check`, JavaScript syntax, Chrome E2E và storage benchmark. Dùng Chrome cài trên máy; script không tải browser, cài package toàn cục hoặc gọi provider. Windows ACL được đọc và xác minh qua Windows security descriptor; DACL data được giới hạn cho user hiện tại, SYSTEM và Administrators. Quota database, WAL/SHM và process-lock dùng thư mục có ACL riêng dưới `%LOCALAPPDATA%\TrendScout`.
 
-## Linux (môi trường kiểm tra phụ)
+## Linux: Wikimedia LIVE local demo
 
-Giữ `setup.sh`, `start.sh`, `demo.sh` và các kiểm tra seccomp trên Linux. Chạy `bash Backend/scripts/verify_offline_readiness.sh` từ root để kiểm tra Linux security gate, gồm seccomp, syscall và giới hạn tài nguyên. Không mô phỏng kết quả các kiểm tra đó trên Windows. Windows là môi trường phát triển/chạy chính; Linux là kiểm tra tương thích và bảo mật riêng.
-
-## Chạy trên Ubuntu
-
-Cần Python 3.12, gói `python3.12-venv` tương ứng và ADC đã đăng nhập. Việc cài gói hệ thống hoặc đăng nhập ADC được thực hiện riêng; script không tự thay đổi Firebase.
-
-Cài đặt một lần tại root:
+Cần Python 3.12, `python3.12-venv`, và quyền truy cập mạng tới Wikimedia Pageviews. Cài dependencies một lần từ repository root, sau đó chạy:
 
 ```bash
-./setup.sh
+bash setup.sh
+bash start.sh
 ```
 
-Script tạo `Backend/.venv`, cài dependency và, nếu chưa có cấu hình token, tạo file `.env` local với quyền `600`. Mở `.env` bằng trình soạn thảo trên máy để lấy `TREND_SCOUT_OPERATOR_TOKEN` khi cần chạy phân tích; không gửi token hoặc file này vào chat hay Git. Nếu `.env` đã tồn tại, script không ghi đè. Cũng có thể đặt `GOOGLE_CLOUD_PROJECT` và `TREND_SCOUT_OPERATOR_TOKEN` qua environment; các biến environment được ưu tiên. Token phải có ít nhất 24 ký tự. File `.env` chỉ hỗ trợ giá trị literal `KEY=value` (có thể đặt trong dấu nháy); không thực thi lệnh hoặc nội suy biến shell.
+Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/) và chọn **Fetch new data** để gửi một lượt Fetch giới hạn. Khởi động không gọi nhà cung cấp; Fetch mới gửi yêu cầu khi người dùng bấm nút. Chế độ mặc định dùng guarded normal Wikimedia LIVE, một worker, loopback và local storage. Không cần Firebase, Firestore, ADC, Google Cloud project, operator token hay Wikimedia API key. Dữ liệu lưu cục bộ và có thể mất khi dừng tiến trình.
 
-Khởi động toàn bộ backend và dashboard từ root:
+`Ctrl+C` dừng tiến trình. Nếu cổng 8000 đang bận, giải phóng cổng hoặc chọn cổng khác bằng `TREND_SCOUT_DEMO_PORT=8123 bash start.sh`. Để chạy fixture ngoại tuyến thay thế, dùng `bash start.sh --synthetic`; dữ liệu đó được gắn nhãn SYNTHETIC và không gọi provider. Các script PowerShell và chế độ Windows không thay đổi.
 
-```bash
-./start.sh
-```
-
-Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/). Nhấn `Ctrl+C` tại terminal đang chạy để dừng. Script mặc định cấu hình project `trendscout-192e4` qua environment và sử dụng ADC hiện có; không tự fetch Wikimedia hay tạo run. Nếu chưa có ADC, cấu hình riêng bằng `gcloud auth application-default login`. Khi chủ động chọn **Fetch & Analyze**, nhập token trong dashboard; giữ run ID để mở lại sau restart.
-
-Trước run live, kiểm tra Firebase Console → Firestore → Usage và Project quotas, xác nhận project `trendscout-192e4`, database `(default)` và quota còn lại. Firebase công bố free tier 50.000 reads, 20.000 writes, 20.000 deletes/ngày và 1 GiB storage; số liệu và quota có thể thay đổi. Không tự bật billing. Xem [Firestore quotas](https://firebase.google.com/docs/firestore/quotas) và [theo dõi usage](https://docs.cloud.google.com/firestore/native/docs/monitor-usage).
+Chạy `bash Backend/scripts/verify_offline_readiness.sh` để kiểm tra Linux security gate gồm seccomp, syscall và giới hạn tài nguyên; kiểm tra đó không được mô phỏng trên Windows.
 
 ## Kiểm tra offline và nguồn
 

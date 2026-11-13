@@ -13,6 +13,12 @@ Demo synthetic nghe loopback, dùng fixture, không gọi provider, và dừng b
 
 Chạy `..\verify_offline_readiness.ps1` để thực hiện D6.1B focused tests, toàn bộ unittest, cả hai golden hash seed, `pip check`, JavaScript syntax, Chrome browser E2E và storage benchmark. File lock dùng byte-range lock Windows qua `msvcrt`, tự nhả khi process kết thúc. Kiểm tra ACL xác minh owner SID và DACL bằng Windows security APIs; cho phép user hiện tại, SYSTEM, Administrators và owner-rights ACE. Reparse point, ACL không đọc được hoặc ACE cấp quyền cho principal khác bị từ chối. SQLite quota ledger nằm dưới `%LOCALAPPDATA%\TrendScout\local\d6-smoke`; database, WAL/SHM và process lock thừa hưởng ACL riêng của thư mục đó.
 
+## Linux: guarded normal Wikimedia LIVE local runtime
+
+From the repository root, run `bash setup.sh` once, then `bash start.sh`. It binds only to `127.0.0.1`, uses one worker and the normal Wikimedia LIVE composition, and defaults to port 8000. Startup does not call Wikimedia; click Fetch in the dashboard to make a bounded provider request. No Firebase/Firestore, ADC, Google Cloud project, operator token, or Wikimedia API key is required for this local composition. `bash start.sh --synthetic` runs the fixture demo. Set `TREND_SCOUT_DEMO_PORT` to use another port. A busy port exits with an actionable message; the foreground process exits cleanly on Ctrl+C.
+
+This runtime is an explicitly guarded local demo, not a cloud deployment or multi-host service. Its local state may be lost when the process stops. The legacy Firestore and operator-token paths documented below remain separate from this entrypoint.
+
 ## Linux (tương thích và bảo mật phụ)
 
 Giữ các script `.sh` và chạy `bash scripts/verify_offline_readiness.sh` từ `Backend/`. Linux là nơi chạy seccomp, libseccomp, resource limits và syscall isolation; không bỏ hoặc giả lập các gate này trên Windows. Xem báo cáo D6 để biết trạng thái gate từng hệ điều hành.
@@ -25,7 +31,7 @@ Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; khôn
 
 Để cài đặt và khởi động toàn bộ hệ thống từ root, ưu tiên `./setup.sh` (một lần) và `./start.sh`; xem [README chính](../README.md). Các lệnh dưới đây là cách thiết lập/chạy thủ công.
 
-Backend Python 3.12 + FastAPI có pipeline Wikimedia, Firestore repository, API run và dashboard cùng origin. Khởi động server không tự fetch Wikimedia hoặc tạo run.
+Repository còn có legacy Firestore-backed run API riêng. `bash start.sh` không dùng API hay credential path đó. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
 
 ## Thiết lập trên Ubuntu
 

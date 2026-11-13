@@ -35,13 +35,18 @@ class D2DashboardContractTests(unittest.TestCase):
         high, low = sorted((luminance(foreground), luminance(background)), reverse=True)
         return (high + 0.05) / (low + 0.05)
 
-    def test_workspace_has_persistent_theme_locale_and_ten_views(self):
+    def test_workspace_has_persistent_theme_locale_and_advanced_navigation(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         self.assertIn('<html lang="vi"', html)
         self.assertIn('data-theme="light"', html)
         self.assertIn("data-theme-toggle", html)
         self.assertIn("data-locale-toggle", html)
         self.assertEqual(html.count("data-nav="), 10)
+        self.assertIn('<nav id="workspace-nav"', html)
+        self.assertEqual(len(re.findall(r'<a class="nav-link[^>]*data-nav=', html.split('<details class="nav-advanced">')[0])), 4)
+        self.assertIn('<details class="nav-advanced">', html)
+        self.assertIn('data-view="overview"', html)
+        self.assertIn('id="rows"', html[: html.index('data-view="sources"')])
         for view in (
             "overview",
             "sources",
@@ -97,6 +102,18 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn("/api/v1/fetches", source)
         self.assertIn("Idempotency-Key", source)
         self.assertNotIn("operator-token", html + source)
+
+    def test_discover_summary_keeps_provider_and_analysis_counts_distinct(self):
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        summary = app[app.index("function updatePublicDiscoverySummary") : app.index("function renderDiscoveryBundle")]
+        legacy_run = app[app.index("function updateRun") : app.index("function renderSyntheticDiscovery")]
+        self.assertIn("source.record_count", summary)
+        self.assertIn("records_omitted_storage_limit", summary)
+        self.assertIn("discovery?.candidate_count", summary)
+        self.assertIn("discovery?.shown_count", summary)
+        self.assertIn("state.publicFetchFinishedAt || fetchedAt", summary)
+        self.assertIn("$('#metric-records-returned').textContent = '—'", legacy_run)
+        self.assertIn("$('#metric-topics-found').textContent = number(run.keyword_count)", legacy_run)
 
     def test_source_cards_are_truthful_for_all_four_requested_sources(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")

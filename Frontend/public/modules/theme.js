@@ -18,7 +18,7 @@ function syncThemeControls(theme) {
   });
   document.querySelectorAll('[data-theme-toggle]').forEach((button) => {
     button.setAttribute('aria-pressed', String(theme === 'dark'));
-    button.setAttribute('aria-label', t('theme.toggle'));
+    button.setAttribute('aria-label', `${t('theme.' + theme)} · ${t('theme.toggle')}`);
   });
 }
 

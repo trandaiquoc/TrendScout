@@ -83,7 +83,9 @@ CHECK = r"""<script>
     }
     check(document.documentElement.dataset.theme==='light','light default');
     check(document.documentElement.lang==='vi','Vietnamese default');
-    check(document.querySelectorAll('[data-nav]').length===10,'ten navigation items');
+    check(document.querySelectorAll('[data-nav]').length===10,'ten destination views remain available');
+    check(document.querySelectorAll('#workspace-nav > .nav-link[data-nav]').length===4,'four primary navigation items');
+    check(document.querySelector('.nav-advanced summary').textContent.includes('Nâng cao'),'technical navigation grouped under Advanced');
     check(document.querySelector('#open-fetch').disabled,'fetch disabled');
     check(!document.querySelector('#operator-token'),'no token input');
     check(!document.querySelector('#fetch-form'),'no fetch submit form');
@@ -113,7 +115,7 @@ CHECK = r"""<script>
     check(document.querySelector('#quality-staleness').textContent.includes('3 ngày'),'stale observation');
     check(document.querySelector('#global-notice').textContent.includes('SYNTHETIC'),'synthetic mode warning');
 
-    go('keywords');await wait(20);
+    go('overview');await wait(20);
     check(document.querySelector('#rows').textContent.includes('<img'),'untrusted keyword rendered as text');
     check(!window.pwned&&!document.querySelector('#rows img'),'keyword XSS blocked');
     check(document.querySelector('#rows').textContent.includes('—'),'null score remains missing');
@@ -153,7 +155,7 @@ CHECK = r"""<script>
     check(document.querySelector('#keyword-count').textContent==='1,234','English number format');
     check(document.querySelector('#run-note').textContent.includes('Run '),'English dynamic run label');
     check(document.querySelector('[data-nav=overview]').textContent.includes('Overview'),'English navigation translation');
-    check(document.querySelector('[data-view=keywords] th').textContent.includes('KEYWORD'),'English table translation');
+    check(document.querySelector('#rows').closest('table').querySelector('th').textContent.includes('TOPIC'),'English Discover table translation');
 
     document.querySelector('[data-locale-toggle]').click();
     check(document.documentElement.lang==='vi','switch back to Vietnamese');

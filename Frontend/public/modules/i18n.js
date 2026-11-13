@@ -23,7 +23,8 @@ export function applyLocale(next = locale, { persist = true } = {}) {
   locale = next === 'en' ? 'en' : 'vi';
   document.documentElement.lang = locale;
   document.documentElement.dataset.locale = locale;
-  document.title = locale === 'en' ? 'TrendScout — Insight workspace' : 'TrendScout — Không gian phân tích';
+  document.title = locale === 'en' ? 'TrendScout — Discover Wikimedia topics' : 'TrendScout — Khám phá chủ đề Wikimedia';
+  document.querySelector('meta[name="description"]')?.setAttribute('content', t('meta.description'));
   document.querySelectorAll('[data-i18n]').forEach((node) => {
     node.textContent = t(node.dataset.i18n);
   });
@@ -37,7 +38,7 @@ export function applyLocale(next = locale, { persist = true } = {}) {
     node.textContent = locale.toUpperCase();
   });
   document.querySelectorAll('[data-locale-toggle]').forEach((button) => {
-    button.setAttribute('aria-label', t('locale.switch'));
+    button.setAttribute('aria-label', `${locale.toUpperCase()} · ${t('locale.switch')}`);
     button.setAttribute('aria-pressed', String(locale === 'en'));
   });
   if (persist) {

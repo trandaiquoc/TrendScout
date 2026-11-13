@@ -61,4 +61,22 @@ export function renderSourceCapabilities(capabilities, translate) {
       badge.classList.toggle('pill--green', available);
     }
   }
+
+  const liveReady = isLocalLiveDemo(capabilities) && canStartFetch(capabilities);
+  const sidebarStatus = document.querySelector('#sidebar-source-status');
+  const sidebarDot = document.querySelector('#sidebar-source-dot');
+  const mainStatus = document.querySelector('#main-source-status');
+  const wikimediaStatus = document.querySelector('#wikimedia-live-status');
+  if (wikimediaStatus) {
+    wikimediaStatus.textContent = translate(liveReady ? 'sources.live-available' : 'sources.not-verified');
+    wikimediaStatus.classList.toggle('text-amber', !liveReady);
+  }
+  for (const badge of [sidebarStatus, mainStatus]) {
+    if (badge) badge.textContent = translate(liveReady ? 'source.live-enabled' : 'source.live-unverified');
+  }
+  if (sidebarDot) sidebarDot.className = `status-dot ${liveReady ? 'status-dot--green' : 'status-dot--muted'}`;
+  if (mainStatus) {
+    mainStatus.classList.toggle('pill--green', liveReady);
+    mainStatus.classList.toggle('pill--gray', !liveReady);
+  }
 }
