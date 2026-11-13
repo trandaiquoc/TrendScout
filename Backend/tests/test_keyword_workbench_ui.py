@@ -65,6 +65,16 @@ class KeywordWorkbenchUITests(unittest.TestCase):
         self.assertIn("window.scrollTo(pageX,pageY)", module)
         self.assertIn("border-left: 1px solid var(--line)", css)
 
+    def test_collection_management_actions_have_separate_sections(self):
+        module = (PUBLIC / "modules" / "keyword-workbench.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
+        for label in ("workbench.manage-settings", "workbench.manage-merge", "workbench.manage-delete"):
+            with self.subTest(label=label):
+                self.assertIn(label, module)
+        self.assertIn("collection-manage-section collection-manage-delete", module)
+        self.assertIn(".collection-manage-delete .collection-danger-button", css)
+        self.assertIn("@media (max-width: 520px)", css)
+
 
 if __name__ == "__main__":
     unittest.main()

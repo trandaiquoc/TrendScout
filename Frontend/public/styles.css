@@ -644,12 +644,36 @@ button:disabled { cursor: not-allowed; }
 .collection-auto-setting { display: flex; align-items: center; gap: 9px; font-size: 12px; }
 .collection-dialog .button-primary { width: auto; }
 .collection-dialog .panel-heading { margin-bottom: 4px; }
+.collection-dialog:has(.collection-manage-panel) { width: min(600px,calc(100vw - 32px)); padding: 24px; }
+.collection-manage-panel { display: grid; gap: 16px; }
+.collection-manage-panel > .panel-heading { margin: 0; }
+.collection-manage-panel > .panel-heading h2 { max-width: calc(100% - 38px); overflow-wrap: anywhere; }
+.collection-origin-note { width: fit-content; margin: -8px 0 0; padding: 5px 9px; border-radius: 999px; color: var(--muted); background: var(--surface-soft); font-size: 11px; }
+.collection-manage-section { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.collection-manage-section h3 { margin: 0; color: var(--ink-strong); font-size: 13px; }
+.collection-manage-section p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.collection-manage-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.collection-merge-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; }
+.collection-manage-label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.collection-merge-controls select { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: var(--surface); font: inherit; }
+.collection-merge-controls .button-primary { min-height: 40px; padding-inline: 18px; }
+.collection-manage-delete { grid-template-columns: minmax(0,1fr) auto; align-items: center; }
+.collection-manage-delete h3, .collection-manage-delete p { grid-column: 1; }
+.collection-manage-delete .collection-danger-button { grid-column: 2; grid-row: 1 / span 2; min-height: 40px; padding: 8px 16px; border: 1px solid color-mix(in srgb,var(--red) 42%,var(--line)); border-radius: 8px; color: var(--red); background: var(--red-soft); font: inherit; font-weight: 650; cursor: pointer; }
+.collection-manage-delete .collection-danger-button:hover { border-color: var(--red); }
 @media (max-width: 900px) {
   .collection-controls { grid-template-columns: 1fr; }
   .collection-inbox-row { align-items: stretch; flex-direction: column; }
   .collection-inbox-row select { max-width: none; }
   .collection-keyword { grid-template-columns: auto minmax(0, 1fr); }
   .collection-keyword select, .collection-keyword .text-button { grid-column: 2; justify-self: start; }
+}
+@media (max-width: 520px) {
+  .collection-dialog:has(.collection-manage-panel) { padding: 18px; }
+  .collection-merge-controls { grid-template-columns: 1fr; }
+  .collection-merge-controls .button-primary { width: 100%; }
+  .collection-manage-delete { grid-template-columns: 1fr; }
+  .collection-manage-delete h3, .collection-manage-delete p, .collection-manage-delete .collection-danger-button { grid-column: 1; grid-row: auto; }
 }
 .discover-results-heading { margin-top: 28px; }
 .candidate-coverage-note { margin-bottom: 12px; }
