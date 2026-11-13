@@ -335,7 +335,7 @@ export const en = {
   'chart.kicker': 'SOURCE EVIDENCE',
   'chart.title': 'Wikimedia pageview evidence',
   'chart.help': 'Approximate views and rank among returned topic evidence; this is not a trend line.',
-  'chart.scope': 'US · all-access',
+  'chart.scope': 'Country filter: US · all-access',
   'chart.empty': 'A ranking will appear after real Wikimedia evidence is received.',
   'source.checking': 'Checking',
   'fetch.cta': 'Fetch new data',

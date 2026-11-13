@@ -157,6 +157,7 @@ async function loadAnalytics() {
       (data.observations_over_time || []).map(row => [row.observation_date, row.source, number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
     const top = data.top_observed || [];
     const target = $('#overview-top-keywords');
+    renderObservedVolumeChart(top, data.top_observed_context || {});
     if (target) {
       const c=data.top_observed_context || {};
       const scope=Array.isArray(c.scope) ? c.scope.slice(1,4).join(' · ') : '—';
@@ -167,6 +168,31 @@ async function loadAnalytics() {
     for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
+  }
+}
+
+function renderObservedVolumeChart(rows, context) {
+  const chart = $('#pageviews-chart');
+  const empty = $('#pageviews-empty');
+  if (!chart || !empty) return;
+  chart.replaceChildren();
+  const comparable = (Array.isArray(rows) ? rows : []).filter((row) => Number.isFinite(row.observed_value) && row.observed_value >= 0).slice(0, 5);
+  empty.hidden = comparable.length > 0;
+  if (!comparable.length) return;
+  const maximum = Math.max(...comparable.map((row) => row.observed_value), 1);
+  chart.setAttribute('aria-label', t('analysis.top-observed-title'));
+  for (const rowData of comparable) {
+    const row = element('li', null, 'chart-row');
+    const label = element('span', rowData.keyword || '—', 'chart-label');
+    const track = element('span', null, 'chart-track');
+    const bar = element('span', null, 'chart-bar');
+    bar.setAttribute('aria-hidden', 'true');
+    bar.style.width = `${Math.max(3, (rowData.observed_value / maximum) * 100)}%`;
+    track.append(bar);
+    const value = element('strong', number(rowData.observed_value), 'chart-value');
+    row.title = `${number(rowData.rank)} · ${rowData.metric || '—'} (${rowData.unit || '—'}) · ${context.observation_date || '—'}`;
+    row.append(label, track, value);
+    chart.append(row);
   }
 }
 

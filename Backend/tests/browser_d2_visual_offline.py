@@ -116,6 +116,8 @@ def main():
 window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await new Promise(r=>setTimeout(r,20));}return false;};
 """
             evaluate(async_def_js)
+            if not evaluate("window.waitFor(()=>document.querySelectorAll('#pageviews-chart .chart-row').length===1)", await_promise=True):
+                raise RuntimeError("persisted comparable Top 5 did not render in the overview chart")
 
             def set_viewport(width, height=900):
                 call(

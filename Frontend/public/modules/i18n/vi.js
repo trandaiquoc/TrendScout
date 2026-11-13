@@ -335,7 +335,7 @@ export const vi = {
   'chart.kicker': 'BẰNG CHỨNG NGUỒN',
   'chart.title': 'Bằng chứng lượt xem Wikimedia',
   'chart.help': 'Lượt xem xấp xỉ và thứ hạng trong phần bằng chứng chủ đề được trả về; không phải đường xu hướng.',
-  'chart.scope': 'US · mọi quyền truy cập',
+  'chart.scope': 'Bộ lọc quốc gia: US · mọi quyền truy cập',
   'chart.empty': 'Bảng xếp hạng chỉ xuất hiện sau khi nhận được bằng chứng thật từ Wikimedia.',
   'source.checking': 'Đang kiểm tra',
   'fetch.cta': 'Thu thập dữ liệu mới',
