@@ -4,7 +4,9 @@ import importlib
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import httpx
 from offline_http_guard import OFFLINE_GUARD_TOTALS, strict_offline_http_guard
 
 MODULES = (
@@ -27,23 +29,32 @@ def main():
     sys.path.insert(0, str(tests_dir))
     suite = unittest.TestSuite()
     loader = unittest.defaultTestLoader
-    with strict_offline_http_guard() as (counts, _fake_transport):
-        for module_name in MODULES:
-            suite.addTests(loader.loadTestsFromModule(importlib.import_module(module_name)))
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
-        if not result.wasSuccessful():
-            raise SystemExit(1)
-        if counts["real_constructions"] != 0 or counts["requests"] != 0:
-            raise AssertionError(f"strict offline transport guard counts: {counts}")
-        if (OFFLINE_GUARD_TOTALS["real_constructions"] != 0
-                or OFFLINE_GUARD_TOTALS["requests"] != 0):
-            raise AssertionError(f"strict offline aggregate counts: {OFFLINE_GUARD_TOTALS}")
-        print(
-            "Strict offline transport guard: ACTIVE; "
-            f"real AsyncHTTPTransport constructions={OFFLINE_GUARD_TOTALS['real_constructions']}; "
-            f"unmocked transport requests={OFFLINE_GUARD_TOTALS['requests']}; "
-            f"fake transport constructions={OFFLINE_GUARD_TOTALS['fake_constructions']}"
-        )
+    mock_requests = {"count": 0}
+    original_mock_handler = httpx.MockTransport.handle_async_request
+
+    async def count_mock_request(transport, request):
+        mock_requests["count"] += 1
+        return await original_mock_handler(transport, request)
+
+    with patch.object(httpx.MockTransport, "handle_async_request", count_mock_request):
+        with strict_offline_http_guard() as (counts, _fake_transport):
+            for module_name in MODULES:
+                suite.addTests(loader.loadTestsFromModule(importlib.import_module(module_name)))
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            if not result.wasSuccessful():
+                raise SystemExit(1)
+            if counts["real_constructions"] != 0 or counts["requests"] != 0:
+                raise AssertionError(f"strict offline transport guard counts: {counts}")
+            if (OFFLINE_GUARD_TOTALS["real_constructions"] != 0
+                    or OFFLINE_GUARD_TOTALS["requests"] != 0):
+                raise AssertionError(f"strict offline aggregate counts: {OFFLINE_GUARD_TOTALS}")
+            print(
+                "Strict offline transport guard: ACTIVE; "
+                f"MockTransport fixture dispatches={mock_requests['count']}; "
+                f"real AsyncHTTPTransport constructions={OFFLINE_GUARD_TOTALS['real_constructions']}; "
+                f"unmocked transport requests={OFFLINE_GUARD_TOTALS['requests']}; "
+                f"fake transport constructions={OFFLINE_GUARD_TOTALS['fake_constructions']}"
+            )
 
 
 if __name__ == "__main__":
