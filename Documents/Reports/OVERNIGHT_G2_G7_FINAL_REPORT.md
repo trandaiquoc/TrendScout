@@ -81,7 +81,7 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 ## Verification
 
 - Scheduler, run idempotency, settings, and demo regression tests: **34 passed, 8 subtests passed**. Ruff passed on the changed backend modules. Python 3.12 project venv used.
-- Full backend suite: **16 failed, 773 passed, 767 subtests passed**. All 16 failures are Firestore emulator tests: no Firebase CLI, Java runtime or `FIRESTORE_EMULATOR_HOST` was available, so the integration tests could not connect. The two demo discovery failures from the preceding run are fixed and now pass.
+- Full backend suite: **16 failed, 773 passed, 767 subtests passed**. All 16 failures are Firestore emulator tests. I installed a temporary, checksum-verified Microsoft OpenJDK 21 and Firebase CLI 15.36.0 outside the repo and started the official Firestore Emulator on loopback. The first guarded test then failed before creating a client because `create_guarded_emulator_client` requires an isolated Linux network namespace and `/proc/net/*`; native Windows has no `/proc`, and no WSL distribution or `bwrap` is available. The emulator was stopped. The safety guard was not bypassed, and no Firestore production endpoint was contacted. The two demo discovery failures from the preceding run are fixed and now pass.
 - Native Chrome offline workspace: passed at 320, 390, 768, 1024, 1440 and 1920 px for locale/theme persistence, all views, read-only API access and XSS handling. The Collection merge picker passed keyboard selection, review-step handoff and Escape dismissal in Vietnamese/English and light/dark in the isolated fixture; no merge was committed and no Fetch occurred.
 - Fresh overview screenshots: 24 combinations at six widths, Vietnamese/English and light/dark are in `Documents/Reports/windows-evidence/overnight-g2-g7/`. Screenshots use an isolated synthetic browser fixture. Five earlier G2 evidence images are also retained in that directory.
 - Offline Chrome visual/workspace checks passed at **320, 390, 768, 1024, 1440 and 1920 px**. Overview evidence covers VI/EN and light/dark; workspace checks cover all views, locale/theme persistence, read-only API behavior and XSS fixtures. These use synthetic/offline fixtures, not provider Fetch.
@@ -95,7 +95,7 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 2. Add complete charts or explicitly accept the current accessible analysis tables; expand chart states only where comparable source data exists.
 3. Provide a supported read-only interface to list Firestore-backed manual runs or clearly accept the local-ledger-only scope.
 4. Finish native Chrome keyboard, mobile drawer, modal, pagination, reload and server-restart journeys; capture fresh evidence for every G2–G7 screen and both locales/themes.
-5. Configure a Firestore emulator to run its 16 integration tests.
+5. Run the 16 Firestore emulator integration tests in the required Linux `bwrap --unshare-net` environment. The emulator can start locally; this Windows workspace cannot provide the guarded network namespace.
 6. Revalidate the dated source research inventory before enabling or approving integrations. No external source approval, credential, quota or production capability is implied here.
 
 No push or deployment was performed.
