@@ -52,7 +52,9 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({
     mode:'AUTO_CREATE',items:[
       {id:'collection-a',name:'Fixture Collection A',description:'Parent Collection',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'USER',auto_match:false},
-      {id:'collection-b',name:'Fixture Collection B',description:'Merge destination',examples:[],exclusions:[],membership_count:1,direct_membership_count:1,subtree_unique_keyword_count:1,created_by:'USER',auto_match:false}
+      {id:'collection-b',name:'Fixture Collection B',description:'Merge destination',examples:[],exclusions:[],membership_count:1,direct_membership_count:1,subtree_unique_keyword_count:1,created_by:'USER',auto_match:false},
+      {id:'collection-parent',name:'Parent with saved topics',description:'Parent with child records',examples:[],exclusions:[],membership_count:2,direct_membership_count:0,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false},
+      {id:'collection-child',name:'Saved child topics',description:'Child records',parent_id:'collection-parent',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false}
     ],suggestions:[],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
   }),{status:200}));
   if(p.startsWith('/api/v1/datasets/latest/keywords?'))return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
@@ -140,6 +142,18 @@ CHECK = r"""<script>
     }
     const {applyLocale}=await import(I18N_MODULE_URI);
     await go('collections');await wait(80);
+    if(innerWidth<=900){
+      const filterToggle=document.querySelector('#workbench-filter-toggle');
+      filterToggle.click();
+      check(document.querySelector('#workbench-sidebar').classList.contains('is-open'),'mobile Collection filters open');
+      check(document.querySelector('#workbench-sidebar').contains(document.activeElement),'opening Collection filters moves focus inside');
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+      check(!document.querySelector('#workbench-sidebar').classList.contains('is-open'),'Escape closes mobile Collection filters');
+      check(document.activeElement===filterToggle,'closing Collection filters restores trigger focus');
+    }
+    const collapsedParent=document.querySelector('[data-collection-id="collection-parent"]');
+    check(collapsedParent?.querySelector('.workbench-disclosure')?.getAttribute('aria-expanded')==='false','parent Collection starts collapsed in the fixture');
+    check(collapsedParent?.querySelector('.workbench-tree-count')?.textContent==='2','collapsed parent shows unique keywords saved in its child Collections');
     document.querySelector('.workbench-context-button')?.click();
     const picker=document.querySelector('.collection-picker');
     const pickerTrigger=picker?.querySelector('[role=combobox]');

@@ -30,7 +30,10 @@ window.fetch=(path,options={})=>{
   if(value==='/api/v1/scheduler')return Promise.resolve(new Response(JSON.stringify({items:[],implemented:true,enabled:false,worker_running:false}),{status:200}));
   if(value==='/api/v1/algorithms')return Promise.resolve(new Response(JSON.stringify({evaluation_status:'NOT_YET_EVALUATED',algorithms:[{algorithm_id:'observed-volume-rank',version:'v3',name:'Observed volume rank'}]}),{status:200}));
   if(value==='/api/v1/algorithms/results')return Promise.resolve(new Response(JSON.stringify({summary:[],items:[]}),{status:200}));
-  if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[],suggestions:[],mode:'SUGGEST_ONLY',summary:{}}),{status:200}));
+  if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[
+    {id:'fixture-parent',name:'Home & Living',parent_id:null,membership_count:8,direct_membership_count:0,subtree_unique_keyword_count:8,created_by:'AI',auto_match:true},
+    {id:'fixture-child',name:'Smart Home',parent_id:'fixture-parent',membership_count:8,direct_membership_count:8,subtree_unique_keyword_count:8,created_by:'AI',auto_match:true}
+  ],suggestions:[],mode:'SUGGEST_ONLY',summary:{eligible_keywords:8,assigned_keywords:8,unclassified_keywords:0,excluded_keywords:0,classified_keywords:8,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:8,manually_managed_keywords:0,ai_created_collections:2}}),{status:200}));
   if(value==='/api/v1/collections/inbox')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/research')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/runs/history')return Promise.resolve(new Response(JSON.stringify({items:[{fetch_id:'e'.repeat(32),run_at:'2026-11-11T03:00:00Z',run_type:'FETCH',sources:['wikimedia_pageviews_top_per_country'],status:'PARTIAL',received_record_count:4,retained_keyword_count:3,rejected_record_count:1,mode:'SYNTHETIC',error_code:'SOURCE_PARTIAL',stage:'DONE',quality_flags:['SYNTHETIC_FIXTURE']}],total:1,next_offset:null}),{status:200}));
@@ -241,9 +244,9 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
 
             set_preferences("light", "vi")
             for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
-                go(view)
                 for width in (390, 1440):
                     set_viewport(width, 900 if width > 500 else 820)
+                    go(view)
                     if view == "runs" and width == 390 and not evaluate("window.waitFor(()=>Boolean(document.querySelector('#run-history tbody td[data-label]')))", await_promise=True):
                         raise RuntimeError("Run History fixture did not load for mobile layout review: " + str(evaluate("JSON.stringify({requests:window.fetchRequests.filter(path=>path.includes('/api/v1/runs/history')),content:document.querySelector('#run-history')?.textContent})")))
                     time.sleep(0.18)
@@ -253,6 +256,21 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         raise RuntimeError("Run History exposed raw diagnostic codes instead of a localized partial-data explanation")
                     if view == "analysis" and width == 390 and not evaluate("Boolean(document.querySelector('#analysis-source-volume tbody td[data-label]'))"):
                         raise RuntimeError("mobile Analysis rows are missing their column labels")
+                    if view == "collections" and width == 390:
+                        if not evaluate("waitFor(()=>Boolean(document.querySelector('#workbench-filter-toggle')))", await_promise=True):
+                            raise RuntimeError("mobile Collection filter toggle was not mounted")
+                        evaluate("document.querySelector('#workbench-filter-toggle')?.click()")
+                        time.sleep(0.24)
+                        drawer_width = evaluate("document.querySelector('#workbench-sidebar')?.getBoundingClientRect().width || 0")
+                        if drawer_width < 280:
+                            raise RuntimeError(f"mobile Collection drawer is clipped to {drawer_width}px")
+                        drawer_left = evaluate("document.querySelector('#workbench-sidebar')?.getBoundingClientRect().left ?? -1")
+                        if drawer_left < 0:
+                            geometry = evaluate("JSON.stringify({innerWidth,scrollX,open:document.querySelector('#workbench-sidebar')?.className,expanded:document.querySelector('#workbench-filter-toggle')?.getAttribute('aria-expanded'),left:document.querySelector('#workbench-sidebar')?.getBoundingClientRect().left,transform:getComputedStyle(document.querySelector('#workbench-sidebar')).transform})")
+                            raise RuntimeError(f"mobile Collection drawer starts outside the viewport at {drawer_left}px: {geometry}")
+                        count_ready = evaluate("waitFor(()=>document.querySelector('[data-collection-id=fixture-parent] .workbench-tree-count')?.textContent==='8')", await_promise=True)
+                        if not count_ready:
+                            raise RuntimeError("collapsed Collection did not show saved descendant keywords")
                     capture(f"screen-{view}-{width}-vi-light.webp", width, configure=False)
 
             set_viewport(1280)
