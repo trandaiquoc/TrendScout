@@ -1,14 +1,17 @@
 """Native Chrome discovery and local DevTools transport for offline browser tests."""
 
 import base64
+import errno
 import hashlib
 import json
 import os
+import platform
 import secrets
 import shutil
 import socket
 import struct
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +27,102 @@ def require_linux_network_isolation():
         except PermissionError:
             continue
         raise SystemExit("Internet blocker is not active")
+
+
+def _network_namespace(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/ns/net")
+    except OSError as exc:
+        raise SystemExit(f"cannot verify network namespace for process {pid}: {exc}") from exc
+
+
+def _process_descendants(root_pid):
+    parent_by_pid = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="ascii")
+            fields = stat[stat.rfind(")") + 2:].split()
+            parent_by_pid[int(entry.name)] = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+
+    descendants = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent_pid in parent_by_pid.items():
+            if parent_pid in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    return descendants
+
+
+def require_loopback_only_network_isolation(chrome_pid=None):
+    """Require Linux loopback in a route-less namespace, or native Windows."""
+    if os.name == "nt":
+        return {"kind": "native-windows", "namespace": None}
+    if not sys.platform.startswith("linux"):
+        raise SystemExit("D6 browser isolation requires Linux or native Windows")
+
+    namespace = _network_namespace("self")
+    interfaces = {name for _index, name in socket.if_nameindex()}
+    if interfaces != {"lo"}:
+        raise SystemExit(f"loopback-only network namespace required; interfaces={sorted(interfaces)}")
+
+    ipv4_routes = Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]
+    external_ipv4_routes = [line for line in ipv4_routes if line.split()[0] != "lo"]
+    ipv6_route_path = Path("/proc/net/ipv6_route")
+    ipv6_routes = ipv6_route_path.read_text(encoding="ascii").splitlines()
+    external_ipv6_routes = [line for line in ipv6_routes if line.split()[-1] != "lo"]
+    if external_ipv4_routes or external_ipv6_routes:
+        raise SystemExit("loopback-only network namespace required; external route found")
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.settimeout(1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+                client.settimeout(1)
+                client.connect(listener.getsockname())
+            connection, _ = listener.accept()
+            connection.close()
+    except OSError as exc:
+        raise SystemExit(f"loopback connectivity is required for the browser E2E: {exc}") from exc
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as external_probe:
+        external_probe.settimeout(1)
+        result = external_probe.connect_ex(("192.0.2.1", 443))
+    if result not in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+        raise SystemExit(f"external egress is not blocked (TEST-NET connect errno={result})")
+
+    checked_processes = []
+    if chrome_pid is not None:
+        for pid in sorted(_process_descendants(chrome_pid)):
+            try:
+                process_namespace = _network_namespace(pid)
+            except SystemExit:
+                continue  # Process exited while the tree was being inspected.
+            if process_namespace != namespace:
+                raise SystemExit(f"Chrome process {pid} escaped the isolated network namespace")
+            checked_processes.append(pid)
+
+    return {
+        "kind": "linux-loopback-only-netns",
+        "namespace": namespace,
+        "interfaces": sorted(interfaces),
+        "non_loopback_ipv4_routes": len(external_ipv4_routes),
+        "non_loopback_ipv6_routes": len(external_ipv6_routes),
+        "external_probe_errno": result,
+        "chrome_processes_checked": checked_processes,
+    }
+
+
+def linux_version():
+    release = platform.freedesktop_os_release()
+    return f"{release.get('PRETTY_NAME', platform.platform())}; kernel {platform.release()}"
 
 
 def find_chrome():

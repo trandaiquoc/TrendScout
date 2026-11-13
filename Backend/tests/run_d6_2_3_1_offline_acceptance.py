@@ -1,7 +1,6 @@
 """Run the D6.2.3.1 focused regression suite under strict HTTP transport isolation."""
 
 import importlib
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -45,12 +44,9 @@ def main():
             f"fake transport constructions={OFFLINE_GUARD_TOTALS['fake_constructions']}"
         )
 
-        if os.name == "nt":
-            from browser_wikimedia_synthetic_e2e_offline import main as browser_e2e
+        from browser_wikimedia_synthetic_e2e_offline import main as browser_e2e
 
-            browser_e2e()
-        else:
-            print("Native Windows Chrome browser E2E: NOT RUN (non-Windows environment)")
+        browser_e2e()
 
 
 if __name__ == "__main__":

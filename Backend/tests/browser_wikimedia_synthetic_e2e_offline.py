@@ -1,7 +1,9 @@
-"""Native Windows Chrome over the actual loopback synthetic API and dashboard."""
+"""Chrome E2E over the actual synthetic API, in Windows or loopback-only Linux."""
 
 import os
+import platform
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -9,14 +11,19 @@ import time
 import urllib.request
 from pathlib import Path
 
-from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+from browser_support import (
+    ChromeDevTools,
+    find_chrome,
+    linux_version,
+    require_loopback_only_network_isolation,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
 sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(BACKEND / "tests"))
 
-from d6_wikimedia_synthetic_support import WIKIMEDIA_SOURCE_ID, build_synthetic_app
+from d6_wikimedia_synthetic_support import WIKIMEDIA_SOURCE_ID, build_synthetic_app  # noqa: E402
 
 
 def _wait_for_app(base_url, server_thread, timeout=15):
@@ -46,10 +53,13 @@ def _evaluate(devtools, expression, *, await_promise=False, session=None):
 
 
 def main():
-    require_linux_network_isolation()
+    isolation = require_loopback_only_network_isolation()
     chrome = find_chrome()
     if not chrome:
-        raise SystemExit("Native Chrome unavailable")
+        raise SystemExit("Chrome unavailable")
+    chrome_version = subprocess.run(
+        [chrome, "--version"], check=True, capture_output=True, text=True,
+    ).stdout.strip()
 
     with tempfile.TemporaryDirectory(prefix="d6-2-3-wikimedia-browser-") as directory:
         app = build_synthetic_app(directory)
@@ -81,6 +91,8 @@ def main():
                 raise AssertionError("dashboard application startup requested the fixture")
             with tempfile.TemporaryDirectory(prefix="d6-2-3-chrome-profile-") as profile:
                 devtools = ChromeDevTools(chrome, profile)
+                if isolation["kind"] == "linux-loopback-only-netns":
+                    isolation = require_loopback_only_network_isolation(devtools.process.pid)
                 try:
                     target = devtools.call("Target.createTarget", {"url": "about:blank"})
                     attached = devtools.call("Target.attachToTarget", {
@@ -106,7 +118,12 @@ def main():
       const count = Number(sessionStorage.getItem('d6-test-post-count') || '0') + 1;
       sessionStorage.setItem('d6-test-post-count', String(count));
     }
-    return nativeFetch(input, init);
+    const pending = nativeFetch(input, init);
+    if (/^\/api\/v1\/fetches\/[a-f0-9]{32}$/i.test(url.pathname) && method === 'GET') {
+      pending.then((response) => response.clone().json())
+        .then((payload) => { window.__d623StatusPayload = payload; });
+    }
+    return pending;
   };
 })();
 """}, session=session)
@@ -116,7 +133,11 @@ def main():
                     script = r"""
 (async () => {
   const failures = [];
-  const check = (condition, label) => { if (!condition) failures.push(label); };
+  let assertionCount = 0;
+  const check = (condition, label) => {
+    assertionCount += 1;
+    if (!condition) failures.push(label);
+  };
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const waitFor = async (predicate, timeout = 10000) => {
     const until = Date.now() + timeout;
@@ -146,8 +167,8 @@ def main():
   check(!/token|secret|credential|password/i.test(JSON.stringify(posts[0]?.headers || {})),
     'browser sends no credential');
   check(statusReads.length >= 1, 'dashboard polls status through public Fetch API');
-  check(posts.every((item) => new URL(item.url).origin === location.origin),
-    'dashboard Fetch uses same-origin API only');
+  check(requests.every((item) => new URL(item.url).origin === location.origin),
+    'browser Fetch requests use same-origin API only');
   check(!document.querySelector('#demo-discovery-list img'), 'untrusted article text creates no image element');
   check(!document.querySelector('#demo-discovery-list script'), 'untrusted article text creates no script element');
   check(!document.body.textContent.includes('D6_2_3_RAW_BODY_MUST_NOT_PERSIST'),
@@ -169,6 +190,14 @@ def main():
   check(!sourceText.includes('LIVE_VERIFIED'), 'no source is represented as live verified');
   check(document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),
     'single snapshot classification remains insufficient');
+  check(await waitFor(() => window.__d623StatusPayload), 'status response is captured for semantic checks');
+  const statusPayload = window.__d623StatusPayload;
+  check(statusPayload.discovery.candidates.every((candidate) => candidate.score === null),
+    'insufficient evidence keeps candidate scores null');
+  check(!JSON.stringify(statusPayload).toLowerCase().includes('search_volume'),
+    'API response does not fabricate search volume');
+  check(!/YOUTUBE_API_KEY|SERPAPI_API_KEY/i.test(JSON.stringify(statusPayload)),
+    'API status response exposes no provider credential names');
 
   const search = document.querySelector('#search');
   search.value = 'linen pants';
@@ -203,7 +232,7 @@ def main():
   check(document.documentElement.lang === 'en', 'English locale toggle remains available');
   check(Number(sessionStorage.getItem('d6-test-post-count')) === 1, 'one browser job submitted before reload');
   window.__d623Result = {failures, postCount: posts.length, statusPolls: statusReads.length,
-    requestCount: requests.length, sourceText, evidenceText};
+    requestCount: requests.length, assertionCount, sourceText, evidenceText};
   return window.__d623Result;
 })()
 """
@@ -236,14 +265,20 @@ def main():
                         raise AssertionError(f"reload submitted a duplicate job: {reload_result}")
                     if app.state.d6_2_3_mock_request_counts[WIKIMEDIA_SOURCE_ID] != 1:
                         raise AssertionError("browser reload or polling repeated the Wikimedia fixture request")
+                    if isolation["kind"] == "linux-loopback-only-netns":
+                        isolation = require_loopback_only_network_isolation(devtools.process.pid)
                 finally:
                     devtools.close()
                     devtools = None
 
+            print(f"OS: {linux_version() if os.name != 'nt' else platform.platform()}")
+            print(f"Chrome: {chrome_version}")
+            print(f"Network isolation: {isolation}")
             print(
-                "Native Windows Chrome actual dashboard/API synthetic Wikimedia flow: PASS; "
+                "Actual dashboard/API synthetic Wikimedia flow: PASS; "
                 f"one browser Fetch, {browser_result['statusPolls']} status poll(s), "
-                f"one Wikimedia MockTransport request, {len(browser_result['failures'])} failures"
+                f"one Wikimedia MockTransport request, {browser_result['assertionCount']} assertions, "
+                f"{len(browser_result['failures'])} failures"
             )
         finally:
             if devtools is not None:
