@@ -268,6 +268,21 @@ def main():
             if evaluate("document.querySelector('#detail-dialog').open"):
                 raise RuntimeError("Escape did not close the dialog")
 
+            evaluate("location.hash='#sources';window.dispatchEvent(new Event('hashchange'))")
+            for _ in range(60):
+                if evaluate("!document.querySelector('[data-view=sources]').hidden"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("keyboard disclosure check could not navigate to Source Center")
+            evaluate("document.querySelector('#source-library-disclosure summary').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#source-library-disclosure').open"):
+                raise RuntimeError("Space did not open the Source Center research disclosure")
+            press(" ", "Space", 32, " ")
+            if not evaluate("!document.querySelector('#source-library-disclosure').open"):
+                raise RuntimeError("Space did not close the Source Center research disclosure")
+
             evaluate("location.hash='#overview';document.querySelector('[data-dashboard-tab=overview]').focus()")
             call("Input.dispatchKeyEvent", {"type":"keyDown","key":"ArrowRight","code":"ArrowRight","windowsVirtualKeyCode":39,"nativeVirtualKeyCode":39}, session)
             if not evaluate("document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true'"):
