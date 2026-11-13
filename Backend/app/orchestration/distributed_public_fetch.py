@@ -4,9 +4,9 @@ The facade has no provider configuration surface. Its admission and result reads
 are usable only when explicitly injected by backend composition.
 """
 
-from datetime import datetime, timezone
-from dataclasses import replace
 import os
+from dataclasses import replace
+from datetime import datetime, timezone
 
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
@@ -17,20 +17,39 @@ from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 class DistributedPublicFetch:
     def __init__(self, admission: PublicAdmission, worker: DistributedFetchWorker, *,
                  resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
-                 local_live=False, resolve_processing_grants=None):
+                 local_live=False, normal_wikimedia_live=False,
+                 resolve_processing_grants=None, provider_retry_after_seconds=None):
         if (not isinstance(admission, PublicAdmission)
                 or not isinstance(worker, DistributedFetchWorker)
                 or worker.admission.policy_digest != admission.policy_digest
-                or not callable(resolve_grant) or not callable(utcnow) or type(local_live) is not bool):
+                or not callable(resolve_grant) or not callable(utcnow)
+                or type(local_live) is not bool or type(normal_wikimedia_live) is not bool
+                or local_live and normal_wikimedia_live
+                or (provider_retry_after_seconds is not None
+                    and not callable(provider_retry_after_seconds))):
             raise ValueError("matching admission, worker and grant resolver required")
         self.admission = admission
         self.worker = worker
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
         self.local_live = local_live
+        self.normal_wikimedia_live = normal_wikimedia_live
         self.journal = SourceCheckpointJournal(admission)
         declared_modes = set(worker.source_modes.values())
-        if local_live:
+        if normal_wikimedia_live:
+            from app.normal_wikimedia_live_policy import normal_wikimedia_live_policy
+            from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
+                    or worker.admission is not admission
+                    or type(admission.store) is not LocalSQLiteAtomicStateStore
+                    or admission.store.data_mode != "LIVE"
+                    or admission.policy != normal_wikimedia_live_policy()
+                    or admission.policy.enabled_sources != frozenset({WIKIMEDIA_SOURCE_ID})
+                    or not callable(resolve_processing_grants)):
+                raise ValueError("normal Wikimedia LIVE requires its separate local policy and state")
+            self.data_mode = "LIVE"
+        elif local_live:
             from app.local_smoke_policy import local_smoke_policy
             from app.storage.local_smoke_store import LocalSmokeStore
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -50,8 +69,18 @@ class DistributedPublicFetch:
                 raise ValueError("public demo Fetch requires explicitly synthetic source handlers")
             self.data_mode = "SYNTHETIC"
         self.resolve_processing_grants = resolve_processing_grants
+        self.provider_retry_after_seconds = provider_retry_after_seconds
 
     def submit(self, idempotency_key: str) -> dict:
+        if self.provider_retry_after_seconds is not None:
+            try:
+                retry_after = self.provider_retry_after_seconds()
+            except Exception:
+                raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE") from None
+            if type(retry_after) is not int or retry_after < 0:
+                raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE")
+            if retry_after:
+                raise AdmissionDenied("PROVIDER_RATE_LIMITED")
         accepted = self.admission.admit(idempotency_key, now=self.utcnow())
         return {"job_id": accepted["job_id"], "result": accepted["result"],
                 "status": accepted["status"], "created_at": accepted.get("created_at")}
@@ -95,6 +124,7 @@ class DistributedPublicFetch:
                     "records": result["records"],
                     "coverage": result.get("coverage"),
                     "error_code": result.get("error_code"),
+                    "retry_after_seconds": result.get("retry_after_seconds"),
                     "quality_flags": result.get("quality_flags", []),
                     **({"transport_diagnostic": result["transport_diagnostic"]}
                        if "transport_diagnostic" in result else {}),

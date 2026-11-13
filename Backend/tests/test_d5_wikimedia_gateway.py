@@ -82,6 +82,7 @@ class WikimediaGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str(seen[0].url),
             "https://wikimedia.org/api/rest_v1/metrics/pageviews/top-per-country/US/all-access/2026/11/12")
         self.assertEqual(seen[0].headers["user-agent"], USER_AGENT)
+        self.assertEqual(seen[0].headers["accept-encoding"], "identity")
         self.assertEqual(str(seen[0].url.params), "")
 
     async def test_revoked_approval_and_invalid_scope_stop_before_transport(self):

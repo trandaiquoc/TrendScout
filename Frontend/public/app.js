@@ -149,18 +149,30 @@ function renderFetchPresentation() {
       .map((source) => {
         const sourceKey = FETCH_SOURCE_LABELS[source.source_id];
         const sourceLabel = sourceKey ? t(sourceKey) : source.source_id;
-        const statusKey = `fetch.source-status.${source.status}`;
+        const visibleStatus = source.error_code === 'RATE_LIMITED' ? 'RATE_LIMITED' : source.status;
+        const statusKey = `fetch.source-status.${visibleStatus}`;
         const sourceStatus = source.status && t(statusKey) !== statusKey
           ? t(statusKey) : source.status;
-        return [sourceLabel, sourceStatus, source.data_mode, source.delivery_state]
+        return [sourceLabel, sourceStatus, source.data_mode, source.delivery_state,
+          Number.isInteger(source.retry_after_seconds)
+            ? t('fetch.retry-after', { seconds: source.retry_after_seconds }) : '']
           .filter((value) => typeof value === 'string' && value).join(' · ');
       })
       .join(' | ')
     : '';
   status.textContent = isActionState
-    ? [t(messageKey), sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '']
+    ? [t(liveDemo ? liveFetchMessage(presentation.kind) || messageKey : messageKey),
+      sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '']
       .filter(Boolean).join(' ')
     : '';
+}
+
+function liveFetchMessage(kind) {
+  return ({
+    submitting: 'fetch.submitting-live', queued: 'fetch.queued-live',
+    running: 'fetch.running-live', partial: 'fetch.partial-live',
+    completed: 'fetch.completed-live', failed: 'fetch.failed-live',
+  })[kind] || null;
 }
 
 function scheduleCapabilityRefresh(delayMs) {
@@ -365,6 +377,9 @@ function renderDiscoveryBundle(bundle) {
   sourceList.replaceChildren();
   list.replaceChildren();
   if (!bundle) return;
+  const liveData = bundle.data_mode === 'LIVE';
+  $('#demo-discovery-title').textContent = t(liveData ? 'demo.live-discovery-title' : 'demo.discovery-title');
+  $('#demo-discovery-help').textContent = t(liveData ? 'demo.live-discovery-help' : 'demo.discovery-help');
   if (bundle.error) {
     sourceList.append(element('li', t('demo.failed')));
     $('#demo-discovery-count').textContent = t('demo.failed');
@@ -374,7 +389,9 @@ function renderDiscoveryBundle(bundle) {
     const name = ({ wikimedia_pageviews_top_per_country: 'Wikimedia',
       google_web_serp: 'Google / SerpApi', bing_web_serp: 'Bing / SerpApi',
       youtube_video_search: 'YouTube' })[source.source_id] || source.source_id || '—';
-    sourceList.append(element('li', `${name} · ${source.data_mode || '—'} · ${source.status} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
+    const sourceStatus = source.error_code === 'RATE_LIMITED'
+      ? t('fetch.source-status.RATE_LIMITED') : source.status;
+    sourceList.append(element('li', `${name} · ${source.data_mode || '—'} · ${sourceStatus} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
   }
   const category = state.category === 'home_goods' ? 'home_living' : state.category;
   const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -383,7 +400,7 @@ function renderDiscoveryBundle(bundle) {
     return (!query || String(candidate.keyword || '').normalize('NFC').toLocaleLowerCase().includes(query))
       && (category === 'all' || categories.includes(category));
   });
-  $('#demo-discovery-count').textContent = t('demo.count', {
+  $('#demo-discovery-count').textContent = t(liveData ? 'demo.live-count' : 'demo.count', {
     shown: candidates.length, total: bundle.candidate_count ?? 0,
   });
   for (const candidate of candidates) {
@@ -402,6 +419,10 @@ function renderDiscoveryBundle(bundle) {
         ? evidence.observed_at.slice(0, 10) : evidence.observed_at;
       evidenceList.append(element('li', [evidence.source_id, evidence.market_evidence, evidence.data_mode,
         evidence.delivery_mode, date(observedDate), timestamp(evidence.fetched_at), evidence.scope,
+        evidence.article ? t('demo.evidence-article', { value: evidence.article }) : '',
+        evidence.project ? t('demo.evidence-project', { value: evidence.project }) : '',
+        Number.isInteger(evidence.provider_rank) ? t('demo.evidence-rank', { value: evidence.provider_rank }) : '',
+        Number.isInteger(evidence.approximate_views) ? t('demo.evidence-views', { value: number(evidence.approximate_views) }) : '',
         ...(Array.isArray(evidence.query_evidence) ? evidence.query_evidence : [])].join(' · ')));
     }
     details.append(evidenceList);
@@ -698,6 +719,10 @@ function renderPublicCandidateDetail(candidate) {
     const entry = element('div', null, 'detail-item detail-item--wide');
     entry.append(element('small', `${evidence.source_id} · ${evidence.market_evidence || 'UNKNOWN'}`));
     const details = [evidence.data_mode, evidence.delivery_mode, evidence.scope,
+      evidence.article ? t('demo.evidence-article', { value: evidence.article }) : '',
+      evidence.project ? t('demo.evidence-project', { value: evidence.project }) : '',
+      Number.isInteger(evidence.provider_rank) ? t('demo.evidence-rank', { value: evidence.provider_rank }) : '',
+      Number.isInteger(evidence.approximate_views) ? t('demo.evidence-views', { value: number(evidence.approximate_views) }) : '',
       evidence.observed_at, evidence.fetched_at, ...(evidence.query_evidence || [])]
       .filter(Boolean).join(' · ');
     entry.append(element('div', details));

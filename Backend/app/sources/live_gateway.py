@@ -21,6 +21,7 @@ from app.ports.credentials import CredentialProvider
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
     source_capability,
 )
@@ -80,6 +81,7 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
             valid = approval.distributed_controls_verified is True
         elif valid and approval.scope == "LOCAL_SMOKE":
             from dataclasses import replace
+
             from app.local_smoke_policy import local_smoke_policy
             from app.storage.local_smoke_store import LocalSmokeStore
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -95,6 +97,21 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                      and type(backing_store) is LocalSQLiteAtomicStateStore
                      and backing_store.data_mode == "LIVE"
                      and runner.admission.policy == replace(local_smoke_policy(), enabled=True))
+        elif valid and approval.scope == "LOCAL_NORMAL":
+            from app.normal_wikimedia_live_policy import (
+                POLICY_VERSION,
+                normal_wikimedia_live_policy,
+            )
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
+            valid = (not os.environ.get("VERCEL")
+                     and source_id == WIKIMEDIA_SOURCE_ID
+                     and approval.policy_version == POLICY_VERSION
+                     and approval.local_controls_verified is True
+                     and isinstance(runner, GuardedAttemptRunner)
+                     and type(store) is LocalSQLiteAtomicStateStore
+                     and store.data_mode == "LIVE"
+                     and runner.admission.policy == normal_wikimedia_live_policy())
         else:
             valid = False
     except Exception:

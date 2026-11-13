@@ -41,6 +41,7 @@ class WikimediaPage:
     item_count: int
     rejected_count: int
     observations: tuple
+    response_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,9 +86,13 @@ class WikimediaTopPageGateway:
     def __init__(self, approvals: ApprovalProvider, runner: GuardedAttemptRunner, *,
                  user_agent: str, inner: httpx.AsyncBaseTransport, offline: bool,
                  clock=lambda: datetime.now(timezone.utc), policy: HttpPolicy | None = None,
+                 before_request=None,
+                 on_rate_limited=None,
                  _construction_token=None):
         if (not callable(getattr(approvals, "current", None))
-                or not isinstance(runner, GuardedAttemptRunner) or not callable(clock)):
+                or not isinstance(runner, GuardedAttemptRunner) or not callable(clock)
+                or (before_request is not None and not callable(before_request))
+                or (on_rate_limited is not None and not callable(on_rate_limited))):
             raise ValueError("approval, guarded runner and clock are required")
         if (not isinstance(user_agent, str) or not user_agent.strip()
                 or "\r" in user_agent or "\n" in user_agent or not _CONTACT.search(user_agent)):
@@ -98,6 +103,8 @@ class WikimediaTopPageGateway:
                             or _construction_token is not _NETWORK_CONSTRUCTION):
             raise ValueError("live Wikimedia gateway requires controlled HTTP transport")
         self.approvals, self.runner, self.user_agent = approvals, runner, user_agent
+        self.before_request = before_request
+        self.on_rate_limited = on_rate_limited
         self._inner, self._offline, self.clock = inner, offline, clock
         self.policy = policy or HttpPolicy(max_retries=0)
         if not isinstance(self.policy, HttpPolicy) or self.policy.max_retries != 0:
@@ -173,11 +180,14 @@ class WikimediaTopPageGateway:
         async def send():
             if self._check_approval() != approved:
                 return ("SOURCE_NOT_APPROVED", None, None)
+            if self.before_request is not None:
+                await self.before_request()
             try:
                 async with httpx.AsyncClient(transport=_SharedTransport(self._inner), follow_redirects=False,
                                              trust_env=False) as client:
                     response = await self.policy.get_bounded(client, endpoint,
-                        headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+                        headers={"User-Agent": self.user_agent, "Accept": "application/json",
+                                 "Accept-Encoding": "identity"},
                         max_response_bytes=_MAX_RESPONSE_BYTES, total_timeout_seconds=timeout_seconds)
             except HttpResponseTooLarge as exc:
                 record_diagnostic("RESPONSE_TOO_LARGE", exc.phase,
@@ -219,6 +229,8 @@ class WikimediaTopPageGateway:
                 header = response.headers.get("Retry-After")
                 unbounded = HttpPolicy.parse_retry_after(header, 0, self.clock())
                 delay = self.policy.retry_delay(header, 0, self.clock())
+                if self.on_rate_limited is not None:
+                    await self.on_rate_limited(unbounded if header else (delay or 1.0))
                 return ("RATE_LIMITED", delay, unbounded)
             if response.status_code != 200:
                 record_diagnostic("UPSTREAM_ERROR", "RESPONSE_HEADERS",
@@ -240,7 +252,7 @@ class WikimediaTopPageGateway:
                     return ("EMPTY_RESPONSE", None, None)
                 return ("PAGE", WikimediaPage(day, fetched_at,
                     "SYNTHETIC" if self._offline else "LIVE", response.status_code,
-                    count, rejected, tuple(observations)), None)
+                    count, rejected, tuple(observations), len(response.content)), None)
             except (ValueError, TypeError, RecursionError) as exc:
                 record_diagnostic("MALFORMED_RESPONSE", "SCHEMA_VALIDATION",
                     http_status=response.status_code, exception_class=type(exc).__name__,

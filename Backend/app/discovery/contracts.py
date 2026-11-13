@@ -24,6 +24,10 @@ class Observation:
     language: str = "en"
     source_url: str | None = None
     delivery_mode: Literal["FRESH", "CACHED"] = "FRESH"
+    article: str | None = None
+    project: str | None = None
+    provider_rank: int | None = None
+    approximate_views: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +69,10 @@ class Evidence:
     source_url: str | None
     delivery_mode: Literal["FRESH", "CACHED"] = "FRESH"
     language: str = "en"
+    article: str | None = None
+    project: str | None = None
+    provider_rank: int | None = None
+    approximate_views: int | None = None
 
 
 @dataclass(frozen=True)

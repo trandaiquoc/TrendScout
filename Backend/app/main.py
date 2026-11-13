@@ -95,18 +95,17 @@ def create_app(
     elif local_live_context_factory is not None:
         raise ValueError("local live context requires explicit opt-in")
     if distributed_public_fetch is not None:
-        expected_sources = {
-            WIKIMEDIA_SOURCE_ID,
-            GOOGLE_SOURCE_ID,
-            BING_SOURCE_ID,
-            YOUTUBE_SOURCE_ID,
-        }
+        expected_sources = ({WIKIMEDIA_SOURCE_ID}
+            if getattr(distributed_public_fetch, "normal_wikimedia_live", False) else {
+                WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+            })
         if (not isinstance(distributed_public_fetch, DistributedPublicFetch)
                 or settings.environment_profile not in {"local", "test"}
                 or read_only
                 or (local_live_opt_in and (run_mode != "live"
                     or distributed_public_fetch.data_mode != "LIVE"
-                    or not getattr(distributed_public_fetch, "local_live", False)))
+                    or not (getattr(distributed_public_fetch, "local_live", False)
+                            or getattr(distributed_public_fetch, "normal_wikimedia_live", False))))
                 or (not local_live_opt_in and (run_mode != "synthetic"
                     or not settings.public_fetch_enabled
                     or distributed_public_fetch.data_mode != "SYNTHETIC"))
@@ -338,10 +337,38 @@ def run_local_live(application, *, port=8001):
     uvicorn.run(application, host="127.0.0.1", port=port, workers=1, proxy_headers=False)
 
 
+def create_normal_wikimedia_live_app(*, enabled=False, workers=1,
+                                     composition_factory=None, settings=None):
+    """Create a normal Wikimedia LIVE demo app with the local-only guard."""
+    if (enabled is not True or type(workers) is not int or workers != 1
+            or not callable(composition_factory)):
+        raise ValueError("explicit opt-in and a normal Wikimedia composition are required")
+    if settings is None:
+        from app.sources.catalog import DEFAULT_WIKIMEDIA_USER_AGENT
+        settings = Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "local", "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_READ_ONLY": "false", "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+            "WIKIMEDIA_USER_AGENT": DEFAULT_WIKIMEDIA_USER_AGENT,
+        })
+    return create_app(settings=settings, local_live_opt_in=True,
+                      local_live_context_factory=composition_factory)
+
+
+def run_normal_wikimedia_live(application, *, port=8001):
+    """Serve the normal local Wikimedia Fetch app on loopback with one worker."""
+    if (type(application) is not LocalLiveGuard or type(port) is not int
+            or not 1 <= port <= 65535):
+        raise ValueError("guarded normal LIVE app and valid port are required")
+    import uvicorn
+
+    uvicorn.run(application, host="127.0.0.1", port=port, workers=1, proxy_headers=False)
+
+
 def _validate_local_live_facade(facade):
     if (not isinstance(facade, DistributedPublicFetch)
             or facade.data_mode != "LIVE"
-            or not getattr(facade, "local_live", False)):
+            or not (getattr(facade, "local_live", False)
+                    or getattr(facade, "normal_wikimedia_live", False))):
         raise ValueError("local composition did not provide a guarded LIVE facade")
 
 

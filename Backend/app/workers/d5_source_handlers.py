@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 from dataclasses import fields, is_dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable, Mapping
 
@@ -88,6 +88,8 @@ class D5SourceHandlers:
                  observation_date: Callable[[], date] | None = None,
                  shared_cache: SharedCache | None = None,
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
+                 max_wikimedia_date_attempts: int = 1,
+                 include_wikimedia_transport_metrics: bool = False,
                  unavailable_mode: str | None = None,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if (set(query_collectors) != _QUERY_SOURCES
@@ -103,6 +105,9 @@ class D5SourceHandlers:
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
                 or ((shared_cache is None) != (resolve_cache_grant is None))
                 or (resolve_cache_grant is not None and not callable(resolve_cache_grant))
+                or type(max_wikimedia_date_attempts) is not int
+                or not 1 <= max_wikimedia_date_attempts <= 3
+                or type(include_wikimedia_transport_metrics) is not bool
                 or not callable(utcnow)):
             raise ValueError("fixed four-source collectors, plan and limits required")
         self.query_collectors = dict(query_collectors)
@@ -112,6 +117,8 @@ class D5SourceHandlers:
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
         self.shared_cache = shared_cache
         self.resolve_cache_grant = resolve_cache_grant
+        self.max_wikimedia_date_attempts = max_wikimedia_date_attempts
+        self.include_wikimedia_transport_metrics = include_wikimedia_transport_metrics
         self.unavailable_mode = unavailable_mode
         self.utcnow = utcnow
 
@@ -228,7 +235,7 @@ class D5SourceHandlers:
                 policy_version=grant.policy_version,
             )
             cached = self.shared_cache.get(scope, grant=grant, now=now)
-            if cached.get("status") == "CACHED" and cached.get("origin") == "SYNTHETIC":
+            if cached.get("status") == "CACHED" and cached.get("origin") in {"SYNTHETIC", "LIVE"}:
                 payload = cached.get("payload")
                 if (not isinstance(payload, dict)
                         or payload.get("data_mode") != cached.get("origin")
@@ -243,7 +250,7 @@ class D5SourceHandlers:
         if (scope is not None and grant.allowed is True
                 and result.get("status") in {"SUCCESS", "PARTIAL"}
                 and result.get("record_count", 0) > 0
-                and result.get("data_mode") == "SYNTHETIC"):
+                and result.get("data_mode") in {"SYNTHETIC", "LIVE"}):
             fetched_at = self.utcnow()
             try:
                 self.shared_cache.put(
@@ -259,10 +266,6 @@ class D5SourceHandlers:
     async def _wikimedia_handler(self, context: SourceWorkContext, observation_date=None):
         context.heartbeat()
         date_value = observation_date or self.observation_date()
-        request = WikimediaRequest(date_value, context.plan_fingerprint)
-        attempt_id = hashlib.sha256(
-            f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{date_value.isoformat()}:page-1".encode()
-        ).hexdigest()
 
         def result_for(page):
             records, omitted = _bounded_records([{
@@ -280,24 +283,37 @@ class D5SourceHandlers:
                 "fetched_at": _jsonable(row.fetched_at),
                 "source_url": row.source_url,
             } for row in page.observations])
+            coverage = {"observation_date": page.observation_date.isoformat(),
+                        "rejected": page.rejected_count,
+                        "records_omitted_storage_limit": omitted,
+                        "item_count": page.item_count}
+            if self.include_wikimedia_transport_metrics:
+                coverage.update(http_status=page.http_status, response_bytes=page.response_bytes)
             return {"status": "PARTIAL" if page.rejected_count or omitted else "SUCCESS",
                     "data_mode": page.data_mode, "records": records,
                     "record_count": len(records),
-                    "coverage": {"observation_date": page.observation_date.isoformat(),
-                                 "rejected": page.rejected_count,
-                                 "records_omitted_storage_limit": omitted,
-                                 "item_count": page.item_count}}
+                    "coverage": coverage}
 
         saved_progress = (context.resume_snapshot or {}).get("progress", {})
         saved_receipt = (saved_progress.get("wikimedia_receipt")
                          if isinstance(saved_progress, dict) else None)
         if saved_receipt is not None:
+            try:
+                saved_date = date.fromisoformat(saved_receipt["observation_date"])
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("CHECKPOINT_INVALID") from None
+            if saved_date not in {date_value - timedelta(days=i)
+                                  for i in range(self.max_wikimedia_date_attempts)}:
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            attempt_id = hashlib.sha256(
+                f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{saved_date.isoformat()}:page-1".encode()
+            ).hexdigest()
             result = saved_receipt.get("result") if isinstance(saved_receipt, dict) else None
             if (not isinstance(saved_receipt, dict)
                     or saved_receipt.get("schema") != 1
                     or saved_receipt.get("source_id") != WIKIMEDIA_SOURCE_ID
                     or saved_receipt.get("plan_fingerprint") != context.plan_fingerprint
-                    or saved_receipt.get("observation_date") != date_value.isoformat()
+                    or saved_receipt.get("observation_date") != saved_date.isoformat()
                     or saved_receipt.get("attempt_id") != attempt_id
                     or saved_receipt.get("data_mode") != self.wikimedia.data_mode
                     or not isinstance(result, dict)
@@ -326,53 +342,78 @@ class D5SourceHandlers:
                 raise AdmissionDenied("SETTLEMENT_PENDING") from None
             return result
 
-        def persist_page_receipt(page):
-            result = result_for(page)
-            context.checkpoint({"wikimedia_receipt": {
-                "schema": 1,
-                "source_id": WIKIMEDIA_SOURCE_ID,
-                "plan_fingerprint": context.plan_fingerprint,
-                "observation_date": date_value.isoformat(),
-                "attempt_id": attempt_id,
-                "data_mode": page.data_mode,
-                "result": result,
-            }})
+        # AQS may lag the latest complete UTC day. Try at most three dates,
+        # treating 404 as unavailable (never as zero), and stop on any other
+        # result. The gateway reserves every date independently before GET.
+        last_error = None
+        for fallback_days in range(self.max_wikimedia_date_attempts):
+            request_date = date_value - timedelta(days=fallback_days)
+            request = WikimediaRequest(request_date, context.plan_fingerprint)
+            attempt_id = hashlib.sha256(
+                f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{request_date.isoformat()}:page-1".encode()
+            ).hexdigest()
 
-        try:
-            page = await self.wikimedia.fetch_day(
-                request=request,
-                job_id=context.job_id,
-                owner=context.owner,
-                fence=context.fence,
-                attempt_id=attempt_id,
-                timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
-                    WIKIMEDIA_SOURCE_ID)),
-                on_page_receipt=persist_page_receipt,
-            )
-        except (WikimediaGatewayError, GatewayError) as exc:
-            if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
-                raise AdmissionDenied(exc.code) from None
-            context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
-            status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
-            result = {"status": status, "data_mode": self.wikimedia.data_mode,
-                      "records": [], "record_count": 0, "error_code": exc.code}
-            diagnostic = getattr(exc, "diagnostic", None)
-            if diagnostic is not None:
-                result["transport_diagnostic"] = {
-                    "source_id": diagnostic.source_id,
-                    "failure_phase": diagnostic.failure_phase,
-                    "http_status": diagnostic.http_status,
-                    "exception_class": diagnostic.exception_class,
-                    "bytes_received": diagnostic.bytes_received,
-                    "response_size_limit": diagnostic.response_size_limit,
-                    "attempt_id": diagnostic.attempt_id,
-                    "error_code": diagnostic.error_code,
-                }
+            def persist_page_receipt(page):
+                result = result_for(page)
+                context.checkpoint({"wikimedia_receipt": {
+                    "schema": 1,
+                    "source_id": WIKIMEDIA_SOURCE_ID,
+                    "plan_fingerprint": context.plan_fingerprint,
+                    "observation_date": request_date.isoformat(),
+                    "attempt_id": attempt_id,
+                    "data_mode": page.data_mode,
+                    "result": result,
+                }})
+
+            try:
+                page = await self.wikimedia.fetch_day(
+                    request=request,
+                    job_id=context.job_id,
+                    owner=context.owner,
+                    fence=context.fence,
+                    attempt_id=attempt_id,
+                    timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
+                        WIKIMEDIA_SOURCE_ID)),
+                    on_page_receipt=persist_page_receipt,
+                )
+            except (WikimediaGatewayError, GatewayError) as exc:
+                if (exc.code == "DAY_UNAVAILABLE"
+                        and fallback_days < self.max_wikimedia_date_attempts - 1):
+                    last_error = exc
+                    continue
+                last_error = exc
+                break
+            result = result_for(page)
+            context.checkpoint({"observation_date": page.observation_date.isoformat(),
+                                "records": result["record_count"],
+                                "rejected": page.rejected_count})
             return result
-        result = result_for(page)
-        context.checkpoint({"observation_date": page.observation_date.isoformat(),
-                            "records": result["record_count"],
-                            "rejected": page.rejected_count})
+
+        exc = last_error
+        if exc is None:
+            return {"status": "FAILED", "data_mode": self.wikimedia.data_mode,
+                    "records": [], "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED"}
+        if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
+            raise AdmissionDenied(exc.code) from None
+        context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
+        status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
+        result = {"status": status, "data_mode": self.wikimedia.data_mode,
+                  "records": [], "record_count": 0, "error_code": exc.code}
+        if exc.code == "RATE_LIMITED" and exc.retry_after_unbounded_seconds is not None:
+            result["retry_after_seconds"] = min(
+                31_536_000, max(1, math.ceil(exc.retry_after_unbounded_seconds)))
+        diagnostic = getattr(exc, "diagnostic", None)
+        if diagnostic is not None:
+            result["transport_diagnostic"] = {
+                "source_id": diagnostic.source_id,
+                "failure_phase": diagnostic.failure_phase,
+                "http_status": diagnostic.http_status,
+                "exception_class": diagnostic.exception_class,
+                "bytes_received": diagnostic.bytes_received,
+                "response_size_limit": diagnostic.response_size_limit,
+                "attempt_id": diagnostic.attempt_id,
+                "error_code": diagnostic.error_code,
+            }
         return result
 
 

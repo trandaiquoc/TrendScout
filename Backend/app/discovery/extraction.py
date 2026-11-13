@@ -156,6 +156,10 @@ def extract_candidates(observations: tuple[Observation, ...], *,
             canonical_url(observation.source_url) if observation.source_url else None,
             observation.delivery_mode,
             observation.language,
+            observation.article,
+            observation.project,
+            observation.provider_rank,
+            observation.approximate_views,
         )
         for phrase, original in _phrases(observation.text):
             forms[phrase].add(original)

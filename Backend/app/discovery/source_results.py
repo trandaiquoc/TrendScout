@@ -85,6 +85,8 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         phrase = _text(record.get("article_display") or record.get("canonical_keyword")
                        or record.get("article_original"))
         project = _text(record.get("project"))
+        rank = record.get("provider_rank")
+        approximate_views = record.get("views_ceil")
         country = record.get("country_scope")
         access = _text(record.get("access"))
         observed = _timestamp(record.get("observation_date"), allow_date=True)
@@ -125,6 +127,13 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
     if (not phrase or len(phrase) > 10_000 or len(_WORD.findall(phrase)) > 100
             or not document or len(scope) > 256):
         return ()
+    if source_id == WIKIMEDIA_SOURCE_ID and (
+        (rank is not None and (type(rank) is not int or rank < 1))
+        or (approximate_views is not None
+            and (type(approximate_views) is not int or approximate_views < 0))
+        or (project and len(project) > 128)
+    ):
+        return ()
     url_value = record.get("source_url") if "source_url" in record else (
         record.get("canonical_url") or record.get("canonical_video_url")
     )
@@ -147,6 +156,11 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         data_mode=mode, parser_version=version,
         language="und" if mode == "LIVE" else "en",
         source_url=url, delivery_mode=delivery,
+        article=(phrase if source_id == WIKIMEDIA_SOURCE_ID else None),
+        project=(project if source_id == WIKIMEDIA_SOURCE_ID else None),
+        provider_rank=(rank if source_id == WIKIMEDIA_SOURCE_ID and type(rank) is int else None),
+        approximate_views=(approximate_views if source_id == WIKIMEDIA_SOURCE_ID
+                           and type(approximate_views) is int else None),
     )
     if not query_evidence:
         return (observation,)
@@ -268,6 +282,10 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                 "delivery_mode": item.delivery_mode,
                 "language": item.language,
                 "source_url": item.source_url,
+                "article": item.article,
+                "project": item.project,
+                "provider_rank": item.provider_rank,
+                "approximate_views": item.approximate_views,
             } for item in candidate.evidence],
         })
     return {

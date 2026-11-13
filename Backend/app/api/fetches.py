@@ -294,8 +294,14 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
 def _raise_distributed_admission_error(code: str, service) -> None:
     if code == "JOB_NOT_FOUND":
         raise HTTPException(404, {"code": "FETCH_NOT_FOUND"}) from None
-    if code in {"RATE_LIMITED", "COOLDOWN", "STATUS_POLL_LIMIT"}:
+    if code in {"RATE_LIMITED", "PROVIDER_RATE_LIMITED", "COOLDOWN", "STATUS_POLL_LIMIT"}:
         retry_after = service.admission.policy.window_seconds
+        provider_retry_after = getattr(service, "provider_retry_after_seconds", None)
+        if code == "PROVIDER_RATE_LIMITED" and callable(provider_retry_after):
+            try:
+                retry_after = max(1, provider_retry_after())
+            except Exception:
+                raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         if code == "COOLDOWN":
             retry_after = max(1, service.admission.policy.cooldown_seconds)
         raise HTTPException(429, {"code": code}, headers={"Retry-After": str(retry_after)}) from None

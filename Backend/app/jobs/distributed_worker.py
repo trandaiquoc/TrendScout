@@ -192,7 +192,8 @@ class DistributedFetchWorker:
                 raise ValueError("invalid deferred source result")
             return value
         allowed = {"status", "data_mode", "delivery_state", "records", "record_count",
-                   "error_code", "coverage", "quality_flags", "transport_diagnostic"}
+                   "error_code", "retry_after_seconds", "coverage", "quality_flags",
+                   "transport_diagnostic"}
         if set(value) - allowed:
             raise ValueError("source result contains an unsupported field")
         if value.get("data_mode") != expected_mode:
@@ -209,6 +210,11 @@ class DistributedFetchWorker:
         if "error_code" in value and (not isinstance(value["error_code"], str)
                                        or not _SAFE_CODE.fullmatch(value["error_code"])):
             raise ValueError("invalid source error code")
+        if "retry_after_seconds" in value and (
+            type(value["retry_after_seconds"]) is not int
+            or not 1 <= value["retry_after_seconds"] <= 31_536_000
+        ):
+            raise ValueError("invalid retry interval")
         if "quality_flags" in value and (
             not isinstance(value["quality_flags"], list)
             or any(not isinstance(flag, str) or len(flag) > 64 for flag in value["quality_flags"])
