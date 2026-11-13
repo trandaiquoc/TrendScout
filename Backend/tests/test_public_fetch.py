@@ -216,7 +216,7 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         )
         sources = {source["source_id"]: source for source in value["sources"]}
         self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["adapter_status"], "IMPLEMENTED")
-        self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["live_verification_status"], "UNVERIFIED")
+        self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["live_verification_status"], "LOCAL_LIVE_VERIFIED")
         youtube = sources[YOUTUBE_SOURCE_ID]
         self.assertEqual(youtube["adapter_status"], "IMPLEMENTED_OFFLINE_VERIFIED")
         self.assertEqual(youtube["supported_data_modes"], ["SYNTHETIC"])

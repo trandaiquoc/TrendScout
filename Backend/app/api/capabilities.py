@@ -103,11 +103,15 @@ async def capabilities(request: Request, response: Response):
         "sources": [
             {
                 "source_id": item.source_id,
+                "display_name": item.display_name,
+                "icon": item.icon,
                 "provider_id": item.provider_id,
                 "adapter_status": item.adapter_status,
                 "approval_status": item.approval_status,
                 "configuration_status": item.configuration_status,
                 "live_verification_status": item.live_verification_status,
+                "local_live_verification_status": item.local_live_verification_status,
+                "production_readiness": item.production_readiness,
                 "supported_data_modes": list(item.supported_data_modes),
                 "query_based": item.query_based,
                 "metric": {

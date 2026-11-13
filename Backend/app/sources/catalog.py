@@ -13,6 +13,8 @@ DEFAULT_WIKIMEDIA_USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/T
 @dataclass(frozen=True)
 class SourceCapability:
     source_id: str
+    display_name: str
+    icon: str
     provider_id: str
     capability_version: int
     endpoint: str
@@ -23,6 +25,8 @@ class SourceCapability:
     approval_status: str
     configuration_status: str
     live_verification_status: str
+    local_live_verification_status: str
+    production_readiness: str
     supported_data_modes: tuple[str, ...]
     known_limitations: tuple[str, ...]
     credential_reference: str | None
@@ -38,6 +42,8 @@ class SourceCapability:
 SOURCE_CAPABILITIES = (
     SourceCapability(
         source_id=WIKIMEDIA_SOURCE_ID,
+        display_name="Wikimedia Pageviews",
+        icon="W",
         provider_id="wikimedia_aqs",
         capability_version=1,
         endpoint=(
@@ -49,12 +55,14 @@ SOURCE_CAPABILITIES = (
         adapter_status="IMPLEMENTED",
         approval_status="PENDING_LIVE_APPROVAL",
         configuration_status="NOT_REQUIRED",
-        live_verification_status="UNVERIFIED",
+        live_verification_status="LOCAL_LIVE_VERIFIED",
+        local_live_verification_status="LOCAL_LIVE_VERIFIED",
+        production_readiness="NOT_PRODUCTION_READY",
         supported_data_modes=("SYNTHETIC", "LIVE"),
         known_limitations=(
             "Top-list membership is censored; absence is not zero.",
             "Approximate pageviews do not measure unique audience or purchase intent.",
-            "Live connectivity has not been verified.",
+            "Local LIVE was verified historically; current runtime health is reported separately.",
         ),
         credential_reference=None,
         market="US country-scoped Wikimedia top list",
@@ -72,6 +80,8 @@ SOURCE_CAPABILITIES = (
     ),
     SourceCapability(
         source_id=YOUTUBE_SOURCE_ID,
+        display_name="YouTube",
+        icon="▶",
         provider_id="youtube_data_api_v3",
         capability_version=1,
         endpoint="https://www.googleapis.com/youtube/v3/search",
@@ -82,6 +92,8 @@ SOURCE_CAPABILITIES = (
         approval_status="PENDING_APPROVAL",
         configuration_status="NOT_CONFIGURED",
         live_verification_status="NOT_VERIFIED",
+        local_live_verification_status="NOT_VERIFIED",
+        production_readiness="NOT_APPROVED",
         supported_data_modes=("SYNTHETIC",),
         known_limitations=(
             "Offline fixture adapter only; live API execution is not configured or enabled.",
@@ -99,6 +111,8 @@ SOURCE_CAPABILITIES = (
     ),
     SourceCapability(
         source_id=GOOGLE_SOURCE_ID,
+        display_name="Google Search",
+        icon="G",
         provider_id="serpapi_google",
         capability_version=1,
         endpoint="https://serpapi.com/search.json",
@@ -109,6 +123,8 @@ SOURCE_CAPABILITIES = (
         approval_status="PENDING_APPROVAL",
         configuration_status="NOT_CONFIGURED",
         live_verification_status="NOT_VERIFIED",
+        local_live_verification_status="NOT_VERIFIED",
+        production_readiness="NOT_APPROVED",
         supported_data_modes=("SYNTHETIC",),
         known_limitations=(
             "Offline mock transport only; live execution is not configured or enabled.",
@@ -126,6 +142,8 @@ SOURCE_CAPABILITIES = (
     ),
     SourceCapability(
         source_id=BING_SOURCE_ID,
+        display_name="Bing Search",
+        icon="B",
         provider_id="serpapi_bing",
         capability_version=1,
         endpoint="https://serpapi.com/search.json",
@@ -136,6 +154,8 @@ SOURCE_CAPABILITIES = (
         approval_status="PENDING_APPROVAL",
         configuration_status="NOT_CONFIGURED",
         live_verification_status="NOT_VERIFIED",
+        local_live_verification_status="NOT_VERIFIED",
+        production_readiness="NOT_APPROVED",
         supported_data_modes=("SYNTHETIC",),
         known_limitations=(
             "Offline mock transport only; live execution is not configured or enabled.",

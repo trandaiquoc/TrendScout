@@ -21,7 +21,7 @@ _logger = logging.getLogger(__name__)
 # Wikidata occupation identifiers are evidence values, not a name-to-category list.
 OCCUPATION_CATEGORIES = {
     "Q33999": ("celebrity_public_figures.performers",),       # actor
-    "Q82955": ("celebrity_public_figures.politicians", "news_politics.public_figures"),
+    "Q82955": ("celebrity_public_figures.politicians",),
     "Q33231": ("celebrity_public_figures.photographers", "arts_culture.photography"),
     "Q40348": ("celebrity_public_figures.legal_professionals",),
     "Q39631": ("celebrity_public_figures.health_professionals", "health_fitness.health"),
@@ -29,6 +29,17 @@ OCCUPATION_CATEGORIES = {
     "Q639669": ("celebrity_public_figures.musicians",),       # musician
     "Q2066131": ("celebrity_public_figures.athletes",),       # athlete
     "Q901": ("celebrity_public_figures.scientists",),         # scientist
+    "Q41583": ("celebrity_public_figures.coaches",),           # coach
+    "Q43845": ("celebrity_public_figures.business_leaders",),
+    "Q131524": ("celebrity_public_figures.entrepreneurs",),
+    "Q245068": ("celebrity_public_figures.comedians",),
+    "Q49757": ("celebrity_public_figures.writers", "arts_culture.literature"),
+    "Q483501": ("arts_culture.visual_arts",),                 # artist
+    "Q5716684": ("arts_culture.performing_arts",),            # dancer
+    "Q1930187": ("celebrity_public_figures.journalists",),
+    "Q1650915": ("celebrity_public_figures.scientists",),      # researcher
+    "Q109459317": ("celebrity_public_figures.creators",),       # content creator
+    "Q111263847": ("celebrity_public_figures.creators",),       # digital creator
 }
 
 INSTANCE_TYPES = {
@@ -41,6 +52,30 @@ INSTANCE_TYPES = {
     "Q482994": "music_work",
     "Q40231": "political_event",
     "Q16510064": "sports_event",
+    "Q43229": "organization",
+    "Q783794": "organization",
+    "Q6881511": "organization",
+    "Q163740": "organization",
+    "Q327333": "organization",
+    "Q12973014": "organization",
+    "Q431289": "brand",
+    "Q2424752": "product",
+    "Q16686448": "software_product",
+    "Q7397": "software_product",
+    "Q4830453": "organization",
+    "Q1656682": "event",
+    "Q6256": "country",
+    "Q515": "city",
+    "Q2221906": "geographic_location",
+    "Q34442": "road",
+    "Q11446": "ship",
+    "Q11436": "aircraft",
+    "Q11173": "chemical_compound",
+    "Q7432": "biological_species",
+    "Q729": "animal",
+    "Q756": "plant",
+    "Q17537576": "scientific_concept",
+    "Q571": "book",
 }
 
 ENTITY_TYPE_CATEGORIES = {
@@ -49,6 +84,31 @@ ENTITY_TYPE_CATEGORIES = {
     "video_game": "gaming.video_games",
     "music_work": "entertainment.music",
     "sports_event": "sports.competitions",
+    "organization": "organizations",
+    "brand": "products_brands",
+    "product": "products_brands.consumer_products",
+    "country": "places_transportation.countries",
+    "city": "places_transportation.cities",
+    "geographic_location": "places_transportation.geographic_locations",
+    "road": "places_transportation.roads",
+    "ship": "places_transportation.ships",
+    "aircraft": "places_transportation.aircraft",
+    "chemical_compound": "science_nature.chemistry",
+    "biological_species": "science_nature.biology",
+    "animal": "science_nature.animals",
+    "plant": "science_nature.plants",
+    "scientific_concept": "science_nature.concepts",
+    "book": "creative_works.books",
+}
+
+INSTANCE_TYPE_CATEGORIES = {
+    "Q4830453": ("business_finance.companies",),
+    "Q327333": ("organizations.government",),
+    "Q163740": ("organizations.nonprofits",),
+    "Q12973014": ("organizations.sports",),
+    "Q2424752": ("products_brands.consumer_products",),
+    "Q16686448": ("technology.software",),
+    "Q7397": ("technology.software",),
 }
 
 
@@ -74,12 +134,13 @@ class EntityContext:
     method: str
     status: str
     captured_at: str
+    instance_types: tuple[str, ...] = ()
 
     def as_row(self) -> tuple:
         return (
             self.keyword_id, self.title, self.page_id, self.entity_id, self.description,
             self.entity_type, json.dumps(self.occupations), json.dumps(self.category_ids),
-            self.source_url, self.method, self.status, CONTEXT_VERSION, self.captured_at,
+            json.dumps(self.instance_types), self.source_url, self.method, self.status, CONTEXT_VERSION, self.captured_at,
         )
 
 
@@ -136,7 +197,7 @@ class WikimediaEntityContextResolver:
                 row["keyword_id"], row["title"], row["page_id"], row["entity_id"],
                 row["description"], row["entity_type"], tuple(json.loads(row["occupations"])),
                 tuple(json.loads(row["category_ids"])), row["source_url"], row["method"],
-                row["status"], row["captured_at"],
+                row["status"], row["captured_at"], tuple(json.loads(row["instance_types"] or "[]")),
             )
         return found
 
@@ -240,7 +301,7 @@ class WikimediaEntityContextResolver:
             output[record["id"]] = EntityContext(
                 record["id"], page_title, page_id if type(page_id) is int else None,
                 qid if isinstance(qid, str) else None, description, entity_type,
-                occupations, categories, source_url, method, status, _timestamp(),
+                occupations, categories, source_url, method, status, _timestamp(), instance,
             )
         return output
 
@@ -272,11 +333,11 @@ class WikimediaEntityContextResolver:
             return
         with self.store.connect() as db:
             db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
-                entity_type,occupations,category_ids,source_url,method,status,context_version,captured_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
+                entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
                 title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
                 description=excluded.description,entity_type=excluded.entity_type,
-                occupations=excluded.occupations,category_ids=excluded.category_ids,
+                occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
                 source_url=excluded.source_url,method=excluded.method,status=excluded.status,
                 context_version=excluded.context_version,captured_at=excluded.captured_at""",
                 [value.as_row() for value in results.values()])

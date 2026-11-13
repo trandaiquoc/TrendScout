@@ -176,13 +176,32 @@ def list_keywords(collection_id: str, request: Request):
 def unassigned_keywords(request: Request, limit: int = Query(default=40, ge=1, le=100),
                        offset: int = Query(default=0, ge=0, le=10000)):
     service = _service(request)
+    result = service.store.search_keywords(state="unassigned", sort="recent", limit=limit, offset=offset)
+    return {"items": result["items"], "total": result["total"], "limit": limit, "offset": offset}
+
+
+@router.get("/collections/classifications/{keyword_id}")
+def keyword_classification(keyword_id: str, request: Request):
+    service = _service(request)
     with service.store.connect() as db:
-        total = db.execute("""SELECT count(*) FROM keywords k LEFT JOIN memberships m ON m.keyword_id=k.id
-            WHERE k.eligible=1 AND m.keyword_id IS NULL""").fetchone()[0]
-        rows = db.execute("""SELECT k.* FROM keywords k LEFT JOIN memberships m ON m.keyword_id=k.id
-            WHERE k.eligible=1 AND m.keyword_id IS NULL ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE
-            LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
-    return {"items": [dict(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+        row = db.execute("SELECT * FROM classification_results WHERE keyword_id=?", (keyword_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, {"code": "CLASSIFICATION_NOT_FOUND"})
+    item = dict(row)
+    for key in ("topic_category_ids", "subcategory_ids", "rule_evidence", "source_evidence"):
+        item[key] = json.loads(item[key] or ("{}" if key == "source_evidence" else "[]"))
+    from app.taxonomy.registry import resolve
+    item["topic_categories"] = [{"id": value, "name": resolve(value).display_name,
+        "scope": resolve(value).scope} for value in item["topic_category_ids"]]
+    return item
+
+
+@router.post("/collections/reconciliation/{run_id}/rollback")
+def rollback_collection_reconciliation(run_id: str, request: Request):
+    _mutating(request)
+    if not _service(request).store.rollback_membership_reconciliation(run_id):
+        raise HTTPException(404, {"code": "RECONCILIATION_NOT_FOUND_OR_ROLLED_BACK"})
+    return {"rolled_back": True, "run_id": run_id}
 
 
 @router.post("/collections/organize")

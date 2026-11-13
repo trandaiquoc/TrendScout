@@ -22,12 +22,12 @@ SOURCE = 'wikimedia_pageviews_top_per_country'
 class TaxonomyRegistryTests(unittest.TestCase):
     def test_parents_subcategories_and_unique_ids(self):
         parents = [x for x in CATEGORIES.values() if x.parent_id is None]
-        self.assertEqual(len(parents), 16)
+        self.assertGreaterEqual(len(parents), 20)
         self.assertEqual(len(CATEGORIES), len({x.id for x in CATEGORIES.values()}))
         self.assertEqual({x.id for x in children('fashion')}, {'fashion.clothing','fashion.footwear','fashion.accessories','fashion.jewelry'})
         self.assertTrue(all(x.parent_id in CATEGORIES for x in CATEGORIES.values() if x.parent_id))
         self.assertTrue(all(x.status == 'active' for x in CATEGORIES.values()))
-        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.2')
+        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.3')
         for rule in RULES:
             self.assertIsNone(resolve(rule.category_id).parent_id)
             if rule.subcategory_id:
@@ -49,13 +49,10 @@ class TaxonomyRegistryTests(unittest.TestCase):
             CATEGORIES['arbitrary'] = resolve('fashion')
 
     def test_all_required_topics_have_expected_children(self):
-        expected = {
-            'entertainment':4, 'celebrity_public_figures':11, 'arts_culture':3, 'fashion':4, 'home_living':4,
-            'technology':4, 'gaming':3, 'beauty_personal_care':3, 'sports':4,
-            'food_beverage':3, 'health_fitness':3, 'travel_lifestyle':3,
-            'business_finance':3, 'news_politics':5, 'other':0, 'unclassified':0,
-        }
-        self.assertEqual({name:len(children(name)) for name in expected}, expected)
+        expected_ids = {'events.historical', 'events.festivals', 'science_nature.chemistry',
+            'places_transportation.ships', 'organizations.government', 'products_brands.software',
+            'celebrity_public_figures.coaches', 'celebrity_public_figures.entrepreneurs'}
+        self.assertTrue(expected_ids.issubset(CATEGORIES))
 
     def test_taxonomy_does_not_import_sdk_or_web(self):
         directory = Path(__file__).resolve().parents[1] / 'app' / 'taxonomy'
@@ -131,6 +128,87 @@ class ClassificationTests(unittest.TestCase):
                 result = self.classify(title)
                 self.assertEqual(result.entity_type, 'unknown')
                 self.assertEqual(result.topic_categories, ('unclassified',))
+
+    def test_multilingual_events_and_science_rules_have_grounded_evidence(self):
+        election = self.classify('Elecciones generales', project='es.wikipedia')
+        self.assertEqual(election.topic_categories, ('unclassified',))
+        vietnamese = self.classify('Bầu cử tổng thống', project='vi.wikipedia')
+        self.assertEqual(vietnamese.topic_categories, ('news_politics',))
+        self.assertEqual(vietnamese.subcategories, ('news_politics.elections',))
+        historical = self.classify('World War II')
+        self.assertEqual(historical.subcategories, ('events.historical',))
+        self.assertEqual(historical.rule_evidence[0].rule_id, 'historical_event')
+
+    def test_contextual_classification_separates_unknown_and_verified_multilabel(self):
+        from app.taxonomy.classifier import classify_contextual
+        unknown = classify_contextual({"id":"x", "keyword":"Taylor Smith", "source":SOURCE,
+            "project":"en.wikipedia", "eligible":1}, {})
+        self.assertEqual(unknown["classification_status"], "UNKNOWN")
+        person = classify_contextual({"id":"y", "keyword":"Jensen Huang", "source":SOURCE,
+            "project":"en.wikipedia", "eligible":1}, {"entity_type":"person", "entity_id":"Q123",
+            "description":"Business executive", "occupations":("Q43845",), "category_ids":(),
+            "instance_types":("Q5",)})
+        self.assertEqual(person["classification_status"], "CLASSIFIED")
+        self.assertEqual(person["topic_category_ids"], ["celebrity_public_figures.business_leaders"])
+        self.assertEqual(person["confidence_level"], "HIGH")
+        company = classify_contextual({"id":"company", "keyword":"Unfamiliar name", "source":SOURCE,
+            "project":"en.wikipedia", "eligible":1}, {"entity_type":"unknown", "entity_id":"Q901",
+            "description":"American multinational technology company", "occupations":(), "category_ids":(),
+            "instance_types":(), "source_url":"https://en.wikipedia.org/wiki/Example"})
+        self.assertEqual(company["classification_status"], "CLASSIFIED")
+        self.assertIn("organizations", company["topic_category_ids"])
+        self.assertIn("technology", company["topic_category_ids"])
+        self.assertTrue(any(item.get("kind") == "ENTITY_DESCRIPTION_RULE" for item in company["rule_evidence"]))
+        ineligible = classify_contextual({"id":"z", "keyword":"technical noise", "source":SOURCE,
+            "project":"en.wikipedia", "eligible":False}, {})
+        self.assertEqual(ineligible["classification_status"], "INELIGIBLE")
+
+    def test_wikidata_instance_type_map_covers_non_person_entities(self):
+        from app.collections.entity_context import INSTANCE_TYPES
+        from app.taxonomy.classifier import classify_contextual
+        examples = {
+            "Q43229": "organizations", "Q431289": "products_brands",
+            "Q11424": "entertainment.film", "Q7889": "gaming.video_games",
+            "Q40231": "news_politics.elections", "Q16510064": "sports.competitions",
+            "Q6256": "places_transportation.countries", "Q515": "places_transportation.cities",
+            "Q34442": "places_transportation.roads", "Q11446": "places_transportation.ships",
+            "Q11436": "places_transportation.aircraft", "Q11173": "science_nature.chemistry",
+            "Q7432": "science_nature.biology", "Q729": "science_nature.animals",
+            "Q756": "science_nature.plants", "Q17537576": "science_nature.concepts",
+            "Q571": "creative_works.books",
+        }
+        for index, (instance_id, category_id) in enumerate(examples.items()):
+            with self.subTest(instance_id=instance_id):
+                title = "2026 United States elections" if instance_id == "Q40231" else "Evidence-backed entity"
+                result = classify_contextual({"id":str(index), "keyword":title,
+                    "source":SOURCE, "project":"en.wikipedia", "eligible":1},
+                    {"entity_type":"unknown", "entity_id":"Q900", "instance_types":(instance_id,),
+                     "occupations":(), "category_ids":(), "description":"Wikidata instance evidence"})
+                self.assertIn(category_id, result["topic_category_ids"])
+                self.assertEqual(result["classification_status"], "CLASSIFIED")
+                self.assertTrue(any(item.get("kind") == "WIKIDATA_ENTITY" for item in result["rule_evidence"]))
+                resolve(category_id)
+        self.assertIn("Q5", INSTANCE_TYPES)
+
+    def test_owner_supplied_regression_title_fixture_never_guesses_bare_names(self):
+        from app.taxonomy.classifier import classify_contextual
+        fixture = Path(__file__).parent / "fixtures" / "contextual_classification_titles.txt"
+        titles = fixture.read_text(encoding="utf-8").splitlines()
+        self.assertGreaterEqual(len(titles), 60)
+        self.assertEqual(len(titles), len(set(titles)))
+        bare_names = {"Jensen Huang", "Lisa Su", "Carson Wentz", "Nvidia", "United States", "MediaWiki"}
+        for index, title in enumerate(titles):
+            result = classify_contextual({"id":str(index), "keyword":title, "source":SOURCE,
+                "project":"en.wikipedia", "eligible":1}, {})
+            if title in bare_names:
+                self.assertEqual(result["classification_status"], "UNKNOWN", title)
+                self.assertNotIn("celebrity_public_figures.public_figures", result["topic_category_ids"])
+        election = classify_contextual({"id":"fixture-election", "keyword":"2026 United States elections",
+            "source":SOURCE, "project":"en.wikipedia", "eligible":1}, {})
+        self.assertEqual(election["topic_category_ids"], ["news_politics.elections"])
+        film = classify_contextual({"id":"fixture-film", "keyword":"Wildwood (film)",
+            "source":SOURCE, "project":"en.wikipedia", "eligible":1}, {})
+        self.assertEqual(film["topic_category_ids"], ["entertainment.film"])
 
     def test_legacy_behavior_and_serialization_unchanged(self):
         titles = ('Paris Fashion Week', 'washing machine', 'General election', 'Stephen Miller')

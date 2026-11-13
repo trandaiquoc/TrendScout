@@ -1,5 +1,49 @@
 # TrendScout data exploration and analytics — implementation status
 
+## Windows resume and contextual-classification acceptance (2026-11-13)
+
+This is the current native-Windows acceptance record. It supersedes older machine-specific counts and statuses below for the Windows Collections database only. Earlier Linux counts and test totals remain historical evidence; they are not Windows database state.
+
+### State and data safety
+
+- Git synchronization: local `HEAD` and `origin/main` both equal `aca450a26b9b2730e90a708bafac8eeaa6b60686` (`fix(collections): contextual AI organization`). No upstream changes were missing at the audit. The final local work is still to be committed; nothing was pushed or deployed.
+- Runtime: Windows 11 Home Single Language, build 26200, native 64-bit Python 3.12.10, project virtual environment under `Backend/.venv`, FastAPI/Uvicorn loopback runtime. `start.ps1` defaults to Wikimedia LIVE, one worker, and no automatic Fetch. A smoke start served `/api/health` with `{"status":"ok"}`. Synthetic and Cloud remain explicit choices.
+- Existing Windows data was found at `%LOCALAPPDATA%\TrendScout\collections-v1\collections.sqlite`; the local multilingual FastEmbed model cache already existed at `%LOCALAPPDATA%\TrendScout\models\fastembed`.
+- Before migration, a SQLite online backup at `%LOCALAPPDATA%\TrendScout\backups\collections.sqlite.before-context-classification-20261113T124517Z` passed `PRAGMA integrity_check`. Baseline: 154 keywords (154 eligible), a PARTIAL latest snapshot with 212 provider-reported and 154 retained records, 70 unassigned, 21 Collections, 127 `LOCAL_AI` memberships, 150 entity-context records, 1,848 algorithm results, 329 cached vectors, 0 keyword decisions and 0 feedback rows. This is the measured Windows state, not a restored Linux database.
+- The classifier replay passed `sources=[]` and used cached Windows entity context; it made **0 provider API requests** and did not Fetch Wikimedia Pageviews. The first warm-up pass inferred 188 vectors and carries `LOCAL_MODEL_UNAVAILABLE` on its fetch-job record. It archived the original 127 unpinned `LOCAL_AI` links and applied contextual results. The successful idempotent retry archived the then-current 180 AI links and completed with 347 cache hits and 0 new inference. Cache count rose from 329 to 517. Both reconciliation records remain available for audit and recovery.
+- Final SQLite integrity is `ok`; `foreign_key_check` is empty. Protected SHA-256 digests match the pre-replay baseline for keyword/source evidence (`1549952b42ff145cd825c3ca83a13f53fd8beab5ddb9c24373f7703bee18fecb`), algorithm results (`ff23137b1a69e58818717211a8a33fabde776717b39c00cbedc8c971c8205aaf`), feedback, and keyword decisions. The protected D6 quota ledger was not read or changed.
+
+### Contextual classification and Collections
+
+- The prior Inbox defect was caused by generated selects whose first option was the first Collection. Native HTML selected it, making unassigned keywords look as though AI had assigned them to Public Figures. The manual per-keyword and bulk selectors now start with a translated blank placeholder; Add remains disabled until an explicit user choice. Contextual AI evidence renders in a separate suggestion panel. Locale changes rerender dynamic Collection content, so the placeholder and evidence switch between Vietnamese and English immediately.
+- Context classification is now part of the persisted full-ledger `CollectionService` replay and available through `/api/v1/collections/classifications/{keyword_id}`. Each stored result includes entity identity/description, taxonomy and subcategory IDs, status, qualitative evidence/confidence level, method/version, source/rule evidence, review status and timestamp. Similarity is not treated as classification confidence; commercial relevance remains `NOT_ASSESSED`.
+- Wikidata `P31` instance types and `P106` occupations feed versioned evidence mappings, with cached multilingual descriptions and conservative title rules. Bare names without context remain `UNKNOWN`; conflicting/weak context may remain `AMBIGUOUS`. Added stable taxonomy branches cover organizations, products/brands, events, places/transportation, science/nature, creative works, and people/occupation leaves. Taxonomy version is `topics-v1.3`; political public figures remain distinct from other public figures.
+- Exact same-ledger result: 154/154 eligible rows have a final status: **125 `CLASSIFIED`, 11 `AMBIGUOUS`, 18 `UNKNOWN`, 0 `INELIGIBLE`**. The final successful replay retained 180 `LOCAL_AI` memberships across 125 distinct assigned keywords; 29 remain unassigned. It did not force every keyword into a Collection. Before/after source evidence, algorithm results, user decisions and feedback are unchanged. The successful retry archived the immediately prior 180 AI links under reversible reconciliation `reconcile-240ab852-9711-4ba6-ad9b-dcde2bc40cf2`; the first warm-up run archived the original 127 links under `reconcile-b813bed0-3a5a-42cc-9f7b-4488580f01fe`.
+- Owner regression fixture: 70 supplied titles; 67 exist in this Windows ledger and 65 have cached entity context. Missing fixture names were not fabricated. Verified examples include evidence-backed Jensen Huang/Lisa Su business-leader labels, Nvidia organization/technology labels, Limonene chemistry, United States country, SS Edmund Fitzgerald ship, Carson Wentz athlete, and explicit comedian/election titles. Bare-name-only fixture inputs stay unknown.
+- A native Chrome run on a disposable database copy exercised Collection creation, bulk addition, merge and delete. Merge moved the keyword to a pinned `USER` membership and removed the source; delete removed the target while preserving the keyword and its classification result. Browser requests made no provider Fetch. This run exposed and fixed a local-guard regex bug that denied merge (`{1,64}` was not escaped in the f-string); a regression test now protects the route.
+
+### Algorithms, source capability, browser and tests
+
+- The Windows ledger contains 1,848 algorithm result rows for 154 eligible keywords and 12 registered methods. The two compatible partial-snapshot methods completed for 150 records each and honestly skipped 4 records each for insufficient comparable cohort evidence. Example: Jensen Huang has 153,200 approximate views and an observed cohort percentile rank of 99.32 on 2026-11-11. The result flags the censored top-list, partial sample, and approximate view count. It is a within-snapshot popularity rank, not growth or a probability.
+- The other methods have 154 `SKIPPED` results each because comparable history/baselines are unavailable or their source/metric contract does not match this Wikimedia snapshot. Search/video provider adapters remain offline/not configured. The catalog/UI shows backend status and provider badges; only Wikimedia is configured for local LIVE. Historical algorithm evaluation remains `NOT_YET_EVALUATED`: this single-day partial snapshot cannot support a winner or claim of emerging US trend.
+- Fresh Chrome screenshots are saved in `Documents/Reports/windows-evidence/`: `windows-dashboard-en-desktop.png`, `windows-keywords-en-desktop.png`, `windows-inbox-vi-desktop.png`, `windows-inbox-en-desktop.png`, `windows-inbox-vi-mobile-dark.png`, `windows-algorithm-library-en-desktop.png`, and `windows-collections-merge-delete-e2e.png`. Browser acceptance confirms restored 154-record dataset/search rows, the blank Inbox target, separate contextual evidence, localized labels, 12 algorithm entries, source status badges, desktop width 1440 without horizontal overflow, mobile width 390 without overflow, merge/delete persistence, and no browser exceptions. Dashboard, Inbox, and algorithm runs made zero Pageviews Fetch POSTs.
+- Windows full backend regression: **737 tests and 765 subtests passed** after adding the merge-guard regression. Changed-file Ruff, Python `compileall`, `node --check Frontend/public/app.js`, and `git diff --check` pass. Repository-wide Ruff reports legacy violations outside this change scope and is not an acceptance gate.
+
+### Parent-goal gates
+
+| Gate | Current evidence | Verdict |
+| --- | --- | --- |
+| G1 — Git synchronization and code audit | Fetched upstream; local and upstream HEAD match; working tree was clean before this change | PASS |
+| G2 — Windows LIVE runtime | Default launcher starts local Wikimedia LIVE on loopback, one worker, no automatic Fetch; health smoke passed | PASS |
+| G3 — persistent restore and search | Windows ledger and cached dataset restore/search/reload were exercised in the Windows browser evidence set | PASS |
+| G4 — contextual Collections and review | Full-ledger classifier, preserved decisions/feedback, assignment and Inbox UI, bulk, merge/delete, rollback and suppression regression coverage | PASS |
+| G5 — compatible algorithm outputs | Actual partial-cohort rank values persisted; unsupported methods visibly skip with reasons; evaluation remains honestly unevaluated | PASS |
+| G6 — capability registry and icons | Runtime registry and browser catalog display configured Wikimedia and nonconfigured adapters without claiming live access | PASS |
+| G7 — native Windows Chrome and regression | Vietnamese/English desktop, Vietnamese mobile, algorithm cards and Collection merge/delete browser runs; 737 tests and 765 subtests pass | PASS |
+| G8 — report, screenshots, local commit | This Windows addendum and fresh evidence are present; local commit remains pending | IN PROGRESS |
+
+No push or deployment is authorized or performed. G8 remains open until the final local commit is created and checked.
+
 **Status:** in progress; not a final acceptance pass
 **Reviewed:** 2026-11-13
 **Scope:** persisted local keyword Collections and the mandatory trend-algorithm-engine addendum. No deployment, push, or Wikimedia Pageviews Fetch was performed for the contextual replay documented below.

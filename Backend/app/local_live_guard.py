@@ -38,10 +38,11 @@ class LocalLiveGuard:
             return
         path = scope.get("path", "")
         method = scope.get("method", "").upper()
+        collection_id = r"(?:[0-9a-f-]{36}|topic-[0-9a-f]{32})"
         collection_read = (
             method == "GET" and path in {"/api/v1/collections", "/api/v1/collections/inbox"}
         ) or (method == "GET" and re.fullmatch(
-            r"/api/v1/collections/(?:jobs/[^/]{1,64}|[0-9a-f-]{36}/keywords)", path
+            rf"/api/v1/collections/(?:jobs/[^/]{1,64}|{collection_id}/keywords|classifications/[a-f0-9]{{64}})", path
         ))
         algorithm_read = method == "GET" and path in {
             "/api/v1/algorithms", "/api/v1/algorithms/results",
@@ -52,13 +53,14 @@ class LocalLiveGuard:
         collection_write = (
             method == "POST" and path in {
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
+                "/api/v1/collections/bulk",
             }
         ) or (method == "POST" and re.fullmatch(
-            r"/api/v1/collections/(?:[^/]{1,64}/merge|[0-9a-f-]{36}/keywords|suggestions/[0-9a-f-]{36}/(?:accept|reject))", path
+            rf"/api/v1/collections/(?:reconciliation/reconcile-[0-9a-f-]{{36}}/rollback|[^/]{{1,64}}/merge|{collection_id}/keywords|suggestions/[0-9a-f-]{{36}}/(?:accept|reject))", path
         )) or (method == "PATCH" and re.fullmatch(
-            r"/api/v1/collections/[0-9a-f-]{36}", path
+            rf"/api/v1/collections/{collection_id}", path
         )) or (method == "DELETE" and re.fullmatch(
-            r"/api/v1/collections/[0-9a-f-]{36}(?:/keywords/[a-f0-9]{64})?", path
+            rf"/api/v1/collections/{collection_id}(?:/keywords/[a-f0-9]{{64}})?", path
         ))
         allowed = (
             (method == "GET" and path in {

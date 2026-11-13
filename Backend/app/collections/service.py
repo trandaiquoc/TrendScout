@@ -60,8 +60,11 @@ class CollectionService:
         except Exception:
             try:
                 with self.store.connect() as db:
-                    db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,error_code,updated_at)
-                        VALUES(?,'FAILED','COLLECTION_PROCESSING_FAILED',?)""", (fetch_id, now()))
+                    db.execute("UPDATE fetch_jobs SET status='FAILED',error_code='COLLECTION_PROCESSING_FAILED',updated_at=? WHERE fetch_id=?",
+                               (now(), fetch_id))
+                    if db.execute("SELECT changes()").fetchone()[0] == 0:
+                        db.execute("""INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at)
+                            VALUES(?,'FAILED','COLLECTION_PROCESSING_FAILED',?)""", (fetch_id, now()))
             except Exception:
                 pass
             return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "COLLECTION_PROCESSING_FAILED"}
@@ -138,6 +141,70 @@ class CollectionService:
                     record["entity_description"] = context.description
                     record["entity_id"] = context.entity_id
                     record["entity_category_ids"] = context.category_ids
+                    record["entity_occupations"] = context.occupations
+                    record["entity_instance_types"] = context.instance_types
+                    record["entity_source_url"] = context.source_url
+                    record["entity_context_method"] = context.method
+                    record["entity_context_status"] = context.status
+                    record["entity_context_captured_at"] = context.captured_at
+        with self.store.connect() as db:
+            excluded_records = [dict(row) for row in db.execute(
+                "SELECT * FROM keywords WHERE eligible=0 ORDER BY observed_at DESC,keyword COLLATE NOCASE"
+            ).fetchall()]
+        classification_records = [*records, *excluded_records]
+        if self.entity_context_resolver is not None and excluded_records:
+            excluded_contexts = self.entity_context_resolver.cached(row["id"] for row in excluded_records)
+            for record in excluded_records:
+                context = excluded_contexts.get(record["id"])
+                if context is not None:
+                    record.update(entity_type=context.entity_type, entity_description=context.description,
+                        entity_id=context.entity_id, entity_category_ids=context.category_ids,
+                        entity_occupations=context.occupations, entity_instance_types=context.instance_types,
+                        entity_source_url=context.source_url, entity_context_method=context.method,
+                        entity_context_status=context.status)
+        from app.taxonomy.classifier import classify_contextual
+        classified_at = now()
+        for record in classification_records:
+            context = {
+                "entity_type": record.get("entity_type", "unknown"),
+                "entity_id": record.get("entity_id"),
+                "description": record.get("entity_description", ""),
+                "occupations": record.get("entity_occupations", ()),
+                "instance_types": record.get("entity_instance_types", ()),
+                "category_ids": record.get("entity_category_ids", ()),
+                "source_url": record.get("entity_source_url", ""),
+                "method": record.get("entity_context_method", ""),
+                "status": record.get("entity_context_status", ""),
+            }
+            result = classify_contextual(record, context)
+            result["classified_at"] = classified_at
+            record["classification_result"] = result
+            if record.get("eligible", 1):
+                record["entity_category_ids"] = tuple(result["topic_category_ids"])
+        with self.store.connect() as db:
+            db.executemany("""INSERT INTO classification_results(keyword_id,entity_type,entity_id,
+                entity_description,topic_category_ids,subcategory_ids,classification_status,confidence_level,
+                commercial_relevance,classification_method,classification_version,taxonomy_version,rule_evidence,source_evidence,
+                review_status,classified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(keyword_id) DO UPDATE SET entity_type=excluded.entity_type,entity_id=excluded.entity_id,
+                entity_description=excluded.entity_description,topic_category_ids=excluded.topic_category_ids,
+                subcategory_ids=excluded.subcategory_ids,classification_status=excluded.classification_status,
+                confidence_level=excluded.confidence_level,commercial_relevance=excluded.commercial_relevance,
+                classification_method=excluded.classification_method,
+                classification_version=excluded.classification_version,taxonomy_version=excluded.taxonomy_version,
+                rule_evidence=excluded.rule_evidence,source_evidence=excluded.source_evidence,
+                review_status=excluded.review_status,classified_at=excluded.classified_at""",
+                [(item["id"], item["classification_result"]["entity_type"],
+                  item["classification_result"]["entity_id"], item["classification_result"]["entity_description"],
+                  json.dumps(item["classification_result"]["topic_category_ids"], ensure_ascii=False),
+                  json.dumps(item["classification_result"]["subcategory_ids"], ensure_ascii=False),
+                  item["classification_result"]["classification_status"], item["classification_result"]["confidence_level"],
+                  item["classification_result"]["commercial_relevance"],
+                  item["classification_result"]["classification_method"], item["classification_result"]["classification_version"],
+                  item["classification_result"]["taxonomy_version"],
+                  json.dumps(item["classification_result"]["rule_evidence"], ensure_ascii=False),
+                  json.dumps(item["classification_result"]["source_evidence"], ensure_ascii=False),
+                  item["classification_result"]["review_status"], classified_at) for item in classification_records])
         category_collection_ids = {}
         for category_id in INITIAL_TOPIC_ROOTS:
             self.store.ensure_category_collection(resolve_category(category_id))
@@ -191,10 +258,15 @@ class CollectionService:
 
         assigned = 0
         unassigned_rows = []
+        reconciliation_id = f"reconcile-{uuid.uuid4()}"
         self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
             processed=len(records), cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
             inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
         self._update_job(fetch_id, stage="ASSIGNING_KEYWORDS")
+        self.store.archive_unpinned_ai_memberships(
+            reconciliation_id, f"Contextual full-ledger replay for {fetch_id}"
+        )
+        self._update_job(fetch_id, membership_reconciliation_id=reconciliation_id)
         with self.store.connect() as db:
             # Recompute automatic memberships from the complete eligible ledger after
             # inference succeeds. Pinned USER memberships and explicit REMOVE feedback stay intact.
@@ -277,7 +349,7 @@ class CollectionService:
                     if not rejected and not fits_existing_collection and not unresolved_person:
                         unassigned_rows.append((record, topic_vector))
         self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
-        created, suggestions = self._propose(fetch_id, unassigned_rows, collections)
+        created, suggestions = self._propose(reconciliation_id, unassigned_rows, collections)
         with self.store.connect() as db:
             assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships WHERE origin='LOCAL_AI'").fetchone()[0]
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
@@ -287,6 +359,7 @@ class CollectionService:
                    "eligible": eligible,
                    "cached_embeddings": self._thread_state.embedding_counts["cached_embeddings"],
                    "inferred_embeddings": self._thread_state.embedding_counts["inferred_embeddings"],
+                   "membership_reconciliation_id": reconciliation_id,
                    "algorithms": analysis}
         self._update_job(fetch_id, stage="SAVING_RESULTS", assigned=assigned, created_collections=created,
             unassigned=outcome["unassigned"])
@@ -295,7 +368,8 @@ class CollectionService:
             unassigned=outcome["unassigned"], created_collections=created,
             suggestions=suggestions, skipped=skipped,
             cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
-            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
+            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"],
+            membership_reconciliation_id=reconciliation_id)
         with self.store.connect() as db:
             db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
                 eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1),
@@ -306,7 +380,8 @@ class CollectionService:
 
     def _update_job(self, fetch_id, **values):
         allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
-                   "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings"}
+                   "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
+                   "membership_reconciliation_id"}
         changes = {key: value for key, value in values.items() if key in allowed}
         assignments = [f"{key}=?" for key in changes]
         parameters = list(changes.values())
@@ -409,7 +484,7 @@ class CollectionService:
                     peer_date = peer_evidence.get("observation_date") or peer["observed_at"][:10]
                     peer_key = (peer["source"], peer_evidence.get("country_scope") or "US",
                         peer_evidence.get("access") or "all-access", peer_date, "views_ceil",
-                        "approx_pageviews_upper_bound")
+                        "approx_pageviews_upper_bound", peer["project"])
                     peer_value = peer_evidence.get("views_ceil")
                     if type(peer_value) is int and peer_value >= 0:
                         peer_scope = Scope(peer["source"], peer_key[1], peer_key[2], peer["project"],
@@ -435,7 +510,7 @@ class CollectionService:
                         point["status"], point["value"], point["snapshot_status"]) for point in history_rows)
                     current = evidence.get("views_ceil")
                     cohort_key = (record["source"], scope.country, scope.access,
-                        analysis_date.isoformat(), metric, unit)
+                        analysis_date.isoformat(), metric, unit, record["project"])
                     cohort = tuple(point for keyword_id, point in snapshot_cohorts.get(cohort_key, ())
                                    if keyword_id != record["id"])
                     item = AlgorithmInput(record["id"], scope, analysis_date, current, history,

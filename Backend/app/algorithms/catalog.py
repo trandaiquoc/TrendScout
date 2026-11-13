@@ -24,8 +24,8 @@ def registry(scorer=score_trends):
     return result
 
 
-def catalog():
-    sources = {source.source_id: source for source in SOURCE_CAPABILITIES}
+def catalog(source_capabilities=SOURCE_CAPABILITIES):
+    sources = {source.source_id: source for source in source_capabilities}
     methods = []
     registered = registry()
     for key in registered.keys():
@@ -51,13 +51,18 @@ def catalog():
             elif 'top_list_censored' in source.capabilities and not meta.accepts_censored_top_list:
                 status = 'INCOMPATIBLE'
                 reason = 'CENSORED_SOURCE_NOT_ACCEPTED'
-            elif source.readiness == 'IMPLEMENTED' and source.approval_status == 'APPROVED':
+            elif source.readiness == 'IMPLEMENTED' and source.adapter_status == 'IMPLEMENTED':
                 status, reason = 'SUPPORTED_AND_AVAILABLE', None
             else:
                 status, reason = 'SUPPORTED_BUT_NOT_LIVE', source.readiness
             compatible.append({'source_id': source_id, 'provider_id': source.provider_id,
+                'display_name': source.display_name, 'icon': source.icon,
                 'status': status, 'reason': reason, 'metric': source.metric_name,
-                'unit': source.metric_unit, 'capabilities': source.capabilities})
+                'unit': source.metric_unit, 'capabilities': source.capabilities,
+                'adapter_status': source.adapter_status,
+                'runtime_availability': 'LIVE_CAPABLE' if 'LIVE' in source.supported_data_modes else 'OFFLINE_ONLY',
+                'local_live_verification_status': source.local_live_verification_status,
+                'production_readiness': source.production_readiness})
         item['sources'] = compatible
         methods.append(item)
     return {'version': 'algorithm-registry-v1', 'evaluation_status': 'NOT_YET_EVALUATED',

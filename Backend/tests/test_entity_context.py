@@ -52,7 +52,8 @@ class EntityContextTests(unittest.TestCase):
             self.assertEqual(len(calls), 2)
             self.assertEqual(first["amanda"].entity_type, "person")
             self.assertIn("celebrity_public_figures.performers", first["amanda"].category_ids)
-            self.assertIn("news_politics.public_figures", first["aoc"].category_ids)
+            self.assertIn("celebrity_public_figures.politicians", first["aoc"].category_ids)
+            self.assertNotIn("news_politics.public_figures", first["aoc"].category_ids)
             self.assertIn("arts_culture.photography", first["ansel"].category_ids)
             self.assertIn("celebrity_public_figures.legal_professionals", first["alina"].category_ids)
             self.assertTrue(all(item.entity_id and item.source_url and item.description

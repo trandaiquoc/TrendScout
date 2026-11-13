@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +46,13 @@ class SmartCollectionsTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_configured_local_store_directory_is_respected(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"TRENDSCOUT_COLLECTIONS_DIR": directory}
+        ):
+            store = CollectionStore.local()
+            self.assertEqual(store.path, Path(directory) / "collections.sqlite")
+
     def test_algorithm_catalog_and_persisted_results_api(self):
         row = {"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
             "project": "en.wikipedia", "observation_date": "2026-11-10",
@@ -77,8 +85,16 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(dataset_response.json()["item"]["restoration_status"], "CACHED")
         self.assertEqual(keyword_response.json()["total"], 1)
         self.assertEqual(keyword_response.json()["items"][0]["keyword"], "Robot vacuum")
+        classification_response = __import__("asyncio").run(self._classification_request(app, keyword_response.json()["items"][0]["id"]))
+        self.assertEqual(classification_response.status_code, 200)
+        self.assertEqual(classification_response.json()["classification_status"], "UNKNOWN")
+        self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.3")
 
-    def test_partial_snapshot_is_not_used_for_snapshot_popularity(self):
+    async def _classification_request(self, app, keyword_id):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+            return await client.get(f"/api/v1/collections/classifications/{keyword_id}")
+
+    def test_partial_snapshot_executes_descriptive_snapshot_popularity(self):
         rows = [{"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
             "project": "en.wikipedia", "observation_date": "2026-11-10",
             "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 1, "views_ceil": 1000},
@@ -90,7 +106,15 @@ class SmartCollectionsTests(unittest.TestCase):
         with patch.object(embeddings, "embed", side_effect=fake_embed):
             self.service._process_fetch("partial-snapshot", source)
         with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE status='COMPLETED'").fetchone()[0], 0)
+            completed = db.execute("SELECT algorithm_id,value,result_json FROM algorithm_results WHERE status='COMPLETED'").fetchall()
+            self.assertEqual(len(completed), 4)
+            rankings = [row for row in completed if row["algorithm_id"] in {
+                "observed-volume-rank", "observed-percentile-rank"}]
+            self.assertEqual(len(rankings), 4)
+            self.assertTrue(all(row["value"] is not None for row in rankings))
+            for row in rankings:
+                flags = __import__("json").loads(row["result_json"])["quality_flags"]
+                self.assertTrue({"CENSORED_TOP_LIST", "PARTIAL_SAMPLE", "VIEWS_APPROXIMATE"} <= set(flags))
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE snapshot_status='PARTIAL'").fetchone()[0], 2)
         self.assertEqual(self.store.latest_dataset()["status"], "PARTIAL")
 
@@ -154,7 +178,8 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(restarted.list_collections()[0]["name"], "Sustainable fashion")
         self.assertEqual(restarted.list_collections()[0]["version"], 3)
         self.assertFalse(restarted.delete(collection_id) is False)
-        self.assertTrue(restarted.connect().execute("SELECT 1 FROM suppression").fetchone())
+        with restarted.connect() as db:
+            self.assertTrue(db.execute("SELECT 1 FROM suppression").fetchone())
 
     def test_merge_transfers_keywords_and_preserves_target_pins_and_rejections(self):
         source = self.store.create({"name": "TV topics"})
@@ -208,8 +233,8 @@ class SmartCollectionsTests(unittest.TestCase):
                         "TEST_VERIFIED_CONTEXT", "CLASSIFIED" if recognized else "UNKNOWN", "2026-11-13T00:00:00Z")
                 with self.store.connect() as db:
                     db.executemany("""INSERT OR REPLACE INTO entity_context(keyword_id,title,page_id,entity_id,
-                        description,entity_type,occupations,category_ids,source_url,method,status,context_version,captured_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
+                        description,entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
                 return self.contexts
 
             def cached(self, keyword_ids):
@@ -256,8 +281,13 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(self.store.archive_unpinned_ai_memberships("reconcile-test", "threshold update"), 1)
         self.assertEqual(len(self.store.keywords_for(collection)), 1)
         self.assertEqual(self.store.keywords_for(collection)[0]["origin"], "USER")
+        with self.store.connect() as db:
+            db.execute("INSERT INTO memberships VALUES(?,?, 'LOCAL_AI',0,0.95,'new replay',?)",
+                       (collection, first["id"], "2026-11-14T00:00:00+00:00"))
         self.assertTrue(self.store.rollback_membership_reconciliation("reconcile-test"))
-        self.assertEqual({row["origin"] for row in self.store.keywords_for(collection)}, {"LOCAL_AI", "USER"})
+        restored = {row["origin"]: row for row in self.store.keywords_for(collection)}
+        self.assertEqual(set(restored), {"LOCAL_AI", "USER"})
+        self.assertEqual((restored["LOCAL_AI"]["score"], restored["LOCAL_AI"]["reason"]), (0.8, "old match"))
 
     def test_multiple_membership_semantic_match_negative_feedback_and_replay(self):
         first = self.store.create({"name": "Sustainable fashion", "description": "Recycled denim and eco clothing"})
@@ -304,11 +334,14 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
             self.assertEqual(result["algorithms"]["executed_keywords"], 212)
             self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
+            self.assertTrue(result["membership_reconciliation_id"].startswith("reconcile-"))
             self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
             self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
             with self.store.connect() as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)
+                self.assertEqual(db.execute("SELECT status FROM membership_reconciliation_runs WHERE id=?",
+                    (result["membership_reconciliation_id"],)).fetchone()[0], "APPLIED")
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
             previous_calls = sum(calls)

@@ -1434,7 +1434,8 @@ function renderCollections() {
     });
     row.append(element('span', `${keyword.keyword} · ${keyword.project} · ${keyword.observed_at}`));
     const select = element('select');
-    select.setAttribute('aria-label', t('collections.open'));
+    select.setAttribute('aria-label', t('collections.manual-target'));
+    select.append(new Option(t('collections.choose-target'), ''));
     state.collections.forEach((collection) => {
       const option = element('option', collection.name);
       option.value = collection.id;
@@ -1442,7 +1443,8 @@ function renderCollections() {
     });
     const add = element('button', t('collections.add'), 'button button-secondary');
     add.type = 'button';
-    add.disabled = !state.collections.length;
+    add.disabled = true;
+    select.addEventListener('change', () => { add.disabled = !select.value; });
     add.addEventListener('click', async () => {
       await requestJson(`/api/v1/collections/${encodeURIComponent(select.value)}/keywords`, {
         method: 'POST', body: { keyword_id: keyword.id }, locale: getLocale(),
@@ -1450,7 +1452,29 @@ function renderCollections() {
       await loadCollections();
     });
     row.prepend(checkbox);
-    row.append(select, add);
+    const classification = keyword.classification_status ? {
+      status: keyword.classification_status,
+      categories: keyword.classified_topic_category_ids || [],
+      categoryLabels: keyword.classified_topic_categories || [],
+      evidence: keyword.classification_rule_evidence || [],
+      confidence: keyword.confidence_level,
+      commercialRelevance: keyword.commercial_relevance,
+      description: keyword.classified_entity_description || keyword.entity_description || '',
+    } : null;
+    const suggestion = element('div', null, 'collection-ai-suggestion');
+    suggestion.append(element('strong', t('collections.ai-suggestion-title')));
+    if (classification?.categories.length) {
+      suggestion.append(element('p', `${t('collections.ai-suggested-topics')}: ${classification.categoryLabels
+        .map((item) => t(`topic.${item.id}`, item.name)).join(', ') || classification.categories.join(', ')}`));
+      suggestion.append(element('p', `${t('collections.classification-status')}: ${t(`classification.${classification.status}`, classification.status)} · ${t('collections.evidence-confidence')}: ${t(`confidence.${classification.confidence}`, classification.confidence || '—')} · ${t('collections.commercial-relevance')}: ${t(`relevance.${classification.commercialRelevance}`, classification.commercialRelevance || '—')}`));
+      const proof = classification.evidence.map((item) => item.matched_text || item.description || item.kind).filter(Boolean);
+      if (classification.description) proof.unshift(classification.description);
+      suggestion.append(element('p', `${t('collections.classification-evidence')}: ${[...new Set(proof)].join(' · ') || t('collections.no-evidence')}`));
+    } else {
+      suggestion.append(element('p', t('collections.no-ai-suggestion')));
+      if (classification) suggestion.append(element('small', `${t('collections.classification-status')}: ${t(`classification.${classification.status}`, classification.status)} · ${t('collections.needs-review')}`));
+    }
+    row.append(select, add, suggestion);
     inbox.append(row);
   });
   if (!state.collectionInbox.length) inbox.append(element('p', t('collections.empty-inbox')));
@@ -1460,7 +1484,7 @@ function renderCollections() {
   $('#collection-unassigned-count').textContent = number(state.collectionInboxTotal);
   const bulkTarget = $('#collection-bulk-target');
   const previousTarget = bulkTarget.value;
-  bulkTarget.replaceChildren();
+  bulkTarget.replaceChildren(new Option(t('collections.choose-target'), ''));
   state.collections.forEach((collection) => {
     const option = element('option', collection.name);
     option.value = collection.id;
@@ -1473,7 +1497,10 @@ function renderCollections() {
   state.collections.forEach((collection) => keywordTarget.append(new Option(collection.name, collection.id)));
   if (state.collections.some((collection) => collection.id === previousKeywordTarget)) keywordTarget.value = previousKeywordTarget;
   bulkTarget.disabled = !state.collections.length;
-  $('#collection-bulk-assign').disabled = !state.collections.length || !state.collectionSelected.size;
+  $('#collection-bulk-assign').disabled = !bulkTarget.value || !state.collectionSelected.size;
+  bulkTarget.onchange = () => {
+    $('#collection-bulk-assign').disabled = !bulkTarget.value || !state.collectionSelected.size;
+  };
   $('#collection-select-page').checked = state.collectionInbox.length > 0
     && state.collectionInbox.every((keyword) => state.collectionSelected.has(keyword.id));
   updateCollectionSelection();
@@ -1484,7 +1511,7 @@ function renderCollections() {
 function updateCollectionSelection() {
   $('#collection-selection-count').textContent = t('collections.selected-count', { count: state.collectionSelected.size });
   const button = $('#collection-bulk-assign');
-  if (button) button.disabled = !state.collections.length || !state.collectionSelected.size;
+  if (button) button.disabled = !$('#collection-bulk-target')?.value || !state.collectionSelected.size;
 }
 
 function isMobileNav() {
@@ -1532,8 +1559,12 @@ async function loadAlgorithmCatalog() {
       getJson('/api/v1/algorithms', { locale: getLocale() }),
       getJson('/api/v1/algorithms/results', { locale: getLocale() }).catch(() => null),
     ]);
+    let runtimeCapabilities = null;
+    try { runtimeCapabilities = await getJson('/api/v1/capabilities', { locale: getLocale() }); }
+    catch { /* registry metadata remains useful when runtime health is unavailable */ }
     state.algorithmCatalog = catalogResult;
     state.algorithmResults = executionResult;
+    state.runtimeCapabilities = runtimeCapabilities;
     populateAlgorithmFilters(state.algorithmCatalog.algorithms || []);
     renderAlgorithmCatalog();
     $('#algorithm-evaluation-status').textContent = `${state.algorithmCatalog.evaluation_status}: ${state.algorithmCatalog.evaluation_reason}`;
@@ -1558,6 +1589,7 @@ function populateAlgorithmFilters(items) {
 function renderAlgorithmCatalog() {
   const root = $('#algorithm-catalog');
   const all = state.algorithmCatalog?.algorithms || [];
+  renderAlgorithmSignalStatus(all);
   const family = $('#algorithm-family-filter').value;
   const source = $('#algorithm-source-filter').value;
   const status = $('#algorithm-status-filter').value;
@@ -1605,9 +1637,19 @@ function renderAlgorithmCatalog() {
     const sourceRow = element('div', null, 'algorithm-source-icons');
     item.sources.forEach((entry) => {
       const sourceBadge = element('span', null, 'algorithm-source-badge');
-      sourceBadge.title = `${entry.source_id}: ${entry.status}${entry.reason ? ` · ${entry.reason}` : ''}`;
-      sourceBadge.append(element('span', sourceGlyph(entry.source_id), 'algorithm-source-glyph'));
-      sourceBadge.append(element('span', entry.source_id.replaceAll('_', ' ')));
+      const currentSource = state.runtimeCapabilities?.sources?.find((source) => source.source_id === entry.source_id);
+      const activeLive = state.runtimeCapabilities?.data_mode === 'LIVE'
+        && state.runtimeCapabilities?.local_live_demo === true
+        && currentSource?.enabled_for_current_operation === true;
+      sourceBadge.title = `${entry.display_name || entry.source_id}: ${entry.status}`
+        + ` · runtime ${activeLive ? 'LIVE active' : (entry.runtime_availability || 'unavailable')}`
+        + ` · local ${entry.local_live_verification_status || 'UNKNOWN'}`
+        + ` · ${entry.production_readiness || 'UNKNOWN'}`
+        + (entry.reason ? ` · ${entry.reason}` : '');
+      const glyph = element('span', entry.icon || '•', 'algorithm-source-glyph');
+      glyph.classList.toggle('algorithm-source-glyph--active', activeLive);
+      sourceBadge.append(glyph);
+      sourceBadge.append(element('span', entry.display_name || entry.source_id.replaceAll('_', ' ')));
       sourceRow.append(sourceBadge);
     });
     card.append(sourceRow);
@@ -1628,12 +1670,43 @@ function renderAlgorithmCatalog() {
   });
 }
 
-function sourceGlyph(id) {
-  if (id.startsWith('wikimedia')) return 'W';
-  if (id.startsWith('google')) return 'G';
-  if (id.startsWith('bing')) return 'B';
-  if (id.startsWith('youtube')) return '▶';
-  return '•';
+function renderAlgorithmSignalStatus(algorithms) {
+  const root = $('#algorithm-signal-status');
+  if (!root) return;
+  const summaries = new Map((state.algorithmResults?.summary || [])
+    .map((item) => [item.algorithm_id, item]));
+  const groups = [
+    { key: 'popularity', family: 'popularity' },
+    { key: 'growth', family: 'growth' },
+    { key: 'anomaly', family: 'anomaly' },
+    { key: 'seasonality', family: 'seasonality' },
+  ];
+  const cards = groups.map(({ key, family }) => {
+    const methods = algorithms.filter((item) => item.family === family);
+    const totals = methods.reduce((sum, item) => {
+      const result = summaries.get(item.algorithm_id);
+      return {
+        completed: sum.completed + (result?.completed || 0),
+        skipped: sum.skipped + (result?.skipped || 0),
+        failed: sum.failed + (result?.failed || 0),
+      };
+    }, { completed: 0, skipped: 0, failed: 0 });
+    const status = !methods.length || (!totals.completed && totals.skipped)
+      ? 'INSUFFICIENT_DATA' : totals.completed ? 'OBSERVED' : 'NOT_RUN';
+    const card = element('article', null, 'algorithm-signal-card');
+    card.append(element('h2', t(`algorithms.signal.${key}`)));
+    card.append(element('strong', status, `algorithm-signal-status algorithm-signal-status--${status.toLowerCase()}`));
+    card.append(element('p', t(`algorithms.signal-counts.${key}`, {
+      methods: methods.length, completed: totals.completed, skipped: totals.skipped,
+    })));
+    return card;
+  });
+  const skipped = [...summaries.values()].reduce((total, item) => total + (item.skipped || 0), 0);
+  const insufficient = element('article', null, 'algorithm-signal-card algorithm-signal-card--wide');
+  insufficient.append(element('h2', t('algorithms.signal.insufficient')));
+  insufficient.append(element('strong', 'INSUFFICIENT_DATA', 'algorithm-signal-status algorithm-signal-status--insufficient_data'));
+  insufficient.append(element('p', t('algorithms.signal-counts.insufficient', { skipped })));
+  root.replaceChildren(...cards, insufficient);
 }
 
 function addAlgorithmDetail(list, label, value) {
@@ -1842,6 +1915,9 @@ function bindEvents() {
     fetchController.dispose();
   });
   document.addEventListener('trendscout:locale', () => {
+    if (window.location.hash === '#collections') {
+      renderCollections();
+    }
     if (state.run) {
       updateRun(state.run);
     }

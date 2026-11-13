@@ -28,7 +28,10 @@ class AlgorithmRunner:
                     minimum = item.minimum_samples
                     config_version = 'algorithm-input-v0.1'
                     if callable(getattr(type(strategy), 'skip_details', None)):
-                        evidence, flags, minimum, config_version = strategy.skip_details(item, reason)
+                        details = strategy.skip_details(item, reason)
+                        evidence, flags, minimum, config_version = details[:4]
+                        if len(details) > 4:
+                            count = details[4]
                     results.append(AlgorithmResult(item.keyword_id, meta.algorithm_id, meta.version,
                         'SKIPPED', None, meta.metric, meta.unit, item.current_value, None,
                         item.window_days, count, evidence, flags, reason,

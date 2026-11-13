@@ -22,6 +22,7 @@ from app.algorithms.strategies import (
     WikimediaLegacy,
 )
 from app.composition import algorithm_engine
+from app.sources.catalog import SOURCE_CAPABILITIES
 
 DAY = date(2026,1,8)
 SCOPE = Scope(SOURCE,'US','all-access','en.wikipedia','Example',METRIC,UNIT)
@@ -54,8 +55,10 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         strategy.metadata = AlgorithmMetadata('fake','v1','Fake',SOURCE,METRIC,UNIT,3,7)
         registry.register(strategy)
         strategy.execute.assert_not_called()
-        with self.assertRaises(ValueError): registry.register(strategy)
-        with self.assertRaises(ValueError): AlgorithmRunner(registry).run(make_input(), ['unknown@v1'])
+        with self.assertRaises(ValueError):
+            registry.register(strategy)
+        with self.assertRaises(ValueError):
+            AlgorithmRunner(registry).run(make_input(), ['unknown@v1'])
         self.assertEqual(AlgorithmRunner(registry).run(make_input(), []), ())
         strategy.applicable.assert_not_called()
 
@@ -146,7 +149,8 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual(runner.legacy_results(DAY, []), ['unchanged'])
         scorer.assert_called_once_with(DAY, [])
         scorer.side_effect = ValueError('invalid shared data')
-        with self.assertRaises(ValueError): runner.legacy_results(DAY, [])
+        with self.assertRaises(ValueError):
+            runner.legacy_results(DAY, [])
 
     def test_reusable_series_methods_execute_only_on_complete_uncensored_history(self):
         scope = Scope('provider_daily_series', 'US', 'public', 'search', 'robot vacuum', 'observed_count', 'items')
@@ -177,18 +181,91 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual(wikimedia['status'], 'INCOMPATIBLE')
         self.assertEqual(response['evaluation_status'], 'NOT_YET_EVALUATED')
 
+    def test_catalog_uses_a_mock_second_source_without_provider_calls(self):
+        wikimedia = SOURCE_CAPABILITIES[0]
+        mock_source = replace(
+            wikimedia,
+            source_id='mock_second_source', provider_id='mock_adapter',
+            display_name='Mock source', icon='M', readiness='PENDING_APPROVAL',
+            default_enabled=False, adapter_status='IMPLEMENTED_OFFLINE_VERIFIED',
+            approval_status='PENDING_APPROVAL', supported_data_modes=('SYNTHETIC',),
+            capabilities=('query_search',), metric_name='result_rank',
+            metric_unit='ordinal result position',
+            local_live_verification_status='NOT_VERIFIED', production_readiness='NOT_APPROVED',
+        )
+        response = catalog((mock_source,))
+        relative = next(item for item in response['algorithms']
+                        if item['algorithm_id'] == 'relative-source-rank')
+        capability = relative['sources'][0]
+        self.assertEqual(capability['source_id'], 'mock_second_source')
+        self.assertEqual(capability['status'], 'SUPPORTED_BUT_NOT_LIVE')
+        self.assertEqual((capability['icon'], capability['display_name']), ('M', 'Mock source'))
+
     def test_snapshot_popularity_ranks_ties_without_claiming_population_coverage(self):
-        second = Scope(SOURCE, 'US', 'all-access', 'fr.wikipedia', 'Different', METRIC, UNIT)
-        cohort = (Observation(DAY, second, 'OBSERVED', 500, 'SUCCESS', 2),
-                  Observation(DAY, second, 'OBSERVED', 500, 'SUCCESS', 3),
-                  Observation(DAY, second, 'OBSERVED', 100, 'SUCCESS', 4))
+        cohort = (Observation(DAY, replace(SCOPE, article='Page A'), 'OBSERVED', 500, 'SUCCESS', 2),
+                  Observation(DAY, replace(SCOPE, article='Page B'), 'OBSERVED', 500, 'SUCCESS', 3),
+                  Observation(DAY, replace(SCOPE, article='Page C'), 'OBSERVED', 100, 'SUCCESS', 4))
         item = replace(make_input(current=500), cohort=cohort, current_snapshot_status='SUCCESS')
         runner = AlgorithmRunner(algorithm_registry())
-        results = runner.run(item, ['observed-volume-rank@v1','observed-percentile-rank@v1'])
+        results = runner.run(item, ['observed-volume-rank@v3','observed-percentile-rank@v3'])
         values = {row.algorithm_id: row.value for row in results}
         self.assertEqual(values['observed-volume-rank'], 1)
         self.assertAlmostEqual(values['observed-percentile-rank'], 200/3)
-        self.assertIn('CENSORED_TOP_LIST', results[1].quality_flags)
+        for result in results:
+            self.assertEqual((result.status, result.sample_count), ('COMPLETED', 4))
+            self.assertTrue({'CENSORED_TOP_LIST', 'PARTIAL_SAMPLE', 'VIEWS_APPROXIMATE'}
+                            <= set(result.quality_flags))
+
+    def test_partial_snapshot_duplicate_self_ties_and_repeatable_order(self):
+        peers = (
+            Observation(DAY, SCOPE, 'OBSERVED', 500, 'PARTIAL', 9),  # self-inclusion
+            Observation(DAY, replace(SCOPE, article='Tie'), 'OBSERVED', 500, 'SUCCESS', 10),
+            Observation(DAY, replace(SCOPE, article='Peer'), 'OBSERVED', 100, 'PARTIAL', 11),
+            Observation(DAY, replace(SCOPE, article='peer'), 'OBSERVED', 100, 'SUCCESS', 12),
+            Observation(DAY - timedelta(days=1), replace(SCOPE, article='Wrong date'), 'OBSERVED', 2000, 'SUCCESS', 13),
+        )
+        item = replace(make_input(current=500), cohort=peers, current_snapshot_status='PARTIAL')
+        runner = AlgorithmRunner(algorithm_registry())
+        keys = ['observed-volume-rank@v3', 'observed-percentile-rank@v3']
+        first = runner.run(item, keys)
+        second = runner.run(replace(item, cohort=tuple(reversed(peers))), keys)
+        self.assertEqual(first, second)
+        values = {row.algorithm_id: (row.status, row.value, row.sample_count) for row in first}
+        self.assertEqual(values['observed-volume-rank'], ('COMPLETED', 1, 3))
+        self.assertEqual(values['observed-percentile-rank'], ('COMPLETED', 75.0, 3))
+
+    def test_snapshot_rank_separates_scope_and_skips_insufficient_or_invalid_values(self):
+        mismatched = (
+            Observation(DAY, replace(SCOPE, country='CA', article='Canada'), 'OBSERVED', 9000),
+            Observation(DAY, replace(SCOPE, access='desktop', article='Desktop'), 'OBSERVED', 8000),
+            Observation(DAY, replace(SCOPE, project='fr.wikipedia', article='French'), 'OBSERVED', 7000),
+            Observation(DAY, replace(SCOPE, metric='other', article='Metric'), 'OBSERVED', 6000),
+            Observation(DAY, replace(SCOPE, unit='other', article='Unit'), 'OBSERVED', 5000),
+            Observation(DAY, replace(SCOPE, article='Missing'), 'NOT_IN_TOP', None),
+            Observation(DAY, replace(SCOPE, article='Invalid'), 'OBSERVED', -1),
+            Observation(DAY - timedelta(days=1), replace(SCOPE, article='Old'), 'OBSERVED', 10000),
+        )
+        base = replace(make_input(current=0), cohort=mismatched, current_snapshot_status='SUCCESS')
+        runner = AlgorithmRunner(algorithm_registry())
+        for versioned_key in ('observed-volume-rank@v3', 'observed-percentile-rank@v3'):
+            result = runner.run(base, [versioned_key])[0]
+            self.assertEqual((result.status, result.reason_code), ('SKIPPED', 'INSUFFICIENT_COHORT'))
+            self.assertEqual((result.sample_count, dict(result.evidence)['cohort_size']), (1, 1))
+            self.assertTrue({'CENSORED_TOP_LIST', 'PARTIAL_SAMPLE', 'VIEWS_APPROXIMATE'}
+                            <= set(result.quality_flags))
+            invalid = runner.run(replace(base, current_value=True), [versioned_key])[0]
+            self.assertEqual((invalid.status, invalid.reason_code), ('SKIPPED', 'INVALID_CURRENT'))
+
+    def test_snapshot_rank_skips_unconfirmed_and_zero_is_a_valid_observation(self):
+        peer = Observation(DAY, replace(SCOPE, article='Peer'), 'OBSERVED', 0, 'SUCCESS')
+        base = replace(make_input(current=0), cohort=(peer,))
+        runner = AlgorithmRunner(algorithm_registry())
+        for versioned_key in ('observed-volume-rank@v3', 'observed-percentile-rank@v3'):
+            partial = runner.run(replace(base, current_snapshot_status='PARTIAL'), [versioned_key])[0]
+            self.assertEqual((partial.status, partial.value), ('COMPLETED', 1 if 'volume' in versioned_key else 50.0))
+            unknown = runner.run(replace(base, current_snapshot_status='UNKNOWN'), [versioned_key])[0]
+            self.assertEqual((unknown.status, unknown.reason_code),
+                             ('SKIPPED', 'CURRENT_COVERAGE_UNCONFIRMED'))
 
 
 class LegacyStrategyTests(unittest.IsolatedAsyncioTestCase):

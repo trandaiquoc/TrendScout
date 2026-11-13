@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from threading import Lock
 
+from app.storage.local_file_security import secure_private_directory
+
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_VERSION = "fastembed-0.9.1"
 _lock = Lock()
@@ -13,12 +15,17 @@ _model = None
 
 
 def _cache_dir() -> Path:
-    path = Path(os.environ.get("TRENDSCOUT_MODEL_CACHE", Path.home() / ".cache" / "trendscout" / "fastembed"))
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
+    configured = os.environ.get("TRENDSCOUT_MODEL_CACHE")
+    if configured:
+        path = Path(configured)
+    elif os.name == "nt":
+        app_data = os.environ.get("LOCALAPPDATA")
+        if not app_data:
+            raise RuntimeError("LOCALAPPDATA is required for the Windows model cache")
+        path = Path(app_data) / "TrendScout" / "models" / "fastembed"
+    else:
+        path = Path.home() / ".cache" / "trendscout" / "fastembed"
+    secure_private_directory(path)
     return path
 
 

@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS fetch_jobs (
  suggestions INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
  error_code TEXT, updated_at TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'QUEUED',
  eligible INTEGER NOT NULL DEFAULT 0, cached_embeddings INTEGER NOT NULL DEFAULT 0,
- inferred_embeddings INTEGER NOT NULL DEFAULT 0
+ inferred_embeddings INTEGER NOT NULL DEFAULT 0,
+ membership_reconciliation_id TEXT
 );
 CREATE TABLE IF NOT EXISTS algorithm_observations (
  keyword_id TEXT NOT NULL, source TEXT NOT NULL, observation_date TEXT NOT NULL,
@@ -96,9 +97,19 @@ CREATE TABLE IF NOT EXISTS entity_context (
  keyword_id TEXT PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
  title TEXT NOT NULL, page_id INTEGER, entity_id TEXT, description TEXT NOT NULL DEFAULT '',
  entity_type TEXT NOT NULL, occupations TEXT NOT NULL DEFAULT '[]',
- category_ids TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL DEFAULT '',
+ category_ids TEXT NOT NULL DEFAULT '[]', instance_types TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL DEFAULT '',
  method TEXT NOT NULL, status TEXT NOT NULL, context_version TEXT NOT NULL,
  captured_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS classification_results (
+ keyword_id TEXT PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
+ entity_type TEXT NOT NULL, entity_id TEXT, entity_description TEXT NOT NULL DEFAULT '',
+ topic_category_ids TEXT NOT NULL DEFAULT '[]', subcategory_ids TEXT NOT NULL DEFAULT '[]',
+ classification_status TEXT NOT NULL CHECK(classification_status IN ('CLASSIFIED','AMBIGUOUS','UNKNOWN','INELIGIBLE')),
+ confidence_level TEXT NOT NULL, commercial_relevance TEXT NOT NULL DEFAULT 'NOT_ASSESSED', classification_method TEXT NOT NULL,
+ classification_version TEXT NOT NULL, taxonomy_version TEXT NOT NULL,
+ rule_evidence TEXT NOT NULL DEFAULT '[]', source_evidence TEXT NOT NULL DEFAULT '{}',
+ review_status TEXT NOT NULL, classified_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS membership_reconciliation_runs (
  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL
@@ -109,6 +120,16 @@ CREATE TABLE IF NOT EXISTS membership_reconciliation_items (
  created_at TEXT NOT NULL, PRIMARY KEY(run_id,collection_id,keyword_id)
 );
 """
+
+
+class ClosingConnection(sqlite3.Connection):
+    """Close SQLite handles when a with-block exits (including on Windows)."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 def now() -> str:
@@ -138,7 +159,8 @@ class CollectionStore:
             for name, declaration in (("stage", "TEXT NOT NULL DEFAULT 'QUEUED'"),
                                       ("eligible", "INTEGER NOT NULL DEFAULT 0"),
                                       ("cached_embeddings", "INTEGER NOT NULL DEFAULT 0"),
-                                      ("inferred_embeddings", "INTEGER NOT NULL DEFAULT 0")):
+                                      ("inferred_embeddings", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("membership_reconciliation_id", "TEXT")):
                 if name not in job_columns:
                     db.execute(f"ALTER TABLE fetch_jobs ADD COLUMN {name} {declaration}")
             collection_columns = {row["name"] for row in db.execute("PRAGMA table_info(collections)")}
@@ -147,6 +169,12 @@ class CollectionStore:
                 db.execute("CREATE UNIQUE INDEX IF NOT EXISTS collections_category_id ON collections(category_id)")
             if "parent_id" not in collection_columns:
                 db.execute("ALTER TABLE collections ADD COLUMN parent_id TEXT REFERENCES collections(id) ON DELETE CASCADE")
+            context_columns = {row["name"] for row in db.execute("PRAGMA table_info(entity_context)")}
+            if "instance_types" not in context_columns:
+                db.execute("ALTER TABLE entity_context ADD COLUMN instance_types TEXT NOT NULL DEFAULT '[]'")
+            classification_columns = {row["name"] for row in db.execute("PRAGMA table_info(classification_results)")}
+            if classification_columns and "commercial_relevance" not in classification_columns:
+                db.execute("ALTER TABLE classification_results ADD COLUMN commercial_relevance TEXT NOT NULL DEFAULT 'NOT_ASSESSED'")
         if self.path.is_symlink():
             raise ValueError("collection database must not be a symlink")
         try:
@@ -156,11 +184,20 @@ class CollectionStore:
 
     @classmethod
     def local(cls, state_dir: Path | None = None):
-        directory = state_dir or Path.home() / ".local/state/trendscout/collections-v1"
+        configured_directory = os.environ.get("TRENDSCOUT_COLLECTIONS_DIR") if state_dir is None else None
+        if configured_directory:
+            directory = Path(configured_directory)
+        elif state_dir is None and os.name == "nt":
+            app_data = os.environ.get("LOCALAPPDATA")
+            if not app_data:
+                raise RuntimeError("LOCALAPPDATA is required for Windows Collections storage")
+            directory = Path(app_data) / "TrendScout" / "collections-v1"
+        else:
+            directory = state_dir or Path.home() / ".local/state/trendscout/collections-v1"
         return cls(Path(directory) / "collections.sqlite")
 
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=10)
+        db = sqlite3.connect(self.path, timeout=10, factory=ClosingConnection)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=10000")
@@ -270,11 +307,20 @@ class CollectionStore:
             page_parameters = (*parameters, limit, offset) if limit is not None else tuple(parameters)
             rows = db.execute(f"""SELECT k.*,e.entity_id,e.entity_type,e.description AS entity_description,
                 e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
+                e.instance_types AS entity_instance_types,
+                cr.entity_type AS classified_entity_type,cr.entity_id AS classified_entity_id,
+                cr.entity_description AS classified_entity_description,
+                cr.topic_category_ids AS classified_topic_category_ids,
+                cr.subcategory_ids AS classified_subcategory_ids,cr.classification_status,
+                cr.confidence_level,cr.commercial_relevance,cr.classification_method,cr.classification_version,cr.taxonomy_version,
+                cr.rule_evidence AS classification_rule_evidence,cr.source_evidence AS classification_source_evidence,
+                cr.review_status,cr.classified_at,
                 e.source_url AS entity_source_url,e.method AS entity_classification_method,
                 e.status AS entity_classification_status,e.captured_at AS entity_context_captured_at,
                 (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin))
                  FROM memberships m JOIN collections c ON c.id=m.collection_id WHERE m.keyword_id=k.id) memberships_json
                 FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id
                 WHERE {where} ORDER BY {ordering}{pagination}""",
                 page_parameters).fetchall()
             items = []
@@ -285,10 +331,26 @@ class CollectionStore:
                     item["memberships"] = json.loads(item.pop("memberships_json") or "[]")
                     item["entity_occupations"] = json.loads(item["entity_occupations"] or "[]")
                     item["entity_category_ids"] = json.loads(item["entity_category_ids"] or "[]")
+                    item["entity_instance_types"] = json.loads(item["entity_instance_types"] or "[]")
+                    item["classified_topic_category_ids"] = json.loads(item["classified_topic_category_ids"] or "[]")
+                    item["classified_subcategory_ids"] = json.loads(item["classified_subcategory_ids"] or "[]")
+                    item["classification_rule_evidence"] = json.loads(item["classification_rule_evidence"] or "[]")
+                    item["classification_source_evidence"] = json.loads(item["classification_source_evidence"] or "{}")
+                    from app.taxonomy.registry import resolve
+                    item["classified_topic_categories"] = [
+                        {"id": category_id, "name": resolve(category_id).display_name,
+                         "scope": resolve(category_id).scope}
+                        for category_id in item["classified_topic_category_ids"]
+                    ]
                 except (TypeError, ValueError):
                     item["memberships"] = []
                     item["entity_occupations"] = []
                     item["entity_category_ids"] = []
+                    item["entity_instance_types"] = []
+                    item["classified_topic_category_ids"] = []
+                    item["classified_subcategory_ids"] = []
+                    item["classification_rule_evidence"] = []
+                    item["classification_source_evidence"] = {}
                 item["algorithm_results"] = [dict(result) for result in db.execute(
                     "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
                     (item["id"],))]
@@ -465,8 +527,12 @@ class CollectionStore:
 
     def rollback_membership_reconciliation(self, run_id: str):
         with self.connect() as db:
-            run = db.execute("SELECT status FROM membership_reconciliation_runs WHERE id=?", (run_id,)).fetchone()
+            run = db.execute("SELECT status,created_at FROM membership_reconciliation_runs WHERE id=?", (run_id,)).fetchone()
             if not run or run["status"] != "APPLIED":
+                return False
+            later = db.execute("SELECT 1 FROM membership_reconciliation_runs WHERE status='APPLIED' AND created_at>? LIMIT 1",
+                               (run["created_at"],)).fetchone()
+            if later:
                 return False
             # Remove automatic Collections created during this run if the user has not
             # adopted them with a manual membership. Avoid creating a deletion suppression
@@ -479,6 +545,8 @@ class CollectionStore:
                 feedback = db.execute("SELECT 1 FROM feedback WHERE collection_id=? LIMIT 1", (item["id"],)).fetchone()
                 if not user_membership and not feedback:
                     db.execute("DELETE FROM collections WHERE id=?", (item["id"],))
+            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0 AND created_at>=?",
+                       (run["created_at"],))
             db.execute("""INSERT OR IGNORE INTO memberships(collection_id,keyword_id,origin,pinned,score,reason,created_at)
                 SELECT i.collection_id,i.keyword_id,i.origin,i.pinned,i.score,i.reason,i.created_at
                 FROM membership_reconciliation_items i
