@@ -7,7 +7,7 @@
 
 - Starting `HEAD` and fetched `origin/main`: `0efd9ef6b7c648a6dde6f8080b16e812863b6ee7`.
 - The working tree was clean before this task. The remote was fetched and no upstream changes needed merging.
-- The feature implementation commit is recorded below after commit. The report-only follow-up commit keeps this file’s implementation hash current.
+- The feature implementation commit is recorded below. A report-only follow-up commit stores this hash in the report.
 
 ## Research reviewed
 
@@ -85,5 +85,5 @@ Port-conflict handling was verified with both the running app and a dummy loopba
 
 ## Local commit
 
-- Feature implementation commit: `PENDING`
-- The local report update follows the implementation commit so the report can record its hash. No remote push was made.
+- Feature implementation commit: `a3d132cfa94cbca6987a87700c910bb574a421b2` (`feat(ui): redesign discover and live start`).
+- The report hash is recorded by a separate local documentation commit. No remote push was made.
