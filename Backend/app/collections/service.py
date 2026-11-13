@@ -8,7 +8,9 @@ import json
 import math
 import struct
 import uuid
-from collections import Counter
+from collections import Counter, defaultdict
+from dataclasses import asdict
+from datetime import date
 
 from app.collections import embeddings
 from app.collections.store import (
@@ -25,6 +27,12 @@ PROPOSAL_THRESHOLD = 0.82
 EXCLUSION_THRESHOLD = 0.46
 MIN_PROPOSAL_SUPPORT = 3
 MAX_AUTO_CREATE_PER_FETCH = 2
+
+# Small, explicit domain anchors let a named Collection work before the user has
+# supplied examples. They are semantic model inputs, never assignment decisions.
+COLLECTION_SEMANTIC_ANCHORS = {
+    "smart home": "Relevant Smart Home topics include robot vacuum cleaner, smart thermostat, connected appliances, smart speakers, and home automation.",
+}
 
 
 def cosine(left, right):
@@ -61,8 +69,11 @@ class CollectionService:
         available = sum(len(source.get("records", [])) for source in sources if isinstance(source.get("records"), list))
         for source in sources:
             source_id, mode = source.get("source_id", ""), source.get("data_mode", "")
+            snapshot_status = source.get("status", "SUCCESS")
+            if snapshot_status not in {"SUCCESS", "PARTIAL"}:
+                continue
             for raw in source.get("records", []):
-                record = keyword_record(raw, source_id, mode)
+                record = keyword_record(raw, source_id, mode, snapshot_status=snapshot_status)
                 if record is None:
                     skipped += 1
                     identifier = keyword_identity(raw, source_id)
@@ -85,6 +96,15 @@ class CollectionService:
                 evidence=excluded.evidence,eligible=1,rejection_reason=NULL""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
+        analysis = self._analyze_persisted_keywords(records)
+        # The source response can be capped or paginated. Classification operates on every
+        # eligible persisted keyword still awaiting a decision, not only this response or UI page.
+        with self.store.connect() as db:
+            persisted = db.execute("""SELECT k.* FROM keywords k
+                WHERE k.eligible=1 AND NOT EXISTS (
+                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
+                ) ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""").fetchall()
+            records = [dict(row) for row in persisted]
         # Do not claim inference succeeded if package/model is missing. Provider Fetch remains complete.
         try:
             collections = self.store.list_collections()
@@ -96,10 +116,11 @@ class CollectionService:
                         (item["id"],))]
             vectors = self._embed_cached([self._candidate_text(row) for row in records], [0] * len(records))
             topic_vectors = self._embed_cached([self._topic_text(row) for row in records], [0] * len(records))
-            collection_texts = [self._collection_text(item) for item in collections]
-            collection_vectors = self._embed_cached(
-                collection_texts, [item["version"] for item in collections]
-            ) if collection_texts else []
+            collection_prototypes = [self._collection_prototypes(item) for item in collections]
+            flattened_prototypes = [text for prototypes in collection_prototypes for text in prototypes]
+            prototype_versions = [item["version"] for item, prototypes in zip(collections, collection_prototypes)
+                                  for _ in prototypes]
+            prototype_vectors = self._embed_cached(flattened_prototypes, prototype_versions) if flattened_prototypes else []
             exclusion_inputs = [example for item in collections for example in item["exclusions"]]
             exclusion_vectors = self._embed_cached(exclusion_inputs, [0] * len(exclusion_inputs)) if exclusion_inputs else []
         except Exception:
@@ -116,12 +137,14 @@ class CollectionService:
         with self.store.connect() as db:
             for record, vector, topic_vector in zip(records, vectors, topic_vectors):
                 scores = []
+                fits_existing_collection = False
                 exclusion_cursor = 0
-                for item, collection_vector in zip(collections, collection_vectors):
+                prototype_cursor = 0
+                for item, prototype_texts in zip(collections, collection_prototypes):
                     exclusion_start = exclusion_cursor
                     exclusion_cursor += len(item["exclusions"])
-                    if not item["auto_match"]:
-                        continue
+                    local_prototypes = prototype_vectors[prototype_cursor:prototype_cursor + len(prototype_texts)]
+                    prototype_cursor += len(prototype_texts)
                     feedback = db.execute("SELECT action FROM feedback WHERE collection_id=? AND keyword_id=?",
                                           (item["id"], record["id"])).fetchone()
                     membership = db.execute("SELECT pinned FROM memberships WHERE collection_id=? AND keyword_id=?",
@@ -137,31 +160,160 @@ class CollectionService:
                     )
                     if exclusion_match:
                         continue
-                    score = cosine(vector, collection_vector)
+                    score = max((cosine(vector, prototype) for prototype in local_prototypes), default=0.0)
+                    if score >= ASSIGN_THRESHOLD:
+                        fits_existing_collection = True
+                    if not item["auto_match"]:
+                        continue
                     scores.append((score, item))
+                strong = [(score, item) for score, item in scores if score >= ASSIGN_THRESHOLD]
+                # A single strong match is unambiguous. Multiple strong matches are retained
+                # when each collection independently matches; they are valid many-to-many links.
+                # Close matches just above threshold remain review-only unless backed by an
+                # explicit positive example or approved keyword prototype.
                 scores.sort(key=lambda value: value[0], reverse=True)
-                if scores and scores[0][0] >= ASSIGN_THRESHOLD and (
-                    len(scores) == 1 or scores[0][0] - scores[1][0] >= ASSIGN_MARGIN
-                ):
-                    score, item = scores[0]
-                    reason = f"LOCAL_AI semantic cosine={score:.3f}; threshold={ASSIGN_THRESHOLD:.2f}; source context included"
-                    db.execute("""INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,?,?,?)""",
-                               (item["id"], record["id"], score, reason, now()))
-                    if db.execute("SELECT changes()").fetchone()[0]:
-                        assigned += 1
+                ambiguous = (not strong or (len(strong) > 1
+                    and strong[0][0] - strong[1][0] < ASSIGN_MARGIN))
+                if not ambiguous:
+                    for score, item in strong:
+                        reason = (f"LOCAL_AI semantic cosine={score:.3f}; threshold={ASSIGN_THRESHOLD:.2f}; "
+                                  "matched collection name, context, example, or approved keyword")
+                        db.execute("""INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,?,?,?)""",
+                                   (item["id"], record["id"], score, reason, now()))
+                        if db.execute("SELECT changes()").fetchone()[0]:
+                            assigned += 1
                 else:
-                    unassigned_rows.append((record, topic_vector))
+                    rejected = db.execute("SELECT 1 FROM feedback WHERE keyword_id=? AND action='REMOVE' LIMIT 1",
+                                          (record["id"],)).fetchone()
+                    if not rejected and not fits_existing_collection:
+                        unassigned_rows.append((record, topic_vector))
         created, suggestions = self._propose(fetch_id, unassigned_rows, collections)
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                    "processed": len(records), "assigned": assigned,
-                   "unassigned": max(0, len(records) - assigned), "created_collections": created,
-                   "suggestions": suggestions, "skipped": skipped}
+                   "unassigned": self._unassigned_count(), "created_collections": created,
+                   "suggestions": suggestions, "skipped": skipped,
+                   "algorithms": analysis}
         with self.store.connect() as db:
             db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,assigned,
                 unassigned,created_collections,suggestions,skipped,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (fetch_id, "COMPLETED", outcome["available"], outcome["processed"], assigned,
                  outcome["unassigned"], created, suggestions, skipped, now()))
         return outcome
+
+    def _analyze_persisted_keywords(self, changed_records):
+        """Persist observation facts and execute the registry across every eligible keyword."""
+        from app.algorithms.contracts import AlgorithmInput, Observation, Scope
+        from app.composition import algorithm_engine
+
+        with self.store.connect() as db:
+            rows = db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id").fetchall()
+            records = [dict(row) for row in rows]
+            for record in changed_records:
+                evidence = json.loads(record["evidence"])
+                try:
+                    observed = date.fromisoformat(evidence.get("observation_date") or record["observed_at"][:10])
+                except (TypeError, ValueError):
+                    continue
+                metric, unit = "views_ceil", "approx_pageviews_upper_bound"
+                snapshot_status = evidence.get("snapshot_status", "SUCCESS")
+                value, rank = evidence.get("views_ceil"), evidence.get("provider_rank")
+                if type(value) is not int or value < 0:
+                    continue
+                digest = hashlib.sha256(json.dumps([record["id"], observed.isoformat(), value, rank,
+                    snapshot_status, record["source"], record["project"]], separators=(",", ":")).encode()).hexdigest()
+                db.execute("""INSERT INTO algorithm_observations(keyword_id,source,observation_date,
+                    country,access,project,metric,unit,status,value,rank,snapshot_status,input_digest)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id,source,observation_date,metric,unit)
+                    DO UPDATE SET value=excluded.value,rank=excluded.rank,status=excluded.status,
+                    snapshot_status=excluded.snapshot_status,input_digest=excluded.input_digest""",
+                    (record["id"], record["source"], observed.isoformat(), evidence.get("country_scope") or "US",
+                     evidence.get("access") or "all-access", record["project"], metric, unit,
+                     "OBSERVED", value, rank, snapshot_status, digest))
+            records = [dict(row) for row in db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id")]
+            engine = algorithm_engine()
+            keys = engine.registry.keys()
+            snapshot_cohorts = defaultdict(list)
+            for peer in records:
+                try:
+                    peer_evidence = json.loads(peer["evidence"])
+                    peer_date = peer_evidence.get("observation_date") or peer["observed_at"][:10]
+                    peer_key = (peer["source"], peer_evidence.get("country_scope") or "US",
+                        peer_evidence.get("access") or "all-access", peer_date, "views_ceil",
+                        "approx_pageviews_upper_bound")
+                    peer_value = peer_evidence.get("views_ceil")
+                    if type(peer_value) is int and peer_value >= 0:
+                        peer_scope = Scope(peer["source"], peer_key[1], peer_key[2], peer["project"],
+                            peer_evidence.get("article_original") or peer["keyword"], peer_key[4], peer_key[5])
+                        snapshot_cohorts[peer_key].append((peer["id"], Observation(
+                            date.fromisoformat(peer_date), peer_scope, "OBSERVED", peer_value,
+                        peer_evidence.get("snapshot_status", "SUCCESS"), peer_evidence.get("provider_rank"))))
+                except (TypeError, ValueError):
+                    continue
+            executed = unchanged = recomputed_algorithms = 0
+            for record in records:
+                try:
+                    evidence = json.loads(record["evidence"])
+                    analysis_date = date.fromisoformat(evidence.get("observation_date") or record["observed_at"][:10])
+                    metric, unit = "views_ceil", "approx_pageviews_upper_bound"
+                    scope = Scope(record["source"], evidence.get("country_scope") or "US",
+                        evidence.get("access") or "all-access", record["project"],
+                        evidence.get("article_original") or record["keyword"], metric, unit)
+                    history_rows = db.execute("""SELECT * FROM algorithm_observations WHERE keyword_id=?
+                        AND source=? AND observation_date<? AND metric=? AND unit=? ORDER BY observation_date""",
+                        (record["id"], record["source"], analysis_date.isoformat(), metric, unit)).fetchall()
+                    history = tuple(Observation(date.fromisoformat(point["observation_date"]), scope,
+                        point["status"], point["value"], point["snapshot_status"]) for point in history_rows)
+                    current = evidence.get("views_ceil")
+                    cohort_key = (record["source"], scope.country, scope.access,
+                        analysis_date.isoformat(), metric, unit)
+                    cohort = tuple(point for keyword_id, point in snapshot_cohorts.get(cohort_key, ())
+                                   if keyword_id != record["id"])
+                    item = AlgorithmInput(record["id"], scope, analysis_date, current, history,
+                        window_days=7, minimum_samples=3, evidence_url=evidence.get("source_url"),
+                        current_snapshot_status=evidence.get("snapshot_status", "SUCCESS"), cohort=cohort)
+                    input_data = {"scope": asdict(scope),
+                        "date": analysis_date.isoformat(), "current": current,
+                        "current_snapshot_status": evidence.get("snapshot_status", "SUCCESS"),
+                        "history": [(str(point.date), point.status, point.value, point.snapshot_status) for point in history],
+                        "cohort": sorted((point.scope.project, point.scope.article, point.value, point.rank)
+                                         for point in cohort)}
+                    existing = {row["algorithm_id"]: row["input_digest"] for row in db.execute(
+                        "SELECT algorithm_id,input_digest FROM algorithm_results WHERE keyword_id=?",
+                        (record["id"],))}
+                    digest_by_key = {}
+                    missing_keys = []
+                    for key in keys:
+                        metadata = engine.registry.get(key).metadata
+                        digest_input = {"input": dict(input_data), "algorithm": asdict(metadata)}
+                        if metadata.family != "popularity":
+                            digest_input["input"].pop("cohort")
+                        digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True,
+                            separators=(",", ":")).encode()).hexdigest()
+                        digest_by_key[key] = digest
+                        if existing.get(metadata.algorithm_id) != digest:
+                            missing_keys.append(key)
+                    if not missing_keys:
+                        unchanged += 1
+                        continue
+                    for result in engine.run(item, missing_keys):
+                        payload = json.dumps(asdict(result), ensure_ascii=False, sort_keys=True)
+                        result_digest = digest_by_key[f"{result.algorithm_id}@{result.algorithm_version}"]
+                        db.execute("""INSERT INTO algorithm_results(keyword_id,algorithm_id,version,status,
+                            reason_code,value,metric,unit,result_json,input_digest,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                            ON CONFLICT(keyword_id,algorithm_id) DO UPDATE SET version=excluded.version,
+                            status=excluded.status,reason_code=excluded.reason_code,value=excluded.value,
+                            metric=excluded.metric,unit=excluded.unit,result_json=excluded.result_json,
+                            input_digest=excluded.input_digest,updated_at=excluded.updated_at""",
+                            (record["id"], result.algorithm_id, result.algorithm_version, result.status,
+                             result.reason_code, result.value, result.metric_name, result.metric_unit,
+                             payload, result_digest, now()))
+                    executed += 1
+                    recomputed_algorithms += len(missing_keys)
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+        return {"eligible_keywords": len(records), "executed_keywords": executed,
+                "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
+                "registered_algorithms": len(keys)}
 
     def _embed_cached(self, texts, versions):
         results, pending, keys = [None] * len(texts), [], []
@@ -190,7 +342,9 @@ class CollectionService:
 
     @staticmethod
     def _candidate_text(record):
-        return f"Topic: {record['keyword']}. Wikimedia evidence context: {record['context']}."
+        # Provider/project metadata describes provenance, not the keyword's subject.
+        # Keep it in evidence and avoid diluting topic semantics with repetitive context.
+        return f"Topic: {record['keyword']}."
 
     @staticmethod
     def _topic_text(record):
@@ -200,6 +354,33 @@ class CollectionService:
     def _collection_text(item):
         examples = "; ".join((item["examples"] + item.get("member_examples", []))[:120])
         return f"Collection topic: {item['name']}. Context: {item['description']}. Examples: {examples}."
+
+    @staticmethod
+    def _collection_prototypes(item):
+        """Keep names, descriptions, examples, and prior approvals individually searchable.
+
+        Embedding one long concatenated description can dilute an exact positive example.
+        Each prototype still goes through the real local model and is version-cached.
+        """
+        prototypes = [f"Collection topic: {item['name']}. Context: {item['description']}."]
+        anchor = COLLECTION_SEMANTIC_ANCHORS.get(" ".join(item["name"].casefold().split()))
+        if anchor:
+            prototypes.append(anchor)
+        prototypes.extend(f"Relevant keyword example: {example}." for example in item["examples"])
+        prototypes.extend(f"Previously approved keyword: {example}." for example in item.get("member_examples", []))
+        return list(dict.fromkeys(text for text in prototypes if text.strip()))
+
+    def _unassigned_count(self):
+        with self.store.connect() as db:
+            return db.execute("""SELECT count(*) FROM keywords k
+                WHERE k.eligible=1 AND NOT EXISTS (
+                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
+                )""").fetchone()[0]
+
+    async def reclassify_unassigned(self, fetch_id: str | None = None):
+        """Run cached local matching after Collection creation/edits without a provider fetch."""
+        identifier = fetch_id or f"reclassify-{uuid.uuid4()}"
+        return await asyncio.to_thread(self._process_fetch, identifier, [])
 
     def _propose(self, fetch_id, unassigned, collections):
         if len(unassigned) < MIN_PROPOSAL_SUPPORT:
@@ -226,6 +407,8 @@ class CollectionService:
         created = suggestions = 0
         for group in groups[:MAX_AUTO_CREATE_PER_FETCH]:
             titles = [row[0]["keyword"] for row in group]
+            if self._contains_platform_noise(titles):
+                continue
             name = self._representative_name(titles)
             key = fingerprint(name)
             if any(fingerprint(item["name"]) == key for item in collections):
@@ -250,6 +433,12 @@ class CollectionService:
                                (proposal_id, name, description, json.dumps(support), reason, stamp, stamp))
                 suggestions += 1
         return created, suggestions
+
+    @staticmethod
+    def _contains_platform_noise(titles):
+        platform_terms = ("mediawiki", "wikimedia api", "wikipedia", "wiktionary", "wikisource",
+                          "wikibooks", "wikifunctions")
+        return any(any(term in title.casefold() for term in platform_terms) for title in titles)
 
     def _near_duplicate_name(self, name, collections):
         with self.store.connect() as db:

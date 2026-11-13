@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 import resource
+import tempfile
 import time
+from pathlib import Path
+
+from app.collections import embeddings
+from app.collections.service import CollectionService
+from app.collections.store import CollectionStore
 
 from app.collections.embeddings import MODEL_NAME, embed
 from app.collections.service import cosine
@@ -51,6 +57,52 @@ def main():
     assert pairs["proposal_positive_us_elections"] >= 0.82
     assert pairs["proposal_negative_unrelated_people"] < 0.82
     assert pairs["proposal_negative_technical_search"] < 0.82
+
+    # Full service acceptance replay: this deliberately uses the real local model above,
+    # including the 105th record beyond the current inbox page size.
+    with tempfile.TemporaryDirectory(prefix="trendscout-local-ai-acceptance-") as directory:
+        store = CollectionStore(Path(directory) / "collections.sqlite")
+        assert store.connect().execute("SELECT value FROM settings WHERE key='creation_mode'").fetchone() is None
+        smart_home = store.create({"name": "Smart Home"})
+        rows = [{"article_display": f"Ancient Roman architecture {index}",
+                 "article_original": f"Ancient_Roman_architecture_{index}",
+                 "project": "en.wikipedia", "observation_date": "2026-11-12",
+                 "fetched_at": "2026-11-13T00:00:00Z", "provider_rank": index + 1,
+                 "views_ceil": 1000} for index in range(104)]
+        rows.extend([
+            {"article_display": "Robot vacuum cleaner", "article_original": "Robot_vacuum_cleaner",
+             "project": "en.wikipedia", "observation_date": "2026-11-12",
+             "fetched_at": "2026-11-13T00:00:00Z", "provider_rank": 105, "views_ceil": 1000},
+            {"article_display": "Mars rover mission", "article_original": "Mars_rover_mission",
+             "project": "en.wikipedia", "observation_date": "2026-11-12",
+             "fetched_at": "2026-11-13T00:00:00Z", "provider_rank": 106, "views_ceil": 1000},
+        ])
+        source = [{"source_id": "wikimedia_pageviews_top_per_country", "data_mode": "LIVE", "records": rows}]
+        service = CollectionService(store)
+        result = service._process_fetch("real-model-acceptance-1", source)
+        assert result["processed"] == 106, result
+        smart_keywords = store.keywords_for(smart_home)
+        robot = next(row for row in rows if row["article_display"] == "Robot vacuum cleaner")
+        robot_id = __import__("app.collections.store", fromlist=["keyword_record"]).keyword_record(
+            robot, source[0]["source_id"], "LIVE")["id"]
+        assert any(item["id"] == robot_id and item["origin"] == "LOCAL_AI" for item in smart_keywords), result
+        assert not any(item["keyword"] == "Mars rover mission" for item in smart_keywords), result
+        persisted_robot = next(row for row in store.connect().execute(
+            "SELECT * FROM keywords WHERE id=?", (robot_id,)))
+        store.feedback_action(smart_home, dict(persisted_robot), "REMOVE")
+        service._process_fetch("real-model-acceptance-2", source)
+        reopened = CollectionStore(Path(directory) / "collections.sqlite")
+        assert not any(item["id"] == robot_id for item in reopened.keywords_for(smart_home))
+        space = reopened.create({"name": "Space exploration", "examples": ["Mars rover mission"]})
+        import asyncio
+        asyncio.run(CollectionService(reopened).reclassify_unassigned())
+        assert any(item["keyword"] == "Mars rover mission" for item in reopened.keywords_for(space))
+        assert reopened.list_collections()
+        print(json.dumps({"automatic_assignment": "PASS", "full_persisted_records": 106,
+            "late_record_assigned": True, "unrelated_record_rejected": True,
+            "rejection_survives_repeated_fetch_and_reopen": True,
+            "new_collection_reclassified_cached_embeddings": True,
+            "collection_auto_creation_default": "SUGGEST"}, indent=2))
 
 
 if __name__ == "__main__":

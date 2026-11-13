@@ -1,18 +1,27 @@
 """Synthetic algorithm contracts; no provider access."""
+import subprocess
+import sys
+import unittest
 from copy import deepcopy
 from dataclasses import replace
 from datetime import date, timedelta
-import unittest
-import subprocess
-import sys
 from unittest.mock import Mock
 
+from test_golden_contract import build_golden
+
+from app.algorithms.catalog import catalog
+from app.algorithms.catalog import registry as algorithm_registry
 from app.algorithms.contracts import AlgorithmInput, AlgorithmMetadata, Observation, Scope
 from app.algorithms.registry import AlgorithmRegistry
 from app.algorithms.runner import AlgorithmRunner
-from app.algorithms.strategies import GrowthRatio, MedianBaseline, SOURCE, METRIC, UNIT, WikimediaLegacy
+from app.algorithms.strategies import (
+    METRIC,
+    SOURCE,
+    UNIT,
+    MedianBaseline,
+    WikimediaLegacy,
+)
 from app.composition import algorithm_engine
-from test_golden_contract import build_golden
 
 DAY = date(2026,1,8)
 SCOPE = Scope(SOURCE,'US','all-access','en.wikipedia','Example',METRIC,UNIT)
@@ -20,7 +29,8 @@ SCOPE = Scope(SOURCE,'US','all-access','en.wikipedia','Example',METRIC,UNIT)
 
 def make_input(values=(100,200,300), current=800):
     history = tuple(Observation(DAY-timedelta(days=i+1),SCOPE,'OBSERVED',v) for i,v in enumerate(values))
-    return AlgorithmInput('synthetic-id', SCOPE, DAY, current, history, evidence_url='https://en.wikipedia.org/wiki/Example')
+    return AlgorithmInput('synthetic-id', SCOPE, DAY, current, history, evidence_url='https://en.wikipedia.org/wiki/Example',
+                          current_snapshot_status='SUCCESS')
 
 
 class EngineTests(unittest.TestCase):
@@ -137,6 +147,48 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         scorer.assert_called_once_with(DAY, [])
         scorer.side_effect = ValueError('invalid shared data')
         with self.assertRaises(ValueError): runner.legacy_results(DAY, [])
+
+    def test_reusable_series_methods_execute_only_on_complete_uncensored_history(self):
+        scope = Scope('provider_daily_series', 'US', 'public', 'search', 'robot vacuum', 'observed_count', 'items')
+        history = tuple(Observation(DAY-timedelta(days=i), scope, 'OBSERVED', 100 + (7-i)*10)
+                        for i in range(7, 0, -1))
+        item = AlgorithmInput('keyword', scope, DAY, 180, history, window_days=7,
+                              minimum_samples=3, current_snapshot_status='SUCCESS')
+        selected = ['rolling-mean-baseline@v1', 'relative-change@v1',
+                    'theil-sen-slope@v1', 'kendall-trend@v1']
+        results = self.runner.run(item, selected)
+        self.assertEqual([result.status for result in results], ['COMPLETED'] * 4)
+        values = {result.algorithm_id: result.value for result in results}
+        self.assertEqual(values['rolling-mean-baseline'], 130)
+        self.assertAlmostEqual(values['relative-change'], 5/13)
+        self.assertEqual(values['theil-sen-slope'], 10)
+        self.assertEqual(values['kendall-trend'], 1)
+        censored = replace(item, scope=SCOPE)
+        skipped = self.runner.run(censored, selected)
+        self.assertEqual({result.reason_code for result in skipped}, {'CENSORED_SOURCE_NOT_ACCEPTED'})
+
+    def test_registry_catalog_is_metadata_driven_and_marks_unavailable_methods(self):
+        response = catalog()
+        ids = {item['algorithm_id'] for item in response['algorithms']}
+        self.assertTrue({'wikimedia-trend', 'growth-ratio', 'median-baseline',
+                         'robust-z-mad', 'ewma', 'theil-sen-slope', 'kendall-trend'} <= ids)
+        theil = next(item for item in response['algorithms'] if item['algorithm_id'] == 'theil-sen-slope')
+        wikimedia = next(source for source in theil['sources'] if source['source_id'] == SOURCE)
+        self.assertEqual(wikimedia['status'], 'INCOMPATIBLE')
+        self.assertEqual(response['evaluation_status'], 'NOT_YET_EVALUATED')
+
+    def test_snapshot_popularity_ranks_ties_without_claiming_population_coverage(self):
+        second = Scope(SOURCE, 'US', 'all-access', 'fr.wikipedia', 'Different', METRIC, UNIT)
+        cohort = (Observation(DAY, second, 'OBSERVED', 500, 'SUCCESS', 2),
+                  Observation(DAY, second, 'OBSERVED', 500, 'SUCCESS', 3),
+                  Observation(DAY, second, 'OBSERVED', 100, 'SUCCESS', 4))
+        item = replace(make_input(current=500), cohort=cohort, current_snapshot_status='SUCCESS')
+        runner = AlgorithmRunner(algorithm_registry())
+        results = runner.run(item, ['observed-volume-rank@v1','observed-percentile-rank@v1'])
+        values = {row.algorithm_id: row.value for row in results}
+        self.assertEqual(values['observed-volume-rank'], 1)
+        self.assertAlmostEqual(values['observed-percentile-rank'], 200/3)
+        self.assertIn('CENSORED_TOP_LIST', results[1].quality_flags)
 
 
 class LegacyStrategyTests(unittest.IsolatedAsyncioTestCase):

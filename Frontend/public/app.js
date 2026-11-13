@@ -38,6 +38,10 @@ const state = {
   collectionQuery: '',
   collectionJobStatus: null,
   collectionInboxTotal: 0,
+  collectionSelected: new Set(),
+  collectionMembershipSelected: {},
+  algorithmCatalog: null,
+  algorithmResults: null,
 };
 
 function number(value) {
@@ -271,7 +275,7 @@ const fetchController = new PublicFetchController({
       state.run = null;
       state.offset = 0;
       renderPublicFetchDiscovery();
-      showView('overview');
+      showView('collections');
       loadKeywords();
     }
     scheduleCapabilityRefresh(100);
@@ -921,6 +925,7 @@ function showView(name) {
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
   }
   if (selected === 'collections') loadCollections();
+  if (selected === 'algorithms') loadAlgorithmCatalog();
   closeMobileNav();
 }
 
@@ -962,28 +967,17 @@ function renderCollections() {
     autoMatch.type = 'button';
     autoMatch.setAttribute('aria-pressed', String(item.auto_match));
     autoMatch.addEventListener('click', async () => {
-      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
+      const result = await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
         method: 'PATCH', body: { auto_match: !item.auto_match }, locale: getLocale(),
       });
+      state.collectionJobStatus = result.reclassification;
       await loadCollections();
     });
     card.append(autoMatch, element('p', t(item.auto_match ? 'collections.auto-enabled' : 'collections.auto-disabled'), 'collection-description'));
     const actions = element('div', null, 'collection-actions');
     const edit = element('button', t('collections.edit'), 'button button-secondary');
     edit.type = 'button';
-    edit.addEventListener('click', async () => {
-      const name = window.prompt(t('collections.name'), item.name);
-      if (name === null || !name.trim()) return;
-      const description = window.prompt(t('collections.context'), item.description || '') ?? item.description;
-      const examples = (window.prompt(t('collections.examples'), (item.examples || []).join('; ')) ?? (item.examples || []).join('; '))
-        .split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
-      const exclusions = (window.prompt(t('collections.exclusions'), (item.exclusions || []).join('; ')) ?? (item.exclusions || []).join('; '))
-        .split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
-      await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}`, {
-        method: 'PATCH', body: { name: name.trim(), description, examples, exclusions }, locale: getLocale(),
-      });
-      await loadCollections();
-    });
+    edit.addEventListener('click', () => openCollectionDialog(item));
     const remove = element('button', t('collections.delete'), 'button button-secondary');
     remove.type = 'button';
     remove.addEventListener('click', async () => {
@@ -994,10 +988,51 @@ function renderCollections() {
     actions.append(edit, remove);
     card.append(actions);
     const keywords = element('div', null, 'collection-keywords');
+    const selectedIds = state.collectionMembershipSelected[item.id]
+      || (state.collectionMembershipSelected[item.id] = new Set());
+    const bulkControls = element('div', null, 'collection-bulk');
+    const selectAll = element('input');
+    selectAll.type = 'checkbox';
+    selectAll.setAttribute('aria-label', t('collections.select-page'));
+    const approveSelected = element('button', t('collections.approve-selected'), 'button button-secondary');
+    const rejectSelected = element('button', t('collections.reject-selected'), 'button button-secondary');
+    approveSelected.type = rejectSelected.type = 'button';
+    approveSelected.disabled = rejectSelected.disabled = !selectedIds.size;
+    selectAll.addEventListener('change', async () => {
+      const result = await getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() });
+      for (const keyword of result.items || []) {
+        if (selectAll.checked) selectedIds.add(keyword.id);
+        else selectedIds.delete(keyword.id);
+      }
+      await loadCollections();
+    });
+    const bulkAction = async (action) => {
+      if (!selectedIds.size) return;
+      const result = await requestJson('/api/v1/collections/bulk', {
+        method: 'POST', body: { action, collection_id: item.id, keyword_ids: [...selectedIds] }, locale: getLocale(),
+      });
+      selectedIds.clear();
+      $('#collections-status').textContent = t('collections.bulk-result', result);
+      await loadCollections();
+    };
+    approveSelected.addEventListener('click', () => bulkAction('APPROVE'));
+    rejectSelected.addEventListener('click', () => bulkAction('REJECT'));
+    bulkControls.append(selectAll, element('span', t('collections.select-page')),
+      approveSelected, rejectSelected);
+    card.append(bulkControls);
     card.append(keywords);
     getJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords`, { locale: getLocale() })
       .then((result) => (result.items || []).forEach((keyword) => {
         const row = element('div', null, 'collection-keyword');
+        const checkbox = element('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = selectedIds.has(keyword.id);
+        checkbox.setAttribute('aria-label', keyword.keyword);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) selectedIds.add(keyword.id);
+          else selectedIds.delete(keyword.id);
+          approveSelected.disabled = rejectSelected.disabled = !selectedIds.size;
+        });
         let evidence = {};
         try { evidence = JSON.parse(keyword.evidence || '{}'); } catch {}
         const details = [keyword.source, keyword.project, keyword.observed_at,
@@ -1031,6 +1066,7 @@ function renderCollections() {
           await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/keywords/${encodeURIComponent(keyword.id)}`, { method: 'DELETE', locale: getLocale() });
           await loadCollections();
         });
+        row.prepend(checkbox);
         row.append(label, destination, copy, move, unassign);
         keywords.append(row);
       })).catch(() => {});
@@ -1064,6 +1100,15 @@ function renderCollections() {
   inbox.replaceChildren();
   state.collectionInbox.forEach((keyword) => {
     const row = element('div', null, 'collection-inbox-row');
+    const checkbox = element('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = state.collectionSelected.has(keyword.id);
+    checkbox.setAttribute('aria-label', keyword.keyword);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) state.collectionSelected.add(keyword.id);
+      else state.collectionSelected.delete(keyword.id);
+      updateCollectionSelection();
+    });
     row.append(element('span', `${keyword.keyword} · ${keyword.project} · ${keyword.observed_at}`));
     const select = element('select');
     select.setAttribute('aria-label', t('collections.open'));
@@ -1081,6 +1126,7 @@ function renderCollections() {
       });
       await loadCollections();
     });
+    row.prepend(checkbox);
     row.append(select, add);
     inbox.append(row);
   });
@@ -1088,12 +1134,47 @@ function renderCollections() {
   const more = $('#collection-inbox-more');
   more.hidden = state.collectionInbox.length >= state.collectionInboxTotal;
   more.disabled = state.collectionInbox.length >= state.collectionInboxTotal;
+  $('#collection-unassigned-count').textContent = number(state.collectionInboxTotal);
+  const bulkTarget = $('#collection-bulk-target');
+  const previousTarget = bulkTarget.value;
+  bulkTarget.replaceChildren();
+  state.collections.forEach((collection) => {
+    const option = element('option', collection.name);
+    option.value = collection.id;
+    bulkTarget.append(option);
+  });
+  if (state.collections.some((collection) => collection.id === previousTarget)) bulkTarget.value = previousTarget;
+  bulkTarget.disabled = !state.collections.length;
+  $('#collection-bulk-assign').disabled = !state.collections.length || !state.collectionSelected.size;
+  $('#collection-select-page').checked = state.collectionInbox.length > 0
+    && state.collectionInbox.every((keyword) => state.collectionSelected.has(keyword.id));
+  updateCollectionSelection();
   $('#collections-status').textContent = state.collectionJobStatus?.status === 'COMPLETED'
     ? t('collections.coverage', state.collectionJobStatus) : t('collections.saved');
 }
 
+function updateCollectionSelection() {
+  $('#collection-selection-count').textContent = t('collections.selected-count', { count: state.collectionSelected.size });
+  const button = $('#collection-bulk-assign');
+  if (button) button.disabled = !state.collections.length || !state.collectionSelected.size;
+}
+
 function isMobileNav() {
   return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function openCollectionDialog(item = null) {
+  const dialog = $('#collection-dialog');
+  const form = $('#collection-form');
+  form.dataset.collectionId = item?.id || '';
+  $('#collection-dialog-title').textContent = t(item ? 'collections.edit' : 'collections.create');
+  $('#collection-name').value = item?.name || '';
+  $('#collection-description').value = item?.description || '';
+  $('#collection-examples').value = (item?.examples || []).join('; ');
+  $('#collection-exclusions').value = (item?.exclusions || []).join('; ');
+  $('#collection-auto-match').checked = item?.auto_match ?? true;
+  dialog.showModal();
+  $('#collection-name').focus();
 }
 
 function setMobileNav(open) {
@@ -1115,14 +1196,122 @@ function closeMobileNav() {
   }
 }
 
-function describeComparison() {
-  const states = {
-    wikimedia: 'algorithms.fixture-wikimedia',
-    robust: 'algorithms.fixture-robust',
-    ewma: 'algorithms.fixture-ewma',
-  };
-  $('#compare-description').textContent = t(states[$('#compare-first').value]) + ' · '
-    + t(states[$('#compare-second').value]) + ' · ' + t('algorithms.fixture-note');
+async function loadAlgorithmCatalog() {
+  const root = $('#algorithm-catalog');
+  root.replaceChildren(element('p', 'Loading algorithm registry…'));
+  try {
+    const [catalogResult, executionResult] = await Promise.all([
+      getJson('/api/v1/algorithms', { locale: getLocale() }),
+      getJson('/api/v1/algorithms/results', { locale: getLocale() }).catch(() => null),
+    ]);
+    state.algorithmCatalog = catalogResult;
+    state.algorithmResults = executionResult;
+    populateAlgorithmFilters(state.algorithmCatalog.algorithms || []);
+    renderAlgorithmCatalog();
+    $('#algorithm-evaluation-status').textContent = `${state.algorithmCatalog.evaluation_status}: ${state.algorithmCatalog.evaluation_reason}`;
+  } catch (error) {
+    root.replaceChildren(element('p', getErrorMessage(error, 'error.detail-fetch')));
+  }
+}
+
+function populateAlgorithmFilters(items) {
+  const family = $('#algorithm-family-filter');
+  const source = $('#algorithm-source-filter');
+  const priorFamily = family.value;
+  const priorSource = source.value;
+  const families = [...new Set(items.map((item) => item.family))].sort();
+  const sources = [...new Set(items.flatMap((item) => item.sources.map((entry) => entry.source_id)))].sort();
+  family.replaceChildren(new Option('All families', ''), ...families.map((value) => new Option(value, value)));
+  source.replaceChildren(new Option('All sources', ''), ...sources.map((value) => new Option(value, value)));
+  family.value = priorFamily;
+  source.value = priorSource;
+}
+
+function renderAlgorithmCatalog() {
+  const root = $('#algorithm-catalog');
+  const all = state.algorithmCatalog?.algorithms || [];
+  const family = $('#algorithm-family-filter').value;
+  const source = $('#algorithm-source-filter').value;
+  const status = $('#algorithm-status-filter').value;
+  const methods = all.filter((item) => (!family || item.family === family)
+    && (!source || item.sources.some((entry) => entry.source_id === source))
+    && (!status || item.sources.some((entry) => entry.status === status)));
+  root.replaceChildren();
+  if (!methods.length) {
+    root.append(element('p', 'No registered algorithms match these filters.'));
+    return;
+  }
+  methods.forEach((item) => {
+    const card = element('article', null, 'panel algorithm-card');
+    const heading = element('div', null, 'panel-heading');
+    const title = element('div');
+    title.append(element('p', item.family.toUpperCase(), 'section-kicker'));
+    title.append(element('h2', item.name));
+    title.append(element('code', item.key));
+    heading.append(title);
+    const compatible = item.sources.filter((entry) => entry.status !== 'INCOMPATIBLE');
+    heading.append(element('span', compatible.length ? compatible[0].status : 'INCOMPATIBLE', 'pill pill--gray'));
+    card.append(heading);
+    card.append(element('p', item.description));
+    const counts = (state.algorithmResults?.summary || []).find((entry) => entry.algorithm_id === item.algorithm_id);
+    card.append(element('p', counts
+      ? `Persisted results: ${counts.completed} completed · ${counts.skipped} skipped · ${counts.failed} failed`
+      : 'Persisted results: none yet', 'algorithm-execution-summary'));
+    const examples = (state.algorithmResults?.items || []).filter((entry) => entry.algorithm_id === item.algorithm_id).slice(0, 3);
+    if (examples.length) {
+      const outputDetails = element('details', null, 'algorithm-details');
+      outputDetails.append(element('summary', 'Latest persisted keyword results'));
+      const outputList = element('ul');
+      examples.forEach((entry) => {
+        let result = {};
+        try { result = JSON.parse(entry.result_json || '{}'); } catch { /* malformed old rows remain display-safe */ }
+        const flags = Array.isArray(result.quality_flags) ? result.quality_flags.join(', ') : '';
+        const message = [entry.keyword, entry.status,
+          entry.value === null ? entry.reason_code : `${entry.value} ${entry.unit}`,
+          flags].filter(Boolean).join(' · ');
+        outputList.append(element('li', message));
+      });
+      outputDetails.append(outputList);
+      card.append(outputDetails);
+    }
+    const sourceRow = element('div', null, 'algorithm-source-icons');
+    item.sources.forEach((entry) => {
+      const sourceBadge = element('span', null, 'algorithm-source-badge');
+      sourceBadge.title = `${entry.source_id}: ${entry.status}${entry.reason ? ` · ${entry.reason}` : ''}`;
+      sourceBadge.append(element('span', sourceGlyph(entry.source_id), 'algorithm-source-glyph'));
+      sourceBadge.append(element('span', entry.source_id.replaceAll('_', ' ')));
+      sourceRow.append(sourceBadge);
+    });
+    card.append(sourceRow);
+    const detail = element('details', null, 'algorithm-details');
+    detail.append(element('summary', 'Requirements, output and limitations'));
+    const list = element('dl', null, 'detail-list');
+    addAlgorithmDetail(list, 'Input', `${item.input_metric} (${item.input_unit})`);
+    addAlgorithmDetail(list, 'Output', `${item.metric} (${item.unit})`);
+    addAlgorithmDetail(list, 'Minimum samples', item.minimum_samples);
+    addAlgorithmDetail(list, 'Windows (days)', (item.supported_windows || []).join(', '));
+    addAlgorithmDetail(list, 'Missing data', item.missing_data);
+    addAlgorithmDetail(list, 'Runtime', item.runtime_limit);
+    addAlgorithmDetail(list, 'Interpretation', item.interpretation || 'Descriptive output.');
+    addAlgorithmDetail(list, 'Limitations', (item.limitations || []).join(' '));
+    detail.append(list);
+    card.append(detail);
+    root.append(card);
+  });
+}
+
+function sourceGlyph(id) {
+  if (id.startsWith('wikimedia')) return 'W';
+  if (id.startsWith('google')) return 'G';
+  if (id.startsWith('bing')) return 'B';
+  if (id.startsWith('youtube')) return '▶';
+  return '•';
+}
+
+function addAlgorithmDetail(list, label, value) {
+  const row = element('div');
+  row.append(element('dt', label), element('dd', value));
+  list.append(row);
 }
 
 function bindEvents() {
@@ -1197,15 +1386,29 @@ function bindEvents() {
       loadKeywords();
     }
   });
-  $('#compare-first').addEventListener('change', describeComparison);
-  $('#compare-second').addEventListener('change', describeComparison);
-  $('#collection-create').addEventListener('click', async () => {
-    const name = window.prompt(t('collections.name'));
-    if (name === null || !name.trim()) return;
-    const description = window.prompt(t('collections.context'), '') || '';
-    const examples = (window.prompt(t('collections.examples'), '') || '').split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
-    const exclusions = (window.prompt(t('collections.exclusions'), '') || '').split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
-    await requestJson('/api/v1/collections', { method: 'POST', body: { name: name.trim(), description, examples, exclusions }, locale: getLocale() });
+  ['#algorithm-family-filter', '#algorithm-source-filter', '#algorithm-status-filter']
+    .forEach((selector) => $(selector).addEventListener('change', renderAlgorithmCatalog));
+  $('#collection-create').addEventListener('click', () => openCollectionDialog());
+  $('#collection-dialog-close').addEventListener('click', () => $('#collection-dialog').close());
+  $('#collection-dialog-cancel').addEventListener('click', () => $('#collection-dialog').close());
+  $('#collection-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const collectionId = form.dataset.collectionId;
+    const splitExamples = (selector) => $(selector).value.split(';').map((value) => value.trim()).filter(Boolean).slice(0, 30);
+    const body = {
+      name: $('#collection-name').value.trim(),
+      description: $('#collection-description').value.trim(),
+      examples: splitExamples('#collection-examples'),
+      exclusions: splitExamples('#collection-exclusions'),
+      auto_match: $('#collection-auto-match').checked,
+    };
+    const result = await requestJson(collectionId
+      ? `/api/v1/collections/${encodeURIComponent(collectionId)}` : '/api/v1/collections', {
+      method: collectionId ? 'PATCH' : 'POST', body, locale: getLocale(),
+    });
+    state.collectionJobStatus = result.reclassification;
+    $('#collection-dialog').close();
     await loadCollections();
   });
   $('#collection-search').addEventListener('input', (event) => {
@@ -1221,6 +1424,23 @@ function bindEvents() {
     await loadCollections();
   });
   $('#collection-inbox-more').addEventListener('click', () => loadCollections({ appendInbox: true }));
+  $('#collection-select-page').addEventListener('change', (event) => {
+    for (const keyword of state.collectionInbox) {
+      if (event.currentTarget.checked) state.collectionSelected.add(keyword.id);
+      else state.collectionSelected.delete(keyword.id);
+    }
+    renderCollections();
+  });
+  $('#collection-bulk-assign').addEventListener('click', async () => {
+    if (!state.collectionSelected.size || !$('#collection-bulk-target').value) return;
+    const result = await requestJson('/api/v1/collections/bulk', {
+      method: 'POST', body: { action: 'ADD', collection_id: $('#collection-bulk-target').value,
+        keyword_ids: [...state.collectionSelected] }, locale: getLocale(),
+    });
+    state.collectionSelected.clear();
+    $('#collections-status').textContent = t('collections.bulk-result', result);
+    await loadCollections();
+  });
   $('#detail-dialog').addEventListener('close', () => {
     state.detailSequence += 1;
     state.detail = null;
@@ -1238,7 +1458,7 @@ function bindEvents() {
     if (state.publicFetchDiscovery) {
       renderPublicFetchDiscovery();
     }
-    describeComparison();
+    if (window.location.hash === '#algorithms') loadAlgorithmCatalog();
     if (state.dataRunId || state.publicFetchDiscovery) {
       loadKeywords();
     }
@@ -1272,7 +1492,6 @@ initializeLocale();
 initializeTheme();
 bindEvents();
 showView(window.location.hash.slice(1));
-describeComparison();
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();

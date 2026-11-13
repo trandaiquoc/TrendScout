@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api.capabilities import router as capabilities_router
+from app.api.algorithms import router as algorithms_router
 from app.api.collections import router as collections_router
 from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
@@ -285,6 +286,7 @@ def create_app(
     application.include_router(health_router, prefix="/api")
     application.include_router(runs_router, prefix="/api")
     application.include_router(capabilities_router, prefix="/api/v1")
+    application.include_router(algorithms_router, prefix="/api/v1")
     application.include_router(fetches_router, prefix="/api/v1")
     application.include_router(collections_router, prefix="/api/v1")
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"

@@ -123,11 +123,23 @@
 
         <section class="view-panel" data-view="collections" hidden aria-labelledby="collections-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="collections.kicker"></p><h1 id="collections-heading" data-i18n="nav.collections"></h1><p data-i18n="collections.description"></p></div><button class="button button-primary" id="collection-create" type="button" data-i18n="collections.create"></button></div>
-          <div class="panel collection-controls"><label for="collection-search" data-i18n="collections.search"></label><input id="collection-search" type="search" maxlength="100" data-i18n-placeholder="collections.search-placeholder"><label for="collection-mode" data-i18n="collections.mode"></label><select id="collection-mode"><option value="SUGGEST" data-i18n="collections.suggest"></option><option value="AUTO_CREATE" data-i18n="collections.auto-create"></option></select><button class="button button-secondary" id="collections-refresh" type="button" data-i18n="collections.organize"></button></div>
+          <div class="panel collection-controls"><label for="collection-search" data-i18n="collections.search"></label><input id="collection-search" type="search" maxlength="100" data-i18n-placeholder="collections.search-placeholder"><label for="collection-mode" data-i18n="collections.mode"></label><select id="collection-mode"><option value="SUGGEST" data-i18n="collections.suggest"></option><option value="AUTO_CREATE" data-i18n="collections.auto-create"></option></select><button class="button button-secondary" id="collections-refresh" type="button" data-i18n="collections.reclassify"></button></div>
           <p id="collections-status" class="notice notice--info" role="status" aria-live="polite"></p>
           <div id="suggestion-list" class="collection-grid"></div>
           <div id="collection-list" class="collection-grid"></div>
-          <div class="panel"><h2 data-i18n="collections.inbox"></h2><div id="collection-inbox" class="collection-inbox"></div><button class="button button-secondary" id="collection-inbox-more" type="button" data-i18n="collections.more" hidden></button></div>
+          <div class="panel"><div class="panel-heading"><h2 data-i18n="collections.inbox"></h2><span id="collection-unassigned-count" class="count-chip">0</span></div><div class="collection-bulk"><label><input id="collection-select-page" type="checkbox"><span data-i18n="collections.select-page"></span></label><select id="collection-bulk-target" aria-label="Assign selected keywords"></select><button class="button button-secondary" id="collection-bulk-assign" type="button" data-i18n="collections.assign-selected"></button><span id="collection-selection-count"></span></div><div id="collection-inbox" class="collection-inbox"></div><button class="button button-secondary" id="collection-inbox-more" type="button" data-i18n="collections.more" hidden></button></div>
+          <dialog id="collection-dialog" class="collection-dialog">
+            <form id="collection-form" method="dialog">
+              <div class="panel-heading"><h2 id="collection-dialog-title"></h2><button class="text-button" id="collection-dialog-close" type="button" aria-label="Close">×</button></div>
+              <label for="collection-name" data-i18n="collections.name"></label><input id="collection-name" name="name" required maxlength="80">
+              <label for="collection-description" data-i18n="collections.context"></label><textarea id="collection-description" name="description" maxlength="1200"></textarea>
+              <label for="collection-examples" data-i18n="collections.examples"></label><textarea id="collection-examples" name="examples"></textarea>
+              <label for="collection-exclusions" data-i18n="collections.exclusions"></label><textarea id="collection-exclusions" name="exclusions"></textarea>
+              <label class="collection-auto-setting"><input id="collection-auto-match" name="auto_match" type="checkbox" checked><span data-i18n="collections.enable-auto"></span></label>
+              <p data-i18n="collections.reclassify-help"></p>
+              <div class="collection-actions"><button class="button button-secondary" id="collection-dialog-cancel" type="button" data-i18n="collections.cancel"></button><button class="button button-primary" type="submit" data-i18n="collections.save"></button></div>
+            </form>
+          </dialog>
         </section>
 
         <section class="view-panel" data-view="sources" hidden aria-labelledby="sources-heading">
@@ -176,12 +188,9 @@
 
         <section class="view-panel" data-view="algorithms" hidden aria-labelledby="algorithms-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="algorithms.kicker"></p><h1 id="algorithms-heading" data-i18n="nav.algorithms"></h1><p data-i18n="algorithms.description"></p></div><span class="page-heading-mark" aria-hidden="true">⌁</span></div>
-          <div class="notice notice--synthetic"><span class="notice-icon" aria-hidden="true">✳</span><p data-i18n="common.synthetic"></p></div>
-          <div class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="algorithms.preview-kicker"></p><h2 data-i18n="algorithms.preview-title"></h2></div><span class="pill pill--gray">NOT_COMPARABLE</span></div><p data-i18n="algorithms.preview-help"></p>
-            <div class="table-wrap"><table class="preview-table"><thead><tr><th data-i18n="algorithms.algorithm"></th><th data-i18n="algorithms.metric"></th><th data-i18n="table.status"></th><th data-i18n="algorithms.reason"></th></tr></thead><tbody><tr><td>wikimedia-trend-v0.1</td><td data-i18n="algorithms.metric-one"></td><td><span class="pill pill--green" data-i18n="algorithms.completed"></span></td><td data-i18n="algorithms.row-one"></td></tr><tr><td>robust-z-mad</td><td data-i18n="algorithms.metric-two"></td><td><span class="pill pill--gray" data-i18n="algorithms.skipped"></span></td><td data-i18n="algorithms.row-two"></td></tr><tr><td>ewma</td><td data-i18n="algorithms.metric-three"></td><td><span class="pill pill--red" data-i18n="algorithms.failed"></span></td><td data-i18n="algorithms.row-three"></td></tr></tbody></table></div>
-            <div class="comparison-controls"><label for="compare-first" data-i18n="algorithms.first"></label><select id="compare-first"><option value="wikimedia">wikimedia-trend-v0.1</option><option value="robust">robust-z-mad</option><option value="ewma">ewma</option></select><label for="compare-second" data-i18n="algorithms.second"></label><select id="compare-second"><option value="robust">robust-z-mad</option><option value="wikimedia">wikimedia-trend-v0.1</option><option value="ewma">ewma</option></select></div>
-            <p id="compare-description" class="comparison-description" role="status" aria-live="polite"></p><p class="fine-print" data-i18n="algorithms.not-comparable"></p>
-          </div>
+          <div class="panel algorithm-catalog-controls"><label>Family <select id="algorithm-family-filter"><option value="">All families</option></select></label><label>Source <select id="algorithm-source-filter"><option value="">All sources</option></select></label><label>Status <select id="algorithm-status-filter"><option value="">All statuses</option><option>SUPPORTED_AND_AVAILABLE</option><option>SUPPORTED_BUT_NOT_LIVE</option><option>INCOMPATIBLE</option></select></label></div>
+          <div id="algorithm-catalog" class="algorithm-catalog" aria-live="polite"></div>
+          <p id="algorithm-evaluation-status" class="fine-print"></p>
         </section>
 
         <section class="view-panel" data-view="quality" hidden aria-labelledby="quality-heading">

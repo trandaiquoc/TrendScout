@@ -61,7 +61,7 @@ SOURCE_CAPABILITIES = (
         language=None,
         query_based=False,
         metric_name="views_ceil",
-        metric_unit="approximate pageviews",
+        metric_unit="approx_pageviews_upper_bound",
         metric_description="Approximate upper-bound pageviews for listed pages",
         capabilities=(
             "daily_snapshot",

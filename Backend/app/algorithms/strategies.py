@@ -58,7 +58,11 @@ def result(item, meta, value, baseline, samples):
 
 
 class MedianBaseline:
-    metadata = AlgorithmMetadata('median-baseline','v0.1','Median baseline',SOURCE,METRIC,UNIT,3,7,input_metric=METRIC,input_unit=UNIT)
+    metadata = AlgorithmMetadata('median-baseline','v0.1','Median baseline',SOURCE,METRIC,UNIT,3,7,input_metric=METRIC,input_unit=UNIT,
+        description='Median of observed prior top-list pageview estimates.', family='growth',
+        supported_windows=(3,4,5,6,7), missing_data='Missing and not-in-top dates remain excluded and are reported.',
+        accepts_censored_top_list=True, interpretation='Descriptive median conditional on observed top-list appearances.',
+        limitations=('Absence from the top list is censored, not zero.', 'Pageviews are approximate.'))
     def applicable(self, item): return applicability(item, needs_current=False)
     def execute(self, item):
         samples = [p.value for p in item.history if p.status == 'OBSERVED']
@@ -67,10 +71,15 @@ class MedianBaseline:
 
 
 class GrowthRatio:
-    metadata = AlgorithmMetadata('growth-ratio','v0.1','Current / median baseline',SOURCE,'growth_ratio','dimensionless',3,7,input_metric=METRIC,input_unit=UNIT)
+    metadata = AlgorithmMetadata('growth-ratio','v0.1','Current / median baseline',SOURCE,'growth_ratio','dimensionless',3,7,input_metric=METRIC,input_unit=UNIT,
+        description='Current approximate pageviews divided by observed-day median.', family='growth',
+        supported_windows=(3,4,5,6,7), missing_data='Requires at least three observed days; missing dates are reported.',
+        accepts_censored_top_list=True, interpretation='Conditional ratio versus observed top-list days.',
+        limitations=('Not market-wide growth; top-list absence is censored.', 'Pageviews are approximate.'))
     def applicable(self, item):
         reason = applicability(item, needs_current=True)
         if reason: return reason
+        if item.current_snapshot_status != 'SUCCESS': return 'CURRENT_COVERAGE_UNCONFIRMED'
         if median(p.value for p in item.history if p.status == 'OBSERVED') <= 0: return 'ZERO_BASELINE'
         return None
     def execute(self, item):
@@ -80,7 +89,11 @@ class GrowthRatio:
 
 
 class WikimediaLegacy:
-    metadata = AlgorithmMetadata('wikimedia-trend','v0.1','Legacy Wikimedia trend score',SOURCE,'trend_score','points_0_100',3,7,input_metric=METRIC,input_unit=UNIT)
+    metadata = AlgorithmMetadata('wikimedia-trend','v0.1','Legacy Wikimedia trend score',SOURCE,'trend_score','points_0_100',3,7,input_metric=METRIC,input_unit=UNIT,
+        description='Existing Wikimedia descriptive score combining current value, observed baseline, and coverage.',
+        family='composite', supported_windows=(7,), missing_data='Score carries legacy missing-baseline and quality flags.',
+        accepts_censored_top_list=True, interpretation='Legacy 0–100 heuristic; not a probability or demand measure.',
+        limitations=('Top-list censoring applies.', 'Retained for compatibility; evaluation status is not yet evaluated.'))
     def __init__(self, scorer): self.scorer = scorer
     def score_batch(self, analysis_date, days): return self.scorer(analysis_date, days)
     def applicable(self, item):

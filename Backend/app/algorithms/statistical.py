@@ -61,7 +61,13 @@ def evidence(item, config):
 
 class RobustZMad:
     metadata = AlgorithmMetadata('robust-z-mad', 'v0.1', 'Robust Z / MAD', SOURCE,
-        'robust_z', 'dimensionless', 14, 90, input_metric=METRIC, input_unit=UNIT)
+        'robust_z', 'dimensionless', 14, 90, input_metric=METRIC, input_unit=UNIT,
+        description='Robust deviation from historical median measured in scaled MAD units.',
+        family='anomaly', supported_windows=tuple(range(14, 91)),
+        missing_data='Requires complete daily history and a nonzero MAD.', accepts_censored_top_list=False,
+        parameters=(('minimum_samples', 14), ('allow_top_censored', False)), runtime_limit='O(n log n)',
+        interpretation='Descriptive robust Z score; no significance test.',
+        limitations=('Disabled for censored Wikimedia top-list observations by default.',))
 
     def __init__(self, config=RobustConfig()): self.config = config
 
@@ -99,7 +105,14 @@ class RobustZMad:
 
 class EWMA:
     metadata = AlgorithmMetadata('ewma', 'v0.1', 'Daily EWMA', SOURCE,
-        'ewma', UNIT, 7, 90, input_metric=METRIC, input_unit=UNIT)
+        'ewma', UNIT, 7, 90, input_metric=METRIC, input_unit=UNIT,
+        description='Exponentially weighted moving average with fixed alpha.', family='anomaly',
+        supported_windows=tuple(range(7, 91)),
+        missing_data='Requires complete daily history and a confirmed current snapshot.',
+        accepts_censored_top_list=False, parameters=(('alpha', 0.3), ('warmup', 7),
+                                                     ('allow_top_censored', False)),
+        runtime_limit='O(n)', interpretation='Smoothed value, not an anomaly probability.',
+        limitations=('Disabled for censored Wikimedia top-list observations by default.',))
 
     def __init__(self, config=EWMAConfig()): self.config = config
 

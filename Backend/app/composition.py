@@ -1,9 +1,7 @@
 """Application composition: select concrete dependencies at the outer boundary."""
 
-from app.algorithms.registry import AlgorithmRegistry
+from app.algorithms.catalog import registry as algorithm_registry
 from app.algorithms.runner import AlgorithmRunner
-from app.algorithms.statistical import EWMA, RobustZMad
-from app.algorithms.strategies import GrowthRatio, MedianBaseline, WikimediaLegacy
 from app.analysis.keywords import extract_keywords
 from app.analysis.trend import DayData, score_trends
 from app.processing.wikimedia_cleaning import clean_snapshot
@@ -26,16 +24,7 @@ def source_registry(settings: Settings | None = None):
 
 
 def algorithm_engine():
-    registry = AlgorithmRegistry()
-    for strategy in (
-        WikimediaLegacy(score_trends),
-        GrowthRatio(),
-        MedianBaseline(),
-        RobustZMad(),
-        EWMA(),
-    ):
-        registry.register(strategy)
-    return AlgorithmRunner(registry)
+    return AlgorithmRunner(algorithm_registry(scorer=score_trends))
 
 
 def build_run_service(

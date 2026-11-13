@@ -3,9 +3,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from app.collections import embeddings
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, keyword_record
+from app.main import create_app
+from app.settings import Settings
 from app.sources.wikimedia.cleaning_rules import collection_technical_reason
 
 
@@ -37,6 +41,44 @@ class SmartCollectionsTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_algorithm_catalog_and_persisted_results_api(self):
+        row = {"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 1, "views_ceil": 1000}
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("api-catalog", live_source([row, {**row,
+                "article_display": "Mars Rover", "article_original": "Mars_Rover", "views_ceil": 500}]))
+        app = create_app(read_only=True, settings=Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true"}))
+        app.state.collection_service = self.service
+
+        async def request():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                return await client.get("/api/v1/algorithms"), await client.get("/api/v1/algorithms/results")
+
+        catalog_response, results_response = __import__("asyncio").run(request())
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(len(catalog_response.json()["algorithms"]), 12)
+        self.assertEqual(results_response.status_code, 200)
+        summaries = {row["algorithm_id"]: row for row in results_response.json()["summary"]}
+        self.assertEqual(summaries["observed-volume-rank"]["completed"], 2)
+        self.assertIn("NOT_YET_EVALUATED", results_response.json()["evaluation_status"])
+
+    def test_partial_snapshot_is_not_used_for_snapshot_popularity(self):
+        rows = [{"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 1, "views_ceil": 1000},
+            {"article_display": "Mars Rover", "article_original": "Mars_Rover",
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 2, "views_ceil": 500}]
+        source = live_source(rows)
+        source[0]["status"] = "PARTIAL"
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("partial-snapshot", source)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE status='COMPLETED'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE snapshot_status='PARTIAL'").fetchone()[0], 2)
 
     def test_crud_feedback_and_restart_persistence(self):
         collection_id = self.store.create({"name": "Sustainable fashion", "examples": ["circular clothing"]})
@@ -94,8 +136,18 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(result["available"], 212)
             self.assertEqual(result["processed"], 212)
             self.assertEqual(result["skipped"], 0)
+            self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
+            self.assertEqual(result["algorithms"]["executed_keywords"], 212)
+            self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
+            with self.store.connect() as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
+                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)
+                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
+                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
             previous_calls = sum(calls)
-            self.service._process_fetch("full-set-again", source)
+            replay = self.service._process_fetch("full-set-again", source)
+            self.assertEqual(replay["algorithms"]["executed_keywords"], 0)
+            self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
             self.assertEqual(sum(calls), previous_calls)
 
     def test_localized_wikimedia_special_and_main_pages_are_filtered(self):
@@ -189,6 +241,40 @@ class SmartCollectionsTests(unittest.TestCase):
         with self.store.connect() as db:
             saved = db.execute("SELECT keyword,eligible FROM keywords").fetchone()
         self.assertEqual(tuple(saved), ("Mars Rover", 1))
+
+    def test_bulk_feedback_actions_are_atomic_and_durable(self):
+        target = self.store.create({"name": "Space", "auto_match": False})
+        rows = [{"article_display": name, "article_original": name.replace(" ", "_"),
+                 "project": "en.wikipedia", "observation_date": "2026-11-10",
+                 "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": index,
+                 "views_ceil": 1000}
+                for index, name in enumerate(("Mars Rover Mission", "Lunar Gateway"), start=1)]
+        source = live_source(rows)
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("bulk-seed", source)
+        ids = [keyword_record(row, source[0]["source_id"], "LIVE")["id"] for row in rows]
+        result = self.store.bulk_membership_action(ids + ["missing"], "ADD", collection_id=target)
+        self.assertEqual(result, {"updated": 2, "skipped": 1, "failed": 0})
+        approved = self.store.bulk_membership_action(ids, "APPROVE", collection_id=target)
+        self.assertEqual(approved["updated"], 2)
+        self.assertTrue(all(item["pinned"] and item["origin"] == "USER"
+                            for item in self.store.keywords_for(target)))
+        rejected = self.store.bulk_membership_action(ids, "REJECT", collection_id=target)
+        self.assertEqual(rejected["updated"], 2)
+        self.assertEqual(self.store.keywords_for(target), [])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE action='REMOVE'").fetchone()[0], 2)
+
+    def test_platform_titles_do_not_form_auto_collection_proposals(self):
+        records = [
+            {"id": "a", "keyword": "MediaWiki", "normalized": "mediawiki"},
+            {"id": "b", "keyword": "Wikimedia APIs", "normalized": "wikimedia apis"},
+            {"id": "c", "keyword": "Wikipedia", "normalized": "wikipedia"},
+        ]
+        with patch("app.collections.service.cosine", return_value=0.95):
+            result = self.service._propose("platform-noise", [(row, [1.0]) for row in records], [])
+        self.assertEqual(result, (0, 0))
+        self.assertEqual(self.store.suggestions(), [])
 
 
 if __name__ == "__main__":

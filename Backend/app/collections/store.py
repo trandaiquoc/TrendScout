@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS fetch_jobs (
  suggestions INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
  error_code TEXT, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS algorithm_observations (
+ keyword_id TEXT NOT NULL, source TEXT NOT NULL, observation_date TEXT NOT NULL,
+ country TEXT NOT NULL, access TEXT NOT NULL, project TEXT NOT NULL, metric TEXT NOT NULL,
+ unit TEXT NOT NULL, status TEXT NOT NULL, value INTEGER, rank INTEGER,
+ snapshot_status TEXT NOT NULL, input_digest TEXT NOT NULL,
+ PRIMARY KEY(keyword_id, source, observation_date, metric, unit)
+);
+CREATE TABLE IF NOT EXISTS algorithm_results (
+ keyword_id TEXT NOT NULL, algorithm_id TEXT NOT NULL, version TEXT NOT NULL,
+ status TEXT NOT NULL, reason_code TEXT, value REAL, metric TEXT NOT NULL, unit TEXT NOT NULL,
+ result_json TEXT NOT NULL, input_digest TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(keyword_id, algorithm_id)
+);
 """
 
 
@@ -150,7 +163,10 @@ class CollectionStore:
                 params.append(value)
             params.extend([now(), identifier])
             db.execute(f"UPDATE collections SET {','.join(assignments)},version=version+1,updated_at=? WHERE id=?", params)
-            db.execute("DELETE FROM cache WHERE collection_version < ?", (row["version"] + 1,))
+            # Version zero entries are keyword vectors shared across Collections; retain them
+            # so a metadata edit does not force unchanged keywords through the model again.
+            db.execute("DELETE FROM cache WHERE collection_version > 0 AND collection_version < ?",
+                       (row["version"] + 1,))
             return True
 
     def delete(self, identifier):
@@ -173,7 +189,7 @@ class CollectionStore:
         with self.connect() as db:
             db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,data_mode,evidence,context)
                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET evidence=excluded.evidence,
-                observed_at=excluded.observed_at""", tuple(record[k] for k in (
+                observed_at=excluded.observed_at WHERE excluded.keyword<>''""", tuple(record[k] for k in (
                     "id", "keyword", "normalized", "source", "project", "observed_at", "data_mode", "evidence", "context")))
             db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?,?,?)",
                        (collection_id, record["id"], action, now()))
@@ -183,6 +199,62 @@ class CollectionStore:
                 db.execute("""INSERT OR REPLACE INTO memberships VALUES(?,?, 'USER', ?,NULL,'Manually added',?)""",
                            (collection_id, record["id"], int(pinned), now()))
             db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?", (now(), collection_id))
+
+    def bulk_membership_action(self, keyword_ids, action, *, collection_id=None, source_collection_id=None):
+        """Apply a bounded user action atomically; return explicit updated/skipped counts."""
+        ids = list(dict.fromkeys(keyword_ids))
+        updated = skipped = 0
+        stamp = now()
+        with self.connect() as db:
+            collections = {row["id"] for row in db.execute(
+                "SELECT id FROM collections WHERE status='ACTIVE'")}
+            if collection_id and collection_id not in collections:
+                raise ValueError("COLLECTION_NOT_FOUND")
+            if source_collection_id and source_collection_id not in collections:
+                raise ValueError("COLLECTION_NOT_FOUND")
+            for keyword_id in ids:
+                keyword = db.execute("SELECT 1 FROM keywords WHERE id=? AND eligible=1", (keyword_id,)).fetchone()
+                if not keyword:
+                    skipped += 1
+                    continue
+                if action in {"ADD", "COPY", "MOVE", "APPROVE"}:
+                    cursor = db.execute("SELECT 1 FROM memberships WHERE collection_id=? AND keyword_id=?",
+                                        (collection_id, keyword_id)).fetchone()
+                    db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'ADD',?)",
+                               (collection_id, keyword_id, stamp))
+                    db.execute("""INSERT OR REPLACE INTO memberships VALUES(?,?, 'USER',1,NULL,
+                        'Manually approved',?)""", (collection_id, keyword_id, stamp))
+                    if action == "MOVE" and source_collection_id and source_collection_id != collection_id:
+                        db.execute("DELETE FROM memberships WHERE collection_id=? AND keyword_id=?",
+                                   (source_collection_id, keyword_id))
+                        db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'REMOVE',?)",
+                                   (source_collection_id, keyword_id, stamp))
+                    if not cursor:
+                        updated += 1
+                    else:
+                        # APPROVE changes the provenance/pin even for an existing AI membership.
+                        updated += int(action == "APPROVE")
+                elif action in {"REMOVE", "REJECT"}:
+                    cursor = db.execute("SELECT 1 FROM memberships WHERE collection_id=? AND keyword_id=?",
+                                        (collection_id, keyword_id)).fetchone()
+                    if action == "REJECT":
+                        db.execute("INSERT OR REPLACE INTO feedback VALUES(?,?, 'REMOVE',?)",
+                                   (collection_id, keyword_id, stamp))
+                    db.execute("DELETE FROM memberships WHERE collection_id=? AND keyword_id=?",
+                               (collection_id, keyword_id))
+                    if cursor:
+                        updated += 1
+                    else:
+                        skipped += 1
+                else:
+                    raise ValueError("INVALID_BULK_ACTION")
+            if collection_id:
+                db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?",
+                           (stamp, collection_id))
+            if source_collection_id and source_collection_id != collection_id:
+                db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?",
+                           (stamp, source_collection_id))
+        return {"updated": updated, "skipped": skipped, "failed": 0}
 
     def suggestions(self):
         with self.connect() as db:
@@ -211,7 +283,7 @@ class CollectionStore:
             return ""
 
 
-def keyword_record(record: dict, source: str, data_mode: str) -> dict | None:
+def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status="SUCCESS") -> dict | None:
     from app.sources.wikimedia.cleaning_rules import (
         COLLECTION_FILTER_VERSION,
         RULE_VERSION,
@@ -238,6 +310,7 @@ def keyword_record(record: dict, source: str, data_mode: str) -> dict | None:
         "evidence": json.dumps({**{key: record.get(key) for key in (
             "article_original", "article_display", "provider_rank", "views_ceil", "country_scope",
             "access", "observation_date", "fetched_at", "source_url", "quality_flags")},
+            "snapshot_status": snapshot_status,
             "normalization_provenance": f"{RULE_VERSION}; {COLLECTION_FILTER_VERSION}"}, ensure_ascii=False, sort_keys=True),
         "context": f"Wikimedia Pageviews, project {project}; country scope {record.get('country_scope', 'unknown')}, access {record.get('access', 'unknown')}"}
 

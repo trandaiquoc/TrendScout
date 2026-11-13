@@ -22,6 +22,7 @@ class Observation:
     status: str
     value: int | None
     snapshot_status: str = 'SUCCESS'
+    rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class AlgorithmInput:
     evidence_url: str | None = None
     legacy_result: object | None = None
     current_snapshot_status: str = 'UNKNOWN'
+    cohort: tuple[Observation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,16 @@ class AlgorithmMetadata:
     max_window_days: int
     input_metric: str | None = None
     input_unit: str | None = None
+    description: str = ''
+    family: str = 'trend'
+    supported_capabilities: tuple[str, ...] = ()
+    supported_windows: tuple[int, ...] = ()
+    missing_data: str = 'Requires complete, compatible observations.'
+    accepts_censored_top_list: bool = False
+    parameters: tuple[tuple[str, object], ...] = ()
+    runtime_limit: str = 'Linear in observation count.'
+    interpretation: str = ''
+    limitations: tuple[str, ...] = ()
 
     @property
     def key(self):

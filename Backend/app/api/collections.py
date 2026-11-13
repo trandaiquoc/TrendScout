@@ -54,6 +54,21 @@ class ModeInput(BaseModel):
     mode: Literal["SUGGEST", "AUTO_CREATE"]
 
 
+class BulkMembershipInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["ADD", "COPY", "MOVE", "REMOVE", "APPROVE", "REJECT"]
+    keyword_ids: list[str] = Field(min_length=1, max_length=500)
+    collection_id: str | None = Field(default=None, max_length=64)
+    source_collection_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("keyword_ids")
+    @classmethod
+    def valid_ids(cls, values):
+        if any(not value.strip() or len(value) > 64 for value in values):
+            raise ValueError("keyword IDs must be non-empty and at most 64 characters")
+        return list(dict.fromkeys(values))
+
+
 def _service(request):
     validate_public_request_origin(request, request.app.state.settings.environment_profile)
     service = getattr(request.app.state, "collection_service", None)
@@ -80,17 +95,19 @@ def _mode(service):
 
 
 @router.post("/collections", status_code=201)
-def create_collection(value: CollectionInput, request: Request):
+async def create_collection(value: CollectionInput, request: Request):
     _mutating(request)
     name = value.name.strip()
     if not name:
         raise HTTPException(422, {"code": "COLLECTION_NAME_REQUIRED"})
-    identifier = _service(request).store.create({**value.model_dump(), "name": name})
-    return {"id": identifier}
+    service = _service(request)
+    identifier = service.store.create({**value.model_dump(), "name": name})
+    result = await service.reclassify_unassigned()
+    return {"id": identifier, "reclassification": result}
 
 
 @router.patch("/collections/{collection_id}")
-def update_collection(collection_id: str, value: CollectionPatch, request: Request):
+async def update_collection(collection_id: str, value: CollectionPatch, request: Request):
     _mutating(request)
     changes = {key: item for key, item in value.model_dump(exclude_unset=True).items() if item is not None}
     if not changes:
@@ -99,9 +116,11 @@ def update_collection(collection_id: str, value: CollectionPatch, request: Reque
         changes["name"] = changes["name"].strip()
         if not changes["name"]:
             raise HTTPException(422, {"code": "COLLECTION_NAME_REQUIRED"})
-    if not _service(request).store.update(collection_id, changes):
+    service = _service(request)
+    if not service.store.update(collection_id, changes):
         raise HTTPException(404, {"code": "COLLECTION_NOT_FOUND"})
-    return {"updated": True}
+    result = await service.reclassify_unassigned()
+    return {"updated": True, "reclassification": result}
 
 
 @router.delete("/collections/{collection_id}")
@@ -168,6 +187,24 @@ def add_keyword(collection_id: str, value: MembershipInput, request: Request):
         raise HTTPException(404, {"code": "KEYWORD_OR_COLLECTION_NOT_FOUND"})
     service.store.feedback_action(collection_id, dict(keyword), "ADD")
     return {"added": True}
+
+
+@router.post("/collections/bulk")
+def bulk_membership(value: BulkMembershipInput, request: Request):
+    _mutating(request)
+    service = _service(request)
+    if value.action in {"ADD", "COPY", "MOVE", "APPROVE", "REMOVE", "REJECT"} and not value.collection_id:
+        raise HTTPException(422, {"code": "COLLECTION_REQUIRED"})
+    if value.action == "MOVE" and not value.source_collection_id:
+        raise HTTPException(422, {"code": "SOURCE_COLLECTION_REQUIRED"})
+    try:
+        return service.store.bulk_membership_action(value.keyword_ids, value.action,
+            collection_id=value.collection_id, source_collection_id=value.source_collection_id)
+    except ValueError as error:
+        code = str(error)
+        if code in {"COLLECTION_NOT_FOUND", "INVALID_BULK_ACTION"}:
+            raise HTTPException(404 if code == "COLLECTION_NOT_FOUND" else 422, {"code": code}) from None
+        raise
 
 
 @router.delete("/collections/{collection_id}/keywords/{keyword_id}")
