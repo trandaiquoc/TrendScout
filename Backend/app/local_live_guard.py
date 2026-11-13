@@ -52,6 +52,21 @@ class LocalLiveGuard:
         dataset_read = method == "GET" and path in {
             "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",
         }
+        product_read = method == "GET" and path in {
+            "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/sources/library",
+            "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
+        }
+        run_history_detail = method == "GET" and re.fullmatch(
+            r"/api/v1/runs/history/[a-f0-9]{32}", path
+        )
+        research_write = (
+            (method == "POST" and path == "/api/v1/research")
+            or (method == "PATCH" and re.fullmatch(r"/api/v1/research/[a-f0-9]{32}", path))
+        )
+        scheduler_write = (
+            (method == "POST" and path == "/api/v1/scheduler")
+            or (method == "PATCH" and re.fullmatch(r"/api/v1/scheduler/[a-f0-9]{32}", path))
+        )
         collection_write = (
             method == "POST" and path in {
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
@@ -73,6 +88,7 @@ class LocalLiveGuard:
             or (method == "POST" and path == "/api/v1/fetches")
             or (method == "GET" and path.startswith("/api/v1/fetches/"))
             or collection_read or collection_write or algorithm_read or dataset_read
+            or product_read or run_history_detail or research_write or scheduler_write
         )
         if not allowed:
             status = 405 if path in {

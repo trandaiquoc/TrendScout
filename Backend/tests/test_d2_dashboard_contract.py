@@ -109,6 +109,7 @@ class D2DashboardContractTests(unittest.TestCase):
     def test_discover_summary_keeps_provider_and_analysis_counts_distinct(self):
         app = (PUBLIC / "app.js").read_text(encoding="utf-8")
         summary = app[app.index("function updatePublicDiscoverySummary") : app.index("function renderDiscoveryBundle")]
+        persisted = app[app.index("function renderPersistedDataset") : app.index("function renderAnalysisSourceVolume")]
         legacy_run = app[app.index("function updateRun") : app.index("function renderSyntheticDiscovery")]
         self.assertIn("source.record_count", summary)
         self.assertIn("records_omitted_storage_limit", summary)
@@ -117,6 +118,7 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn("state.publicFetchFinishedAt || fetchedAt", summary)
         self.assertIn("$('#metric-records-returned').textContent = '—'", legacy_run)
         self.assertIn("$('#metric-topics-found').textContent = number(run.keyword_count)", legacy_run)
+        self.assertNotIn("$('#metric-topics-found').textContent", persisted)
 
     def test_source_cards_are_truthful_for_all_four_requested_sources(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")

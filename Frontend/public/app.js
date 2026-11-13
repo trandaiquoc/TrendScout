@@ -1461,11 +1461,8 @@ function renderPersistedDataset(item) {
     ? t('metric.legacy-fetch-count') : t('metric.provider-snapshot');
   $('#metric-records-stored').textContent = item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count);
   $('#metric-records-stored-note').textContent = t('metric.ledger-stored');
-  $('#metric-topics-found').textContent = eligible;
-  $('#metric-topics-found-note').textContent = t('metric.topic-assignment', {
-    assigned: item.assigned_keyword_count == null ? t('common.unavailable') : number(item.assigned_keyword_count),
-    unassigned,
-  });
+  // Classification totals belong to analytics; eligible/assigned Collection
+  // counts are different measures and must not overwrite the classified metric.
   $('#metric-last-fetch').textContent = item.fetched_at ? compactTimestamp(item.fetched_at) : '—';
   $('#metric-last-fetch-note').textContent = item.fetched_at
     ? t('metric.cached-snapshot-note') : t('metric.cached-time-unavailable');
