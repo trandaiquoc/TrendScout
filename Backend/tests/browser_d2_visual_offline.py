@@ -34,13 +34,24 @@ window.fetch=(path,options={})=>{
   if(value==='/api/v1/algorithms')return Promise.resolve(new Response(JSON.stringify({evaluation_status:'NOT_YET_EVALUATED',algorithms:[{algorithm_id:'observed-volume-rank',version:'v3',name:'Observed volume rank'}]}),{status:200}));
   if(value==='/api/v1/algorithms/results')return Promise.resolve(new Response(JSON.stringify({summary:[],items:[]}),{status:200}));
   if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[
-    {id:'fixture-parent',name:'Home & Living',parent_id:null,membership_count:8,direct_membership_count:0,subtree_unique_keyword_count:8,created_by:'AI',auto_match:true},
-    {id:'fixture-child',name:'Smart Home',parent_id:'fixture-parent',membership_count:8,direct_membership_count:8,subtree_unique_keyword_count:8,created_by:'AI',auto_match:true}
-  ],suggestions:[],mode:'SUGGEST_ONLY',summary:{eligible_keywords:8,assigned_keywords:8,unclassified_keywords:0,excluded_keywords:0,classified_keywords:8,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:8,manually_managed_keywords:0,ai_created_collections:2}}),{status:200}));
+    {id:'fixture-parent',name:'Home & Living',parent_id:null,membership_count:2,direct_membership_count:0,subtree_unique_keyword_count:2,created_by:'AI',auto_match:true},
+    {id:'fixture-child',name:'Smart Home',parent_id:'fixture-parent',membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:true}
+  ],suggestions:[],mode:'SUGGEST_ONLY',summary:{eligible_keywords:3,assigned_keywords:2,unclassified_keywords:1,excluded_keywords:0,classified_keywords:2,ambiguous_keywords:0,unknown_keywords:1,ineligible_topic_keywords:0,ai_assigned_keywords:2,manually_managed_keywords:0,ai_created_collections:2}}),{status:200}));
   if(value==='/api/v1/collections/inbox')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/research')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/runs/history')return Promise.resolve(new Response(JSON.stringify({items:[{fetch_id:'e'.repeat(32),run_at:'2026-11-11T03:00:00Z',run_type:'FETCH',sources:['wikimedia_pageviews_top_per_country'],status:'PARTIAL',received_record_count:4,retained_keyword_count:3,rejected_record_count:1,mode:'SYNTHETIC',error_code:'SOURCE_PARTIAL',stage:'DONE',quality_flags:['SYNTHETIC_FIXTURE']}],total:1,next_offset:null}),{status:200}));
-  if(value==='/api/v1/datasets/latest/keywords')return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
+  if(value==='/api/v1/datasets/latest/keywords'){
+    const keywords=[
+      {id:'c'.repeat(64),keyword:'Kitchen organizer',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'CLASSIFIED',memberships:[{id:'fixture-child',name:'Smart Home',origin:'LOCAL_AI'}],evidence:{views_ceil:8400}},
+      {id:'d'.repeat(64),keyword:'Home energy monitor',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'CLASSIFIED',memberships:[{id:'fixture-child',name:'Smart Home',origin:'LOCAL_AI'}],evidence:{views_ceil:4200}},
+      {id:'e'.repeat(64),keyword:'Compact apartment storage',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'UNKNOWN',memberships:[],evidence:{views_ceil:2100}}
+    ];
+    const params=new URLSearchParams(String(path).split('?')[1]||'');
+    const collectionIds=params.getAll('collection_ids');
+    const query=(params.get('q')||'').toLocaleLowerCase();
+    const matching=keywords.filter(item=>(!collectionIds.length||item.memberships.some(m=>collectionIds.includes(m.id)))&&item.keyword.toLocaleLowerCase().includes(query));
+    return Promise.resolve(new Response(JSON.stringify({items:matching,total:matching.length,next_offset:null}),{status:200}));
+  }
   if(value==='/api/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')return Promise.resolve(new Response(JSON.stringify({
     run_id:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',status:'COMPLETED',keyword_count:124,
     scored_count:28,data_date:'2026-11-10',mode:'synthetic',fetched_at:'2026-11-11T03:00:00Z',
@@ -281,9 +292,12 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         if drawer_left < 0:
                             geometry = evaluate("JSON.stringify({innerWidth,scrollX,open:document.querySelector('#workbench-sidebar')?.className,expanded:document.querySelector('#workbench-filter-toggle')?.getAttribute('aria-expanded'),left:document.querySelector('#workbench-sidebar')?.getBoundingClientRect().left,transform:getComputedStyle(document.querySelector('#workbench-sidebar')).transform})")
                             raise RuntimeError(f"mobile Collection drawer starts outside the viewport at {drawer_left}px: {geometry}")
-                        count_ready = evaluate("waitFor(()=>document.querySelector('[data-collection-id=fixture-parent] .workbench-tree-count')?.textContent==='8')", await_promise=True)
+                        count_ready = evaluate("waitFor(()=>document.querySelector('[data-collection-id=fixture-parent] .workbench-tree-count')?.textContent==='2'&&document.querySelectorAll('#workbench-rows tr').length===3&&document.querySelector('#workbench-summary').textContent.includes('3')&&document.querySelector('#workbench-page-info').textContent.includes('3'))", await_promise=True)
                         if not count_ready:
-                            raise RuntimeError("collapsed Collection did not show saved descendant keywords")
+                            raise RuntimeError("Collection summary, child membership count, result rows and pagination total disagree")
+                        if not evaluate("document.querySelector('#workbench-filter-toggle')?.click();!document.querySelector('#workbench-sidebar').classList.contains('is-open')"):
+                            raise RuntimeError("mobile Collection drawer remained open before the screen capture")
+                        time.sleep(0.25)
                     capture(f"screen-{view}-{width}-vi-light.webp", width, configure=False)
 
             set_viewport(1280)
