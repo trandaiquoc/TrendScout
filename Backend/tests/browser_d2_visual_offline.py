@@ -121,6 +121,8 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             evaluate("document.querySelector('#dashboard-analysis-tab').click()")
             if not evaluate("window.waitFor(()=>document.querySelector('#analysis-algorithms').textContent.includes('Xếp hạng theo lượng ghi nhận'))", await_promise=True):
                 raise RuntimeError("algorithm analysis table exposed a technical identifier instead of the localized registry name")
+            if not evaluate("document.querySelectorAll('#analysis-history-chart .chart-row').length===1 && Boolean(document.querySelector('#analysis-history-chart').getAttribute('aria-label'))"):
+                raise RuntimeError("daily observation coverage chart did not render with an accessible label")
             evaluate("document.querySelector('#dashboard-overview-tab').click()")
 
             def set_viewport(width, height=900):

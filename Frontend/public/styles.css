@@ -336,7 +336,9 @@ button:disabled { cursor: not-allowed; }
 .chart-row { display: grid; grid-template-columns: minmax(90px, 1.1fr) minmax(50px, 1fr) minmax(55px, auto); align-items: center; gap: 10px; }
 .chart-label { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .chart-track { height: 8px; overflow: hidden; border-radius: 99px; background: var(--surface-accent); }
+.chart-track--stacked { display: flex; }
 .chart-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.chart-bar--unavailable { background: var(--muted); }
 .chart-value { color: var(--ink-strong); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; }
 .chart-empty { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .fetch-card {

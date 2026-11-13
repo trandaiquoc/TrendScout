@@ -157,6 +157,7 @@ async function loadAnalytics() {
     renderDataTable($('#analysis-coverage'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
       (data.multi_source_coverage?.sources || []).map(row => [row.source, number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]),
       data.multi_source_coverage?.status === 'INSUFFICIENT_SOURCES' ? t('analysis.coverage-insufficient') : t('analysis.coverage-caveat'));
+    renderObservationHistoryChart(data.observations_over_time || []);
     renderDataTable($('#analysis-history'), [t('analysis.date'), t('analysis.source'), t('analysis.observed'), t('analysis.unavailable')],
       (data.observations_over_time || []).map(row => [row.observation_date, row.source, number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
     const top = data.top_observed || [];
@@ -203,6 +204,46 @@ function renderObservedVolumeChart(rows, context) {
     track.append(bar);
     const value = element('strong', number(rowData.observed_value), 'chart-value');
     row.title = `${number(rowData.rank)} · ${rowData.metric || '—'} (${rowData.unit || '—'}) · ${context.observation_date || '—'}`;
+    row.append(label, track, value);
+    chart.append(row);
+  }
+}
+
+function renderObservationHistoryChart(rows) {
+  const chart = $('#analysis-history-chart');
+  if (!chart) return;
+  chart.replaceChildren();
+  chart.setAttribute('aria-label', t('analysis.history-chart-label'));
+  const byDate = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (typeof row.observation_date !== 'string') continue;
+    const counts = byDate.get(row.observation_date) || { observed: 0, unavailable: 0 };
+    counts.observed += Number.isFinite(row.observed) ? row.observed : 0;
+    counts.unavailable += Number.isFinite(row.unavailable) ? row.unavailable : 0;
+    byDate.set(row.observation_date, counts);
+  }
+  const dates = [...byDate.entries()].sort(([left], [right]) => left.localeCompare(right)).slice(-30);
+  if (!dates.length) {
+    chart.append(element('li', t('analysis.history-empty'), 'chart-empty'));
+    return;
+  }
+  const maximum = Math.max(1, ...dates.map(([, value]) => value.observed + value.unavailable));
+  chart.classList.toggle('pageviews-chart--history', true);
+  for (const [date, counts] of dates) {
+    const row = element('li', null, 'chart-row');
+    const label = element('span', date, 'chart-label');
+    const track = element('span', null, 'chart-track chart-track--stacked');
+    const observed = element('span', null, 'chart-bar');
+    observed.style.width = `${(counts.observed / maximum) * 100}%`;
+    const unavailable = element('span', null, 'chart-bar chart-bar--unavailable');
+    unavailable.style.width = `${(counts.unavailable / maximum) * 100}%`;
+    observed.setAttribute('aria-hidden', 'true');
+    unavailable.setAttribute('aria-hidden', 'true');
+    track.append(observed, unavailable);
+    const value = element('strong', t('analysis.history-chart-value', {
+      observed: number(counts.observed), unavailable: number(counts.unavailable),
+    }), 'chart-value');
+    row.title = `${date} · ${t('analysis.observed')}: ${number(counts.observed)} · ${t('analysis.unavailable')}: ${number(counts.unavailable)}`;
     row.append(label, track, value);
     chart.append(row);
   }
