@@ -40,11 +40,11 @@ This is the current native-Windows acceptance record. It supersedes older machin
 | G5 — compatible algorithm outputs | Actual partial-cohort rank values persisted; unsupported methods visibly skip with reasons; evaluation remains honestly unevaluated | PASS |
 | G6 — capability registry and icons | Runtime registry and browser catalog display configured Wikimedia and nonconfigured adapters without claiming live access | PASS |
 | G7 — native Windows Chrome and regression | Vietnamese/English desktop, Vietnamese mobile, algorithm cards and Collection merge/delete browser runs; 737 tests and 765 subtests pass | PASS |
-| G8 — report, screenshots, local commit | Windows addendum, 13 screenshots, and reviewed local implementation commit `37368e3` are present; this final report-status update is being committed locally | PASS |
+| G8 — report, screenshots, local commit | Windows addendum, 13 screenshots, and reviewed local implementation plus final report commits are present | PASS |
 
 All parent-goal gates G1–G8 pass. The work is committed locally; no push or deployment was performed.
 
-**Status:** in progress; not a final acceptance pass
+**Status:** Windows acceptance gates G1–G8 PASS; algorithm evaluation remains `NOT_YET_EVALUATED` because compatible labeled history is unavailable
 **Reviewed:** 2026-11-13
 **Scope:** persisted local keyword Collections and the mandatory trend-algorithm-engine addendum. No deployment, push, or Wikimedia Pageviews Fetch was performed for the contextual replay documented below.
 
@@ -99,7 +99,9 @@ All parent-goal gates G1–G8 pass. The work is committed locally; no push or de
 - [scikit-learn `TimeSeriesSplit`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html): time-ordered evaluation avoids training on future observations.
 - [Kleinberg, “Bursty and Hierarchical Structure in Streams”](https://dl.acm.org/doi/10.1145/775047.775061): event-stream burst model; the current daily aggregate source does not meet that input contract.
 
-## Verification recorded
+## Historical verification from the preceding Linux phase
+
+The following results were recorded on Linux before the Windows resume. They remain historical evidence and do not describe current Windows database state or current gate status.
 
 - Local model assignment acceptance replay: **PASS** — the installed multilingual model assigned “robot vacuum cleaner” to Smart Home and left an unrelated person keyword unassigned; a temporary coherent dataset created two topic groups and left an unrelated keyword unassigned.
 - Algorithm engine numerical and compatibility tests: **PASS** — complete-series growth and direction methods, ties in snapshot popularity, censored-source rejection, catalog capabilities, and existing Wikimedia strategies.
@@ -110,7 +112,9 @@ All parent-goal gates G1–G8 pass. The work is committed locally; no push or de
 - Focused Collections suite: **PASS** — 17 tests, including mode migration/default, unpinned-membership archival and rollback, full-ledger reprocessing, negative feedback, deletion suppression, and cache reuse. Full backend suite: **PASS** — 723 tests, 2 skipped. Ruff and Python compilation pass. Parent-goal final browser regression remains open.
 - Latest relevant regression: **42 tests PASS** across entity context, taxonomy, smart Collections, local-live HTTP, and Wikimedia LIVE; the real local multilingual model acceptance script **PASS** (106 persisted rows); changed Python Ruff checks, Python compilation, `node --check`, and `git diff --check` pass.
 
-## Remaining acceptance gates
+## Historical open gates from the preceding Linux phase
+
+These gates were open in the older report snapshot and are superseded by the current Windows G1–G8 table above.
 
 - The full parent-goal regression and end-to-end Fetch-to-progress-to-dashboard browser flow have not been rerun after this change set. Pageviews was intentionally not fetched again.
 - Collection merge is implemented for user/AI Collections: transferred memberships become pinned user decisions, target rejections and existing pins are preserved, and the source name is suppressed. Taxonomy nodes cannot be merged. Unit tests and native Chrome verified transfer and persistence; exact duplicate names are rejected with a localized 409 explanation.
