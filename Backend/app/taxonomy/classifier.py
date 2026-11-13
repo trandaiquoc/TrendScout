@@ -92,6 +92,15 @@ DESCRIPTION_RULES = (
     ("city_description", r"\bcity\b", "places_transportation.cities"),
     ("place_description", r"\bgeographic location\b", "places_transportation.geographic_locations"),
     ("software_description", r"\b(?:software product|software platform|operating system|web browser)\b", "technology.software"),
+    ("television_description", r"\b(?:television series|tv series|television program|television show|reality television series)\b", "entertainment.television"),
+    ("film_description", r"\b(?:feature film|motion picture|upcoming film|american superhero film)\b", "entertainment.film"),
+    ("visual_art_description", r"\b(?:painting|artwork|work of art|oil painting|artistic work)\b", "arts_culture.visual_arts"),
+    ("ship_description", r"\b(?:ocean liner|passenger ship|warship|naval vessel|steamship)\b", "places_transportation.ships"),
+    ("athlete_description", r"\b(?:athlete|professional (?:boxer|wrestler|footballer|basketball player)|mixed martial artist|paralympic athlete|track and field athlete)\b", "celebrity_public_figures.athletes"),
+    ("sports_event_description", r"\b(?:sports competition|sporting event|championship)\b", "sports.competitions"),
+    ("place_description", r"\b(?:unincorporated community|census-designated place|village|town|city|neighborhood|geographic location)\b", "places_transportation.geographic_locations"),
+    ("road_description", r"\b(?:state highway|u\.s\. route|national highway|highway|road in the united states)\b", "places_transportation.roads"),
+    ("public_person_description", r"\b(?:politician|author|writer|actress|actor|television personality|internet personality|content creator|comedian|musician|singer|scientist|psychologist|professor)\b", "celebrity_public_figures.public_figures"),
 )
 _MEDIA = re.compile(r'\((?:\d{4}\s+)?(?:film|song|album|television series|television program|television show|tv series|tv program|tv show|video game|game)\)\s*$', re.IGNORECASE)
 _COMPILED = tuple((rule, re.compile(rule.pattern, re.IGNORECASE)) for rule in RULES)
@@ -174,7 +183,9 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
     categories.update(rule_result.subcategories if rule_result else ())
     description = context.get("description", "")
     description_evidence = []
-    if context.get("entity_id") and isinstance(description, str):
+    # A resolved Wikipedia description remains useful evidence when the page has no Wikidata QID.
+    # Requiring entity_id here silently discarded this evidence and left identifiable pages UNKNOWN.
+    if isinstance(description, str) and description.strip():
         for rule_id, expression, category_id in DESCRIPTION_RULES:
             match = re.search(expression, description, re.IGNORECASE)
             if match:
@@ -254,6 +265,7 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         "confidence_level": confidence,
         "commercial_relevance": "NOT_ASSESSED",
         "classification_method": "WIKIDATA_P31_P106_AND_CONTEXT_RULES" if context.get("entity_id") else (
+            "WIKIPEDIA_DESCRIPTION_RULES" if description_evidence else
             "CONTEXT_TITLE_RULES" if rule_result and rule_result.rule_evidence else "INSUFFICIENT_EVIDENCE"),
         "classification_version": CLASSIFICATION_VERSION,
         "taxonomy_version": TAXONOMY_VERSION,

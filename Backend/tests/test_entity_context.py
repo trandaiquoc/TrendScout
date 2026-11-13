@@ -109,5 +109,37 @@ class EntityContextTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM entity_context").fetchone()[0], 0)
 
 
+    def test_wikipedia_description_classifies_pages_without_wikidata_qid(self):
+        from app.taxonomy.classifier import classify_contextual
+
+        painting = classify_contextual({
+            "id": "painting", "keyword": "Children's Games (Bruegel)",
+            "source": "wikimedia_pageviews_top_per_country", "project": "en.wikipedia",
+            "observed_at": "2026-11-11", "evidence": "{}", "eligible": 1,
+        }, {
+            "entity_type": "unknown", "entity_id": None,
+            "description": "A 1560 oil painting by Pieter Bruegel the Elder",
+            "source_url": "https://en.wikipedia.org/wiki/Children%27s_Games",
+            "method": "WIKIPEDIA_PAGE_WITHOUT_QID", "status": "UNKNOWN",
+        })
+        self.assertEqual(painting["classification_status"], "CLASSIFIED")
+        self.assertIn("arts_culture.visual_arts", painting["topic_category_ids"])
+        self.assertEqual(painting["classification_method"], "WIKIPEDIA_DESCRIPTION_RULES")
+        self.assertEqual(painting["confidence_level"], "MEDIUM")
+
+        ship = classify_contextual({
+            "id": "ship", "keyword": "SS United States",
+            "source": "wikimedia_pageviews_top_per_country", "project": "en.wikipedia",
+            "observed_at": "2026-11-11", "evidence": "{}", "eligible": 1,
+        }, {
+            "entity_type": "unknown", "entity_id": None,
+            "description": "An American ocean liner",
+            "source_url": "https://en.wikipedia.org/wiki/SS_United_States",
+            "method": "WIKIPEDIA_PAGE_WITHOUT_QID", "status": "UNKNOWN",
+        })
+        self.assertEqual(ship["classification_status"], "CLASSIFIED")
+        self.assertIn("places_transportation.ships", ship["topic_category_ids"])
+
+
 if __name__ == "__main__":
     unittest.main()
