@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -127,14 +128,23 @@ class RunService:
         finally:
             self.lock.release()
 
-    async def start(self, *, execution_timeout_seconds=None):
+    async def start(self, *, execution_timeout_seconds=None, run_id=None):
+        if run_id is not None:
+            if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f]{32}", run_id):
+                raise ValueError("Invalid idempotent run ID")
+            # A schedule occurrence uses its stable ID as the run ID. If the
+            # process restarted after job creation, reuse that ledger entry
+            # instead of starting a second Fetch for the same occurrence.
+            existing = await self.storage.get_run(run_id)
+            if existing is not None:
+                return run_id
         state = self.lock.acquire()
         try:
             if state.get("active_run_id"):
                 old = await self.storage.get_run(state["active_run_id"])
                 if old and old.get("status") not in TERMINAL:
                     await self.storage.update_run(state["active_run_id"], {"status": "ABORTED", "error": "Previous process interrupted", "finished_at": now()})
-            run_id = uuid4().hex
+            run_id = run_id or uuid4().hex
             # Write marker first so a crash during creation never leaves an untracked run.
             self.lock.write({"active_run_id": run_id})
             await self.storage.create_run(run_id, {"run_id": run_id, "status": "QUEUED", "mode": self.mode, "created_at": now(), "source": "wikimedia_pageviews_top_per_country"})

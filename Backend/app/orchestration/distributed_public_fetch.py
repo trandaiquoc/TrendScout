@@ -132,13 +132,14 @@ class DistributedPublicFetch:
         discovery = None
         if terminal:
             try:
-                grants = self.resolve_processing_grants(now) if self.resolve_processing_grants else ()
+                grants = self.resolve_processing_grants(now) if callable(self.resolve_processing_grants) else ()
                 discovery = discover_fetch_results(source_results, now=now, processing_grants=grants,
                                                    empty_mode=self.data_mode)
-            except Exception:
+            except Exception as exc:
                 discovery = {
                     "status": "UNAVAILABLE",
                     "data_mode": self.data_mode,
+                    "error_code": type(exc).__name__,
                     "candidate_count": 0,
                     "shown_count": 0,
                     "rejected_record_count": 0,

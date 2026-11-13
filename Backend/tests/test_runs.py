@@ -1,18 +1,18 @@
 import asyncio
+import tempfile
+import unittest
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-import tempfile
-import unittest
 from unittest.mock import patch
 
 import httpx
 from google.cloud.firestore_v1._helpers import encode_dict
 
-from app.adapters.wikimedia import CollectionResult, SOURCE
+from app.adapters.wikimedia import SOURCE, CollectionResult
 from app.main import create_app
 from app.models.observations import DatasetSnapshot, FetchStatus, PageObservation
-from app.orchestration.runs import HostRunLock, RunBusy, RunService
+from app.orchestration.runs import HostRunLock, RunBusy
 from app.processing.wikimedia_cleaning import clean_snapshot
 from app.storage.base import StorageError
 from app.storage.fake import FakeStorage
@@ -137,6 +137,15 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         BlockingAdapter.event.set()
         await wait_run(self.client, first.json()["run_id"])
         self.assertEqual((await self.client.post("/api/runs", headers=headers)).status_code, 429)
+
+    async def test_schedule_occurrence_run_id_is_idempotent_across_retries(self):
+        occurrence_id = "b" * 32
+        first = await self.app.state.run_service.start(run_id=occurrence_id)
+        second = await self.app.state.run_service.start(run_id=occurrence_id)
+        self.assertEqual(first, second)
+        result = await wait_run(self.client, occurrence_id)
+        self.assertIn(result["status"], {"COMPLETED", "PARTIAL"})
+        self.assertEqual(len([run for run in await self.store.list_runs() if run["run_id"] == occurrence_id]), 1)
 
     async def test_recover_interrupted_run(self):
         run_id = "a" * 32

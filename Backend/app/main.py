@@ -1,5 +1,6 @@
 """Application entry point."""
 
+import asyncio
 import base64
 import binascii
 import hmac
@@ -8,6 +9,7 @@ import mimetypes
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -22,6 +24,7 @@ from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
 from app.api.research import router as research_router
 from app.api.runs import router as runs_router
+from app.api.scheduler import router as scheduler_router
 from app.collections.entity_context import WikimediaEntityContextResolver
 from app.composition import build_run_service, read_only_storage
 from app.local_live_guard import LocalLiveGuard
@@ -37,6 +40,7 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import HostRunLock, RunService
 from app.ports.storage import StorageError
+from app.scheduling.persistent import ScheduleWorker
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -62,6 +66,7 @@ def create_app(
     distributed_public_fetch: DistributedPublicFetch | None = None,
     local_live_opt_in: bool = False,
     local_live_context_factory=None,
+    scheduler_store=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -192,8 +197,33 @@ def create_app(
             app.state.operator_token = (
                 operator_token if operator_token is not None else settings.operator_token
             )
+            app.state.scheduler_worker = None
+            app.state.scheduler_store = scheduler_store
+            if settings.scheduler_enabled:
+                if app.state.run_service is None or run_mode != "synthetic" or not app.state.public_fetch_enabled:
+                    raise RuntimeError("Scheduler requires an enabled synthetic RunService")
+                if app.state.scheduler_store is None:
+                    from app.api.scheduler import _store
+                    # Resolve storage through the same private local path used by the operator API.
+                    app.state.scheduler_store = _store(SimpleNamespace(app=app))
+
+                async def run_scheduled_fetch(_occurrence):
+                    run_id = await app.state.run_service.start(
+                        execution_timeout_seconds=settings.public_fetch_deadline_seconds,
+                        run_id=_occurrence["occurrence_id"],
+                    )
+                    while True:
+                        run = await app.state.run_service.storage.get_run(run_id)
+                        if run and run.get("status") in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED"}:
+                            return run["status"]
+                        await asyncio.sleep(0.5)
+
+                app.state.scheduler_worker = ScheduleWorker(app.state.scheduler_store, run_scheduled_fetch)
+                await app.state.scheduler_worker.start()
             yield
         finally:
+            if getattr(app.state, "scheduler_worker", None):
+                await app.state.scheduler_worker.stop()
             if app.state.run_service:
                 await app.state.run_service.shutdown()
             if runtime_guard is not None:
@@ -212,6 +242,8 @@ def create_app(
     application.state.public_fetch_block_reason = public_fetch_block_reason
     application.state.distributed_public_fetch = distributed_public_fetch
     application.state.collection_service = None
+    application.state.scheduler_store = scheduler_store
+    application.state.scheduler_worker = None
     application.state.fetch_registry = PublicFetchRegistry()
     application.state.public_fetch_source_ids = (
         tuple(sorted(distributed_public_fetch.admission.policy.enabled_sources))
@@ -297,6 +329,7 @@ def create_app(
     application.include_router(algorithms_router, prefix="/api/v1")
     application.include_router(analytics_router, prefix="/api/v1")
     application.include_router(research_router, prefix="/api/v1")
+    application.include_router(scheduler_router, prefix="/api/v1")
     application.include_router(fetches_router, prefix="/api/v1")
     application.include_router(collections_router, prefix="/api/v1")
     application.include_router(datasets_router, prefix="/api/v1")

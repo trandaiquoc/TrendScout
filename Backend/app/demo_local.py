@@ -57,14 +57,14 @@ def _demo_distributed_fetch(directory):
 
     def handler_for(source_id):
         def handle(_context):
-            fetched = datetime.now(timezone.utc).isoformat()
+            fetched = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
             common = {"fetched_at": fetched, "source_url": None}
             if source_id == WIKIMEDIA_SOURCE_ID:
                 record = {
                     **common, "article_display": "Quiet luxury fashion guide",
                     "article_original": "Quiet_luxury_fashion_guide",
                     "project": "en.wikipedia", "country_scope": "US",
-                    "access": "all-access", "observation_date": date.today().isoformat(),
+                    "access": "all-access", "observation_date": (date.today() - timedelta(days=1)).isoformat(),
                 }
             elif source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
                 record = {

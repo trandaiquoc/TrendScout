@@ -298,7 +298,11 @@ async function loadRuntimeStatus() {
       [t('settings.llm-state'),l.status], [t('settings.ai-usage'),l.usage_instrumented ? t('settings.measured') : t('settings.not-measured')],
     ];
     for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value ?? t('common.unavailable')));root.append(row);}
-    $('#settings-scheduler-reason').textContent=s.reason || t('settings.scheduler-help');
+    const schedulerStatus=$('#settings-scheduler-status');
+    schedulerStatus.textContent=t(s.worker_running?'settings.scheduler-running':'settings.scheduler-disabled');
+    schedulerStatus.classList.toggle('pill--green',Boolean(s.worker_running));
+    schedulerStatus.classList.toggle('pill--gray',!s.worker_running);
+    $('#settings-scheduler-reason').textContent=t(s.worker_running?'settings.scheduler-running-help':s.enabled?'settings.scheduler-configured-help':'settings.scheduler-help');
   } catch(error) { root.replaceChildren(element('div',getErrorMessage(error,'settings.runtime-error'))); }
 }
 

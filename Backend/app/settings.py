@@ -83,6 +83,7 @@ class Settings:
     allowed_fetch_operations: frozenset[str]
     public_fetch_enabled: bool = False
     public_fetch_deadline_seconds: float = 60.0
+    scheduler_enabled: bool = False
 
     def __post_init__(self):
         if self.environment_profile not in _ALLOWED_PROFILES:
@@ -133,6 +134,18 @@ class Settings:
             or self.google_cloud_project
         ):
             raise ValueError("Public Fetch is limited to local offline synthetic profiles")
+        if type(self.scheduler_enabled) is not bool:
+            raise ValueError("Scheduler setting must be boolean")
+        if self.scheduler_enabled and (
+            self.environment_profile not in {"local", "test"}
+            or self.run_mode != "synthetic"
+            or not self.public_fetch_enabled
+            or self.read_only
+            or self.google_cloud_project
+            or not self.operator_token
+            or len(self.operator_token) < 24
+        ):
+            raise ValueError("Scheduler requires an operator and enabled local synthetic Fetch")
         if self.read_only and self.allowed_fetch_operations:
             raise ValueError("Read-only settings cannot allow fetch operations")
         operations = frozenset(self.allowed_fetch_operations)
@@ -241,6 +254,7 @@ class Settings:
         public_fetch_deadline_seconds = _bounded_float(
             environment, "TREND_SCOUT_PUBLIC_FETCH_DEADLINE_SECONDS", 60.0, 1.0, 300.0
         )
+        scheduler_enabled = _boolean(environment, "TREND_SCOUT_SCHEDULER_ENABLED", False)
         allowed_fetch_operations = (
             frozenset({"manual_run"})
             if not read_only and operator_token and len(operator_token) >= 24
@@ -273,4 +287,5 @@ class Settings:
             allowed_fetch_operations=allowed_fetch_operations,
             public_fetch_enabled=public_fetch_enabled,
             public_fetch_deadline_seconds=public_fetch_deadline_seconds,
+            scheduler_enabled=scheduler_enabled,
         )

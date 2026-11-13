@@ -70,6 +70,28 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.allowed_fetch_operations, frozenset({"manual_run"}))
 
+    def test_scheduler_is_disabled_by_default_and_cannot_enable_live_or_remote_runs(self):
+        self.assertFalse(Settings.from_environment({}).scheduler_enabled)
+        with self.assertRaisesRegex(ValueError, "Scheduler requires"):
+            Settings.from_environment({"TREND_SCOUT_SCHEDULER_ENABLED": "true"})
+        with self.assertRaisesRegex(ValueError, "Public Fetch"):
+            Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+                "TREND_SCOUT_SCHEDULER_ENABLED": "true",
+                "TREND_SCOUT_OPERATOR_TOKEN": "synthetic-scheduler-operator-token",
+                "GOOGLE_CLOUD_PROJECT": "production-project",
+            })
+        synthetic = Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "test",
+            "TREND_SCOUT_RUN_MODE": "synthetic",
+            "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
+            "TREND_SCOUT_SCHEDULER_ENABLED": "true",
+            "TREND_SCOUT_OPERATOR_TOKEN": "synthetic-scheduler-operator-token",
+        })
+        self.assertTrue(synthetic.scheduler_enabled)
+
     def test_secrets_are_hidden_and_settings_are_immutable(self):
         token = "synthetic-server-token-only"
         password = "synthetic-server-password-only"

@@ -44,12 +44,24 @@ def runtime_status(request: Request):
             "taxonomy_version": TAXONOMY_VERSION,
         },
         "llm": {"status": "NOT_CONFIGURED", "provider": None, "usage_instrumented": False},
-        "scheduler": {
-            "status": "DISABLED",
-            "implemented": False,
-            "enabled": False,
-            "reason": "No persistent application scheduler is connected to Fetch jobs.",
-        },
+        "scheduler": _scheduler_status(request),
+    }
+
+
+def _scheduler_status(request: Request):
+    settings = request.app.state.settings
+    worker = getattr(request.app.state, "scheduler_worker", None)
+    running = bool(worker and worker._task and not worker._task.done())
+    enabled = bool(settings.scheduler_enabled)
+    return {
+        "status": "RUNNING" if running else "DISABLED",
+        "implemented": True,
+        "enabled": enabled,
+        "worker_running": running,
+        "execution_policy": "LOCAL_SYNTHETIC_ONLY",
+        "reason": None if running else (
+            "Worker is not running." if enabled else "Disabled in backend configuration; no scheduled Fetch is started."
+        ),
     }
 
 
