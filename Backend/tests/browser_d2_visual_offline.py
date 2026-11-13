@@ -16,7 +16,9 @@ KEYWORD_ID = "c" * 64
 FAKE = r"""<script>
 window.fetch=(path,options={})=>{
   window.fetchRequests=(window.fetchRequests||[]).concat(String(path));
+  window.fetchCalls=(window.fetchCalls||[]).concat({path:String(path),method:options.method||'GET',headers:options.headers||{},body:options.body||null});
   const value=String(path).split('?')[0];
+  if(value==='/api/v1/scheduler'&&options.method==='POST')return Promise.resolve(new Response(JSON.stringify({item:{id:'f'.repeat(32),name:'Daily synthetic check',frequency:'DAILY',timezone:'Asia/Ho_Chi_Minh',hour:9,minute:0,enabled:false}}),{status:201}));
   if(value==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
   if(value==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({contract_version:'1.0',environment_mode:'test',read_only:true,authentication_required:false,public_fetch_enabled:false,fetch_enabled:false,fetch_block_reason:'FEATURE_DISABLED',data_mode:'SYNTHETIC',sources:[
     {source_id:'wikimedia_pageviews_top_per_country',display_name:'Wikimedia Pageviews',icon:'W',category:'trends_search_interest',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false,last_saved_fetch:{status:'PARTIAL',data_mode:'SYNTHETIC',record_count:4,fetched_at:'2026-11-11T03:00:00Z',observation_start:'2026-11-10',observation_end:'2026-11-10'},metric:{name:'views_ceil',unit:'approx_pageviews_upper_bound',meaning:'Approximate pageviews in a censored source sample'},market_scope:'US country scoped top list',documentation_url:'https://doc.wikimedia.org/generated-data-platform/aqs/'},
@@ -146,6 +148,14 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             details = evaluate("document.querySelector('#settings-system-details').textContent")
             if not all(label in details for label in ("SQLite", "Máy cá nhân", "Đã kiểm tra, đạt")):
                 raise RuntimeError("localized system and storage status values were not shown")
+            evaluate("document.querySelector('#settings-schedule-form').elements.namedItem('name').value='Daily synthetic check';document.querySelector('#settings-schedule-form').elements.namedItem('operator-key').value='offline-scheduler-key-0123456789';document.querySelector('#settings-schedule-form').requestSubmit()")
+            if not evaluate("window.waitFor(()=>window.fetchCalls.some(call=>call.path==='/api/v1/scheduler'&&call.method==='POST'))", await_promise=True):
+                raise RuntimeError("scheduler create control did not call the protected same-origin API")
+            if not evaluate("window.fetchCalls.find(call=>call.path==='/api/v1/scheduler'&&call.method==='POST')?.headers?.Authorization==='Bearer offline-scheduler-key-0123456789'&&document.querySelector('#settings-schedule-form').elements.namedItem('operator-key').value===''&&!localStorage.length&&!sessionStorage.length"):
+                raise RuntimeError("scheduler operator key was not transient or was not sent to the protected endpoint")
+            if not evaluate("document.querySelector('#settings-schedule-feedback').textContent.includes('Đã tạo lịch ở trạng thái tắt')"):
+                raise RuntimeError("scheduler create did not explain that the new schedule remains disabled")
+            evaluate("document.querySelector('#settings-schedule-feedback').textContent=''")
             evaluate("document.querySelector('#dashboard-overview-tab').click()")
 
             def set_viewport(width, height=900):

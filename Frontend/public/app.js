@@ -57,6 +57,7 @@ const state = {
   sourceLibrary: [],
   researchKeywords: [],
 };
+let schedulerListSequence = 0;
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
@@ -606,11 +607,16 @@ async function loadRuntimeStatus() {
 
 async function loadSchedulerList() {
   const root=$('#settings-schedules'); if(!root)return;
+  const sequence=++schedulerListSequence;
   root.replaceChildren();
   try {
     const data=await getJson('/api/v1/scheduler');
-    if(!data.items?.length){root.append(element('li',t('settings.scheduler-no-items'),'schedule-empty'));return;}
-    for(const item of data.items){
+    if(sequence!==schedulerListSequence)return;
+    const form=$('#settings-schedule-form');
+    const canToggle=Boolean(data.enabled&&data.worker_running);
+    const items=Array.isArray(data.items)?data.items:[];
+    if(!items.length){root.append(element('li',t('settings.scheduler-no-items'),'schedule-empty'));}
+    for(const item of items){
       const card=element('li',null,'schedule-item');
       const heading=element('div',null,'schedule-item-heading');
       heading.append(element('strong',item.name || t('common.unavailable')),
@@ -619,16 +625,58 @@ async function loadSchedulerList() {
       const values=[
         [t('settings.schedule-frequency'),t(item.frequency==='WEEKLY'?'settings.schedule-weekly':'settings.schedule-daily')],
         [t('settings.schedule-timezone'),item.timezone],
-        [t('settings.schedule-next'),formatScheduleTime(item.next_run_at,item.timezone)],
+        [t('settings.schedule-next'),item.enabled?formatScheduleTime(item.next_run_at,item.timezone):t('settings.schedule-not-enabled')],
         [t('settings.schedule-last'),item.last_run_at?`${formatScheduleTime(item.last_run_at,item.timezone)} · ${localizedStatus('status.',item.last_status || 'UNKNOWN')}`:t('common.unavailable')],
         [t('settings.schedule-missed'),number(item.missed_runs || 0)],
       ];
       for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',value));details.append(row);}
-      card.append(heading,details);root.append(card);
+      const action=element('button',t(item.enabled?'settings.schedule-disable':'settings.schedule-enable'),'button button-secondary schedule-action');
+      action.type='button';action.disabled=!canToggle;action.addEventListener('click',async()=>{
+        try{await protectedScheduleRequest(`/api/v1/scheduler/${encodeURIComponent(item.id)}`,'PATCH',{enabled:!item.enabled});await loadSchedulerList();setScheduleFeedback(t('settings.schedule-updated'));}
+        catch(error){setScheduleFeedback(error.message || t('settings.schedule-action-failed'));}
+      });
+      card.append(heading,details,action);root.append(card);
     }
+    if(items.length&&!canToggle)root.append(element('li',t(data.enabled?'settings.schedule-worker-stopped':'settings.schedule-global-off'),'schedule-empty'));
+    if(form){form.querySelector('[name="name"]').disabled=false;form.querySelector('[name="frequency"]').disabled=false;form.querySelector('[name="timezone"]').disabled=false;form.querySelector('[name="time"]').disabled=false;}
   } catch {
+    if(sequence!==schedulerListSequence)return;
     root.append(element('li',t('settings.scheduler-list-unavailable'),'schedule-empty'));
   }
+}
+
+function setScheduleFeedback(message){const target=$('#settings-schedule-feedback');if(target)target.textContent=message;}
+
+async function protectedScheduleRequest(path,method,body){
+  const form=$('#settings-schedule-form');
+  const key=form?.elements.namedItem('operator-key');
+  const token=key?.value.trim()||'';
+  if(token.length<24){setScheduleFeedback(t('settings.schedule-key-required'));key?.focus();throw new Error(t('settings.schedule-key-required'));}
+  try{
+    return await requestJson(path,{method,body,locale:getLocale(),headers:{Authorization:`Bearer ${token}`}});
+  }catch(error){
+    if(error.status===401){setScheduleFeedback(t('settings.schedule-auth-failed'));throw new Error(t('settings.schedule-auth-failed'));}
+    throw error;
+  }finally{if(key)key.value='';}
+}
+
+function initializeScheduleForm(){
+  const form=$('#settings-schedule-form');if(!form)return;
+  const timezone=form.elements.namedItem('timezone');
+  timezone.value=Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Ho_Chi_Minh';
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();
+    if(!form.reportValidity())return;
+    const [hour,minute]=form.elements.namedItem('time').value.split(':').map(Number);
+    const body={name:form.elements.namedItem('name').value.trim(),frequency:form.elements.namedItem('frequency').value,
+      timezone:timezone.value.trim(),hour,minute};
+    try{
+      await protectedScheduleRequest('/api/v1/scheduler','POST',body);
+      form.elements.namedItem('name').value='';
+      setScheduleFeedback(t('settings.schedule-created-disabled'));
+      await loadSchedulerList();
+    }catch(error){setScheduleFeedback(error.message||t('settings.schedule-create-failed'));}
+  });
 }
 
 function formatScheduleTime(value,timezone) {
@@ -2294,6 +2342,7 @@ async function checkBackend() {
 
 initializeLocale();
 initializeTheme();
+initializeScheduleForm();
 bindEvents();
 showView(window.location.hash.slice(1));
 setMobileNav(false);

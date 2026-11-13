@@ -93,8 +93,9 @@ class D2DashboardContractTests(unittest.TestCase):
             for path in (PUBLIC / "app.js", *sorted((PUBLIC / "modules").rglob("*.js")))
         )
         self.assertNotRegex(html.lower(), r"\b(login|logout|register)\b")
-        self.assertNotIn('type="password"', html.lower())
-        self.assertNotIn("Authorization", source)
+        self.assertIn('id="settings-schedule-form"', html)
+        self.assertIn('type="password"', html.lower())
+        self.assertIn("Authorization", source)
         self.assertIn('id="open-fetch"', html)
         self.assertIn(
             "disabled", html[html.index('id="open-fetch"') : html.index('id="open-fetch"') + 300]
@@ -102,6 +103,8 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn("/api/v1/fetches", source)
         self.assertIn("Idempotency-Key", source)
         self.assertNotIn("operator-token", html + source)
+        self.assertNotIn("localStorage.setItem('scheduler", source)
+        self.assertNotIn("sessionStorage.setItem('scheduler", source)
 
     def test_discover_summary_keeps_provider_and_analysis_counts_distinct(self):
         app = (PUBLIC / "app.js").read_text(encoding="utf-8")

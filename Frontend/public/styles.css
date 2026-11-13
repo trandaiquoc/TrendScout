@@ -363,6 +363,14 @@ button:disabled { cursor: not-allowed; }
 .chart-value { color: var(--ink-strong); font-size: 10px; font-variant-numeric: tabular-nums; text-align: right; }
 .chart-empty { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .settings-schedule-list { display: grid; gap: 9px; margin: 13px 0 0; padding: 0; list-style: none; }
+.schedule-form { display: grid; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.schedule-form-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.schedule-form label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 10px; }
+.schedule-form input, .schedule-form select { min-width: 0; width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--surface); font: inherit; font-size: 12px; }
+.schedule-token-label { margin-top: 2px; }
+.schedule-form > .button { justify-self: start; }
+#settings-schedule-feedback { min-height: 1em; margin: 0; color: var(--accent-strong); font-size: 11px; }
+.schedule-action { min-height: 30px; padding: 5px 9px; font-size: 10px; }
 .schedule-item { padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
 .schedule-item-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--ink-strong); font-size: 12px; }
 .schedule-item-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 11px 0 0; }
@@ -606,6 +614,7 @@ button:disabled { cursor: not-allowed; }
   .workbench-scrim:not([hidden]) { position: fixed; z-index: 19; inset: 0; display: block; width: 100%; height: 100%; border: 0; background: #10182666; }
 }
 @media (max-width: 600px) {
+  .schedule-form-fields { grid-template-columns: 1fr; }
   .workbench-heading { flex-wrap: wrap; }
   .workbench-heading > .button { margin-left: auto; }
   .workbench-toolbar { justify-content: space-between; flex-wrap: wrap; }
