@@ -6,10 +6,11 @@
 
 ## Git baseline and safety
 
-- Fetched `origin` and compared the local branch and recent history. `origin/main` remains `8349a17` (`fix(ui): explain unavailable merge destinations`); local `main` remains ahead and has no remote-only commits; no remote commits were pulled over local work. Relevant verified G2-G7 checkpoints include `2b9cce2` (Top 5 chart), `5e37027` (manual run history), `febeaf5` (persistent scheduler), `23300ed` (daily coverage chart), `a83a195` (persisted schedules in Settings), `70be938` (system/storage status) and `99943c1` (evidence charts and mobile Run History), `1791ca7` (saved Source Center Fetch evidence), `ada796b` (collapsed Collection tree counts), and `225c31a` (protected Scheduler controls). No push or deploy was performed.
+- Fetched `origin` and compared the local branch and recent history. `origin/main` remains `8349a17` (`fix(ui): explain unavailable merge destinations`); local `main` is 23 commits ahead with no remote-only commits; no remote commits were pulled over local work. Recent G2-G7 checkpoints include `1791ca7` (saved Source Center Fetch evidence), `ada796b` (collapsed Collection tree counts), `225c31a` (protected Scheduler controls), `8455055` (Analytics counts and local route allowlist) and `031744e` (real Chrome workbench acceptance). No push or deploy was performed.
 - Changes in this report are committed locally after focused verification. No push or deploy was performed.
 - No Pageviews Fetch, Google/Bing/YouTube API call, paid LLM call, or scheduled provider Fetch was made during this goal.
 - The configured user database was backed up before G2 reconciliation to `%LOCALAPPDATA%\TrendScout\backups\overnight-g2-g7\collections-20261114-020943.sqlite`; SHA-256 `4662079f510ff754a81032a747dc260f2e846fac08177e8c8685f8219e1da0d7`. The backup's integrity check was `ok`, and its foreign-key check was empty. The baseline manifest with exact membership and user-decision state remains outside Git.
+- Final read-only revalidation confirmed the backup still matches that SHA-256, with 154 keywords, 39 active Collections and 180 memberships; its SQLite integrity is `ok` and foreign-key check empty. The current database also passed read-only integrity/foreign-key checks and remains at 154 keywords, 53 active Collections, 211 memberships and 148 covered keywords. Neither check wrote to either database.
 - The current database was inspected for read-only analytics. No database reset or D6 ledger change occurred. Research feature tests use temporary databases.
 
 ## Phase acceptance
