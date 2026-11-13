@@ -49,6 +49,13 @@ window.fetch=(path,opts={})=>{
     classification_evidence:[{category:'fashion',matched_text:'<script>',rule_id:'fixture'}],
     quality_flags:['<svg onload=window.pwned=true>']
   }),{status:200}));
+  if(p==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({
+    mode:'AUTO_CREATE',items:[
+      {id:'collection-a',name:'Fixture Collection A',description:'Parent Collection',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'USER',auto_match:false},
+      {id:'collection-b',name:'Fixture Collection B',description:'Merge destination',examples:[],exclusions:[],membership_count:1,direct_membership_count:1,subtree_unique_keyword_count:1,created_by:'USER',auto_match:false}
+    ],suggestions:[],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
+  }),{status:200}));
+  if(p.startsWith('/api/v1/datasets/latest/keywords?'))return Promise.resolve(new Response(JSON.stringify({items:[],total:0,next_offset:null}),{status:200}));
   if(p.includes('/keywords?')){
     const q=new URL(p,'https://local.invalid').searchParams;
     const empty=q.get('q')==='empty';
@@ -122,6 +129,18 @@ CHECK = r"""<script>
       check(link.getAttribute('aria-current')==='page','aria current '+link.dataset.nav);
       check(document.documentElement.scrollWidth<=innerWidth+1,'horizontal overflow '+link.dataset.nav);
     }
+    await go('collections');await wait(80);
+    document.querySelector('.workbench-context-button')?.click();
+    const picker=document.querySelector('.collection-picker');
+    const pickerTrigger=picker?.querySelector('[role=combobox]');
+    pickerTrigger?.click();
+    picker?.querySelector('[role=option]')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    check(pickerTrigger?.textContent.includes('Fixture Collection B'),'merge destination picker accepts keyboard selection');
+    check(pickerTrigger?.getAttribute('aria-expanded')==='false','merge destination picker closes after selection');
+    const mergeSection=[...document.querySelectorAll('.collection-manage-section')].find(section=>section.querySelector('.collection-picker'));
+    mergeSection?.querySelector('.button-primary')?.click();
+    check(document.querySelector('#workbench-collection-dialog')?.textContent.includes('Fixture Collection B'),'selected merge destination reaches the review step');
+    document.querySelector('#workbench-collection-dialog button')?.click();
     await go('runs');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
     check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
@@ -223,7 +242,7 @@ CHECK = r"""<script>
     check(testRequests.filter(request=>request.path==='/api/runs/'+'b'.repeat(32)).length===31,'bounded run polling');
     check(document.querySelector('#global-notice').textContent.includes('30 lần kiểm tra'),'polling stop status');
     window.setTimeout=nativeTimeout;
-    check(testRequests.every(request=>request.method==='GET'),'all dashboard requests are GET');
+    check(testRequests.every(request=>request.method==='GET'),'offline browser workflow made no write or Fetch requests');
     check(!testRequests.some(request=>/token|secret|credential/i.test(JSON.stringify(request.headers))),'no credential header');
     check(!testRequests.some(request=>request.path==='/api/config'),'no auth-capability inference from config');
     check(localStorage.getItem('trendscout.theme')==='light','light preference persisted');

@@ -81,10 +81,10 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 
 - Focused dashboard, keyword workbench and workspace structure tests: **23 passed, 34 subtests passed**.
 - Full backend suite after the static-shell assertion update: **18 failed, 759 passed, 767 subtests passed**. Seventeen failures require `FIRESTORE_EMULATOR_HOST` and a running Firestore emulator, neither configured. The other two are pre-existing synthetic discovery expectation mismatches documented before this work (`INSUFFICIENT_EVIDENCE` expected while runtime returns `UNAVAILABLE`). No live provider requests were made to chase emulator/synthetic cases.
-- Native Chrome offline workspace: passed at 320, 390, 768, 1024, 1440 and 1920 px for locale/theme persistence, all views, read-only API access and XSS handling. No Fetch occurred.
+- Native Chrome offline workspace: passed at 320, 390, 768, 1024, 1440 and 1920 px for locale/theme persistence, all views, read-only API access and XSS handling. The Collection merge picker also passed keyboard selection and review-step handoff in the isolated fixture; no merge was committed and no Fetch occurred.
 - Fresh overview screenshots: 24 combinations at six widths, Vietnamese/English and light/dark are in `Documents/Reports/windows-evidence/overnight-g2-g7/`. Screenshots use an isolated synthetic browser fixture. Five earlier G2 evidence images are also retained in that directory.
 - `node --check` passed for `Frontend/public/app.js` and `Frontend/public/modules/capabilities.js`; Python compilation passed for changed backend modules; `git diff --check` passed (Git emitted only line-ending normalization warnings).
-- Reviewed Lucian UX/UI Prompt's light/dark, keyboard/touch and reduced-motion guidance and its catalog; the current Overview already uses a segmented-tab pattern. The Collection merge destination still uses the browser-native `<select>` and is a known visual follow-up (catalog element #031 is the closest reference). No library code or dependency was added in this checkpoint. [Lucian UX/UI Prompt](https://lucianlabs.dev/en/uxui-prompt/introducing/), [catalog entry #031](https://github.com/Seokwoooo/lucian-uxui-prompt/blob/main/api/v1/en/e/031.txt).
+- Reviewed Lucian UX/UI Prompt's light/dark, keyboard/touch and reduced-motion guidance and its catalog. Applied the #031 custom listbox pattern to the Collection merge destination: clear selected state, themed popup, keyboard arrows/Home/End/Enter/Escape/typeahead, outside-click dismissal and no native blue highlight. The existing Overview segmented tabs remain unchanged. The implementation is adapted to the project's theme tokens and Collection data; no dependency was added. [Lucian UX/UI Prompt](https://lucianlabs.dev/en/uxui-prompt/introducing/), [catalog entry #031](https://github.com/Seokwoooo/lucian-uxui-prompt/blob/main/api/v1/en/e/031.txt).
 - The screenshot run covered Overview only. The browser workflow exercised all routes but did not capture every route at every viewport. Keyboard-only workflows, complete modal/mobile-drawer journeys and a server restart acceptance pass remain incomplete.
 
 ## Remaining gates
@@ -94,7 +94,6 @@ The taxonomy retained stable IDs and added evidenced leaves for settlements, mon
 3. Provide a supported read-only interface to list Firestore-backed manual runs or clearly accept the local-ledger-only scope.
 4. Finish native Chrome keyboard, mobile drawer, modal, pagination, reload and server-restart journeys; capture fresh evidence for every G2–G7 screen and both locales/themes.
 5. Configure a Firestore emulator to run its 17 integration tests. Separately resolve or explicitly accept the two known synthetic discovery expectation mismatches.
-6. Replace or explicitly accept the browser-native merge destination dropdown after checking Lucian element #031 against the current Collection workflow. Preserve keyboard behavior and both themes.
-7. Revalidate the dated source research inventory before enabling or approving integrations. No external source approval, credential, quota or production capability is implied here.
+6. Revalidate the dated source research inventory before enabling or approving integrations. No external source approval, credential, quota or production capability is implied here.
 
 No push or deployment was performed.

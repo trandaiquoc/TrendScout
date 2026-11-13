@@ -27,6 +27,104 @@ function labelled(select, key, options, fallback = key) {
   const label = make('label', labels(key, fallback), 'workbench-filter'); label.append(select); return label;
 }
 function button(text, className = 'button button-secondary') { const node = make('button', text, className); node.type = 'button'; return node; }
+let collectionPickerSequence = 0;
+function collectionPicker(options, label) {
+  const root = make('div', '', 'collection-picker');
+  const trigger = button(labels('workbench.choose-target', 'Choose a target Collection'), 'collection-picker-trigger');
+  trigger.setAttribute('role', 'combobox');
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-expanded', 'false');
+  trigger.setAttribute('aria-label', label);
+  const id = `collection-picker-${++collectionPickerSequence}`;
+  const list = make('ul', '', 'collection-picker-list');
+  list.id = id;
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-label', label);
+  list.hidden = true;
+  trigger.setAttribute('aria-controls', id);
+  const choices = options.map((item, index) => {
+    const optionNode = make('li', '', 'collection-picker-option');
+    optionNode.setAttribute('role', 'option');
+    optionNode.setAttribute('aria-selected', 'false');
+    optionNode.tabIndex = -1;
+    optionNode.dataset.value = item.value;
+    optionNode.textContent = item.label;
+    optionNode.addEventListener('pointermove', () => setActive(index));
+    optionNode.addEventListener('click', () => choose(index));
+    list.append(optionNode);
+    return optionNode;
+  });
+  let value = '';
+  let active = 0;
+  let typeahead = '';
+  let typeaheadTimer;
+  const setActive = (index) => {
+    if (!choices.length) return;
+    active = (index + choices.length) % choices.length;
+    choices.forEach((node, position) => {
+      node.classList.toggle('is-active', position === active);
+      if (position === active) list.setAttribute('aria-activedescendant', node.id || (node.id = `${id}-${position}`));
+    });
+    const choice = choices[active];
+    if (choice.offsetTop < list.scrollTop) list.scrollTop = choice.offsetTop;
+    else if (choice.offsetTop + choice.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = choice.offsetTop + choice.offsetHeight - list.clientHeight;
+  };
+  const close = (restoreFocus = false) => {
+    list.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    root.classList.remove('is-open');
+    if (restoreFocus) trigger.focus();
+  };
+  const open = () => {
+    if (!choices.length) return;
+    list.hidden = false;
+    trigger.setAttribute('aria-expanded', 'true');
+    root.classList.add('is-open');
+    const selectedIndex = options.findIndex((item) => item.value === value);
+    setActive(selectedIndex >= 0 ? selectedIndex : 0);
+    choices[active].focus();
+  };
+  const choose = (index) => {
+    const item = options[index];
+    if (!item) return;
+    value = item.value;
+    trigger.textContent = item.label;
+    trigger.setAttribute('aria-label', `${label}: ${item.label}`);
+    choices.forEach((node, position) => node.setAttribute('aria-selected', String(position === index)));
+    close(true);
+  };
+  trigger.addEventListener('click', () => list.hidden ? open() : close());
+  trigger.addEventListener('keydown', (event) => {
+    if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) { event.preventDefault(); open(); }
+  });
+  list.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setActive(active + (event.key === 'ArrowDown' ? 1 : -1)); choices[active].focus(); }
+    else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); setActive(event.key === 'Home' ? 0 : choices.length - 1); choices[active].focus(); }
+    else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(active); }
+    else if (event.key === 'Escape') { event.preventDefault(); close(true); }
+    else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      typeahead += event.key.toLocaleLowerCase();
+      clearTimeout(typeaheadTimer);
+      typeaheadTimer = setTimeout(() => { typeahead = ''; }, 650);
+      const start = active + 1;
+      const match = [...options.slice(start), ...options.slice(0, start)].findIndex((item) => item.label.toLocaleLowerCase().startsWith(typeahead));
+      if (match >= 0) { setActive((start + match) % options.length); choices[active].focus(); }
+    }
+  });
+  root.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !list.hidden) { event.preventDefault(); close(true); } });
+  root.append(trigger, list);
+  queueMicrotask(() => {
+    const dialog = root.closest('dialog');
+    if (!dialog) return;
+    const dismissOutside = (event) => { if (!root.contains(event.target)) close(); };
+    const cleanup = () => { dialog.removeEventListener('pointerdown', dismissOutside); clearTimeout(typeaheadTimer); };
+    dialog.addEventListener('pointerdown', dismissOutside);
+    dialog.addEventListener('close', cleanup, { once: true });
+  });
+  Object.defineProperty(root, 'value', { get: () => value });
+  root.focus = () => trigger.focus();
+  return root;
+}
 function status(text, error = false) { const node = $('#workbench-status'); node.textContent = text; node.classList.toggle('notice--error', error); }
 function idsInQuery() { return state.collectionId ? [state.collectionId] : []; }
 
@@ -235,7 +333,7 @@ function openManageDialog(item){
       const empty=make('div','','collection-no-merge-target');empty.append(make('p',labels('workbench.no-merge-target','There is no other Collection available as a destination. Create one first.')));const create=button(labels('collections.create','Create Collection'),'button button-secondary');create.addEventListener('click',()=>{dialog.close();openCollectionDialog();});empty.append(create);mergeSection.append(empty);
     }else{
       mergeSection.append(make('p',labels('workbench.merge-help','Choose where to move keywords and nested Collections. You will review the change before merging.')));
-      const mergeControls=make('div','','collection-merge-controls');const mergeLabel=make('label',labels('workbench.merge-into','Target Collection'),'collection-manage-label');const target=make('select');target.setAttribute('aria-label',labels('workbench.merge-into','Target Collection'));option(target,'','workbench.choose-target','Choose a target Collection');for(const other of targets){const op=make('option',nameOf(other));op.value=other.id;target.append(op);}mergeLabel.append(target);mergeControls.append(mergeLabel);
+      const mergeControls=make('div','','collection-merge-controls');const mergeLabel=make('div','','collection-manage-label');mergeLabel.append(make('span',labels('workbench.merge-into','Target Collection')));const target=collectionPicker(targets.map((other)=>({value:other.id,label:nameOf(other)})),labels('workbench.merge-into','Target Collection'));mergeLabel.append(target);mergeControls.append(mergeLabel);
       const merge=button(labels('workbench.merge-action','Merge'),'button button-primary');merge.addEventListener('click',()=>{if(!target.value){status(labels('workbench.choose-target-error','Choose a target Collection first.'),true);target.focus();return;}openMergeConfirmation(item,target.value);});mergeControls.append(merge);mergeSection.append(mergeControls);
     }
   }
