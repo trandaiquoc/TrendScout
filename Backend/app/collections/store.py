@@ -73,6 +73,22 @@ CREATE TABLE IF NOT EXISTS algorithm_results (
  result_json TEXT NOT NULL, input_digest TEXT NOT NULL, updated_at TEXT NOT NULL,
  PRIMARY KEY(keyword_id, algorithm_id)
 );
+CREATE TABLE IF NOT EXISTS dataset_snapshots (
+ dataset_id TEXT PRIMARY KEY, status TEXT NOT NULL, data_mode TEXT NOT NULL,
+ source_manifest TEXT NOT NULL, provider_record_count INTEGER NOT NULL,
+ received_record_count INTEGER NOT NULL, retained_keyword_count INTEGER NOT NULL,
+ rejected_record_count INTEGER NOT NULL, observation_start TEXT, observation_end TEXT,
+ fetched_at TEXT, quality_flags TEXT NOT NULL, processing_status TEXT NOT NULL,
+ eligible_keyword_count INTEGER NOT NULL DEFAULT 0,
+ assigned_keyword_count INTEGER NOT NULL DEFAULT 0,
+ unassigned_keyword_count INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS keyword_decisions (
+ keyword_id TEXT PRIMARY KEY REFERENCES keywords(id) ON DELETE CASCADE,
+ decision TEXT NOT NULL CHECK(decision IN ('EXCLUDED','RESTORED')),
+ reason TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+);
 """
 
 
@@ -117,6 +133,124 @@ class CollectionStore:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=10000")
         return db
+
+    def latest_dataset(self):
+        """Return durable local dataset metadata, with an honest legacy fallback."""
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM dataset_snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
+            total, eligible, excluded = db.execute("""SELECT count(*),
+                sum(eligible=1),sum(eligible=0) FROM keywords""").fetchone()
+            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
+            if row is None:
+                legacy = db.execute("""SELECT * FROM fetch_jobs WHERE status IN ('COMPLETED','MODEL_UNAVAILABLE')
+                    ORDER BY updated_at DESC LIMIT 1""").fetchone()
+                if legacy is None and not total:
+                    return None
+                sources = [item[0] for item in db.execute("SELECT DISTINCT source FROM keywords ORDER BY source")]
+                modes = [item[0] for item in db.execute("SELECT DISTINCT data_mode FROM keywords ORDER BY data_mode")]
+                fetched = None
+                dates = []
+                for evidence, observed in db.execute("SELECT evidence,observed_at FROM keywords"):
+                    try:
+                        metadata = json.loads(evidence)
+                        fetched = max(fetched or '', metadata.get('fetched_at') or '') or None
+                    except (TypeError, ValueError):
+                        pass
+                    dates.append(str(observed)[:10])
+                return {"dataset_id": legacy["fetch_id"] if legacy else "legacy-local-ledger",
+                    "status": "LEGACY_CACHED", "processing_status": legacy["status"] if legacy else "UNKNOWN",
+                    "data_mode": modes[0] if len(modes) == 1 else "MIXED" if modes else "UNKNOWN",
+                    "sources": sources, "provider_record_count": legacy["available"] if legacy else None,
+                    "received_record_count": None, "retained_keyword_count": total,
+                    "eligible_keyword_count": eligible or 0, "excluded_keyword_count": excluded or 0,
+                    "assigned_keyword_count": assigned, "unassigned_keyword_count": unassigned,
+                    "observation_start": min(dates) if dates else None,
+                    "observation_end": max(dates) if dates else None, "fetched_at": fetched,
+                    "quality_flags": ["LEGACY_COVERAGE_UNKNOWN"], "coverage_status": "UNKNOWN"}
+            item = dict(row)
+            item["source_manifest"] = json.loads(item["source_manifest"])
+            item["quality_flags"] = json.loads(item["quality_flags"])
+            item["sources"] = [source["source_id"] for source in item["source_manifest"]]
+            item["snapshot_retained_keyword_count"] = item["retained_keyword_count"]
+            item["retained_keyword_count"] = total
+            item["ledger_coverage_status"] = (
+                "MIXED_OR_UNKNOWN" if item["snapshot_retained_keyword_count"] < total else "SNAPSHOT_ONLY"
+            )
+            if item["ledger_coverage_status"] == "MIXED_OR_UNKNOWN":
+                item["quality_flags"] = sorted(set(item["quality_flags"] + ["PRIOR_LEDGER_COVERAGE_UNKNOWN"]))
+            item["eligible_keyword_count"] = eligible or 0
+            item["excluded_keyword_count"] = excluded or 0
+            item["assigned_keyword_count"] = assigned
+            item["unassigned_keyword_count"] = unassigned
+            item["coverage_status"] = "PARTIAL" if item["status"] == "PARTIAL" else "RECORDED"
+            return item
+
+    def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
+                        sort="recent", limit=50, offset=0, ids_only=False):
+        normalized = " ".join(query.casefold().split())
+        clauses, parameters = [], []
+        if normalized:
+            escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            clauses.append("k.normalized LIKE ? ESCAPE '!'")
+            parameters.append(f"%{escaped}%")
+        if source:
+            clauses.append("k.source=?")
+            parameters.append(source)
+        if state == "excluded":
+            clauses.append("k.eligible=0")
+        elif state == "unassigned":
+            clauses.append("k.eligible=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)")
+        elif state == "ai":
+            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')")
+        elif state == "manual":
+            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
+        elif state == "needs_review":
+            clauses.append("k.eligible=1 AND (NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id) OR EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI'))")
+        elif state != "all":
+            raise ValueError("INVALID_KEYWORD_STATE")
+        ids = tuple(dict.fromkeys(collection_ids))
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.collection_id IN ({placeholders}))")
+            parameters.extend(ids)
+        where = " AND ".join(clauses) or "1=1"
+        ordering = {
+            "keyword": "k.normalized ASC,k.id ASC",
+            "views": "CAST(json_extract(k.evidence,'$.views_ceil') AS INTEGER) DESC,k.id ASC",
+            "rank": "CAST(json_extract(k.evidence,'$.provider_rank') AS INTEGER) ASC,k.id ASC",
+            "recent": "k.observed_at DESC,k.id ASC",
+        }.get(sort)
+        if ordering is None:
+            raise ValueError("INVALID_KEYWORD_SORT")
+        with self.connect() as db:
+            total = db.execute(f"SELECT count(*) FROM keywords k WHERE {where}", parameters).fetchone()[0]
+            if ids_only:
+                rows = db.execute(f"SELECT k.id FROM keywords k WHERE {where} ORDER BY {ordering}",
+                                  parameters).fetchall()
+                return {"ids": [row["id"] for row in rows], "total": total}
+            pagination = " LIMIT ? OFFSET ?" if limit is not None else ""
+            page_parameters = (*parameters, limit, offset) if limit is not None else tuple(parameters)
+            rows = db.execute(f"""SELECT k.*,
+                (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin))
+                 FROM memberships m JOIN collections c ON c.id=m.collection_id WHERE m.keyword_id=k.id) memberships_json
+                FROM keywords k WHERE {where} ORDER BY {ordering}{pagination}""",
+                page_parameters).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["evidence"] = json.loads(item["evidence"])
+                    item["memberships"] = json.loads(item.pop("memberships_json") or "[]")
+                except (TypeError, ValueError):
+                    item["memberships"] = []
+                item["algorithm_results"] = [dict(result) for result in db.execute(
+                    "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
+                    (item["id"],))]
+                items.append(item)
+        return {"items": items, "total": total, "limit": limit, "offset": offset,
+                "next_offset": offset + limit if limit is not None and offset + limit < total else None}
 
     def list_collections(self):
         with self.connect() as db:
@@ -213,6 +347,23 @@ class CollectionStore:
             if source_collection_id and source_collection_id not in collections:
                 raise ValueError("COLLECTION_NOT_FOUND")
             for keyword_id in ids:
+                if action in {"EXCLUDE", "RESTORE"}:
+                    keyword = db.execute("SELECT 1 FROM keywords WHERE id=?", (keyword_id,)).fetchone()
+                    if not keyword:
+                        skipped += 1
+                        continue
+                    if action == "EXCLUDE":
+                        db.execute("INSERT OR REPLACE INTO keyword_decisions VALUES(?,'EXCLUDED','User excluded',?)",
+                                   (keyword_id, stamp))
+                        db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=?",
+                                   (keyword_id,))
+                        db.execute("DELETE FROM memberships WHERE keyword_id=? AND origin='LOCAL_AI'", (keyword_id,))
+                    else:
+                        db.execute("INSERT OR REPLACE INTO keyword_decisions VALUES(?,'RESTORED','User restored',?)",
+                                   (keyword_id, stamp))
+                        db.execute("UPDATE keywords SET eligible=1,rejection_reason=NULL WHERE id=?", (keyword_id,))
+                    updated += 1
+                    continue
                 keyword = db.execute("SELECT 1 FROM keywords WHERE id=? AND eligible=1", (keyword_id,)).fetchone()
                 if not keyword:
                     skipped += 1

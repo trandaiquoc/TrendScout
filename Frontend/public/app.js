@@ -17,7 +17,7 @@ const state = {
   publicFetchFinishedAt: null,
   category: 'all',
   query: '',
-  sort: 'score',
+  sort: 'recent',
   offset: 0,
   limit: 20,
   next: null,
@@ -42,6 +42,12 @@ const state = {
   collectionMembershipSelected: {},
   algorithmCatalog: null,
   algorithmResults: null,
+  persistedDataset: null,
+  persistedDatasetAvailable: false,
+  collectionFilters: new Set(),
+  selectedKeywordIds: new Set(),
+  selectAllFiltered: false,
+  latestKeywordTotal: 0,
 };
 
 function number(value) {
@@ -183,8 +189,8 @@ function refreshCollectionJob(fetchId) {
   const poll = async (attempt = 0) => {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
-      if (job.status === 'PROCESSING' && attempt < 12) {
-        window.setTimeout(() => poll(attempt + 1), 500);
+      if (job.status === 'PROCESSING' && attempt < 120) {
+        window.setTimeout(() => poll(attempt + 1), 1000);
         return;
       }
       state.collectionJobStatus = job;
@@ -193,6 +199,8 @@ function refreshCollectionJob(fetchId) {
       } else if (job.status === 'COMPLETED') {
         $('#collections-status').textContent = t('collections.coverage', job);
       }
+      await loadLatestDataset();
+      if (state.persistedDatasetAvailable) loadKeywords();
       if (window.location.hash === '#collections') loadCollections();
     } catch {}
   };
@@ -266,7 +274,8 @@ const fetchController = new PublicFetchController({
       loadRun(runId);
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
       refreshCollectionJob(fetchStatus.fetch_id);
-      state.publicFetchDiscovery = fetchStatus.discovery;
+      const localLive = isLocalLiveDemo(state.capabilities);
+      state.publicFetchDiscovery = localLive ? null : fetchStatus.discovery;
       state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
       state.publicFetchFinishedAt = typeof fetchStatus.finished_at === 'string'
         ? fetchStatus.finished_at : null;
@@ -274,9 +283,15 @@ const fetchController = new PublicFetchController({
       state.dataRunId = null;
       state.run = null;
       state.offset = 0;
-      renderPublicFetchDiscovery();
-      showView('collections');
-      loadKeywords();
+      if (localLive) {
+        showView('overview');
+        window.location.hash = 'overview';
+        void loadLatestDataset().then(() => loadKeywords());
+      } else {
+        renderPublicFetchDiscovery();
+        showView('collections');
+        loadKeywords();
+      }
     }
     scheduleCapabilityRefresh(100);
   },
@@ -590,13 +605,32 @@ function renderRows(items) {
   body.replaceChildren();
   for (const item of items) {
     const row = element('tr');
+    const selectCell = element('td');
+    const checkbox = element('input');
+    checkbox.type = 'checkbox';
+    const keywordId = item.id || item.keyword_id;
+    checkbox.dataset.keywordId = keywordId || '';
+    checkbox.disabled = !keywordId;
+    checkbox.checked = Boolean(keywordId && state.selectedKeywordIds.has(keywordId));
+    checkbox.setAttribute('aria-label', `Select ${item.display_keyword || item.keyword || 'keyword'}`);
+    checkbox.addEventListener('change', () => {
+      const id = item.id || item.keyword_id;
+      if (checkbox.checked) state.selectedKeywordIds.add(id);
+      else state.selectedKeywordIds.delete(id);
+      state.selectAllFiltered = false;
+      updateKeywordBulkUi();
+    });
+    selectCell.append(checkbox);
+    row.append(selectCell);
     const title = element('td');
     title.dataset.label = t('table.topic');
-    title.append(element('strong', item.display_keyword || item.canonical_keyword || '—'));
+    title.append(element('strong', item.display_keyword || item.canonical_keyword || item.keyword || '—'));
     title.append(element('small', item.project || '—'));
     row.append(title);
-    const category = Array.isArray(item.categories) && item.categories.length
-      ? item.categories.map((value) => t('category.' + value)).join(', ') : t('category.unclassified');
+    const category = Array.isArray(item.memberships) && item.memberships.length
+      ? item.memberships.map((membership) => `${membership.name} (${t(membership.origin === 'LOCAL_AI' ? 'dataset.ai' : 'dataset.manual')})`).join(', ')
+      : Array.isArray(item.categories) && item.categories.length
+        ? item.categories.map((value) => t('category.' + value)).join(', ') : t(item.eligible === 0 ? 'dataset.excluded' : 'dataset.unassigned');
     appendCell(row, category, '', t('table.category'));
     const evidence = item.current_views_ceil != null
       ? t('table.views-evidence', { value: number(item.current_views_ceil), rank: item.provider_rank ?? '—' })
@@ -613,10 +647,97 @@ function renderRows(items) {
     button.setAttribute('aria-label', t('table.open-detail', {
       name: item.display_keyword || item.canonical_keyword || t('common.keyword'),
     }));
-    button.addEventListener('click', () => openDetail(item.keyword_id));
+    button.disabled = !state.dataRunId;
+    if (button.disabled) button.title = 'Detailed run evidence is unavailable for this cached ledger row.';
+    button.addEventListener('click', () => openDetail(item.keyword_id || item.id));
     action.append(button);
     row.append(action);
     body.append(row);
+  }
+  const selectPage = $('#keyword-select-page');
+  if (selectPage) selectPage.checked = items.length > 0 && items.every((item) => state.selectedKeywordIds.has(item.id || item.keyword_id));
+  updateKeywordBulkUi();
+}
+
+function currentDatasetQuery() {
+  const params = new URLSearchParams({ q: state.query, state: $('#keyword-state-filter')?.value || 'all',
+    sort: state.sort === 'score' ? 'recent' : state.sort, limit: String(state.limit), offset: String(state.offset) });
+  for (const id of state.collectionFilters) params.append('collection_ids', id);
+  return params;
+}
+
+function updateKeywordBulkUi() {
+  const toolbar = $('#keyword-bulk-toolbar');
+  if (!toolbar) return;
+  toolbar.hidden = !state.persistedDatasetAvailable;
+  const count = state.selectAllFiltered ? state.latestKeywordTotal : state.selectedKeywordIds.size;
+  $('#keyword-selection-count').textContent = t('dataset.selected', { count });
+  $('#keyword-filter-total').textContent = state.selectAllFiltered
+    ? t('dataset.all-filtered-selected', { count: number(state.latestKeywordTotal) }) : '';
+  $('#keyword-select-page').disabled = state.selectAllFiltered;
+}
+
+function renderCollectionFilters() {
+  const box = $('#keyword-collection-filters');
+  if (!box) return;
+  box.replaceChildren();
+  for (const collection of state.collections) {
+    const label = element('label');
+    const checkbox = element('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = collection.id;
+    checkbox.checked = state.collectionFilters.has(collection.id);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) state.collectionFilters.add(collection.id);
+      else state.collectionFilters.delete(collection.id);
+      state.offset = 0;
+      state.selectedKeywordIds.clear();
+      state.selectAllFiltered = false;
+      loadKeywords();
+    });
+    label.append(checkbox, element('span', collection.name));
+    box.append(label);
+  }
+}
+
+async function loadLatestDataset() {
+  if (!isLocalLiveDemo(state.capabilities)) return null;
+  try {
+    const response = await getJson('/api/v1/datasets/latest', { locale: getLocale() });
+    state.persistedDataset = response.item || null;
+    state.persistedDatasetAvailable = Boolean(response.item);
+    if (response.item) {
+      const item = response.item;
+      const sources = (item.sources || []).join(', ') || 'Unknown source';
+      const status = item.status === 'LEGACY_CACHED'
+        ? 'Legacy cached local ledger; historical coverage is unknown.' : `${item.status} snapshot`;
+      const snapshotCoverage = item.snapshot_retained_keyword_count == null ? ''
+        : ` · latest batch ${number(item.snapshot_retained_keyword_count)}; ledger ${number(item.retained_keyword_count || 0)}`;
+      const ledgerCaveat = item.ledger_coverage_status === 'MIXED_OR_UNKNOWN'
+        || item.status === 'LEGACY_CACHED' ? ' · earlier ledger coverage is unknown' : '';
+      $('#overview-context').textContent = `${status}${snapshotCoverage}${ledgerCaveat} · ${sources} · ${number(item.eligible_keyword_count || 0)} eligible · ${number(item.unassigned_keyword_count || 0)} unassigned · ${item.fetched_at || 'collection time unavailable'}`;
+      $('#metric-records-returned').textContent = item.provider_record_count == null ? 'Unknown' : number(item.provider_record_count);
+      $('#metric-records-returned-note').textContent = item.status === 'LEGACY_CACHED' ? 'Legacy fetch count; coverage may be incomplete' : 'Provider-reported for this snapshot';
+      $('#metric-records-stored').textContent = number(item.retained_keyword_count || 0);
+      $('#metric-records-stored-note').textContent = 'Cached in the local keyword ledger';
+      $('#metric-topics-found').textContent = number(item.eligible_keyword_count || 0);
+      $('#metric-topics-found-note').textContent = `${number(item.assigned_keyword_count || 0)} assigned · ${number(item.unassigned_keyword_count || 0)} unassigned`;
+      $('#metric-observation-date').textContent = [item.observation_start, item.observation_end].filter(Boolean).join(' – ') || 'Unknown';
+      $('#metric-last-fetch').textContent = item.fetched_at ? `Cached snapshot · ${item.fetched_at}` : 'Cached ledger; time unavailable';
+      $('#main-source-status').textContent = item.status === 'LEGACY_CACHED' ? 'LEGACY CACHE' : item.status;
+      $('#keyword-count').textContent = number(item.retained_keyword_count || 0);
+      $('#scored-count').textContent = number(item.assigned_keyword_count || 0);
+      $('#results-count').textContent = number(item.eligible_keyword_count || 0);
+      await loadCollections();
+      renderCollectionFilters();
+      return item;
+    }
+    $('#overview-context').textContent = t('overview.no-fetch-context');
+    return null;
+  } catch (error) {
+    state.persistedDatasetAvailable = false;
+    setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'));
+    return null;
   }
 }
 
@@ -698,6 +819,50 @@ async function loadKeywords() {
     return;
   }
   $('#candidate-coverage-note').hidden = true;
+  if (state.persistedDatasetAvailable && !state.dataRunId) {
+    const sequence = ++state.keywordSequence;
+    try {
+      const result = await getJson('/api/v1/datasets/latest/keywords?' + currentDatasetQuery(), { locale: getLocale() });
+      if (sequence !== state.keywordSequence) return;
+      const rows = result.items.map((item) => {
+        const evidence = item.evidence && typeof item.evidence === 'object' ? item.evidence : {};
+        const evidenceItems = Array.isArray(evidence.evidence) ? evidence.evidence : [];
+        const primary = evidenceItems.find((entry) => entry.source_id === 'wikimedia_pageviews_top_per_country') || evidenceItems[0] || evidence;
+        const sources = [...new Set([item.source, ...evidenceItems.map((entry) => entry.source_id)].filter(Boolean))];
+        return {
+          ...item,
+          keyword_id: item.id,
+          display_keyword: item.keyword,
+          canonical_keyword: item.keyword,
+          project: [sources.join(' · '), item.project].filter(Boolean).join(' · '),
+          observation_date: item.observed_at?.slice(0, 10),
+          score: null,
+          status: item.eligible === 0 ? 'EXCLUDED' : 'INSUFFICIENT_DATA',
+          current_views_ceil: primary.views_ceil ?? primary.approximate_views ?? null,
+          provider_rank: primary.provider_rank ?? null,
+        };
+      });
+      renderRows(rows);
+      state.next = result.next_offset;
+      state.latestKeywordTotal = result.total;
+      updateKeywordBulkUi();
+      $('#results-count').textContent = number(result.total);
+      $('#pagination-info').textContent = result.total ? t('table.range', {
+        start: number(state.offset + 1), end: number(state.offset + rows.length), total: number(result.total),
+      }) : t('table.zero-results');
+      $('#prev').disabled = state.offset === 0;
+      $('#next').disabled = result.next_offset == null;
+      if (!rows.length) showEmpty(t('keywords.empty-title'), t('keywords.page-empty'));
+      else $('#empty').hidden = true;
+      setNotice('#keyword-notice', '');
+    } catch (error) {
+      if (sequence === state.keywordSequence) {
+        renderRows([]);
+        setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'), 'error');
+      }
+    }
+    return;
+  }
   if (!state.dataRunId) {
     renderRows([]);
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
@@ -907,7 +1072,10 @@ async function openDetail(id) {
 }
 
 function showView(name) {
-  const view = name === 'results' ? 'keywords' : name;
+  const view = name === 'results' || name === 'keywords' ? 'overview' : name;
+  if ((name === 'keywords' || name === 'results') && window.location.hash !== '#overview') {
+    window.history.replaceState(null, '', '#overview');
+  }
   const valid = new Set(['overview', 'collections', 'sources', 'runs', 'keywords', 'algorithms', 'quality', 'refresh', 'research', 'usage', 'settings']);
   const selected = valid.has(view) ? view : 'overview';
   $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
@@ -921,10 +1089,11 @@ function showView(name) {
     }
   });
   $('#breadcrumb-current').textContent = t('nav.' + selected);
-  if (selected === 'keywords' && !state.dataRunId && !state.publicFetchDiscovery) {
+  if (selected === 'keywords' && !state.dataRunId && !state.publicFetchDiscovery && !state.persistedDatasetAvailable) {
     showEmpty(t('keywords.empty-title'), t('keywords.no-run'));
   }
   if (selected === 'collections') loadCollections();
+  if (selected === 'keywords') loadKeywords();
   if (selected === 'algorithms') loadAlgorithmCatalog();
   closeMobileNav();
 }
@@ -942,6 +1111,7 @@ async function loadCollections({ appendInbox = false } = {}) {
     state.collectionInboxTotal = inbox.total || 0;
     $('#collection-mode').value = data.mode || 'SUGGEST';
     renderCollections();
+    renderCollectionFilters();
   } catch {
     $('#collections-status').textContent = t('collections.error');
     $('#collection-list').replaceChildren();
@@ -1144,6 +1314,11 @@ function renderCollections() {
     bulkTarget.append(option);
   });
   if (state.collections.some((collection) => collection.id === previousTarget)) bulkTarget.value = previousTarget;
+  const keywordTarget = $('#keyword-bulk-target');
+  const previousKeywordTarget = keywordTarget.value;
+  keywordTarget.replaceChildren(new Option(t('dataset.choose-collection'), ''));
+  state.collections.forEach((collection) => keywordTarget.append(new Option(collection.name, collection.id)));
+  if (state.collections.some((collection) => collection.id === previousKeywordTarget)) keywordTarget.value = previousKeywordTarget;
   bulkTarget.disabled = !state.collections.length;
   $('#collection-bulk-assign').disabled = !state.collections.length || !state.collectionSelected.size;
   $('#collection-select-page').checked = state.collectionInbox.length > 0
@@ -1366,6 +1541,8 @@ function bindEvents() {
     searchTimer = setTimeout(() => {
       state.query = query;
       state.offset = 0;
+      state.selectedKeywordIds.clear();
+      state.selectAllFiltered = false;
       if (state.publicFetchDiscovery) renderPublicFetchDiscovery();
       else if (state.run) renderSyntheticDiscovery(state.run);
       loadKeywords();
@@ -1375,6 +1552,57 @@ function bindEvents() {
     state.sort = event.currentTarget.value;
     state.offset = 0;
     loadKeywords();
+  });
+  $('#keyword-state-filter').addEventListener('change', () => {
+    state.offset = 0;
+    state.selectedKeywordIds.clear();
+    state.selectAllFiltered = false;
+    loadKeywords();
+  });
+  $('#keyword-select-page').addEventListener('change', (event) => {
+    state.selectAllFiltered = false;
+    for (const row of $$('#rows tr')) {
+      const checkbox = $('input[type="checkbox"]', row);
+      if (!checkbox || checkbox.disabled) continue;
+      const id = checkbox.dataset.keywordId;
+      if (event.currentTarget.checked) state.selectedKeywordIds.add(id);
+      else state.selectedKeywordIds.delete(id);
+    }
+    updateKeywordBulkUi();
+  });
+  $('#keyword-select-filtered').addEventListener('click', () => {
+    state.selectAllFiltered = true;
+    state.selectedKeywordIds.clear();
+    updateKeywordBulkUi();
+  });
+  $('#keyword-bulk-action').addEventListener('change', (event) => {
+    const target = $('#keyword-bulk-target');
+    target.disabled = ['EXCLUDE', 'RESTORE'].includes(event.currentTarget.value);
+    target.required = !target.disabled;
+  });
+  $('#keyword-bulk-apply').addEventListener('click', async () => {
+    if (!state.selectAllFiltered && !state.selectedKeywordIds.size) return;
+    const action = $('#keyword-bulk-action').value;
+    if (!['EXCLUDE', 'RESTORE'].includes(action) && !$('#keyword-bulk-target').value) {
+      announce(t('dataset.choose-collection-error'));
+      return;
+    }
+    const body = { action, keyword_ids: state.selectAllFiltered ? [] : [...state.selectedKeywordIds],
+      all_filtered: state.selectAllFiltered };
+    if (!['EXCLUDE', 'RESTORE'].includes(action)) body.collection_id = $('#keyword-bulk-target').value;
+    const params = currentDatasetQuery();
+    body.query = params.get('q');
+    body.state = params.get('state');
+    body.source = params.get('source') || '';
+    body.collection_ids = params.getAll('collection_ids');
+    const result = await requestJson('/api/v1/collections/bulk', {
+      method: 'POST', body, locale: getLocale(),
+    });
+    state.selectedKeywordIds.clear();
+    state.selectAllFiltered = false;
+    $('#keyword-filter-total').textContent = `${result.updated} updated · ${result.skipped} skipped`;
+    await loadLatestDataset();
+    await loadKeywords();
   });
   $('#prev').addEventListener('click', () => {
     state.offset = Math.max(0, state.offset - state.limit);
@@ -1459,7 +1687,7 @@ function bindEvents() {
       renderPublicFetchDiscovery();
     }
     if (window.location.hash === '#algorithms') loadAlgorithmCatalog();
-    if (state.dataRunId || state.publicFetchDiscovery) {
+    if (state.dataRunId || state.publicFetchDiscovery || state.persistedDatasetAvailable) {
       loadKeywords();
     }
     if ($('#detail-dialog').open && state.detail) {
@@ -1495,4 +1723,6 @@ showView(window.location.hash.slice(1));
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();
-loadPublicCapabilities();
+void loadPublicCapabilities().then(() => loadLatestDataset()).then(() => {
+  if (state.persistedDatasetAvailable) loadKeywords();
+});

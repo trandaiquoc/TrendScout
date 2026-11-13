@@ -30,7 +30,8 @@ def live_source(rows):
     for rank, row in enumerate(rows, start=1):
         row.setdefault("provider_rank", rank)
         row.setdefault("views_ceil", 1000)
-    return [{"source_id": "wikimedia_pageviews_top_per_country", "data_mode": "LIVE", "records": rows}]
+    return [{"source_id": "wikimedia_pageviews_top_per_country", "data_mode": "LIVE",
+             "status": "SUCCESS", "record_count": len(rows), "records": rows}]
 
 
 class SmartCollectionsTests(unittest.TestCase):
@@ -64,6 +65,16 @@ class SmartCollectionsTests(unittest.TestCase):
         summaries = {row["algorithm_id"]: row for row in results_response.json()["summary"]}
         self.assertEqual(summaries["observed-volume-rank"]["completed"], 2)
         self.assertIn("NOT_YET_EVALUATED", results_response.json()["evaluation_status"])
+        async def read_dataset():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                summary = await client.get("/api/v1/datasets/latest")
+                page = await client.get("/api/v1/datasets/latest/keywords?q=robot&state=all&sort=keyword")
+                return summary, page
+        dataset_response, keyword_response = __import__("asyncio").run(read_dataset())
+        self.assertEqual(dataset_response.json()["item"]["status"], "COMPLETED")
+        self.assertEqual(dataset_response.json()["item"]["restoration_status"], "CACHED")
+        self.assertEqual(keyword_response.json()["total"], 1)
+        self.assertEqual(keyword_response.json()["items"][0]["keyword"], "Robot vacuum")
 
     def test_partial_snapshot_is_not_used_for_snapshot_popularity(self):
         rows = [{"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
@@ -79,6 +90,53 @@ class SmartCollectionsTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE status='COMPLETED'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE snapshot_status='PARTIAL'").fetchone()[0], 2)
+        self.assertEqual(self.store.latest_dataset()["status"], "PARTIAL")
+
+    def test_user_exclusion_survives_repeated_fetch_and_can_be_restored(self):
+        import asyncio
+
+        row = {"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
+               "project": "en.wikipedia", "observation_date": "2026-11-10",
+               "fetched_at": "2026-11-12T00:00:00Z", "views_ceil": 1000}
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            asyncio.run(self.service.process_fetch("first-exclude", live_source([row])))
+            self.assertEqual(self.store.search_keywords(query="robot")["total"], 1)
+            app = create_app(read_only=True, settings=Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true"}))
+            app.state.collection_service = self.service
+
+            async def bulk(action, state):
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                    return await client.post("/api/v1/collections/bulk", json={
+                        "action": action, "all_filtered": True, "query": "robot", "state": state,
+                    })
+
+            excluded = asyncio.run(bulk("EXCLUDE", "all"))
+            self.assertEqual(excluded.status_code, 200)
+            self.assertEqual(excluded.json()["updated"], 1)
+            asyncio.run(self.service.process_fetch("repeated-exclude", live_source([row])))
+        self.assertEqual(self.store.search_keywords(state="excluded")["total"], 1)
+        self.assertEqual(self.store.search_keywords(state="all")["items"][0]["eligible"], 0)
+        restored = asyncio.run(bulk("RESTORE", "excluded"))
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.json()["updated"], 1)
+        self.assertEqual(self.store.search_keywords(state="all")["items"][0]["eligible"], 1)
+
+    def test_latest_dataset_separates_latest_fetch_batch_from_full_ledger(self):
+        import asyncio
+
+        first = {"article_display": "Mars Rover", "article_original": "Mars_Rover",
+                 "project": "en.wikipedia", "observation_date": "2026-11-10",
+                 "fetched_at": "2026-11-12T00:00:00Z"}
+        second = {"article_display": "Robot Vacuum", "article_original": "Robot_Vacuum",
+                  "project": "en.wikipedia", "observation_date": "2026-11-11",
+                  "fetched_at": "2026-11-12T01:00:00Z"}
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            asyncio.run(self.service.process_fetch("batch-two", live_source([first, second])))
+            asyncio.run(self.service.process_fetch("batch-one", live_source([second])))
+        snapshot = self.store.latest_dataset()
+        self.assertEqual(snapshot["snapshot_retained_keyword_count"], 1)
+        self.assertEqual(snapshot["retained_keyword_count"], 2)
 
     def test_crud_feedback_and_restart_persistence(self):
         collection_id = self.store.create({"name": "Sustainable fashion", "examples": ["circular clothing"]})
@@ -139,6 +197,8 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
             self.assertEqual(result["algorithms"]["executed_keywords"], 212)
             self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
+            self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
+            self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
             with self.store.connect() as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)

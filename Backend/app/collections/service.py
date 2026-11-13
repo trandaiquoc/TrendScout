@@ -93,9 +93,15 @@ class CollectionService:
             db.executemany("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
                 data_mode,evidence,context,eligible,rejection_reason) VALUES(?,?,?,?,?,?,?,?,?,1,NULL)
                 ON CONFLICT(id) DO UPDATE SET keyword=excluded.keyword,observed_at=excluded.observed_at,
-                evidence=excluded.evidence,eligible=1,rejection_reason=NULL""",
+                evidence=excluded.evidence,
+                eligible=COALESCE((SELECT CASE decision WHEN 'EXCLUDED' THEN 0 ELSE 1 END
+                    FROM keyword_decisions WHERE keyword_id=excluded.id),1),
+                rejection_reason=CASE WHEN (SELECT decision FROM keyword_decisions
+                    WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
+        if sources and not fetch_id.startswith("organize-"):
+            self._persist_dataset_snapshot(fetch_id, sources, records, available, skipped)
         analysis = self._analyze_persisted_keywords(records)
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.
@@ -125,6 +131,8 @@ class CollectionService:
             exclusion_vectors = self._embed_cached(exclusion_inputs, [0] * len(exclusion_inputs)) if exclusion_inputs else []
         except Exception:
             with self.store.connect() as db:
+                db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
+                           (fetch_id,))
                 db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
                     error_code,updated_at) VALUES(?,?,?,?,?,?,?)""",
                     (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped,
@@ -198,7 +206,67 @@ class CollectionService:
                 unassigned,created_collections,suggestions,skipped,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (fetch_id, "COMPLETED", outcome["available"], outcome["processed"], assigned,
                  outcome["unassigned"], created, suggestions, skipped, now()))
+            db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
+                eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1),
+                assigned_keyword_count=(SELECT count(DISTINCT keyword_id) FROM memberships),
+                unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+                    (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) WHERE dataset_id=?""", (fetch_id,))
         return outcome
+
+    def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped):
+        manifests, flags, modes = [], [], set()
+        provider_count = 0
+        for source in sources:
+            raw_records = source.get("records", []) if isinstance(source.get("records"), list) else []
+            status = source.get("status", "SUCCESS")
+            declared = source.get("record_count")
+            if type(declared) is not int or declared < len(raw_records):
+                declared = len(raw_records)
+            provider_count += declared
+            if source.get("data_mode"):
+                modes.add(source["data_mode"])
+            if status != "SUCCESS":
+                flags.append(f"{source.get('source_id', 'UNKNOWN')}_{status}")
+            if declared > len(raw_records):
+                flags.append(f"{source.get('source_id', 'UNKNOWN')}_RECORDS_OMITTED")
+            source_flags = source.get("quality_flags")
+            if isinstance(source_flags, list):
+                flags.extend(str(value) for value in source_flags)
+            elif source_flags:
+                flags.append(str(source_flags))
+            manifests.append({key: source.get(key) for key in (
+                "source_id", "status", "data_mode", "record_count", "coverage", "quality_flags",
+                "error_code", "retry_after_seconds") if source.get(key) is not None})
+        if skipped:
+            flags.append("CLEANING_REJECTIONS")
+        dates, fetched = [], []
+        for record in records:
+            try:
+                evidence = json.loads(record["evidence"])
+                if evidence.get("observation_date"):
+                    dates.append(evidence["observation_date"][:10])
+                if evidence.get("fetched_at"):
+                    fetched.append(evidence["fetched_at"])
+            except (TypeError, ValueError):
+                continue
+        with self.store.connect() as db:
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
+            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
+            db.execute("""INSERT OR REPLACE INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
+                provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
+                observation_start,observation_end,fetched_at,quality_flags,processing_status,
+                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (fetch_id, "FAILED" if sources and all(
+                    source.get("status") not in {"SUCCESS", "PARTIAL"} for source in sources
+                ) else "PARTIAL" if flags else "COMPLETED",
+                 next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else "UNKNOWN",
+                 json.dumps(manifests, ensure_ascii=False, sort_keys=True), provider_count, available,
+                 len(records), skipped, min(dates) if dates else None, max(dates) if dates else None,
+                 max(fetched) if fetched else None, json.dumps(sorted(set(flags))), "PROCESSING",
+                 eligible, assigned, unassigned, now()))
 
     def _analyze_persisted_keywords(self, changed_records):
         """Persist observation facts and execute the registry across every eligible keyword."""

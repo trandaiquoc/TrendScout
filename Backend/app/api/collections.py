@@ -56,8 +56,13 @@ class ModeInput(BaseModel):
 
 class BulkMembershipInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["ADD", "COPY", "MOVE", "REMOVE", "APPROVE", "REJECT"]
-    keyword_ids: list[str] = Field(min_length=1, max_length=500)
+    action: Literal["ADD", "COPY", "MOVE", "REMOVE", "APPROVE", "REJECT", "EXCLUDE", "RESTORE"]
+    keyword_ids: list[str] = Field(default_factory=list, max_length=500)
+    all_filtered: bool = False
+    query: str = Field(default="", max_length=100)
+    state: Literal["all", "unassigned", "ai", "manual", "needs_review", "excluded"] = "all"
+    collection_ids: list[str] = Field(default_factory=list, max_length=20)
+    source: str = Field(default="", max_length=100)
     collection_id: str | None = Field(default=None, max_length=64)
     source_collection_id: str | None = Field(default=None, max_length=64)
 
@@ -193,12 +198,20 @@ def add_keyword(collection_id: str, value: MembershipInput, request: Request):
 def bulk_membership(value: BulkMembershipInput, request: Request):
     _mutating(request)
     service = _service(request)
+    keyword_ids = value.keyword_ids
+    if value.all_filtered:
+        result = service.store.search_keywords(query=value.query, state=value.state,
+            collection_ids=value.collection_ids, source=value.source, sort="recent", limit=None,
+            offset=0, ids_only=True)
+        keyword_ids = result["ids"]
+    if not keyword_ids:
+        raise HTTPException(422, {"code": "KEYWORDS_REQUIRED"})
     if value.action in {"ADD", "COPY", "MOVE", "APPROVE", "REMOVE", "REJECT"} and not value.collection_id:
         raise HTTPException(422, {"code": "COLLECTION_REQUIRED"})
     if value.action == "MOVE" and not value.source_collection_id:
         raise HTTPException(422, {"code": "SOURCE_COLLECTION_REQUIRED"})
     try:
-        return service.store.bulk_membership_action(value.keyword_ids, value.action,
+        return service.store.bulk_membership_action(keyword_ids, value.action,
             collection_id=value.collection_id, source_collection_id=value.source_collection_id)
     except ValueError as error:
         code = str(error)

@@ -46,6 +46,9 @@ class LocalLiveGuard:
         algorithm_read = method == "GET" and path in {
             "/api/v1/algorithms", "/api/v1/algorithms/results",
         }
+        dataset_read = method == "GET" and path in {
+            "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",
+        }
         collection_write = (
             method == "POST" and path in {
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
@@ -65,13 +68,14 @@ class LocalLiveGuard:
             or (method == "GET" and path.startswith("/dashboard/"))
             or (method == "POST" and path == "/api/v1/fetches")
             or (method == "GET" and path.startswith("/api/v1/fetches/"))
-            or collection_read or collection_write or algorithm_read
+            or collection_read or collection_write or algorithm_read or dataset_read
         )
         if not allowed:
             status = 405 if path in {
                 "/", "/dashboard", "/dashboard/", "/api/v1/capabilities",
                 "/api/health", "/api/v1/fetches",
                 "/api/v1/algorithms", "/api/v1/algorithms/results",
+                "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",
             } or path.startswith("/api/v1/fetches/") else 404
             await JSONResponse({"detail": {"code": "LOCAL_ROUTE_NOT_ALLOWED"}},
                                status_code=status)(scope, receive, send)
