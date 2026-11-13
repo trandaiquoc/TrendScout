@@ -1,7 +1,7 @@
 # D6.2.3.1 — Strict offline isolation recovery
 
 **Run date:** 2026-11-13
-**Status:** Remediation implemented; offline Python acceptance passed; native Windows browser gate pending.
+**Status:** Accepted for the owner-authorized Linux browser scope; native Windows browser behavior was not rerun.
 **Provider requests:** 0. **Pushes/deployments:** 0.
 
 ## 1. Git baseline and synchronization
@@ -85,7 +85,7 @@ The canonical LIVE ledger was **not opened or modified**. Tests use temporary SQ
 | G7 Security and regression | PASS for focused Python checks | 60 focused tests, Ruff, syntax compilation, and diff check passed under the guard. |
 | G8 Documentation and handoff | PASS, except G6 remains pending | Historical failure preserved, this recovery report and main report pointer added, local commits created, and no push/deployment made. |
 
-The remediation is **7/8 gates accepted; G6 remains pending**. Do not report 100% or D6.2 complete.
+The **initial** remediation run was 7/8 with G6 pending. The owner-authorized Linux follow-up and its separate final matrix are recorded in Section 8; D6.2 remains incomplete.
 
 ## 6. Limitations and remaining LIVE blockers
 
@@ -95,13 +95,52 @@ The remediation is **7/8 gates accepted; G6 remains pending**. Do not report 100
 - Wikimedia LIVE is still unverified. The historical one-request authorization and quota reservation remain consumed, and the approval is expired. No new authorization tranche, live budget, quota reset, or Fetch was created.
 - Any future live attempt still requires a separate owner-approved authorization and resolution of the existing D6.2 data-processing, retention, policy and launcher-diagnostic blockers. Synthetic verification does not satisfy those requirements.
 
-## 7. Next action
+## 7. Initial acceptance status
 
-On native Windows Python 3.12.10 with Chrome, run:
+The first D6.2.3.1 run passed 7/8 gates and left G6 pending because it ran on Linux without a supported loopback network sandbox. That historical run and its limitations remain part of this report. The owner subsequently authorized Linux Chrome for the remaining browser acceptance; this follow-up is recorded below and does not claim Windows browser compatibility.
 
-```powershell
-cd Backend
-py -3.12 tests/run_d6_2_3_1_offline_acceptance.py
+## 8. Owner-authorized Linux browser acceptance (2026-11-13)
+
+### Environment and network isolation
+
+- OS: Ubuntu 24.04.5 LTS; kernel `6.17.0-1033-oem`.
+- Python: 3.12.3 from `Backend/.venv`.
+- Browser: Google Chrome `157.0.8103.50`.
+- Unprivileged user and network namespaces were available. The run used `unshare --user --map-root-user --net --fork`, then enabled only `lo` with `ip link set lo up` inside the disposable namespace. No host interface, route, firewall, or network configuration was changed.
+- The browser preflight observed only `lo`, zero non-loopback IPv4 routes, zero non-loopback IPv6 routes, successful TCP loopback connectivity, and `ENETUNREACH` (errno 101) for TEST-NET-1. Thus the test namespace had no external interface or route and external egress was unavailable.
+- The preflight checked Chrome and its descendants; all 15 observed Chrome process-tree PIDs used the test network namespace. The namespace and its processes were destroyed on command exit.
+- Browser-run namespace identifier: `net:[4026532747]`.
+- The original `require_linux_network_isolation()` all-IP-blocked seccomp check remains unchanged for other browser suites. Only this D6 test uses the new loopback-only network-namespace preflight.
+
+### Commands and results
+
+The guarded suite ran first and then invoked the existing browser test's `main()` inside the same isolation boundary:
+
+```text
+unshare --user --map-root-user --net --fork bash -c 'set -euo pipefail; ip link set lo up; cd Backend; exec .venv/bin/python tests/run_d6_2_3_1_offline_acceptance.py'
 ```
 
-That run must pass the same guarded suite and the browser E2E before G6 can be marked PASS. Stop after D6.2.3.1; do not start a new LIVE attempt or D6.3.
+- Guarded Python suite: **60/60 passed**, including `test_controlled_network_constructor_opens_no_request`.
+- Strict HTTP guard: active; **0** real `AsyncHTTPTransport` constructions, **0** unmocked transport requests, **13** fake transport constructions.
+- Chrome E2E: **PASS**, executed against the actual dashboard assets, loopback API, admission, worker, and synthetic fixture. One Fetch POST, one status poll, one Wikimedia `MockTransport` request, **34** scripted browser assertions with zero failures. Mobile viewport and post-reload no-duplicate-job checks also passed.
+- Browser checks covered duplicate clicks/idempotency, same-origin requests, credentials, HTML injection, synthetic provenance, unavailable Google/Bing/YouTube sources, insufficient evidence, null candidate scores, no search-volume claim, Fashion and Home & Living filters, source/date/scope evidence, themes, locales, and reload behavior.
+- Real provider requests: **0**. Provider DNS/Internet access was unavailable because the namespace had no external interfaces or routes. The fixture request to the Wikimedia hostname remained inside `MockTransport` and performed no DNS lookup.
+- Canonical LIVE ledger: not opened or modified. No credentials, real approvals, quota changes, or live launchers were used.
+- Ruff, Python syntax compilation, and `git diff --check` passed for the changed files.
+
+### Updated acceptance gates
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| G1 Git baseline | PASS | Follow-up began clean at `14729618849b0eff8cd1958bf41fd01da447e484`, matching `origin/main`; no history rewrite or push. |
+| G2 Strict offline isolation | PASS | Guarded suite and browser ran in the route-less namespace; zero real transports, unmocked sends, provider requests, or external egress. |
+| G3 Constructor contract | PASS | Fake constructor config, approval cases, cleanup, mode distinction, and production type/security checks remain verified. |
+| G4 Synthetic pipeline | PASS | 60 regression tests and actual synthetic API/worker/dashboard E2E passed. |
+| G5 Provenance and semantics | PASS | SYNTHETIC shown; scores null; insufficient evidence retained; no live, volume, or purchase-demand claim. |
+| G6 Dashboard browser E2E | PASS for owner-authorized Linux scope | Chrome 157; one Fetch, one Wikimedia fixture request, 34 browser assertions, zero failures; loopback-only egress verification passed. |
+| G7 Security and regression | PASS | Guard, namespace boundary, process tree, focused tests, Ruff, compilation, and diff checks passed. |
+| G8 Documentation and handoff | PASS | Historical G2 failure preserved; reports updated; local commit created; no push or deployment. |
+
+**[100%] D6.2.3.1 — LINUX OFFLINE ACCEPTED.** This acceptance uses the owner's explicit Linux scope update. Windows browser compatibility was not rerun or newly verified. D6.2.3 historical acceptance remains 7/8 with G2 FAIL; the D6.2.3.1 initial Linux run remains recorded as 7/8 with G6 not run. Wikimedia LIVE is still unverified and remains blocked by the consumed/expired one-request authorization and the outstanding processing, retention, policy, and launcher-diagnostic decisions. Stop after D6.2.3.1; do not begin a live attempt or D6.3.
+
+**Follow-up code commit:** `1e879b8` (`test(d6): run isolated Linux Chrome E2E`).
