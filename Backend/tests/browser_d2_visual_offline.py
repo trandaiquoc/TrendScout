@@ -35,7 +35,8 @@ window.fetch=(path,options={})=>{
   if(value==='/api/v1/algorithms/results')return Promise.resolve(new Response(JSON.stringify({summary:[],items:[]}),{status:200}));
   if(value==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({items:[
     {id:'fixture-parent',name:'Home & Living',parent_id:null,membership_count:2,direct_membership_count:0,subtree_unique_keyword_count:2,created_by:'AI',auto_match:true},
-    {id:'fixture-child',name:'Smart Home',parent_id:'fixture-parent',membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:true}
+    {id:'fixture-child',name:'Smart Home',parent_id:'fixture-parent',membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:true},
+    {id:'fixture-sibling',name:'Seasonal Ideas',parent_id:null,membership_count:0,direct_membership_count:0,subtree_unique_keyword_count:0,created_by:'USER',auto_match:false}
   ],suggestions:[],mode:'SUGGEST_ONLY',summary:{eligible_keywords:3,assigned_keywords:2,unclassified_keywords:1,excluded_keywords:0,classified_keywords:2,ambiguous_keywords:0,unknown_keywords:1,ineligible_topic_keywords:0,ai_assigned_keywords:2,manually_managed_keywords:0,ai_created_collections:2}}),{status:200}));
   if(value==='/api/v1/collections/inbox')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
   if(value==='/api/v1/research')return Promise.resolve(new Response(JSON.stringify({items:[],total:0}),{status:200}));
@@ -314,6 +315,23 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         capture(f"screen-{view}-{width}-{locale}-{theme}.webp", width, configure=False)
 
             set_viewport(1280)
+            set_preferences("light", "vi")
+            go("collections")
+            if not evaluate("window.waitFor(()=>Boolean(document.querySelector('[data-collection-id=fixture-parent] .workbench-context-button')))", await_promise=True):
+                raise RuntimeError("Collection management action did not render for the merge picker screenshot")
+            evaluate("document.querySelector('[data-collection-id=fixture-parent] .workbench-context-button').click()")
+            if not evaluate("window.waitFor(()=>Boolean(document.querySelector('#workbench-collection-dialog .collection-picker-trigger')))", await_promise=True):
+                raise RuntimeError("merge destination picker did not render with an eligible sibling Collection")
+            evaluate("document.querySelector('#workbench-collection-dialog .collection-picker-trigger').click()")
+            if not evaluate("window.waitFor(()=>!document.querySelector('.collection-picker-list').hidden&&document.querySelectorAll('.collection-picker-option').length===1)", await_promise=True):
+                raise RuntimeError("merge destination list did not open with the single eligible sibling")
+            capture("collection-merge-picker-1280-vi-light.webp", 1280, configure=False)
+            evaluate("document.querySelector('.collection-picker-option').click();document.querySelector('.collection-manage-section:not(.collection-manage-delete) .button-primary').click()")
+            if not evaluate("window.waitFor(()=>Boolean(document.querySelector('#workbench-collection-dialog h2'))&&!document.querySelector('#workbench-collection-dialog .collection-manage-panel'))", await_promise=True):
+                raise RuntimeError("selected destination did not reach the merge review step")
+            capture("collection-merge-review-1280-vi-light.webp", 1280, configure=False)
+
+            set_viewport(1280)
             go("runs")
             evaluate(
                 "document.querySelector('#run-id').value='"
@@ -351,7 +369,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         console_errors.append(message or "console.error")
             if console_errors:
                 raise RuntimeError("Browser console errors: " + " | ".join(console_errors))
-            print("Visual evidence: Overview and all eight secondary screens captured at six widths in VI/EN light/dark.")
+            print("Visual evidence: Overview and all eight screens captured at six widths in VI/EN light/dark, plus merge picker/review dialogs.")
         finally:
             browser.close()
 
