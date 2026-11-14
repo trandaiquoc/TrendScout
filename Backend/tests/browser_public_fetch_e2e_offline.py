@@ -31,7 +31,7 @@ window.fetch=(path,options={{}})=>{{
   if(value==='/api/health') body={{status:'ok'}};
   else if(value==='/api/v1/capabilities') body={{contract_version:'1.0',authentication_required:false,public_fetch_enabled:true,fetch_enabled:true,data_mode:'SYNTHETIC',fetch_block_reason:null,sources:[
     {{source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',live_verification_status:'UNVERIFIED',enabled_for_current_operation:true}},
-    {{source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}},
+    {{source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false,documentation_url:'javascript:alert(1)'}},
     {{source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}},
     {{source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',live_verification_status:'NOT_VERIFIED',supported_data_modes:['SYNTHETIC'],enabled_for_current_operation:false}}
   ]}};
@@ -66,6 +66,7 @@ check(!document.querySelector('#demo-discovery-list img'),'untrusted keyword is 
 check(document.querySelector('#demo-discovery-list').textContent.includes('CACHED'),'cache provenance rendered');
 const youtube=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent==='youtube_video_search');
 check(Boolean(youtube&&youtube.textContent.includes('Đã xác minh adapter ngoại tuyến')&&youtube.textContent.includes('Không bật cho thao tác hiện tại')),'offline-implemented source remains live-disabled');
+check(!youtube?.querySelector('a[href^="javascript:"]'),'untrusted source documentation links cannot execute script');
 check(!Object.keys(localStorage).some(key=>/token|secret|credential|password/i.test(key)),'no credentials stored');
 document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>""".replace("RUN_ID", json.dumps(RUN_ID))

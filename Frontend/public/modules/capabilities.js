@@ -89,7 +89,11 @@ export function renderSourceCapabilities(capabilities, translate) {
       }
       const details=document.createElement('details'); details.className='source-capability-details';
       const detailSummary=document.createElement('summary'); detailSummary.textContent=translate('phoenix.source-details'); details.append(detailSummary,list);
-      const link=document.createElement('a'); link.textContent=translate('sources.official-docs'); link.href=descriptor.documentation_url || '#'; link.target='_blank'; link.rel='noopener noreferrer'; details.append(link); card.append(details);
+      try {
+        const url=new URL(descriptor.documentation_url);
+        if(url.protocol==='https:'&&!url.username&&!url.password){const link=document.createElement('a');link.textContent=translate('sources.official-docs');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';details.append(link);}
+      } catch { /* An absent or invalid provider link is not shown. */ }
+      card.append(details);
       const enabled=descriptor.enabled_for_current_operation===true; card.classList.toggle('source-card--active',enabled);
       badge.textContent=translate(enabled?'source.enabled':'source.disabled'); badge.classList.toggle('pill--green',enabled);
       grid.append(card);
