@@ -194,6 +194,8 @@ def main():
               check(document.querySelectorAll('#source-registry-list .source-card').length===4,'Source Center lists the four configured source descriptors');
               check([...document.querySelectorAll('#source-registry-list .source-card')].every(card=>card.textContent.includes('Tắt')||card.textContent.includes('Đã tắt')),'Source Center reflects the backend disabled fetch policy');
               check(await until(()=>document.querySelectorAll('#source-library-rows tr').length>0),'Source Center loads the research inventory from the API');
+              const youtubeResearch=document.querySelector('#source-library-rows [data-source-id="youtube"]');
+              check(Boolean(youtubeResearch?.textContent.includes('Đã xác minh adapter ngoại tuyến')&&youtubeResearch.textContent.includes('Không bật cho thao tác hiện tại')),'research inventory maps YouTube to its disabled offline-tested runtime adapter');
               check(window.__apiCalls.some(x=>x.url==='/api/v1/capabilities')&&window.__apiCalls.some(x=>x.url==='/api/v1/sources/library'),'Source Center uses real capability and catalog endpoints');
               await go('overview');
               check(await until(()=>document.querySelector('#metric-records-stored').textContent==='3'),'Dashboard total comes from saved SQLite keywords');

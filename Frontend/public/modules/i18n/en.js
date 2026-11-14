@@ -1132,6 +1132,8 @@ export const en = {
   'phoenix.research-subject-group': 'Topic and keyword',
   'phoenix.research-hypothesis-group': 'Hypothesis and scope',
   'phoenix.research-evidence-group': 'Evidence and assessment',
+  'phoenix.source-not-in-runtime': 'Not listed among sources in this runtime',
+  'phoenix.source-runtime-unknown': 'Current runtime status is unknown',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

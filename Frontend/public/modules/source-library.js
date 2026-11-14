@@ -13,6 +13,14 @@ const element = (tag, text = null, className = '') => {
 const getErrorMessage = (error, fallback) => error && typeof error.message === 'string' ? error.message : t(fallback);
 let catalog = [];
 let loadSequence = 0;
+let runtimeSources = null;
+// The research inventory and runtime registry use different, stable IDs for these four sources.
+const runtimeIdByResearchId = {
+  wikimedia_pageviews: 'wikimedia_pageviews_top_per_country',
+  youtube: 'youtube_video_search',
+  google_serp: 'google_web_serp',
+  bing_serp: 'bing_web_serp',
+};
 
 async function loadSourceLibrary() {
   const body=$('#source-library-rows'); if (!body) return;
@@ -46,8 +54,12 @@ function renderSourceLibrary() {
     const candidate=element('td');candidate.append(element('strong',item.display_name || t('sources.candidate-unnamed')));row.append(candidate);
     const group=item.category?.match(/^([A-E])\./)?.[1];
     row.append(element('td',group?t(`sources.group.${group}`):item.category));
-    row.append(element('td',t('sources.candidate-locked')));
-    const availability=element('td');availability.append(element('span',t('sources.candidate-not-integrated')));
+    const runtime=runtimeSources?.get(runtimeIdByResearchId[item.source_id] || item.source_id);
+    const runtimeStatus=runtime ? `${t(runtime.enabled_for_current_operation === true ? 'source.enabled' : 'source.disabled')} · ${runtime.display_name || runtime.source_id}` : t(runtimeSources ? 'sources.candidate-locked' : 'phoenix.source-runtime-unknown');
+    row.append(element('td',runtimeStatus));
+    const adapterKey=runtime?.adapter_status ? `source.status.${String(runtime.adapter_status).toLowerCase()}` : '';
+    const adapterText=adapterKey?t(adapterKey):'';
+    const availability=element('td');availability.append(element('span',runtime ? (adapterText && adapterText!==adapterKey ? adapterText : t('source.status-unknown')) : t(runtimeSources ? 'phoenix.source-not-in-runtime' : 'phoenix.source-runtime-unknown')));
     const reference=typeof item.source_reference==='string'?item.source_reference.trim().replace(/^[A-Z];\s*/,''):'';
     const noteKey=typeof item.revalidation_note_key==='string'?item.revalidation_note_key:'';
     const translatedNote=noteKey?t(noteKey):'';
@@ -99,5 +111,8 @@ export function initializeSourceLibrary() {
     renderSourceLibrary();
   });
   $('#source-library-category').addEventListener('change', renderSourceLibrary);
-  return { load: loadSourceLibrary };
+  return { load: loadSourceLibrary, setCapabilities(capabilities) {
+    runtimeSources=Array.isArray(capabilities?.sources)?new Map(capabilities.sources.map(source=>[source.source_id,source])):null;
+    if(catalog.length)renderSourceLibrary();
+  } };
 }

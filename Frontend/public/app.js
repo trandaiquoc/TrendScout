@@ -1128,12 +1128,14 @@ async function loadPublicCapabilities() {
       scheduleCapabilityRefresh(60000);
     }
     renderSourceCapabilities(capabilities, t);
+    sourceLibrary.setCapabilities(capabilities);
     renderFetchPresentation();
   } catch {
     state.capabilities = null;
     state.fetchReady = false;
     state.fetchBlockReason = null;
     renderSourceCapabilities(null, t);
+    sourceLibrary.setCapabilities(null);
     renderFetchPresentation();
     $('#fetch-readiness').textContent = t('fetch.capability-unavailable');
   }

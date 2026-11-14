@@ -1132,6 +1132,8 @@ export const vi = {
   'phoenix.research-subject-group': 'Chủ đề và từ khóa',
   'phoenix.research-hypothesis-group': 'Giả thuyết và phạm vi',
   'phoenix.research-evidence-group': 'Bằng chứng và nhận định',
+  'phoenix.source-not-in-runtime': 'Không có trong danh sách nguồn của phiên hiện tại',
+  'phoenix.source-runtime-unknown': 'Chưa xác định trạng thái phiên hiện tại',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',
