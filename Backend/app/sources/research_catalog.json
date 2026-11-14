@@ -509,7 +509,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Fandom](https://www.fandom.com/); license/coverage cần xác minh."
+      "source_reference": "U; [Fandom](https://www.fandom.com/); content rights and scope vary by community.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Fandom's official terms distinguish user submissions from company-owned original content. The reviewed official materials did not establish a Fandom-wide public trend API or one license for content across all communities; content rights, API access, and coverage must be verified per use.",
+      "revalidation_note_key": "sources.review.fandom",
+      "revalidation_links": [
+        {
+          "label": "Fandom Terms of Use and content ownership",
+          "url": "https://www.fandom.com/terms-of-use"
+        },
+        {
+          "label": "MediaWiki API usage policies",
+          "url": "https://www.mediawiki.org/wiki/API:REST_API/Policies"
+        }
+      ]
     },
     {
       "source_id": "twitch",
@@ -518,7 +531,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://dev.twitch.tv/docs/api/); auth và terms theo endpoint."
+      "source_reference": "G; [API](https://dev.twitch.tv/docs/api/); OAuth and endpoint-specific permissions apply.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Twitch's API supports channel and category searches using an OAuth app or user token; app requests use a rate-limited token bucket. Search results describe Twitch channels/categories, not overall US demand, and TrendScout app registration/access remains unverified.",
+      "revalidation_note_key": "sources.review.twitch",
+      "revalidation_links": [
+        {
+          "label": "Twitch channel search endpoint",
+          "url": "https://dev.twitch.tv/docs/api/reference/search/"
+        },
+        {
+          "label": "Twitch authentication and API rate limits",
+          "url": "https://dev.twitch.tv/docs/api/guide/"
+        }
+      ]
     },
     {
       "source_id": "kick",
@@ -527,7 +553,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Kick](https://kick.com/); API commercial discovery chưa xác minh."
+      "source_reference": "G; [Public API](https://docs.kick.com/); OAuth 2.1; broad trend measurement not verified.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Kick now documents a public API with OAuth 2.1 and endpoints including categories and channels. The documented endpoint set does not establish a broad historical keyword-trend measure; TrendScout use, quota, and commercial approval remain unverified.",
+      "revalidation_note_key": "sources.review.kick",
+      "revalidation_links": [
+        {
+          "label": "Kick Developer Public API reference",
+          "url": "https://api.kick.com/swagger/index.html"
+        },
+        {
+          "label": "Kick developer documentation",
+          "url": "https://docs.kick.com/"
+        }
+      ]
     },
     {
       "source_id": "rumble",
@@ -536,7 +575,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Rumble](https://rumble.com/); access chưa xác minh."
+      "source_reference": "U; [Advertising API](https://ads.rumble.com/docs/api/); public-content API not verified.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The official Rumble Advertising Center API covers an account's advertising data and requires a bearer API key; its documentation does not establish a public-video discovery or general keyword-trend API. No suitable public content API or TrendScout permission is verified.",
+      "revalidation_note_key": "sources.review.rumble",
+      "revalidation_links": [
+        {
+          "label": "Rumble Advertising Center API scope and access",
+          "url": "https://ads.rumble.com/docs/api/"
+        }
+      ]
     },
     {
       "source_id": "vimeo",
@@ -545,7 +593,24 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://developer.vimeo.com/api/guides/start); quyền từng endpoint cần duyệt."
+      "source_reference": "G; [API](https://developer.vimeo.com/api/guides/start); registered app/token; quota varies by account.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Vimeo documents video search, but API access requires a registered app and access token; public-data access still uses an authenticated token. Per-user rate limits vary by Vimeo membership (25 to 2,500 requests per minute in the current table). Search results are Vimeo-specific, not population-representative US demand; TrendScout access is unverified.",
+      "revalidation_note_key": "sources.review.vimeo",
+      "revalidation_links": [
+        {
+          "label": "Vimeo video search reference",
+          "url": "https://developer.vimeo.com/api/reference/videos"
+        },
+        {
+          "label": "Vimeo API authentication",
+          "url": "https://developer.vimeo.com/api/authentication"
+        },
+        {
+          "label": "Vimeo API rate limits",
+          "url": "https://developer.vimeo.com/guidelines/rate-limiting"
+        }
+      ]
     },
     {
       "source_id": "dailymotion",
