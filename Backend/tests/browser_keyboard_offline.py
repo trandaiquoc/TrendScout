@@ -256,23 +256,21 @@ def main():
             if not evaluate("window.testRequests.some(request=>request.path==='/api/v1/collections/collection-a'&&request.method==='DELETE')"):
                 raise RuntimeError("keyboard-confirmed Collection deletion was not sent to the Collection API")
 
-            evaluate("document.querySelector('#detail-dialog').showModal()")
+            evaluate("document.querySelector('#collection-create').focus();document.querySelector('#detail-dialog').showModal()")
             if not evaluate("document.querySelector('#detail-dialog').open"):
                 raise RuntimeError("detail dialog did not open")
-            for event in ("keyDown", "keyUp"):
-                call(
-                    "Input.dispatchKeyEvent",
-                    {
-                        "type": event,
-                        "key": "Escape",
-                        "code": "Escape",
-                        "windowsVirtualKeyCode": 27,
-                        "nativeVirtualKeyCode": 27,
-                    },
-                    session,
-                )
-            if evaluate("document.querySelector('#detail-dialog').open"):
-                raise RuntimeError("Escape did not close the dialog")
+            if not evaluate("document.querySelector('#detail-dialog').getAttribute('aria-labelledby')==='detail-title'&&document.querySelector('#detail-dialog [data-close]').getAttribute('aria-label')"):
+                raise RuntimeError("keyword detail dialog does not expose an accessible name and close action")
+            evaluate("document.querySelector('#detail-dialog [data-close]').focus()")
+            press("Tab", "Tab", 9)
+            if not evaluate("document.querySelector('#detail-dialog').contains(document.activeElement)"):
+                raise RuntimeError("Tab escaped the keyword detail dialog")
+            press("Tab", "Tab", 9, modifiers=8)
+            if not evaluate("document.querySelector('#detail-dialog').contains(document.activeElement)"):
+                raise RuntimeError("Shift+Tab escaped the keyword detail dialog")
+            press("Escape", "Escape", 27)
+            if evaluate("document.querySelector('#detail-dialog').open || document.activeElement.id!=='collection-create'"):
+                raise RuntimeError("Escape did not close keyword detail and return focus")
 
             evaluate("document.querySelector('#workbench-rows button').click()")
             for _ in range(60):
