@@ -314,3 +314,4 @@ body { font-size:14px; letter-spacing:-.01em; }
 @media (max-width:600px) { .research-section { padding:12px; } }
 .source-registry-state { margin:0 0 12px; padding:15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--muted); font-size:13px; }
 #source-capabilities-retry { margin:0 0 15px; }
+.workbench-detail h2:focus-visible { outline:2px solid var(--focus); outline-offset:4px; border-radius:3px; }
