@@ -28,6 +28,8 @@ async function loadSourceLibrary() {
   try {
     const data=await getJson('/api/v1/sources/library',{locale:getLocale()});
     if(sequence!==loadSequence)return;
+    $('#source-library-retry').hidden=true;
+    $('#source-library-search').disabled=false;$('#source-library-category').disabled=false;
     catalog=data.items || [];
     const category=$('#source-library-category');
     const previous=category.value;
@@ -36,7 +38,7 @@ async function loadSourceLibrary() {
     category.value=previous;
     $('#source-library-audit').textContent=t('sources.library-audit',{date:data.audit_date || '—',count:number(catalog.length)});
     renderSourceLibrary();
-  } catch (error) { if(sequence!==loadSequence)return;body.replaceChildren(); const row=element('tr'); row.append(element('td',getErrorMessage(error,'sources.library-error'))); body.append(row); }
+  } catch (error) { if(sequence!==loadSequence)return;catalog=[];$('#source-library-count').textContent='';$('#source-library-audit').textContent=t('sources.library-error');$('#source-library-retry').hidden=false;$('#source-library-search').disabled=true;$('#source-library-category').disabled=true;body.replaceChildren(); const row=element('tr'); row.append(element('td',getErrorMessage(error,'sources.library-error'))); body.append(row); }
 }
 
 function renderSourceLibrary() {
@@ -111,6 +113,7 @@ export function initializeSourceLibrary() {
     renderSourceLibrary();
   });
   $('#source-library-category').addEventListener('change', renderSourceLibrary);
+  $('#source-library-retry').addEventListener('click', loadSourceLibrary);
   return { load: loadSourceLibrary, setCapabilities(capabilities) {
     runtimeSources=Array.isArray(capabilities?.sources)?new Map(capabilities.sources.map(source=>[source.source_id,source])):null;
     if(catalog.length)renderSourceLibrary();
