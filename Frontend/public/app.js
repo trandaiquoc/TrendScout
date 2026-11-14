@@ -2115,7 +2115,9 @@ function renderAlgorithmCatalog() {
     const heading = element('div', null, 'panel-heading');
     const title = element('div');
     title.append(element('p', translatedAlgorithmCode('family', item.family), 'section-kicker'));
-    title.append(element('h2', item.name));
+    const nameKey = `algorithms.name.${item.algorithm_id}`;
+    const translatedName = t(nameKey);
+    title.append(element('h2', translatedName === nameKey ? item.name : translatedName));
     heading.append(title);
     const compatible = item.sources.filter((entry) => entry.status !== 'INCOMPATIBLE');
     heading.append(element('span', translatedAlgorithmCode('status', compatible.length ? compatible[0].status : 'INCOMPATIBLE'), 'pill pill--gray'));
@@ -2133,7 +2135,8 @@ function renderAlgorithmCatalog() {
       examples.forEach((entry) => {
         let result = {};
         try { result = JSON.parse(entry.result_json || '{}'); } catch { /* malformed old rows remain display-safe */ }
-        const flags = Array.isArray(result.quality_flags) ? result.quality_flags.join(', ') : '';
+        const flags = Array.isArray(result.quality_flags)
+          ? result.quality_flags.map((flag) => translatedAlgorithmCode('quality', flag)).join(', ') : '';
       const message = [entry.keyword, translatedAlgorithmCode('result', entry.status),
           entry.value === null ? translatedAlgorithmCode('reason', entry.reason_code) : `${entry.value} ${entry.unit}`,
           flags].filter(Boolean).join(' · ');
@@ -2219,7 +2222,7 @@ function renderAlgorithmSignalStatus(algorithms) {
   const skipped = [...summaries.values()].reduce((total, item) => total + (item.skipped || 0), 0);
   const insufficient = element('article', null, 'algorithm-signal-card algorithm-signal-card--wide');
   insufficient.append(element('h2', t('algorithms.signal.insufficient')));
-  insufficient.append(element('strong', 'INSUFFICIENT_DATA', 'algorithm-signal-status algorithm-signal-status--insufficient_data'));
+  insufficient.append(element('strong', translatedAlgorithmCode('evaluation', 'INSUFFICIENT_DATA'), 'algorithm-signal-status algorithm-signal-status--insufficient_data'));
   insufficient.append(element('p', t('algorithms.signal-counts.insufficient', { skipped })));
   root.replaceChildren(...cards, insufficient);
 }

@@ -319,6 +319,21 @@ def main():
             if not evaluate("!document.querySelector('#source-library-disclosure').open"):
                 raise RuntimeError("Space did not close the Source Center research disclosure")
 
+            evaluate("location.hash='#algorithms';window.dispatchEvent(new Event('hashchange'))")
+            for _ in range(60):
+                if evaluate("Boolean(document.querySelector('#algorithm-catalog details summary'))"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("algorithm registry disclosure did not render")
+            evaluate("document.querySelector('#algorithm-catalog details summary').focus()")
+            press(" ", "Space", 32, " ")
+            if not evaluate("document.querySelector('#algorithm-catalog details').open"):
+                raise RuntimeError("Space did not open the algorithm result disclosure")
+            press(" ", "Space", 32, " ")
+            if not evaluate("!document.querySelector('#algorithm-catalog details').open"):
+                raise RuntimeError("Space did not close the algorithm result disclosure")
+
             evaluate("location.hash='#overview';document.querySelector('[data-dashboard-tab=overview]').focus()")
             call("Input.dispatchKeyEvent", {"type":"keyDown","key":"ArrowRight","code":"ArrowRight","windowsVirtualKeyCode":39,"nativeVirtualKeyCode":39}, session)
             if not evaluate("document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true'"):

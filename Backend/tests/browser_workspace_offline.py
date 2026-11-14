@@ -76,6 +76,22 @@ window.fetch=(path,opts={})=>{
     classification_evidence:[{category:'fashion',matched_text:'<script>',rule_id:'fixture'}],
     quality_flags:['<svg onload=window.pwned=true>']
   }),{status:200}));
+  if(p==='/api/v1/algorithms')return Promise.resolve(new Response(JSON.stringify({algorithms:[{
+    algorithm_id:'ewma',name:'Daily EWMA',family:'growth',description:'Describes recent changes.',
+    input_metric:'views_ceil',input_unit:'approx_pageviews_upper_bound',metric:'ewma',unit:'approx_pageviews_upper_bound',
+    minimum_samples:2,supported_windows:[2,3,7],missing_data:'Require observations',runtime_limit:'O(n)',
+    interpretation:'Recent observations receive more weight.',limitations:['Descriptive only.'],sources:[{
+      source_id:'wikimedia_pageviews_top_per_country',display_name:'Wikimedia Pageviews',icon:'W',
+      status:'SUPPORTED_AND_AVAILABLE',runtime_availability:'LIVE_CAPABLE',
+      local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY'
+    }]
+  }]}),{status:200}));
+  if(p==='/api/v1/algorithms/results')return Promise.resolve(new Response(JSON.stringify({summary:[{
+    algorithm_id:'ewma',completed:0,skipped:1,failed:0
+  }],items:[{
+    algorithm_id:'ewma',keyword:'YouTube',status:'SKIPPED',reason_code:'INSUFFICIENT_SAMPLES',
+    value:null,unit:'approx_pageviews_upper_bound',result_json:JSON.stringify({quality_flags:['CENSORED_TOP_LIST']})
+  }]}),{status:200}));
   if(p==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({
     mode:'AUTO_CREATE',items:[
       {id:'collection-a',name:'Fixture Collection A',description:'Parent Collection',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'USER',auto_match:false},
@@ -178,12 +194,22 @@ CHECK = r"""<script>
       window.dispatchEvent(new Event('hashchange'));
       await wait(40);
     };
+    const {applyLocale}=await import(I18N_MODULE_URI);
     for(const link of document.querySelectorAll('[data-nav]')){
       await go(link.dataset.nav);
       check(!document.querySelector('[data-view=\"'+link.dataset.nav+'\"]')?.hidden,'view '+link.dataset.nav);
       check(link.getAttribute('aria-current')==='page','aria current '+link.dataset.nav);
       check(document.documentElement.scrollWidth<=innerWidth+1,'horizontal overflow '+link.dataset.nav);
     }
+    await go('algorithms');await wait(80);
+    const algorithmView=document.querySelector('[data-view=algorithms]');
+    check(algorithmView.textContent.includes('Xu hướng trung bình có trọng số gần đây'),'algorithm registry uses the translated method name');
+    check(algorithmView.textContent.includes('Chưa đủ dữ liệu'),'aggregate sufficiency status is localized');
+    check(algorithmView.textContent.includes('Danh sách nguồn chỉ hiển thị một phần'),'algorithm result quality note is localized');
+    check(!/INSUFFICIENT_DATA|CENSORED_TOP_LIST|Daily EWMA/.test(algorithmView.textContent),'algorithm view does not leak internal codes or untranslated names');
+    applyLocale('en');await wait(80);
+    check(algorithmView.textContent.includes('Recent-weighted trend average')&&algorithmView.textContent.includes('Not enough data')&&algorithmView.textContent.includes('The source list is only a partial listing'),'algorithm labels relocalize to English');
+    applyLocale('vi');await wait(80);
     if(innerWidth<=900){
       const menuButton=document.querySelector('#menu-toggle');
       menuButton.click();
@@ -200,7 +226,6 @@ CHECK = r"""<script>
     check(Boolean(sourceLibrary?.open&&document.querySelectorAll('#source-library-rows tr').length===1&&document.querySelector('#source-library-rows').textContent.includes('YouTube Search')),'searching the research inventory opens it and shows the matching source');
     sourceSearch.value='';sourceSearch.dispatchEvent(new Event('input',{bubbles:true}));
     check(document.querySelectorAll('#source-library-rows tr').length===3,'clearing research search restores all inventory candidates');
-    const {applyLocale}=await import(I18N_MODULE_URI);
     await go('collections');await wait(80);
     if(innerWidth<=900){
       const filterToggle=document.querySelector('#workbench-filter-toggle');
