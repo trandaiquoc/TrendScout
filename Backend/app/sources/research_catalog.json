@@ -1299,7 +1299,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Goodreads](https://www.goodreads.com/); API hiện phù hợp chưa xác minh."
+      "source_reference": "G; [Goodreads Developers group](https://www.goodreads.com/group/show/8095-goodreads-developers) says no new public API keys have been issued since 2020; current access remains unverified.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Goodreads' official Developers group still states that it stopped issuing new public API developer keys on December 8, 2020 and planned to retire the existing tools. It does not establish a currently supported public discovery API or new access for TrendScout. Do not use legacy keys, scraping, or unofficial endpoints as substitutes; ratings and reviews would also measure Goodreads users, not all readers.",
+      "revalidation_note_key": "sources.review.goodreads",
+      "revalidation_links": [
+        {"label": "Goodreads Developers group notice", "url": "https://www.goodreads.com/group/show/8095-goodreads-developers"}
+      ]
     },
     {
       "source_id": "letterboxd",
@@ -1308,7 +1314,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Letterboxd](https://letterboxd.com/); quyền commercial chưa xác minh."
+      "source_reference": "G; [Letterboxd API access](https://letterboxd.com/api-beta/access/) currently excludes data-analysis and visualization projects.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Letterboxd API access is by request, and its current access page says it is not granting access for data-analysis, visualization, or recommendation projects. Its terms also prohibit exporting content other than a user's own posts and indexing a significant portion of the service without express written authorization. This makes the reviewed API pathway unsuitable for TrendScout trend analytics unless Letterboxd changes its policy or grants specific written permission.",
+      "revalidation_note_key": "sources.review.letterboxd",
+      "revalidation_links": [
+        {"label": "Letterboxd API access", "url": "https://letterboxd.com/api-beta/access/"},
+        {"label": "Letterboxd Terms of Use", "url": "https://letterboxd.com/legal/terms-of-use/"}
+      ]
     },
     {
       "source_id": "soundcloud",
@@ -1317,7 +1330,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://developers.soundcloud.com/docs/api/guide); access và rights cần review."
+      "source_reference": "G; [SoundCloud API guide](https://developers.soundcloud.com/docs/api/guide), [rate limits](https://developers.soundcloud.com/docs/api/rate-limits), and [terms](https://developers.soundcloud.com/docs/api/terms-of-use).",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "SoundCloud's OAuth 2.1 API supports search for tracks, users, and playlists; results and rate limits are endpoint/app-scoped and limits can change. This is SoundCloud-specific content activity, not overall music demand. API terms require privacy, minimization, and retention controls for personal data, including deletion within seven days after account disconnection; TrendScout access and rights for the intended analytics remain unverified.",
+      "revalidation_note_key": "sources.review.soundcloud",
+      "revalidation_links": [
+        {"label": "SoundCloud API guide and search", "url": "https://developers.soundcloud.com/docs/api/guide"},
+        {"label": "SoundCloud API rate limits", "url": "https://developers.soundcloud.com/docs/api/rate-limits"},
+        {"label": "SoundCloud API Terms of Use", "url": "https://developers.soundcloud.com/docs/api/terms-of-use"}
+      ]
     },
     {
       "source_id": "spotify",
@@ -1326,7 +1347,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Web API](https://developer.spotify.com/documentation/web-api); chart/data use và policy cần review riêng."
+      "source_reference": "G; [Spotify Search API](https://developer.spotify.com/documentation/web-api/reference/search), [Developer Policy](https://developer.spotify.com/policy), and [quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes).",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Spotify's Web API can search catalog metadata, but its Developer Policy expressly prohibits analyzing Spotify Content or the service to create listenership metrics, benchmarks, usage statistics, or user profiles; it also prohibits AI/ML training on Spotify content. Development apps are restricted to five allowlisted users, and wider access requires Spotify review under current eligibility criteria. TrendScout's proposed trend-analysis use is not permitted by the reviewed policy.",
+      "revalidation_note_key": "sources.review.spotify",
+      "revalidation_links": [
+        {"label": "Spotify Search API", "url": "https://developer.spotify.com/documentation/web-api/reference/search"},
+        {"label": "Spotify Developer Policy", "url": "https://developer.spotify.com/policy"},
+        {"label": "Spotify quota modes", "url": "https://developer.spotify.com/documentation/web-api/concepts/quota-modes"}
+      ]
     },
     {
       "source_id": "apple_podcasts",
@@ -1335,7 +1364,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [Apple Podcasts](https://podcasters.apple.com/); quyền chart/feed theo nguồn cần kiểm tra."
+      "source_reference": "G; [Apple Podcasts Catalog API feed eligibility](https://podcasters.apple.com/support/897-submit-a-show) is opt-in per publisher; Connect analytics are show-owner scoped.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Apple makes a podcast's RSS feed available in the Podcasts Catalog API only when its publisher selects public distribution. Apple Podcasts Connect analytics are for creators managing or claiming their shows, not a platform-wide listening-trend API. Catalog metadata and episode feeds therefore cover only included shows and do not establish audience demand; each publisher's feed terms and content rights still apply.",
+      "revalidation_note_key": "sources.review.apple_podcasts",
+      "revalidation_links": [
+        {"label": "Apple Podcasts show submission and public Catalog API feeds", "url": "https://podcasters.apple.com/support/897-submit-a-show"},
+        {"label": "Apple Podcasts Connect analytics", "url": "https://podcasters.apple.com/support/5392-listener-analytics"},
+        {"label": "iTunes Search API documentation", "url": "https://developer.apple.com/library/archive/documentation/AudioVideo/Conceptual/iTuneSearchAPI/"}
+      ]
     },
     {
       "source_id": "podcast_index",
