@@ -66,14 +66,16 @@ class D2DashboardContractTests(unittest.TestCase):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         app = (PUBLIC / "app.js").read_text(encoding="utf-8")
         template_keys = set(re.findall(r'data-i18n(?:-placeholder|-aria)?="([^"]+)"', html))
-        dynamic_keys = set(
-            re.findall(
+        dynamic_keys = {
+            key
+            for key in re.findall(
                 r"['\"]((?:a11y|algorithms|common|connection|detail|error|fetch|filter|keywords|"
                 r"locale|nav|overview|quality|run|runs|settings|source|sources|status|table|"
                 r"theme|time|sort|refresh|research|usage|dashboard|analysis|dataset|metric)\.[^'\"]+)['\"]",
                 app,
             )
-        )
+            if not key.endswith(".")
+        }
         catalog_keysets = []
         required_keys = template_keys | dynamic_keys
         self.assertTrue(required_keys)
