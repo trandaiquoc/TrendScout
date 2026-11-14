@@ -202,6 +202,8 @@ async function loadAnalytics() {
     if (top) top.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     const chart = $('#pageviews-chart');
     if (chart) chart.replaceChildren();
+    const scope = $('#overview-chart-scope');
+    if (scope) scope.textContent = t('common.unavailable');
     const empty = $('#pageviews-empty');
     if (empty) { empty.hidden = false; empty.textContent = getErrorMessage(error, 'analysis.error'); }
   }
@@ -464,7 +466,9 @@ function renderCoverageHeatmap(rows) {
 function renderObservedVolumeChart(rows, context) {
   const chart = $('#pageviews-chart');
   const empty = $('#pageviews-empty');
+  const scope = $('#overview-chart-scope');
   if (!chart || !empty) return;
+  if(scope)scope.textContent=context.source ? [localizedSourceName(context.source),...(Array.isArray(context.scope)?context.scope.slice(1,4):[])].filter(Boolean).join(' · ') : t('common.unavailable');
   chart.replaceChildren();
   empty.textContent = t('chart.empty');
   const comparable = (Array.isArray(rows) ? rows : []).filter((row) => Number.isFinite(row.observed_value) && row.observed_value >= 0).slice(0, 5);
@@ -1088,6 +1092,7 @@ function updatePublicDiscoverySummary(discovery, sources) {
   const chartRows = [...unique.values()].sort((a, b) => (a.provider_rank ?? 9999) - (b.provider_rank ?? 9999)).slice(0, 5);
   const chart = $('#pageviews-chart');
   chart.replaceChildren();
+  $('#overview-chart-scope').textContent = `${t('source.name.wikimedia')} · ${t('chart.scope')}`;
   $('#pageviews-empty').hidden = chartRows.length > 0;
   if (chartRows.length) {
     const max = Math.max(...chartRows.map((item) => item.approximate_views), 1);

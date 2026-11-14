@@ -1132,6 +1132,8 @@ export const vi = {
   'phoenix.research-subject-group': 'Chủ đề và từ khóa',
   'phoenix.research-hypothesis-group': 'Giả thuyết và phạm vi',
   'phoenix.research-evidence-group': 'Bằng chứng và nhận định',
+  'phoenix.observed-chart-title': 'Các quan sát nổi bật',
+  'phoenix.observed-chart-help': 'Giá trị và thứ hạng trong nhóm quan sát có thể so sánh; xem đơn vị và phạm vi trong bảng bằng chứng. Đây không phải đường xu hướng.',
   'phoenix.source-not-in-runtime': 'Không có trong danh sách nguồn của phiên hiện tại',
   'phoenix.source-runtime-unknown': 'Chưa xác định trạng thái phiên hiện tại',
   'phoenix.source-load-error': 'Không tải được trạng thái nguồn. Hãy kiểm tra kết nối rồi thử lại.',

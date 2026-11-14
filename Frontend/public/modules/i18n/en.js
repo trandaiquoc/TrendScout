@@ -1132,6 +1132,8 @@ export const en = {
   'phoenix.research-subject-group': 'Topic and keyword',
   'phoenix.research-hypothesis-group': 'Hypothesis and scope',
   'phoenix.research-evidence-group': 'Evidence and assessment',
+  'phoenix.observed-chart-title': 'Leading observations',
+  'phoenix.observed-chart-help': 'Values and ranks within the comparable observation group; see units and scope in the evidence table. This is not a trend line.',
   'phoenix.source-not-in-runtime': 'Not listed among sources in this runtime',
   'phoenix.source-runtime-unknown': 'Current runtime status is unknown',
   'phoenix.source-load-error': 'Source status could not be loaded. Check the connection and try again.',
