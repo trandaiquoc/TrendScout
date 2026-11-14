@@ -256,6 +256,7 @@ CHECK = r"""<script>
     mergeSection?.querySelector('.button-primary')?.click();
     check(document.querySelector('#workbench-collection-dialog')?.textContent.includes('Fixture Collection B'),'selected merge destination reaches the review step');
     check(document.querySelector('#workbench-collection-dialog').getAttribute('aria-labelledby')===document.querySelector('#workbench-collection-dialog [id$=title]')?.id,'merge review dialog exposes its title to assistive technology');
+    check(document.activeElement===document.querySelector('#workbench-collection-dialog .collection-actions button'),'merge review places initial focus on the safe Cancel action');
     document.querySelector('#workbench-collection-dialog button')?.click();
     applyLocale('en');document.documentElement.dataset.theme='dark';await wait(60);
     document.querySelector('.workbench-context-button')?.click();
