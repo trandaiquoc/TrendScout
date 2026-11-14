@@ -235,7 +235,14 @@ def main():
               const createdCollection=(await (await fetch('/api/v1/collections')).json()).items.find(item=>item.name==='Browser workflow collection');
               check(Boolean(createdCollection?.id),'Collection create returns a saved ID from SQLite');
               check(await until(()=>createdCollection&&[...document.querySelector('#workbench-target').options].some(option=>option.value===createdCollection.id)),'new Collection becomes available as a bulk-assignment target');
-              const knownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Browser workflow topic'));
+              let knownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Browser workflow topic'));
+              knownRow.querySelector('input[type="checkbox"]').click();
+              const selectionButtons=[...document.querySelectorAll('#workbench-bulk .text-button')];
+              selectionButtons[0].click();
+              const allChecks=[...document.querySelectorAll('#workbench-rows tr input[type="checkbox"]')];
+              check(allChecks.length===3&&allChecks.every(input=>input.checked&&input.disabled),'all matching selection visibly includes each row and prevents unsupported individual deselection');
+              selectionButtons[1].click();
+              knownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Browser workflow topic'));
               knownRow.querySelector('input[type="checkbox"]').click();
               const bulkAction=document.querySelector('#workbench-action');bulkAction.value='ADD';bulkAction.dispatchEvent(new Event('change',{bubbles:true}));
               const bulkTarget=document.querySelector('#workbench-target');bulkTarget.value=createdCollection.id;
