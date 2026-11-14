@@ -663,8 +663,14 @@ class CollectionStore:
                 feedback = db.execute("SELECT 1 FROM feedback WHERE collection_id=? LIMIT 1", (item["id"],)).fetchone()
                 if not user_membership and not feedback:
                     db.execute("DELETE FROM collections WHERE id=?", (item["id"],))
-            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0 AND created_at>=?",
-                       (run["created_at"],))
+            db.execute("""DELETE FROM memberships
+                WHERE origin='LOCAL_AI' AND pinned=0 AND (
+                    created_at>=? OR EXISTS (
+                        SELECT 1 FROM membership_reconciliation_items i
+                        WHERE i.run_id=? AND i.collection_id=memberships.collection_id
+                          AND i.keyword_id=memberships.keyword_id
+                    )
+                )""", (run["created_at"], run_id))
             db.execute("""INSERT OR IGNORE INTO memberships(collection_id,keyword_id,origin,pinned,score,reason,created_at)
                 SELECT i.collection_id,i.keyword_id,i.origin,i.pinned,i.score,i.reason,i.created_at
                 FROM membership_reconciliation_items i
