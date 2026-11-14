@@ -1141,6 +1141,7 @@ export const vi = {
   'phoenix.retry': 'Thử lại',
   'phoenix.research-no-match': 'Không có nghiên cứu nào khớp bộ lọc.',
   'phoenix.clear-research-filters': 'Xóa bộ lọc',
+  'phoenix.remove-filter': 'Bỏ bộ lọc: {filter}',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

@@ -241,6 +241,7 @@ function build() {
   query.value=state.query;statusSelect.value=state.filterState;classification.value=state.classification;evidence.value=state.evidence;sort.value=state.sort;
   from.value=state.dateFrom;to.value=state.dateTo;
   main.append(filters);
+  const activeFilters=make('div','','workbench-active-filters');activeFilters.id='workbench-active-filters';activeFilters.setAttribute('aria-live','polite');main.append(activeFilters);
   const mobilePageLabel = make('label', '', 'workbench-mobile-select');
   const mobilePageCheck = make('input'); mobilePageCheck.type = 'checkbox'; mobilePageCheck.id = 'workbench-mobile-page-check';
   mobilePageLabel.append(mobilePageCheck, make('span', labels('dataset.select-page', 'Select page'))); main.append(mobilePageLabel);
@@ -294,7 +295,26 @@ function updateRoute() {
   if(state.dateFrom) url.searchParams.set('from',state.dateFrom); if(state.dateTo) url.searchParams.set('to',state.dateTo); if(state.collectionId) url.searchParams.set('collection_id',state.collectionId); if(state.offset) url.searchParams.set('offset',String(state.offset));
   window.history.replaceState(null,'',url.pathname+url.search+url.hash);
 }
-function changedFilters() { state.selected.clear(); state.allFiltered=false; updateRoute(); loadRows(); }
+function changedFilters() { state.selected.clear(); state.allFiltered=false; renderActiveFilters(); updateRoute(); loadRows(); }
+function renderActiveFilters() {
+  const root=$('#workbench-active-filters');if(!root)return;const focusedKey=root.contains(document.activeElement)?document.activeElement.dataset.filterKey:null;root.replaceChildren();
+  const filters=[
+    ['filterState','all','#workbench-state',labels('workbench.assignment','Assignment')],
+    ['classification','all','#workbench-classification',labels('workbench.classification','Classification')],
+    ['source','','#workbench-source',labels('workbench.source','Source')],
+    ['evidence','all','#workbench-evidence',labels('workbench.evidence','Evidence')],
+    ['dateFrom','','#workbench-from',labels('workbench.from','Observed from')],
+    ['dateTo','','#workbench-to',labels('workbench.to','Observed through')],
+  ];
+  for(const [key,defaultValue,selector,label] of filters){
+    if(!state[key]||state[key]===defaultValue)continue;
+    const control=$(selector);const value=control?.selectedOptions?.[0]?.textContent||state[key];const text=`${label}: ${value}`;
+    const chip=button(`${text} ×`,'workbench-filter-chip');chip.dataset.filterKey=key;chip.setAttribute('aria-label',formatted('phoenix.remove-filter',{filter:text},'Remove filter: {filter}'));
+    chip.addEventListener('click',()=>{state[key]=defaultValue;if(control)control.value=defaultValue;state.offset=0;renderTree();changedFilters();const next=root.querySelector('.workbench-filter-chip');(next||(window.innerWidth<=600?$('.workbench-mobile-filter-button'):$('#workbench-query')))?.focus();});root.append(chip);
+  }
+  root.hidden=!root.childElementCount;
+  if(focusedKey)[...root.querySelectorAll('.workbench-filter-chip')].find(chip=>chip.dataset.filterKey===focusedKey)?.focus();
+}
 function selectView(id, filter) { state.collectionId=id; state.filterState=filter; state.offset=0; $('#workbench-state').value=filter; state.selected.clear(); state.allFiltered=false; if(window.innerWidth<=900&&state.mobileOpen)setMobileOpen(false); renderTree(); updateRoute(); loadRows(); }
 function nameOf(item) { const local=t(`topic.${item.category_id}`); return item.category_id&&local!==`topic.${item.category_id}`?local:item.name; }
 function renderTree() {
@@ -355,7 +375,7 @@ function renderTable(){const body=$('#workbench-rows');if(!body)return;body.repl
     const details=make('td');details.dataset.label=labels('table.details','Details');const open=button(labels('workbench.details','Open details'),'text-button');open.addEventListener('click',()=>openDetail(item.id,open));details.append(open);row.append(details);body.append(row);}
   const prev=$('#workbench-prev'),next=$('#workbench-next');prev.disabled=state.total===null||state.offset===0;next.disabled=state.total===null||state.offset+state.rows.length>=state.total;$('#workbench-page-info').textContent=state.total===null?displayCount(null):state.total?`${number(state.offset+1)}–${number(state.offset+state.rows.length)} / ${number(state.total)}`:labels('table.zero-results','No results');$('#workbench-page-check').checked=!!state.rows.length&&state.rows.every(item=>state.selected.has(item.id));$('#workbench-page-check').disabled=state.allFiltered||state.total===null;const headerCheck=$('#workbench-header-check');headerCheck.checked=$('#workbench-page-check').checked;headerCheck.disabled=$('#workbench-page-check').disabled||!state.rows.length;renderSelection();
 }
-function renderSelection(){const count=state.allFiltered?state.total:state.selected.size;$('#workbench-selection-count').textContent=state.allFiltered?formatted('dataset.all-filtered-selected',{count:number(count)},'All {count} filtered keywords selected'):formatted('dataset.selected',{count:number(count)},'{count} selected');$('#workbench-bulk').classList.toggle('has-selection',count>0);const selectedOnPage=state.rows.filter(item=>state.selected.has(item.id)).length;for(const control of [$('#workbench-page-check'),$('#workbench-header-check'),$('#workbench-mobile-page-check')]){control.checked=state.rows.length>0&&(state.allFiltered||selectedOnPage===state.rows.length);control.indeterminate=!state.allFiltered&&selectedOnPage>0&&selectedOnPage<state.rows.length;control.disabled=state.allFiltered||state.total===null||!state.rows.length;}const resultCount=state.total===null?displayCount(null):formatted('workbench.results-count',{count:number(state.total)},'{count} results');for(const node of [$('#workbench-context-count'),$('#workbench-filter-sheet-count')])if(node)node.textContent=resultCount;}
+function renderSelection(){const count=state.allFiltered?state.total:state.selected.size;$('#workbench-selection-count').textContent=state.allFiltered?formatted('dataset.all-filtered-selected',{count:number(count)},'All {count} filtered keywords selected'):formatted('dataset.selected',{count:number(count)},'{count} selected');$('#workbench-bulk').classList.toggle('has-selection',count>0);const selectedOnPage=state.rows.filter(item=>state.selected.has(item.id)).length;for(const control of [$('#workbench-page-check'),$('#workbench-header-check'),$('#workbench-mobile-page-check')]){control.checked=state.rows.length>0&&(state.allFiltered||selectedOnPage===state.rows.length);control.indeterminate=!state.allFiltered&&selectedOnPage>0&&selectedOnPage<state.rows.length;control.disabled=state.allFiltered||state.total===null||!state.rows.length;}const resultCount=state.total===null?displayCount(null):formatted('workbench.results-count',{count:number(state.total)},'{count} results');for(const node of [$('#workbench-context-count'),$('#workbench-filter-sheet-count')])if(node)node.textContent=resultCount;renderActiveFilters();}
 async function runBulk(){const action=$('#workbench-action').value;if(!action||(!state.allFiltered&&!state.selected.size))return;const body={action,keyword_ids:state.allFiltered?[]:[...state.selected],all_filtered:state.allFiltered};if(!['EXCLUDE','RESTORE'].includes(action)){if(!$('#workbench-target').value){status(labels('dataset.choose-collection-error','Choose a Collection first'),true);return;}body.collection_id=$('#workbench-target').value;}if(state.allFiltered){const p=queryParams();body.query=p.get('q');body.state=p.get('state');body.classification=p.get('classification');body.evidence=p.get('evidence');body.source=p.get('source')||'';body.date_from=p.get('date_from');body.date_to=p.get('date_to');body.collection_ids=p.getAll('collection_ids');}if(action==='MOVE'){if(!$('#workbench-source-target').value){status(labels('workbench.choose-source','Choose the source Collection'),true);return;}body.source_collection_id=$('#workbench-source-target').value;}
   try{const result=await requestJson('/api/v1/collections/bulk',{method:'POST',body,locale:getLocale()});state.selected.clear();state.allFiltered=false;status(formatted('collections.bulk-result',{updated:number(result.updated??0)},'{updated} updated'));await refresh();}catch(error){status(error.message||labels('collections.error','Could not apply action'),true);}}
 

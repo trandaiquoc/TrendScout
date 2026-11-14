@@ -1141,6 +1141,7 @@ export const en = {
   'phoenix.retry': 'Try again',
   'phoenix.research-no-match': 'No research matches these filters.',
   'phoenix.clear-research-filters': 'Clear filters',
+  'phoenix.remove-filter': 'Remove filter: {filter}',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',
