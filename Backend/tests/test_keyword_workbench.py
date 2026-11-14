@@ -11,6 +11,7 @@ from app.collections.store import CollectionStore
 from app.main import create_app
 from app.settings import Settings
 from app.storage.fake import FakeStorage
+from app.taxonomy.registry import resolve as resolve_category
 
 
 class KeywordWorkbenchTests(unittest.TestCase):
@@ -102,7 +103,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertNotIn("k-unknown", {item["id"] for item in inbox["items"]})
         self.assertIn("k-unknown", {item["id"] for item in self.store.search_keywords(state="all", limit=None)["items"]})
 
-    def test_targeted_cached_reclassification_updates_results_only(self):
+    def test_targeted_cached_reclassification_updates_results_and_taxonomy_memberships(self):
         ids = ("MediaWiki", "Istimewa:Pencarian", "Home", "Thank You/en", "YouTube", "Katie Miller")
         rows = [
             (ids[0], "mediawiki", "Q5296", "main page of a Wikimedia project", ["Q17442446"], 0, "https://www.mediawiki.org/wiki/MediaWiki"),
@@ -125,7 +126,6 @@ class KeywordWorkbenchTests(unittest.TestCase):
                      "WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS" if qid else "WIKIPEDIA_PAGE_WITHOUT_QID"))
             db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'Preserve owner membership',?)",
                        (self.root, "MediaWiki", "2026-11-14"))
-            db.execute("INSERT INTO feedback VALUES(?,?, 'REMOVE',?)", (self.child, "YouTube", "2026-11-14"))
         response = self._request("POST", "/api/v1/collections/reclassify-cached", json={"keyword_ids": ids})
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
@@ -141,17 +141,45 @@ class KeywordWorkbenchTests(unittest.TestCase):
                          ["celebrity_public_figures.political_advisers"])
         unassigned = self.store.search_keywords(state="unassigned", limit=None)
         unassigned_ids = {item["id"] for item in unassigned["items"]}
-        self.assertEqual(unassigned["total"], 4)
-        self.assertTrue({"YouTube", "Katie Miller", "Thank You/en"}.issubset(unassigned_ids))
+        self.assertEqual(unassigned["total"], 2)
+        self.assertIn("Thank You/en", unassigned_ids)
+        self.assertNotIn("YouTube", unassigned_ids)
+        self.assertNotIn("Katie Miller", unassigned_ids)
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT count(*) FROM memberships WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 1)
-            self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE keyword_id IN (?,?)", ("YouTube", "MediaWiki")).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM memberships WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE keyword_id IN (?,?)", ("YouTube", "MediaWiki")).fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT classification_reason FROM classification_results WHERE keyword_id='Istimewa:Pencarian'").fetchone()[0], "NON_TOPIC_SYSTEM_PAGE")
             video = db.execute("SELECT id,parent_id FROM collections WHERE category_id='technology.internet_services.video_platforms'").fetchone()
+            advisers = db.execute("SELECT id FROM collections WHERE category_id='celebrity_public_figures.political_advisers'").fetchone()
             internet = db.execute("SELECT id,parent_id FROM collections WHERE category_id='technology.internet_services'").fetchone()
             self.assertIsNotNone(video)
             self.assertEqual(video["parent_id"], internet["id"])
+            self.assertIsNotNone(advisers)
+            self.assertEqual(db.execute("SELECT collection_id FROM memberships WHERE keyword_id='YouTube' AND collection_id=?", (video["id"],)).fetchone()[0], video["id"])
+            self.assertEqual(db.execute("SELECT collection_id FROM memberships WHERE keyword_id='Katie Miller' AND collection_id=?", (advisers["id"],)).fetchone()[0], advisers["id"])
+            self.assertIsNotNone(db.execute("SELECT 1 FROM memberships WHERE keyword_id='MediaWiki' AND collection_id=? AND origin='USER' AND pinned=1", (self.root,)).fetchone())
+
+    def test_cached_taxonomy_assignment_respects_explicit_removal_feedback(self):
+        keyword_id = "feedback-protected-youtube"
+        with self.store.connect() as db:
+            db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,data_mode,evidence,context,eligible)
+                VALUES(?,?,?,?,?,?,?,?,?,1)""", (keyword_id, "YouTube", "youtube",
+                "wikimedia_pageviews_top_per_country", "en.wikipedia", "2026-11-14", "LIVE",
+                json.dumps({"views_ceil": 17}), ""))
+            db.execute("""INSERT INTO entity_context(keyword_id,title,entity_id,description,page_namespace,
+                entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                VALUES(?,?,?, ?,0,'unknown','[]','[]','[]',?,'WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS','CACHED','fixture-v1','2026-11-14')""",
+                (keyword_id, "YouTube", "Q866", "American video-sharing platform owned by Alphabet Inc.",
+                 "https://en.wikipedia.org/wiki/YouTube"))
+        self.store.ensure_category_collection(resolve_category("technology.internet_services"))
+        video_id = self.store.ensure_category_collection(resolve_category("technology.internet_services.video_platforms"))
+        with self.store.connect() as db:
+            db.execute("INSERT INTO feedback VALUES(?,?, 'REMOVE',?)", (video_id, keyword_id, "2026-11-14"))
+        response = self._request("POST", "/api/v1/collections/reclassify-cached", json={"keyword_ids": [keyword_id]})
+        self.assertEqual(response.status_code, 200, response.text)
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM memberships WHERE collection_id=? AND keyword_id=?", (video_id, keyword_id)).fetchone())
 
     def test_analytics_and_runtime_are_read_only_and_use_saved_evidence(self):
         analytics = self._request("GET", "/api/v1/analytics/overview").json()

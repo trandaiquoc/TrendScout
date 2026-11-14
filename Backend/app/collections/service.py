@@ -659,7 +659,7 @@ class CollectionService:
         return await asyncio.to_thread(self._process_fetch, identifier, [])
 
     def reclassify_cached_keywords(self, keyword_ids):
-        """Reclassify selected saved records from persisted context; never fetch or alter membership."""
+        """Reclassify cached records and add missing taxonomy links without replacing user state."""
         identifiers = tuple(dict.fromkeys(keyword_ids))
         if not identifiers:
             return {"reclassified": 0, "items": []}
@@ -728,8 +728,10 @@ class CollectionService:
                      json.dumps(result["rule_evidence"], ensure_ascii=False),
                      json.dumps(result["source_evidence"], ensure_ascii=False), result["review_status"],
                      result["classified_at"], result["classification_reason"]))
-        for _identifier, result in updated:
-            if result["classification_status"] != "CLASSIFIED":
+        source_records = {row["id"]: row for row in rows}
+        for keyword_id, result in updated:
+            source_record = source_records[keyword_id]
+            if not source_record["eligible"] or result["classification_status"] != "CLASSIFIED":
                 continue
             for category_id in result["topic_category_ids"]:
                 def ensure_taxonomy_path(item):
@@ -740,7 +742,23 @@ class CollectionService:
                             return None
                         return self.store.ensure_category_collection(item, parent_id=parent_id)
                     return self.store.ensure_category_collection(item)
-                ensure_taxonomy_path(resolve_category(category_id))
+                collection_id = ensure_taxonomy_path(resolve_category(category_id))
+                if collection_id is None:
+                    continue
+                with self.store.connect() as db:
+                    collection = db.execute("SELECT auto_match,status FROM collections WHERE id=?",
+                                            (collection_id,)).fetchone()
+                    if not collection or collection["status"] != "ACTIVE" or not collection["auto_match"]:
+                        continue
+                    removed = db.execute("SELECT 1 FROM feedback WHERE collection_id=? AND keyword_id=? AND action='REMOVE'",
+                                         (collection_id, keyword_id)).fetchone()
+                    if removed:
+                        continue
+                    db.execute("""INSERT OR IGNORE INTO memberships
+                        (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                        VALUES(?,?,'LOCAL_AI',0,NULL,?,?)""",
+                        (collection_id, keyword_id,
+                         f"Verified cached entity classification: {category_id}", now()))
         return {"reclassified": len(updated), "items": [
             {"keyword_id": identifier, "classification_status": result["classification_status"],
              "classification_reason": result["classification_reason"],
