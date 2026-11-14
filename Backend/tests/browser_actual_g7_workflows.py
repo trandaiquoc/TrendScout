@@ -198,6 +198,11 @@ def main():
               const collectionCounts=[...document.querySelectorAll('#workbench-summary .workbench-stat strong')].map(x=>x.textContent);
               check(collectionCounts.join(',')==='3,1,1,0','Collection cards show 3 stored, 1 assigned, 1 unclassified and 0 excluded');
               check(document.querySelector('#workbench-summary').textContent.includes('1 kh\u00f4ng ph\u1ea3i ch\u1ee7 \u0111\u1ec1'),'Collection summary explains the ineligible topic count');
+              await go('algorithms');
+              check(await until(()=>document.querySelectorAll('#algorithm-catalog .algorithm-card').length>0),'Algorithm catalog loads its registered methods');
+              check(Boolean(document.querySelector('#algorithm-evaluation-status').textContent.trim()),'Algorithm evaluation status is shown separately from the catalog');
+              check(!document.querySelector('#algorithm-catalog').textContent.includes('INSUFFICIENT_DATA'),'Algorithm catalog does not expose raw evaluation status codes');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/algorithms')&&window.__apiCalls.some(x=>x.url==='/api/v1/algorithms/results'),'Algorithm catalog and results use actual backend endpoints');
               await go('research');
               await until(()=>document.querySelector('#research-keyword option[value="g7-browser-keyword"]'));
               const selector=document.querySelector('#research-keyword');selector.value='g7-browser-keyword';
@@ -263,6 +268,8 @@ def main():
               check(document.querySelector('#run-history-detail').textContent.includes('Wikimedia')&&!document.querySelector('#run-history-detail').textContent.includes('wikimedia_pageviews_top_per_country'),'Run History detail localizes the saved source manifest');
 
               await go('settings');
+              check(await until(()=>document.querySelectorAll('#settings-runtime-details div').length>=8),'AI and model settings load the backend runtime facts');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/runtime'),'AI settings use the real runtime endpoint');
               check(await until(()=>document.querySelector('#settings-schedules .schedule-item')),'Scheduler API renders the previously enabled saved schedule');
               const staleCard=[...document.querySelectorAll('#settings-schedules .schedule-item')].find(x=>x.textContent.includes('Previously enabled fixture'));
               const disable=staleCard?.querySelector('.schedule-action');
@@ -360,7 +367,7 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center capabilities/catalog; Dashboard/Collections counts; Run History cursor/filter/detail; "
+                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; algorithm registry/results; AI runtime settings; Dashboard/Collections counts; Run History cursor/filter/detail; "
                 "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
