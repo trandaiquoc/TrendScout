@@ -22,6 +22,21 @@ The master-goal deadline (07:00 Asia/Ho_Chi_Minh) has passed. This is a handoff 
 The full-ledger replay did not change the original dataset snapshot (84/70 assigned/unassigned) or the 154 algorithm observations. The live API now derives 149 assigned, 2 unassigned, and 3 non-topic records from the current ledger.
 - Fresh read-only current-code Native Chrome verification against a temporary server attached to the active DB rendered 154 stored, 149 classified, 2 unclassified, and 3 ineligible. The API reports two inbox items and neither is `INELIGIBLE`; both remaining UNKNOWN cases are Thank You/en and Wikimedia APIs. The temporary server was stopped; the existing port-8123 process was not restarted, and no Pageviews Fetch was issued.
 
+### Current outcome for the six prioritized records
+
+This table reflects the active Collections database after the full cached replay above. “Classified” means the record has supported topic taxonomy and a Collection membership; “ineligible” means source evidence is retained but it is not a topic candidate.
+
+| Keyword | Evidence in the saved record | Current result | BA interpretation |
+|---|---|---|---|
+| YouTube | English Wikipedia URL, entity `Q866`, description “American video-sharing platform owned by Alphabet Inc.” | `CLASSIFIED`; `technology.internet_services.video_platforms`; member of “Video Platforms” | Already fixed. The note “Bỏ sót phân loại” is stale for this active database. |
+| Katie Miller | English Wikipedia URL, entity `Q78337779`, description “American political advisor (born 1991)” and saved occupation IDs | `CLASSIFIED`; `celebrity_public_figures.political_advisers`; member of “Political Advisers & Communications” | Already fixed based on the verified entity context, not the title alone. |
+| MediaWiki | `mediawiki.org/wiki/MediaWiki`; official page metadata says this is the project main page | `INELIGIBLE / WIKIMEDIA_PROJECT_HOME_PAGE`; no topic membership | Do not infer the software product from this project-home record. |
+| Home | `foundation.wikimedia.org/wiki/Home`; official page metadata says this is the project main page | `INELIGIBLE / WIKIMEDIA_PROJECT_HOME_PAGE`; no topic membership | Exclude this navigation/home page from topic Collections. |
+| Istimewa:Pencarian | `id.wiktionary.org`; localized namespace metadata resolves `Istimewa:` to namespace `-1` | `INELIGIBLE / NON_TOPIC_SYSTEM_PAGE`; no topic membership | Exclude the verified Special page from topic Collections. |
+| Thank You/en | Main-namespace URL, but no entity ID, description, or page namespace in saved context | `UNKNOWN`; no topic membership | Keep unresolved. `/en` alone does not establish that it is a translation or a non-topic page. |
+
+The active ledger therefore has **2 classified, 3 ineligible, and 1 unknown** across these six records. Raw Pageviews observations remain eligible and preserved; classification eligibility is a separate state. Reclassification used cached context and did not fetch Pageviews.
+
 ## Git baseline and safety
 
 - Fetched `origin` on 2026-11-14 and compared the local branch and recent history. `origin/main` is `8349a17` (`fix(ui): explain unavailable merge destinations`); local `main` has no remote-only commits and is now 40 commits ahead, including `09e9118` (collapsed, searchable Source Center research inventory), `e133cfc` (native keyboard disclosure coverage) and this dialog accessibility check. Other G2-G7 checkpoints include `1791ca7` (saved Source Center Fetch evidence), `ada796b` (collapsed Collection tree counts), `225c31a` (protected Scheduler controls), `8455055` (Analytics counts and local route allowlist), `031744e` (real Chrome workbench acceptance), `3a44002` (Chrome Collection tree/pagination scroll), `010a282` (Collection search/pagination and linked Research fixture), `edd80f1` (consistent Collection browser fixture/evidence), `4832fde` (all views at six breakpoints), `3acc76c` (merge picker/review evidence), `9469f1b` (keyboard Collection management), and `4ef4884` (final read-only database validation). No push or deploy was performed.
@@ -67,11 +82,11 @@ The 25 mandatory titles were reviewed against persisted context and fixture case
 | SS United States | Places → Ships |
 | Children's Games (Bruegel) | Creative Works → Artwork |
 | Joran van der Sloot | Person entity; Crime & Justice from saved criminal context; no occupation inferred |
-| MediaWiki | Ambiguous: the saved project context identifies a Wikimedia project home page, not verified wiki software |
+| MediaWiki | `INELIGIBLE`: verified project main page; do not infer wiki software from the title |
 | Istimewa:Pencarian | `INELIGIBLE`: saved official page metadata identifies namespace `-1` |
 | Wikimedia APIs | Technology → Internet Services |
 | Tomb of the Unknown Soldier (Arlington National Cemetery) | Places → Monuments & Memorials |
-| Home | Ambiguous: saved page context is a project home page, not a topic |
+| Home | `INELIGIBLE`: verified project main page; no topic membership |
 | Neatsville, Kentucky | Places → Settlements |
 | Avengers: Doomsday | Entertainment → Movies |
 | Usman Nurmagomedov; Ezra Frech; Peter Norman; Sonny Liston; Fernando Mendoza | People → Athletes from saved descriptions/occupation IDs |
