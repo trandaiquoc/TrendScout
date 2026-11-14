@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-14 (Asia/Bangkok)  
 **State:** Local implementation checkpoint; not pushed or deployed  
-**Overall acceptance:** **PARTIAL - approximately 90%**. G2 replay and most offline/local portions of G3-G7 are implemented. Dashboard analytics now chart the available source, algorithm-result, Fetch-status and observation-coverage evidence; algorithm effectiveness remains unvalidated without labeled comparable data. G5 manual-run listing is bounded and awaits emulator verification, and scheduler operation remains off by default and limited to explicitly configured local synthetic Fetch. Full product acceptance is still outstanding.
+**Overall acceptance:** **PARTIAL**. G2 replay and the offline/local portions of G3-G7 are implemented and exercised in Native Chrome. Current saved observations support only one source, so cross-source overlap and algorithm effectiveness cannot be validated; the guarded Firestore emulator suite also remains unverified on this Windows runner. Scheduler operation remains off by default and no scheduled Fetch has run. Full product acceptance is still outstanding.
 
 ## Late runtime correction and deadline handoff (2026-11-14 11:34 Asia/Bangkok)
 
