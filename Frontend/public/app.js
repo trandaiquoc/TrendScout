@@ -920,7 +920,11 @@ function beginResearchEdit(item) {
     '#research-status':item.status,
   };
   for(const [selector,value] of Object.entries(fields))$(selector).value=value||'';
-  $('#research-keyword').value=item.keyword_id||'';
+  const linkedKeyword=$('#research-keyword');
+  if(item.keyword_id && ![...linkedKeyword.options].some(option=>option.value===item.keyword_id)) {
+    linkedKeyword.add(new Option([item.keyword || item.keyword_id, localizedSourceName(item.source), item.observed_at || '—'].join(' · '), item.keyword_id));
+  }
+  linkedKeyword.value=item.keyword_id||'';
   $('#research-form').querySelector('[type="submit"]').textContent=t('research.update');
   $('#research-cancel-edit').hidden=false;
   $('#research-form-status').textContent='';
