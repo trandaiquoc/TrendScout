@@ -117,6 +117,7 @@ export const en = {
   'runs.outcome': 'Outcome / limits',
   'runs.details': 'Details',
   'runs.detail-title': 'Saved task details',
+  'runs.close-detail': 'Close details',
   'runs.error': 'Error',
   'runs.quality': 'Quality notes',
   'runs.duration': 'Duration',

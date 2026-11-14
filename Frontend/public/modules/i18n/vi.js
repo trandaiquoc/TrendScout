@@ -117,6 +117,7 @@ export const vi = {
   'runs.outcome': 'Kết quả / giới hạn',
   'runs.details': 'Chi tiết',
   'runs.detail-title': 'Chi tiết tác vụ đã lưu',
+  'runs.close-detail': 'Đóng chi tiết',
   'runs.error': 'Lỗi',
   'runs.quality': 'Ghi chú chất lượng',
   'runs.duration': 'Thời lượng',

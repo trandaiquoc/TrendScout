@@ -54,6 +54,10 @@ const state = {
   analytics: null,
   runHistoryOffset: 0,
   runHistoryCursor: null,
+  runHistoryDetailSequence: 0,
+  runHistoryDetailId: null,
+  runHistoryDetailItem: null,
+  runHistoryDetailTrigger: null,
   runHistoryQuery: '',
   sourceLibrary: [],
   researchKeywords: [],
@@ -529,7 +533,14 @@ async function loadRunHistory({ append = false } = {}) {
       const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',run.status),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
       values.forEach((value,index)=>{const cell=element('td',value);cell.dataset.label=headers[index];tr.append(cell);});
       const actions=element('td');
-      if (run.fetch_id) { const button=element('button',t('runs.details'),'button button-secondary'); button.type='button'; button.addEventListener('click',()=>loadRunHistoryDetail(run.fetch_id)); actions.append(button); }
+      if (run.fetch_id) {
+        const button=element('button',t('runs.details'),'button button-secondary');
+        button.type='button'; button.setAttribute('aria-controls','run-history-detail');
+        const expanded=!$('#run-history-detail').hidden&&state.runHistoryDetailId===run.fetch_id;
+        button.setAttribute('aria-expanded',String(expanded));
+        if(expanded)state.runHistoryDetailTrigger=button;
+        button.addEventListener('click',()=>loadRunHistoryDetail(run.fetch_id,button)); actions.append(button);
+      }
       else actions.textContent='—';
       actions.dataset.label=headers[8];
       tr.append(actions); body.append(tr);
@@ -541,22 +552,71 @@ async function loadRunHistory({ append = false } = {}) {
   } catch (error) { root.replaceChildren(element('p',getErrorMessage(error,'runs.history-error'))); }
 }
 
-async function loadRunHistoryDetail(fetchId) {
-  const root=$('#run-history-detail'); root.hidden=false; root.replaceChildren(element('p',t('common.loading')));
+function renderRunHistoryDetail(item, errorMessage = null) {
+  const root=$('#run-history-detail');
+  root.replaceChildren();
+  const title=element('h2',t('runs.detail-title')); title.id='run-history-detail-title';
+  const close=element('button',t('runs.close-detail'),'button button-secondary');
+  close.type='button'; close.addEventListener('click',closeRunHistoryDetail);
+  const heading=element('div',null,'panel-heading'); heading.append(title,close);
+  root.setAttribute('aria-labelledby',title.id);
+  root.append(heading);
+  if(errorMessage){const message=element('p',errorMessage); message.setAttribute('role','alert'); root.append(message); return;}
+  const list=element('dl','', 'detail-list detail-list--grid');
+  const sourceSummary=(item.source_manifest || []).map(source=>{
+    const status=localizedStatus('fetch.source-status.',source.status || 'UNKNOWN');
+    const count=source.record_count == null ? t('common.unavailable') : number(source.record_count);
+    return `${localizedSourceName(source.source_id)}: ${status} (${count})`;
+  }).join(' · ') || t('common.unavailable');
+  const quality=(item.quality_flags || []).length
+    ? t('runs.outcome.quality-notes',{count:number(item.quality_flags.length)})
+    : t('runs.outcome.no-notes');
+  const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.status)],
+    [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
+    [t('runs.received'),item.received_record_count ?? item.available],
+    [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
+    [t('runs.outcome'),localizedRunOutcome(item)],[t('runs.quality'),quality],
+    [t('runs.duration'),t('runs.duration-unavailable')],
+    [t('runs.date'),item.fetched_at || item.updated_at ? timestamp(item.fetched_at || item.updated_at) : t('common.unavailable')]];
+  for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',typeof value==='number'?number(value):value == null?t('common.unavailable'):value));list.append(row);}
+  root.append(list);
+}
+
+function closeRunHistoryDetail() {
+  const root=$('#run-history-detail');
+  if (!root || root.hidden) return;
+  state.runHistoryDetailSequence += 1;
+  root.hidden=true;
+  root.replaceChildren();
+  root.removeAttribute('aria-labelledby');
+  state.runHistoryDetailId=null;
+  state.runHistoryDetailItem=null;
+  const trigger=state.runHistoryDetailTrigger;
+  state.runHistoryDetailTrigger=null;
+  if(trigger?.isConnected){trigger.setAttribute('aria-expanded','false');trigger.focus();}
+}
+
+async function loadRunHistoryDetail(fetchId, trigger) {
+  const root=$('#run-history-detail');
+  if(state.runHistoryDetailTrigger&&state.runHistoryDetailTrigger!==trigger)state.runHistoryDetailTrigger.setAttribute('aria-expanded','false');
+  state.runHistoryDetailTrigger=trigger || null;
+  state.runHistoryDetailId=fetchId;
+  if(trigger)trigger.setAttribute('aria-expanded','true');
+  const sequence=++state.runHistoryDetailSequence;
+  root.hidden=false;
+  const title=element('h2',t('runs.detail-title')); title.id='run-history-detail-title';
+  const loading=element('p',t('common.loading')); loading.setAttribute('role','status');
+  root.replaceChildren(title,loading); root.setAttribute('aria-labelledby',title.id); root.focus();
   try {
     const response=await getJson('/api/v1/runs/history/'+encodeURIComponent(fetchId),{locale:getLocale()});
-    const item=response.item || {}; root.replaceChildren();
-    root.append(element('h2',t('runs.detail-title')));
-    const list=element('dl','', 'detail-list detail-list--grid');
-    const sourceSummary=(item.source_manifest || []).map(source=>`${source.source_id}: ${source.status || '—'} (${source.record_count ?? '—'})`).join(' · ') || '—';
-    const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),item.status],[t('runs.mode'),item.data_mode || '—'],
-      [t('runs.sources'),sourceSummary],[t('runs.received'),item.received_record_count ?? item.available],
-      [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
-      [t('runs.error'),item.error_code],[t('runs.quality'),(item.quality_flags || []).join(', ') || '—'],
-      [t('runs.duration'),t('runs.duration-unavailable')],[t('runs.date'),item.fetched_at || item.updated_at || '—']];
-    for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',value == null ? t('common.unavailable') : value));list.append(row);}
-    root.append(list);
-  } catch(error) { root.replaceChildren(element('p',getErrorMessage(error,'runs.history-error'))); }
+    if(sequence!==state.runHistoryDetailSequence||root.hidden)return;
+    state.runHistoryDetailItem=response.item || {};
+    renderRunHistoryDetail(state.runHistoryDetailItem);
+  } catch(error) {
+    if(sequence!==state.runHistoryDetailSequence||root.hidden)return;
+    state.runHistoryDetailItem=null;
+    renderRunHistoryDetail({},getErrorMessage(error,'runs.history-error'));
+  }
 }
 
 async function loadSourceLibrary() {
@@ -2229,6 +2289,9 @@ function bindEvents() {
 
   $('#load-run').addEventListener('click', () => loadRun($('#run-id').value));
   $('#run-history-refresh').addEventListener('click', () => loadRunHistory());
+  $('#run-history-detail').addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); closeRunHistoryDetail(); }
+  });
   $('#run-history-more').addEventListener('click', () => loadRunHistory({ append: true }));
   $('#run-history-search').addEventListener('input', () => { clearTimeout(window.runHistoryTimer); window.runHistoryTimer=setTimeout(()=>loadRunHistory(),250); });
   $('#run-history-status').addEventListener('change', () => loadRunHistory());
@@ -2388,6 +2451,9 @@ function bindEvents() {
     if (state.persistedDataset) renderPersistedDataset(state.persistedDataset);
     if (state.analytics) loadAnalytics();
     if (window.location.hash === '#runs') loadRunHistory();
+    if (!$('#run-history-detail').hidden && state.runHistoryDetailItem) {
+      renderRunHistoryDetail(state.runHistoryDetailItem);
+    }
     if (window.location.hash === '#sources') loadSourceLibrary();
     if (window.location.hash === '#settings') loadRuntimeStatus();
     if (window.location.hash === '#research') loadResearchWorkspace();

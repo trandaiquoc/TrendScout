@@ -285,6 +285,25 @@ def main():
             if evaluate("document.querySelector('#workbench-detail').open"):
                 raise RuntimeError("Escape did not close keyword details")
 
+            evaluate("location.hash='#runs';window.dispatchEvent(new Event('hashchange'))")
+            for _ in range(60):
+                if evaluate("Boolean(document.querySelector('#run-history button[aria-controls=run-history-detail]'))"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("Run History did not render its detail action")
+            evaluate("document.querySelector('#run-history button[aria-controls=run-history-detail]').focus()")
+            press(" ", "Space", 32, " ")
+            for _ in range(60):
+                if evaluate("!document.querySelector('#run-history-detail').hidden && document.activeElement.id==='run-history-detail'"):
+                    break
+                time.sleep(0.02)
+            else:
+                raise RuntimeError("keyboard activation did not focus the accessible Run History detail region: " + str(evaluate("JSON.stringify({active:document.activeElement?.id,detail:document.querySelector('#run-history-detail')?.outerHTML,requests:window.testRequests.filter(request=>request.path.includes('/api/v1/runs/history'))})")))
+            press("Escape", "Escape", 27)
+            if not evaluate("document.querySelector('#run-history-detail').hidden && document.activeElement.matches('#run-history button[aria-controls=run-history-detail]')"):
+                raise RuntimeError("Escape did not close Run History details and return focus to the opener")
+
             evaluate("location.hash='#sources';window.dispatchEvent(new Event('hashchange'))")
             for _ in range(60):
                 if evaluate("!document.querySelector('[data-view=sources]').hidden"):

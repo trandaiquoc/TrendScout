@@ -90,6 +90,19 @@ window.fetch=(path,opts={})=>{
     return Promise.resolve(new Response(JSON.stringify({items:empty?[]:[{id:'c'.repeat(64),keyword:'Fixture keyword',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,classification_status:'CLASSIFIED',memberships:[],evidence:{views_ceil:12}}],total:empty?0:51,next_offset:empty?null:25}),{status:200}));
   }
   if(p.startsWith('/api/v1/research?'))return Promise.resolve(new Response(JSON.stringify({items:window.fixtureResearch,total:window.fixtureResearch.length}),{status:200}));
+  if(p.startsWith('/api/v1/runs/history?'))return Promise.resolve(new Response(JSON.stringify({items:[{
+    fetch_id:'f'.repeat(32),run_at:'2026-11-14T01:00:00Z',run_type:'FETCH',
+    sources:['wikimedia_pageviews_top_per_country'],status:'PARTIAL',keyword_count:10,
+    received_record_count:12,retained_keyword_count:10,rejected_record_count:2,
+    duration_seconds:null,mode:'synthetic',error_code:'SOURCE_COVERAGE_PARTIAL',quality_flags:['CENSORED_TOP_LIST']
+  }],next_cursor:null,next_offset:null,manual_history_status:'COMPLETE'}),{status:200}));
+  if(p==='/api/v1/runs/history/'+'f'.repeat(32))return Promise.resolve(new Response(JSON.stringify({item:{
+    fetch_id:'f'.repeat(32),status:'PARTIAL',data_mode:'SYNTHETIC',
+    source_manifest:[{source_id:'wikimedia_pageviews_top_per_country',status:'PARTIAL',record_count:10}],
+    received_record_count:12,retained_record_count:10,rejected_record_count:2,
+    error_code:'SOURCE_COVERAGE_PARTIAL',quality_flags:['CENSORED_TOP_LIST'],
+    fetched_at:'2026-11-14T01:00:00Z'
+  }}),{status:200}));
   if(p.includes('/keywords?')){
     const q=new URL(p,'https://local.invalid').searchParams;
     const empty=q.get('q')==='empty';
@@ -249,7 +262,25 @@ CHECK = r"""<script>
     window.__checkpoint='bulk assignment';const keywordCheck=document.querySelector('#workbench-rows tr input[type=checkbox]');
     if(keywordCheck){keywordCheck.click();document.querySelector('#workbench-action').value='ADD';document.querySelector('#workbench-action').dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#workbench-target').value='collection-b';document.querySelector('#workbench-bulk button:last-child').click();await wait(80);}
     check(testRequests.some(request=>request.path==='/api/v1/collections/bulk'&&request.method==='POST'&&JSON.parse(request.body).action==='ADD'&&JSON.parse(request.body).keyword_ids?.includes('c'.repeat(64))&&JSON.parse(request.body).collection_id==='collection-b'),'bulk assignment sends only the selected keyword to the chosen Collection');
-    await go('runs');
+    await go('runs');await wait(40);
+    const historyButton=document.querySelector('#run-history button');
+    check(Boolean(historyButton),'saved run history renders a details action');
+    historyButton?.click();await wait(40);
+    const historyDetail=document.querySelector('#run-history-detail');
+    check(!historyDetail.hidden&&historyDetail.getAttribute('aria-labelledby')===historyDetail.querySelector('h2')?.id,'run detail is exposed as a named region');
+    check(historyButton.getAttribute('aria-expanded')==='true'&&historyButton.getAttribute('aria-controls')==='run-history-detail','run detail action exposes expanded state and target');
+    check(document.activeElement===historyDetail,'opening run details moves focus to the detail region');
+    check(historyDetail.textContent.includes('Dữ liệu một phần')&&historyDetail.textContent.includes('Lượt xem trang Wikimedia'),'run detail localizes source and status values: '+historyDetail.textContent);
+    check(historyDetail.textContent.includes('Dữ liệu mô phỏng')&&!historyDetail.textContent.includes('SYNTHETIC'),'run detail localizes the data mode');
+    check(historyDetail.textContent.includes('Một hoặc nhiều nguồn chỉ trả về dữ liệu một phần')&&!historyDetail.textContent.includes('SOURCE_COVERAGE_PARTIAL')&&!historyDetail.textContent.includes('CENSORED_TOP_LIST')&&!historyDetail.textContent.includes('wikimedia_pageviews_top_per_country'),'run detail hides internal identifiers behind a user-facing explanation');
+    applyLocale('en');
+    check(historyDetail.textContent.includes('Partial data')&&historyDetail.textContent.includes('One or more sources returned partial data'),'open run detail relocalizes with current language');
+    applyLocale('vi');
+    await wait(40);
+    const currentHistoryButton=document.querySelector('#run-history button[aria-controls=run-history-detail]');
+    check(currentHistoryButton?.getAttribute('aria-expanded')==='true','run detail trigger state survives locale refresh');
+    historyDetail.querySelector('button').click();
+    check(historyDetail.hidden&&currentHistoryButton?.getAttribute('aria-expanded')==='false'&&document.activeElement===currentHistoryButton,'closing run detail restores focus to its current opener');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
     check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
     check(new URLSearchParams(location.search).get('q')==='renewables','legacy keyword deep link preserves the search query');
