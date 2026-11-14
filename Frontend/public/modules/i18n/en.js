@@ -899,6 +899,8 @@ export const en = {
   'algorithms.kicker': 'MEASUREMENT AND COMPARISON',
   'algorithms.description': 'Registered methods run after a successful local Fetch. Results include persisted evidence, source compatibility, and data limits; unavailable history is marked SKIPPED.',
   'algorithms.unknown-name': 'Unidentified method',
+  'algorithms.loading-catalog': 'Loading analysis methods…',
+  'algorithms.filter-empty': 'No analysis methods match these filters.',
   'algorithms.name.ewma': 'Recent-weighted trend average',
   'algorithms.name.growth-ratio': 'Compared with the median baseline',
   'algorithms.name.kendall-trend': 'Ordered upward or downward trend',

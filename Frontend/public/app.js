@@ -2062,7 +2062,7 @@ function closeMobileNav() {
 
 async function loadAlgorithmCatalog() {
   const root = $('#algorithm-catalog');
-  root.replaceChildren(element('p', 'Loading algorithm registry…'));
+  root.replaceChildren(element('p', t('algorithms.loading-catalog')));
   try {
     const [catalogResult, executionResult] = await Promise.all([
       getJson('/api/v1/algorithms', { locale: getLocale() }),
@@ -2107,7 +2107,7 @@ function renderAlgorithmCatalog() {
     && (!status || item.sources.some((entry) => entry.status === status)));
   root.replaceChildren();
   if (!methods.length) {
-    root.append(element('p', 'No registered algorithms match these filters.'));
+    root.append(element('p', t('algorithms.filter-empty')));
     return;
   }
   methods.forEach((item) => {

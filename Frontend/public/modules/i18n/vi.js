@@ -899,6 +899,8 @@ export const vi = {
   'algorithms.kicker': 'ĐO LƯỜNG VÀ SO SÁNH',
   'algorithms.description': 'Các phương pháp đã đăng ký chạy sau mỗi lần Fetch local thành công. Kết quả lưu kèm bằng chứng, mức tương thích nguồn và giới hạn dữ liệu; thiếu lịch sử sẽ được đánh dấu ĐÃ BỎ QUA.',
   'algorithms.unknown-name': 'Phương pháp chưa xác định',
+  'algorithms.loading-catalog': 'Đang tải các phương pháp phân tích…',
+  'algorithms.filter-empty': 'Không có phương pháp phân tích nào phù hợp với bộ lọc này.',
   'algorithms.name.ewma': 'Xu hướng trung bình có trọng số gần đây',
   'algorithms.name.growth-ratio': 'So sánh với mức nền trung vị',
   'algorithms.name.kendall-trend': 'Xu hướng tăng hoặc giảm theo thứ tự',

@@ -16,6 +16,17 @@ class WorkspaceStructureTests(unittest.TestCase):
         self.assertIn("'table.detail-unavailable': 'Từ khóa đã lưu này chưa liên kết với lần chạy có thể xem chi tiết.'", vietnamese)
         self.assertNotIn("Detailed run evidence is unavailable for this cached ledger row.", app)
 
+    def test_algorithm_catalog_loading_and_empty_states_are_localized(self):
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        english = (PUBLIC / "modules" / "i18n" / "en.js").read_text(encoding="utf-8")
+        vietnamese = (PUBLIC / "modules" / "i18n" / "vi.js").read_text(encoding="utf-8")
+        self.assertIn("t('algorithms.loading-catalog')", app)
+        self.assertIn("t('algorithms.filter-empty')", app)
+        self.assertIn("'algorithms.loading-catalog': 'Loading analysis methods…'", english)
+        self.assertIn("'algorithms.filter-empty': 'No analysis methods match these filters.'", english)
+        self.assertIn("'algorithms.loading-catalog': 'Đang tải các phương pháp phân tích…'", vietnamese)
+        self.assertIn("'algorithms.filter-empty': 'Không có phương pháp phân tích nào phù hợp với bộ lọc này.'", vietnamese)
+
     def test_required_workspace_sections_and_safe_disabled_controls(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (
