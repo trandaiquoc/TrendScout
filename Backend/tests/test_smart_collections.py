@@ -88,7 +88,7 @@ class SmartCollectionsTests(unittest.TestCase):
         classification_response = __import__("asyncio").run(self._classification_request(app, keyword_response.json()["items"][0]["id"]))
         self.assertEqual(classification_response.status_code, 200)
         self.assertEqual(classification_response.json()["classification_status"], "UNKNOWN")
-        self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.4")
+        self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.5")
 
     async def _classification_request(self, app, keyword_id):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
