@@ -27,6 +27,11 @@ class WorkspaceStructureTests(unittest.TestCase):
         self.assertIn("'algorithms.loading-catalog': 'Đang tải các phương pháp phân tích…'", vietnamese)
         self.assertIn("'algorithms.filter-empty': 'Không có phương pháp phân tích nào phù hợp với bộ lọc này.'", vietnamese)
 
+    def test_algorithm_source_filter_uses_user_facing_source_names(self):
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn("sources.map((value) => new Option(localizedSourceName(value), value))", app)
+        self.assertNotIn("new Option(value.replaceAll('_',' '), value)", app)
+
     def test_required_workspace_sections_and_safe_disabled_controls(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (

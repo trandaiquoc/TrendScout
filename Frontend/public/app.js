@@ -2090,7 +2090,7 @@ function populateAlgorithmFilters(items) {
   const families = [...new Set(items.map((item) => item.family))].sort();
   const sources = [...new Set(items.flatMap((item) => item.sources.map((entry) => entry.source_id)))].sort();
   family.replaceChildren(new Option(t('algorithms.all-families'), ''), ...families.map((value) => new Option(translatedAlgorithmCode('family',value), value)));
-  source.replaceChildren(new Option(t('algorithms.all-sources'), ''), ...sources.map((value) => new Option(value.replaceAll('_',' '), value)));
+  source.replaceChildren(new Option(t('algorithms.all-sources'), ''), ...sources.map((value) => new Option(localizedSourceName(value), value)));
   family.value = priorFamily;
   source.value = priorSource;
 }
