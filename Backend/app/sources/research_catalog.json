@@ -859,7 +859,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Temu](https://www.temu.com/); quyền API/scrape chưa xác minh."
+      "source_reference": "U; [Điều khoản Temu US](https://www.temu.com/us-pt/terms-of-use.html); cấm quét dữ liệu và giới hạn sử dụng cá nhân.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The Temu US terms page updated November 1, 2026 restricts service use to personal, non-commercial purposes and prohibits crawling, scraping, or using automated software to access service data. The reviewed official materials do not establish a public product-discovery API or written authorization for TrendScout.",
+      "revalidation_note_key": "sources.review.temu",
+      "revalidation_links": [
+        {"label": "Temu US Terms of Use", "url": "https://www.temu.com/us-pt/terms-of-use.html"}
+      ]
     },
     {
       "source_id": "shop_app",
@@ -868,7 +874,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Shopify API](https://shopify.dev/docs/api); merchant scope không mặc định toàn bộ Shop."
+      "source_reference": "G; [Shopify API Terms](https://www.shopify.com/legal/api-terms); cấm tạo chỉ mục sản phẩm hoặc thu thập hệ thống.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Shopify APIs access merchant data only within permissions granted by each merchant and Shopify. Current API Terms prohibit systematic data collection and building commerce/product indexes, so they cannot be used to aggregate independent stores into TrendScout's product-trend index without explicit Shopify authorization.",
+      "revalidation_note_key": "sources.review.shop_app",
+      "revalidation_links": [
+        {"label": "Shopify API License and Terms", "url": "https://www.shopify.com/legal/api-terms"},
+        {"label": "Shopify app authorization scopes", "url": "https://shopify.dev/docs/apps/build/authentication-authorization"}
+      ]
     },
     {
       "source_id": "wayfair",
@@ -877,7 +890,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Wayfair](https://www.wayfair.com/); partner quyền discovery chưa xác minh."
+      "source_reference": "U; [Wayfair](https://www.wayfair.com/); tài liệu đã xem chưa xác nhận API tìm kiếm công khai.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The reviewed official Wayfair materials did not establish a public product-search API, a partner discovery feed, or authorization for TrendScout to collect catalog and demand data. Treat product discovery access and commercial data rights as unverified; do not infer permission from the customer-facing search site.",
+      "revalidation_note_key": "sources.review.wayfair",
+      "revalidation_links": [
+        {"label": "Wayfair Terms of Use", "url": "https://www.wayfair.com/terms"}
+      ]
     },
     {
       "source_id": "houzz",
@@ -886,7 +905,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Houzz](https://www.houzz.com/); access thương mại chưa xác minh."
+      "source_reference": "G; [Houzz Pro API](https://developer.houzz.com/docs/api-overview) dành tích hợp Pro; điều khoản cấm khai thác dữ liệu.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Houzz Pro provides an OAuth-authenticated API for Pro business integrations, while Houzz's Terms of Use prohibit data mining, scraping, and commercial use of product descriptions or professional listings for another merchant's benefit without permission. No public consumer product-trend API or TrendScout authorization was established.",
+      "revalidation_note_key": "sources.review.houzz",
+      "revalidation_links": [
+        {"label": "Houzz Pro API overview", "url": "https://developer.houzz.com/docs/api-overview"},
+        {"label": "Houzz Terms of Use", "url": "https://www.houzz.com/termsOfUse"}
+      ]
     },
     {
       "source_id": "home_depot",
@@ -895,7 +921,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Home Depot](https://www.homedepot.com/); permission catalog chưa xác minh."
+      "source_reference": "U; [Điều khoản Home Depot](https://www.homedepot.com/c/Terms_of_Use); chỉ cho phép xem cá nhân, phi thương mại; hạn chế trích xuất.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The Home Depot Terms of Use grant personal, non-commercial site viewing and restrict copying, distribution, or gathering site information for reseller activity. The reviewed official materials do not establish a public catalog-search API or permission for TrendScout; do not use storefront endpoints or scraping as substitutes.",
+      "revalidation_note_key": "sources.review.home_depot",
+      "revalidation_links": [
+        {"label": "The Home Depot Terms of Use", "url": "https://www.homedepot.com/c/Terms_of_Use"}
+      ]
     },
     {
       "source_id": "lowes",
