@@ -13,7 +13,7 @@ PUBLIC = ROOT / "Frontend" / "public"
 RUN_A = "a" * 32
 
 FAKE = r"""<script>
-window.testRequests=[];window.pwned=false;window.fixtureResearch=[];
+window.testRequests=[];window.pwned=false;window.fixtureResearch=[];window.fixtureSchedules=[];
 window.fetch=(path,opts={})=>{
   const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
   testRequests.push(request);
@@ -30,6 +30,15 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/v1/research/research-fixture'&&request.method==='PATCH'){
     window.fixtureResearch=window.fixtureResearch.map(item=>({...item,...JSON.parse(request.body)}));
     return Promise.resolve(new Response(JSON.stringify({item:window.fixtureResearch[0]}),{status:200}));
+  }
+  if(p==='/api/v1/scheduler'&&request.method==='GET')return Promise.resolve(new Response(JSON.stringify({items:window.fixtureSchedules,implemented:true,enabled:false,worker_running:false}),{status:200}));
+  if(p==='/api/v1/scheduler'&&request.method==='POST'){
+    const item={...JSON.parse(request.body),id:'e'.repeat(32),enabled:false};window.fixtureSchedules=[item];
+    return Promise.resolve(new Response(JSON.stringify({item}),{status:201}));
+  }
+  if(p==='/api/v1/scheduler/'+'e'.repeat(32)&&request.method==='PATCH'){
+    window.fixtureSchedules=window.fixtureSchedules.map(item=>({...item,...JSON.parse(request.body)}));
+    return Promise.resolve(new Response(JSON.stringify({item:window.fixtureSchedules[0]}),{status:200}));
   }
   if(p==='/api/timeout-json')return Promise.resolve({ok:true,json:()=>opts.signal.aborted?Promise.reject(new Error('aborted')):new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new Error('aborted'))))});
   if(p==='/api/network-fail')return Promise.reject(new TypeError('offline network failure'));
@@ -311,6 +320,24 @@ CHECK = r"""<script>
     document.querySelector('[data-dashboard-tab=overview]').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));
     check(document.querySelector('[data-dashboard-tab=analysis]').getAttribute('aria-selected')==='true','ArrowRight changes tabs');
     await go('settings');
+    const scheduleForm=document.querySelector('#settings-schedule-form');
+    scheduleForm.elements.namedItem('name').value='Daily synthetic check';
+    scheduleForm.elements.namedItem('operator-key').value='offline-scheduler-key-0123456789';
+    scheduleForm.requestSubmit();await wait(60);
+    check(testRequests.some(request=>request.path==='/api/v1/scheduler'&&request.method==='POST'&&JSON.parse(request.body).name==='Daily synthetic check'),'scheduler create submits through its protected API');
+    check(Boolean(document.querySelector('#settings-schedules .schedule-edit')),'new disabled schedule appears in the saved list');
+    document.querySelector('#settings-schedules .schedule-edit').click();
+    check(scheduleForm.elements.namedItem('name').value==='Daily synthetic check'&&scheduleForm.elements.namedItem('time').value==='09:00','schedule edit loads saved values into the form');
+    scheduleForm.elements.namedItem('name').value='Weekly synthetic review';
+    scheduleForm.elements.namedItem('frequency').value='WEEKLY';
+    scheduleForm.elements.namedItem('timezone').value='America/Los_Angeles';
+    scheduleForm.elements.namedItem('time').value='10:30';
+    scheduleForm.elements.namedItem('operator-key').value='offline-scheduler-key-0123456789';
+    scheduleForm.requestSubmit();await wait(80);
+    const schedulePatch=testRequests.find(request=>request.path==='/api/v1/scheduler/'+'e'.repeat(32)&&request.method==='PATCH');
+    const scheduleBody=schedulePatch?JSON.parse(schedulePatch.body):{};
+    check(scheduleBody.name==='Weekly synthetic review'&&scheduleBody.frequency==='WEEKLY'&&scheduleBody.timezone==='America/Los_Angeles'&&scheduleBody.hour===10&&scheduleBody.minute===30,'schedule edit persists frequency, timezone and run time');
+    check(schedulePatch?.headers?.Authorization==='Bearer offline-scheduler-key-0123456789'&&scheduleForm.elements.namedItem('operator-key').value===''&&!Object.values(localStorage).some(value=>String(value).includes('offline-scheduler-key'))&&!Object.values(sessionStorage).some(value=>String(value).includes('offline-scheduler-key')),'schedule editing uses and clears a transient operator key');
     document.querySelector('[data-theme-toggle]').click();
     document.querySelector('[data-locale-toggle]').click();
     await wait(300);
@@ -356,11 +383,12 @@ CHECK = r"""<script>
     check(document.querySelector('#global-notice').textContent.includes('30 lần kiểm tra'),'polling stop status');
     window.setTimeout=nativeTimeout;
     const writes=testRequests.filter(request=>request.method!=='GET');
-    check(writes.length===6&&writes.every(request=>[
+    check(writes.length===8&&writes.every(request=>[
       'POST /api/v1/collections','PATCH /api/v1/collections/collection-a',
       'DELETE /api/v1/collections/collection-a','POST /api/v1/collections/bulk',
-      'POST /api/v1/research','PATCH /api/v1/research/research-fixture'
-    ].includes(request.method+' '+request.path)),'offline browser writes are limited to the four exercised Collection fixture actions');
+      'POST /api/v1/research','PATCH /api/v1/research/research-fixture',
+      'POST /api/v1/scheduler','PATCH /api/v1/scheduler/'+'e'.repeat(32)
+    ].includes(request.method+' '+request.path)),'offline browser writes are limited to explicitly exercised Collection, Research, and Scheduler fixture actions');
     check(!testRequests.some(request=>request.path.startsWith('/api/v1/fetches')),'offline browser workflow did not submit a provider Fetch');
     check(!testRequests.some(request=>/token|secret|credential/i.test(JSON.stringify(request.headers))),'no credential header');
     check(!testRequests.some(request=>request.path==='/api/config'),'no auth-capability inference from config');
