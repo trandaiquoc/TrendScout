@@ -227,8 +227,18 @@ function renderQualitySnapshot(snapshot) {
     [t('runs.received'),snapshot.received_record_count == null ? t('common.unavailable') : number(snapshot.received_record_count)],
     [t('runs.retained'),snapshot.retained_keyword_count == null ? t('common.unavailable') : number(snapshot.retained_keyword_count)],
     [t('runs.rejected'),snapshot.rejected_record_count == null ? t('common.unavailable') : number(snapshot.rejected_record_count)],
+    [t('phoenix.quality-notes'),Array.isArray(snapshot.quality_flags) && snapshot.quality_flags.length ? t('runs.outcome.quality-notes',{count:number(snapshot.quality_flags.length)}) : t('runs.outcome.no-notes')],
   ];
   for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value));root.append(row);}
+  const sources=Array.isArray(snapshot.source_manifest)?snapshot.source_manifest:[];
+  const sourceRow=element('div',null,'quality-sources');
+  const sourceValues=sources.map(source=>{
+    const status=String(source.status || 'UNKNOWN');
+    const key=`fetch.source-status.${status}`;
+    const translated=t(key);
+    return `${localizedSourceName(source.source_id)} · ${translated===key?t('source.status-unknown'):translated}`;
+  });
+  sourceRow.append(element('dt',t('phoenix.quality-sources')),element('dd',sourceValues.join(' · ') || t('phoenix.quality-source-unknown')));root.append(sourceRow);
 }
 
 function localizedAlgorithmName(id) {

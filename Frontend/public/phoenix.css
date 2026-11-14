@@ -307,3 +307,5 @@ body { font-size:14px; letter-spacing:-.01em; }
 .workbench-stat span,.workbench-summary-note,.metric-label,.metric-foot { font-size:12px; }
 .workbench-sidebar input,.workbench-organization,.source-context-copy,.data-limit-note { font-size:12px; }
 @media (max-width:600px) { .workbench-table td::before { font-size:11px; } }
+.quality-snapshot-grid > .quality-sources { grid-column:1 / -1; }
+.quality-sources dd { font-size:12px; font-weight:600; line-height:1.6; }
