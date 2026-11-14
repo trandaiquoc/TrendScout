@@ -78,15 +78,10 @@
         <div id="global-notice" class="notice notice--warning" role="status" aria-live="polite" hidden></div>
         <section data-view="overview" aria-labelledby="overview-heading">
           <div class="panel" id="demo-discovery" hidden><h2 id="demo-discovery-title" data-i18n="demo.discovery-title"></h2><p id="demo-discovery-help" data-i18n="demo.discovery-help"></p><p id="demo-discovery-count"></p><ul id="demo-discovery-list"></ul></div>
-          <div class="dashboard-tabs" role="tablist" data-i18n-aria="dashboard.tablist" aria-label="Dashboard views">
-            <button id="dashboard-overview-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-overview-panel" aria-selected="true" tabindex="0" data-dashboard-tab="overview" data-i18n="dashboard.overview"></button>
-            <button id="dashboard-analysis-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-analysis-panel" aria-selected="false" tabindex="-1" data-dashboard-tab="analysis" data-i18n="dashboard.analysis"></button>
-          </div>
-          <div id="dashboard-overview-panel" role="tabpanel" aria-labelledby="dashboard-overview-tab" data-dashboard-panel="overview" tabindex="0">
           <div class="hero">
             <div class="hero-copy">
               <p class="hero-kicker" data-i18n="overview.kicker"></p>
-              <h1 id="overview-heading" data-i18n="overview.title"></h1>
+              <h1 id="overview-heading" data-i18n="nav.overview"></h1>
               <p data-i18n="overview.subtitle"></p>
             </div>
             <div class="fetch-card">
@@ -96,6 +91,11 @@
               <p id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></p>
             </div>
           </div>
+          <div class="dashboard-tabs" role="tablist" data-i18n-aria="dashboard.tablist" aria-label="Dashboard views">
+            <button id="dashboard-overview-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-overview-panel" aria-selected="true" tabindex="0" data-dashboard-tab="overview" data-i18n="dashboard.overview"></button>
+            <button id="dashboard-analysis-tab" class="dashboard-tab" type="button" role="tab" aria-controls="dashboard-analysis-panel" aria-selected="false" tabindex="-1" data-dashboard-tab="analysis" data-i18n="dashboard.analysis"></button>
+          </div>
+          <div id="dashboard-overview-panel" role="tabpanel" aria-labelledby="dashboard-overview-tab" data-dashboard-panel="overview" tabindex="0">
           <section class="dashboard-snapshot" aria-labelledby="dashboard-snapshot-title">
           <div class="dashboard-section-heading"><div><p class="section-kicker" data-i18n="overview.snapshot-kicker"></p><h2 id="dashboard-snapshot-title" data-i18n="overview.snapshot-title"></h2></div><a class="text-link" href="#runs" data-goto="runs"><span data-i18n="overview.open-runs"></span><span aria-hidden="true"> →</span></a></div>
           <div class="metrics-grid" aria-label="Wikimedia Fetch summary" data-i18n-aria="overview.metrics-label">
@@ -133,7 +133,7 @@
           </div>
           </div>
           <div id="dashboard-analysis-panel" class="analysis-panel" role="tabpanel" aria-labelledby="dashboard-analysis-tab" data-dashboard-panel="analysis" tabindex="0" hidden>
-            <div class="page-heading"><div><p class="section-kicker" data-i18n="analysis.kicker"></p><h1 data-i18n="analysis.title"></h1><p data-i18n="analysis.description"></p></div></div>
+            <div class="page-heading"><div><p class="section-kicker" data-i18n="analysis.kicker"></p><h2 data-i18n="analysis.title"></h2><p data-i18n="analysis.description"></p></div></div>
             <div class="analysis-filters panel" data-i18n-aria="analysis.filters" aria-label="Analysis filters"><label for="analysis-source-filter" data-i18n="analysis.source"></label><select id="analysis-source-filter" disabled><option data-i18n="analysis.all-sources"></option></select><label for="analysis-period-filter" data-i18n="analysis.period"></label><select id="analysis-period-filter" disabled><option data-i18n="analysis.available-window"></option></select><span class="pill pill--gray" data-i18n="analysis.filters-unavailable"></span></div>
             <div class="analysis-grid">
               <article class="panel analysis-card"><div class="panel-heading"><div><p class="section-kicker" data-i18n="analysis.source-volume-kicker"></p><h2 data-i18n="analysis.source-volume-title"></h2></div></div><ul id="analysis-source-volume-chart" class="pageviews-chart" aria-label=""></ul><div id="analysis-source-volume" class="analysis-state" role="status" aria-live="polite"></div></article>

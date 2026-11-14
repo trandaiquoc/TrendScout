@@ -315,3 +315,15 @@ body { font-size:14px; letter-spacing:-.01em; }
 .source-registry-state { margin:0 0 12px; padding:15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--muted); font-size:13px; }
 #source-capabilities-retry { margin:0 0 15px; }
 .workbench-detail h2:focus-visible { outline:2px solid var(--focus); outline-offset:4px; border-radius:3px; }
+/* Dashboard masthead: one compact workspace heading with the action beside it. */
+[data-view="overview"] > .hero { grid-template-columns:minmax(0,1fr) minmax(260px,340px); align-items:start; gap:22px; margin:0 0 26px; }
+[data-view="overview"] > .hero h1 { font-size:clamp(29px,3vw,38px); }
+[data-view="overview"] > .hero .hero-copy > p:last-child { margin-top:8px; font-size:13px; }
+[data-view="overview"] > .hero .fetch-card { grid-template-columns:auto minmax(130px,1fr); align-items:center; gap:8px 12px; padding:13px; box-shadow:none; }
+[data-view="overview"] > .hero .fetch-card-top { gap:8px; }
+[data-view="overview"] > .hero .fetch-card .fetch-help,[data-view="overview"] > .hero .fetch-card .fetch-status { grid-column:1 / -1; }
+[data-view="overview"] > .hero .fetch-card .button { min-width:0; }
+[data-view="overview"] > .dashboard-tabs { margin-bottom:25px; }
+.analysis-panel .page-heading h2 { margin:0; color:var(--ink-strong); font-size:24px; letter-spacing:-.035em; }
+@media (max-width:900px) { [data-view="overview"] > .hero { grid-template-columns:1fr; } [data-view="overview"] > .hero .fetch-card { max-width:420px; } }
+@media (max-width:600px) { [data-view="overview"] > .hero { gap:15px; margin-bottom:20px; } [data-view="overview"] > .hero h1 { font-size:29px; } [data-view="overview"] > .hero .fetch-card { grid-template-columns:1fr; } }
