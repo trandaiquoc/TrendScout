@@ -181,9 +181,14 @@ def main():
               const errors=[];const check=(v,m)=>{if(!v)errors.push(m)};
               const delay=ms=>new Promise(r=>setTimeout(r,ms));
               const until=async fn=>{for(let n=0;n<150;n++){if(fn())return true;await delay(40)}return false};
+              const go=async name=>{const a=document.querySelector('[data-nav="'+name+'"]');a?.click();location.hash='#'+name;window.dispatchEvent(new Event('hashchange'));await delay(250)};
               await until(()=>document.readyState==='complete'&&!document.documentElement.classList.contains('js-pending'));
               check(document.documentElement.lang==='vi','Research workflow starts in Vietnamese');
-              const go=async name=>{const a=document.querySelector('[data-nav="'+name+'"]');a?.click();location.hash='#'+name;window.dispatchEvent(new Event('hashchange'));await delay(250)};
+              await go('quality');
+              check(!document.querySelector('#quality-coverage').textContent.includes('NOT_MEASURED')&&!document.querySelector('#quality-fetched').textContent.includes('NOT_AVAILABLE'),'Data Quality empty state uses customer-facing labels');
+              document.querySelector('[data-locale-toggle]').click();await delay(100);
+              check(document.documentElement.lang==='en'&&!document.querySelector('#quality-coverage').textContent.includes('NOT_MEASURED')&&!document.querySelector('#quality-fetched').textContent.includes('NOT_AVAILABLE'),'Data Quality empty state localizes to English without internal codes');
+              document.querySelector('[data-locale-toggle]').click();await delay(100);
               await go('sources');
               check(await until(()=>document.querySelectorAll('#source-registry-list .source-card').length>0),'Source Center renders current capability descriptors');
               check(document.querySelectorAll('#source-registry-list .source-card').length===4,'Source Center lists the four configured source descriptors');
@@ -367,7 +372,7 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; algorithm registry/results; AI runtime settings; Dashboard/Collections counts; Run History cursor/filter/detail; "
+                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; Data Quality empty state; algorithm registry/results; AI runtime settings; Dashboard/Collections counts; Run History cursor/filter/detail; "
                 "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
