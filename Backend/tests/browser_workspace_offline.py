@@ -97,7 +97,8 @@ window.fetch=(path,opts={})=>{
       {id:'collection-a',name:'Fixture Collection A',description:'Parent Collection',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'USER',auto_match:false},
       {id:'collection-b',name:'Fixture Collection B',description:'Merge destination',examples:[],exclusions:[],membership_count:1,direct_membership_count:1,subtree_unique_keyword_count:1,created_by:'USER',auto_match:false},
       {id:'collection-parent',name:'Parent with saved topics',description:'Parent with child records',examples:[],exclusions:[],membership_count:2,direct_membership_count:0,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false},
-      {id:'collection-child',name:'Saved child topics',description:'Child records',parent_id:'collection-parent',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false}
+      {id:'collection-child',name:'Saved child topics',description:'Child records',parent_id:'collection-parent',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false},
+      ...Array.from({length:24},(_,index)=>({id:`merge-target-${index+1}`,name:`Merge destination ${String(index+1).padStart(2,'0')}`,description:'Long-list picker fixture',examples:[],exclusions:[],membership_count:0,direct_membership_count:0,subtree_unique_keyword_count:0,created_by:'USER',auto_match:false}))
     ],suggestions:[],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
   }),{status:200}));
   if(p.startsWith('/api/v1/datasets/latest/keywords?')){
@@ -248,6 +249,15 @@ CHECK = r"""<script>
     document.querySelector('.workbench-context-button')?.click();
     const picker=document.querySelector('.collection-picker');
     const pickerTrigger=picker?.querySelector('[role=combobox]');
+    const pickerDialog=picker?.closest('dialog');if(pickerDialog)pickerDialog.scrollTop=pickerDialog.scrollHeight;
+    pickerTrigger?.click();
+    const pickerList=picker?.querySelector('[role=listbox]');
+    const pickerDialogRect=pickerDialog?.getBoundingClientRect();const pickerListRect=pickerList?.getBoundingClientRect();
+    check(Boolean(picker?.classList.contains('opens-above')&&pickerDialogRect&&pickerListRect&&pickerListRect.top>=pickerDialogRect.top&&pickerListRect.bottom<=pickerDialogRect.bottom),'long merge destination list opens above when the dialog has less space below');
+    const lastPickerOption=pickerList?.querySelector('[role=option]:last-child');lastPickerOption?.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+    check(Boolean(lastPickerOption&&document.activeElement===lastPickerOption&&pickerList.scrollTop>0),'keyboard can reach the last destination in a long merge list');
+    lastPickerOption?.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    check(pickerTrigger?.getAttribute('aria-expanded')==='false'&&document.activeElement===pickerTrigger,'closing the long merge list restores focus to its trigger');
     pickerTrigger?.click();
     picker?.querySelector('[role=option]')?.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
     check(pickerTrigger?.textContent.includes('Fixture Collection B'),'merge destination picker accepts keyboard selection');

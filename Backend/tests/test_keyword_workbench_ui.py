@@ -79,6 +79,17 @@ class KeywordWorkbenchUITests(unittest.TestCase):
         self.assertIn("workbench.merge-system-help", module)
         self.assertIn("workbench.no-merge-target", module)
 
+    def test_merge_picker_fits_long_destination_lists_inside_dialog(self):
+        module = (PUBLIC / "modules" / "keyword-workbench.js").read_text(encoding="utf-8")
+        css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
+        browser_fixture = (Path(__file__).parent / "browser_workspace_offline.py").read_text(encoding="utf-8")
+        self.assertIn("const openAbove = belowSpace < desiredHeight && aboveSpace > belowSpace", module)
+        self.assertIn("root.classList.toggle('opens-above', openAbove)", module)
+        self.assertIn(".collection-picker.opens-above .collection-picker-list", css)
+        self.assertIn("Array.from({length:24}", browser_fixture)
+        self.assertIn("long merge destination list opens above", browser_fixture)
+        self.assertIn("keyboard can reach the last destination", browser_fixture)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -83,6 +83,17 @@ function collectionPicker(options, label) {
   const open = () => {
     if (!choices.length) return;
     list.hidden = false;
+    const dialog = root.closest('dialog');
+    const bounds = dialog?.getBoundingClientRect() || { top: 0, bottom: window.innerHeight };
+    const triggerBounds = trigger.getBoundingClientRect();
+    const configuredMax = Number.parseFloat(getComputedStyle(list).maxHeight) || 240;
+    const desiredHeight = Math.min(list.scrollHeight, configuredMax);
+    const aboveSpace = Math.max(0, triggerBounds.top - bounds.top - 12);
+    const belowSpace = Math.max(0, bounds.bottom - triggerBounds.bottom - 12);
+    const openAbove = belowSpace < desiredHeight && aboveSpace > belowSpace;
+    const availableSpace = openAbove ? aboveSpace : belowSpace;
+    list.style.maxHeight = `${Math.max(72, Math.min(configuredMax, availableSpace - 6))}px`;
+    root.classList.toggle('opens-above', openAbove);
     trigger.setAttribute('aria-expanded', 'true');
     root.classList.add('is-open');
     const selectedIndex = options.findIndex((item) => item.value === value);

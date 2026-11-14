@@ -705,6 +705,7 @@ button:disabled { cursor: not-allowed; }
 .collection-picker.is-open .collection-picker-trigger::after { transform: rotate(225deg) translate(-1px,-1px); }
 .collection-picker-trigger:focus-visible, .collection-picker-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .collection-picker-list { position: absolute; z-index: 20; inset: calc(100% + 6px) 0 auto; max-height: min(240px,35vh); overflow-y: auto; margin: 0; padding: 5px; list-style: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 14px 30px color-mix(in srgb,var(--ink) 16%,transparent); }
+.collection-picker.opens-above .collection-picker-list { inset: auto 0 calc(100% + 6px); }
 .collection-picker-list[hidden] { display: none; }
 .collection-picker-option { display: flex; align-items: center; min-height: 38px; padding: 8px 11px; border-radius: 7px; color: var(--ink); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; cursor: pointer; }
 .collection-picker-option:hover, .collection-picker-option.is-active { background: var(--surface-soft); }
