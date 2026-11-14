@@ -312,3 +312,5 @@ body { font-size:14px; letter-spacing:-.01em; }
 .research-section { display:grid; gap:12px; min-width:0; margin:0; padding:15px; border:1px solid var(--line); border-radius:10px; }
 .research-section legend { padding:0 6px; color:var(--ink-strong); font-size:12px; font-weight:750; }
 @media (max-width:600px) { .research-section { padding:12px; } }
+.source-registry-state { margin:0 0 12px; padding:15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--muted); font-size:13px; }
+#source-capabilities-retry { margin:0 0 15px; }

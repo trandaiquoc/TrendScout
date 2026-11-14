@@ -57,6 +57,13 @@ function savedFetchSummary(activity, translate) {
 export function renderSourceCapabilities(capabilities, translate) {
   const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
   const grid = document.querySelector('#source-registry-list');
+  const state = document.querySelector('#source-registry-state');
+  if (state) {
+    state.hidden = Boolean(capabilities && Array.isArray(capabilities.sources) && descriptors.size);
+    state.textContent = translate(!capabilities || !Array.isArray(capabilities.sources) ? 'phoenix.source-load-error' : 'phoenix.source-empty');
+  }
+  const retry = document.querySelector('#source-capabilities-retry');
+  if (retry) retry.hidden = Boolean(capabilities && Array.isArray(capabilities.sources));
   if (grid) {
     grid.replaceChildren();
     for (const descriptor of descriptors.values()) {

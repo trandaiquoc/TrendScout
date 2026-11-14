@@ -2174,6 +2174,7 @@ function addAlgorithmDetail(list, label, value) {
 }
 
 function bindEvents() {
+  $('#source-capabilities-retry').addEventListener('click', () => loadPublicCapabilities());
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
   $('#sidebar-collapse').addEventListener('click', () => {
     if (isMobileNav()) return;
