@@ -107,6 +107,7 @@ class SourceCatalogTests(unittest.TestCase):
             "substack", "medium", "google_news", "gdelt", "public_rss",
             "common_crawl", "newsapi", "openalex", "roblox", "steam_community",
             "goodreads", "letterboxd", "soundcloud", "spotify", "apple_podcasts",
+            "podcast_index", "yelp", "tripadvisor", "strava", "ravelry", "alltrails",
         })
         locale_root = Path(__file__).resolve().parents[2] / "Frontend" / "public" / "modules" / "i18n"
         catalogs = {locale: (locale_root / f"{locale}.js").read_text(encoding="utf-8")

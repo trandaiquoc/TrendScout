@@ -1381,7 +1381,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://podcastindex-org.github.io/docs-api/); từng feed có quyền riêng."
+      "source_reference": "G; [API docs](https://podcastindex-org.github.io/docs-api/) and [Terms](https://github.com/Podcastindex-org/legal/blob/main/TermsOfService.md); podcast metadata is not listening demand.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Podcast Index offers authenticated search across indexed podcast feeds and episodes, but it does not establish listener counts or population demand. Its API terms require following documented request limits and prohibit creating permanent databases or copies of returned third-party content, or caching beyond the response cache header, unless the content owner or law permits it. Feed descriptions and media remain subject to publisher rights; TrendScout use and required attribution are unverified.",
+      "revalidation_note_key": "sources.review.podcast_index",
+      "revalidation_links": [
+        {"label": "Podcast Index API documentation", "url": "https://podcastindex-org.github.io/docs-api/"},
+        {"label": "Podcast Index Terms of Service", "url": "https://github.com/Podcastindex-org/legal/blob/main/TermsOfService.md"},
+        {"label": "Podcast Index API terms PDF", "url": "https://api.podcastindex.org/tos_v1.1.pdf"}
+      ]
     },
     {
       "source_id": "yelp",
@@ -1390,7 +1398,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Fusion API](https://docs.developer.yelp.com/); reviews và commercial terms cần review."
+      "source_reference": "G; [Yelp Places API](https://docs.developer.yelp.com/docs/places-intro) and [Insights partnership](https://docs.developer.yelp.com/docs/yelp-insights).",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Yelp Places/Fusion API supports local business search by keyword, category, and location, with business attributes and up to three review excerpts. Full review text and deeper business insights require access through Yelp's separate Insights partnership and executed agreement. Yelp listing/review activity is localized to businesses and platform users, not a representative measure of broad US consumer demand; TrendScout's plan and rights are unverified.",
+      "revalidation_note_key": "sources.review.yelp",
+      "revalidation_links": [
+        {"label": "Yelp Places API overview", "url": "https://docs.developer.yelp.com/docs/places-intro"},
+        {"label": "Yelp Places plans and fields", "url": "https://docs.developer.yelp.com/page/start-your-free-trial"},
+        {"label": "Yelp Insights partnership access", "url": "https://docs.developer.yelp.com/docs/yelp-insights"}
+      ]
     },
     {
       "source_id": "tripadvisor",
@@ -1399,7 +1415,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Content API](https://tripadvisor-content-api.readme.io/); access, quota và rights cần review."
+      "source_reference": "G; current [Tripadvisor Terra](https://docs.terra.tripadvisor.com/docs/overview) uses partner packages and agreement-specific access.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Tripadvisor's current Terra platform provides partner-tier access to location, review, and photo content; each package and agreement controls authorized endpoints, usage rights, quotas, and display requirements. It is travel-content delivery, not a general keyword search or representative measure of US travel demand. The legacy JSON Partner API is in a migration/deprecation process; TrendScout has no verified partnership or content license.",
+      "revalidation_note_key": "sources.review.tripadvisor",
+      "revalidation_links": [
+        {"label": "Tripadvisor Terra platform overview", "url": "https://docs.terra.tripadvisor.com/docs/overview"},
+        {"label": "Terra API access and rate limits", "url": "https://docs.terra.tripadvisor.com/docs/rate-limits"},
+        {"label": "Legacy Partner API status", "url": "https://developer-tripadvisor.com/partner/json-api/index.html"}
+      ]
     },
     {
       "source_id": "strava",
@@ -1408,7 +1432,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://developers.strava.com/); người dùng consent, privacy và allowed use cần review."
+      "source_reference": "G; [Strava API](https://developers.strava.com/docs/) and [2026 API Policy](https://www.strava.com/legal/api_policy); data is athlete-authorized and cannot be pooled across users in a third-party app.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Strava API access is tied to an athlete's authorization; newly created apps start with capacity for one athlete, and expansion beyond ten requires Strava review. The 2026 API Policy and Agreement restrict sharing a user's data with other app users or third parties and prohibit re-exposing API materials through an aggregator. This blocks TrendScout's intended cross-user trend aggregation; no Strava activity data may be fetched or pooled for that purpose.",
+      "revalidation_note_key": "sources.review.strava",
+      "revalidation_links": [
+        {"label": "Strava API documentation", "url": "https://developers.strava.com/docs/"},
+        {"label": "Strava API rate limits and athlete capacity", "url": "https://developers.strava.com/docs/rate-limits/"},
+        {"label": "Strava API Policy", "url": "https://www.strava.com/legal/api_policy"},
+        {"label": "Strava API Agreement", "url": "https://www.strava.com/legal/api"}
+      ]
     },
     {
       "source_id": "ravelry",
@@ -1417,7 +1450,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Ravelry](https://www.ravelry.com/); API và commercial access cần xác minh."
+      "source_reference": "G; public [Ravelry Goodies](https://www.ravelry.com/about/goodies) points developers to a login-gated API group and user-specific exports.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Ravelry's public developer-facing page points app developers to a login-gated API group and documents project-progress export for a user's own data; its RSS feeds are tailored to individual pages or user activity. The reviewed public materials do not establish an open, platform-wide pattern/project trend API or TrendScout commercial access. Do not infer permission from the presence of community pages or RSS feeds; third-party content rights remain with their owners.",
+      "revalidation_note_key": "sources.review.ravelry",
+      "revalidation_links": [
+        {"label": "Ravelry Goodies and API information", "url": "https://www.ravelry.com/about/goodies"},
+        {"label": "Ravelry Terms of Service", "url": "https://www.ravelry.com/about/terms"},
+        {"label": "Ravelry API group (login required)", "url": "https://www.ravelry.com/groups/ravelry-api"}
+      ]
     },
     {
       "source_id": "alltrails",
@@ -1426,7 +1467,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [AllTrails](https://www.alltrails.com/); rights và API cần xác minh."
+      "source_reference": "G; [AllTrails Terms](https://www.alltrails.com/terms) prohibit automated searches/scraping and commercial use without written consent; no public API was verified.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "AllTrails' Terms prohibit automated searches, requests, and scraping/mining of the Products, and prohibit commercial use without express written consent. The reviewed official materials do not establish a public developer API for trail, review, or activity discovery. Do not scrape the consumer site or use undocumented endpoints; TrendScout has no verified written permission.",
+      "revalidation_note_key": "sources.review.alltrails",
+      "revalidation_links": [
+        {"label": "AllTrails Terms of Service", "url": "https://www.alltrails.com/terms"}
+      ]
     }
   ]
 }
