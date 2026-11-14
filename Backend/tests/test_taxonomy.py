@@ -222,6 +222,7 @@ class ClassificationTests(unittest.TestCase):
 
     def test_owner_25_contextual_cases_use_saved_evidence_and_stay_conservative_without_it(self):
         import json
+
         from app.taxonomy.classifier import classify_contextual
 
         fixture = Path(__file__).parent / "fixtures" / "contextual_classification_cases.json"
@@ -239,7 +240,8 @@ class ClassificationTests(unittest.TestCase):
                 "description":item["description"], "occupations":tuple(item["occupations"]),
                 "instance_types":tuple(item["instance_types"]), "category_ids":(),
                 "source_url":item.get("source_url", ""), "method":item.get("method", ""),
-                "page_namespace":item.get("page_namespace")}
+                "page_namespace":item.get("page_namespace"),
+                "is_main_page":item.get("is_main_page", False)}
             result = classify_contextual({"id":f"context-{index}", "keyword":item["title"],
                 "source":SOURCE, "project":item["project"], "eligible":1}, context)
             self.assertEqual(result["classification_status"], item.get("expected_status", "CLASSIFIED"), item["title"])
@@ -274,6 +276,15 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(software["classification_status"], "CLASSIFIED")
         self.assertIn("technology.software", software["topic_category_ids"])
         self.assertEqual(software["classification_reason"], "")
+
+        homepage_description_without_page_metadata = run("MediaWiki", {
+            "entity_id":"Q5296", "description":"main page of a Wikimedia project",
+            "instance_types":("Q17442446",),
+        }, project="mediawiki")
+        self.assertNotEqual(homepage_description_without_page_metadata["classification_status"], "INELIGIBLE")
+        verified_homepage = run("MediaWiki", {"is_main_page":True}, project="mediawiki")
+        self.assertEqual(verified_homepage["classification_status"], "INELIGIBLE")
+        self.assertEqual(verified_homepage["classification_reason"], "WIKIMEDIA_PROJECT_HOME_PAGE")
 
         ambiguous = run("YouTube", {"entity_id":"Q866", "description":"video-sharing platform",
             "is_disambiguation":True, "source_url":"https://en.wikipedia.org/wiki/YouTube",

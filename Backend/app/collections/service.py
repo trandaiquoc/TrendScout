@@ -149,6 +149,7 @@ class CollectionService:
                     record["entity_context_captured_at"] = context.captured_at
                     record["page_namespace"] = context.page_namespace
                     record["page_is_disambiguation"] = context.is_disambiguation
+                    record["page_is_main_page"] = context.is_main_page
                     record["redirected_from"] = context.redirected_from
                     record["page_language"] = context.page_language
         with self.store.connect() as db:
@@ -167,6 +168,7 @@ class CollectionService:
                         entity_source_url=context.source_url, entity_context_method=context.method,
                         entity_context_status=context.status, page_namespace=context.page_namespace,
                         page_is_disambiguation=context.is_disambiguation,
+                        page_is_main_page=context.is_main_page,
                         redirected_from=context.redirected_from, page_language=context.page_language)
         from app.taxonomy.classifier import classify_contextual
         classified_at = now()
@@ -183,6 +185,7 @@ class CollectionService:
                 "status": record.get("entity_context_status", ""),
                 "page_namespace": record.get("page_namespace"),
                 "is_disambiguation": record.get("page_is_disambiguation", False),
+                "is_main_page": record.get("page_is_main_page", False),
                 "redirected_from": record.get("redirected_from", ""),
                 "page_language": record.get("page_language", ""),
             }
@@ -669,7 +672,7 @@ class CollectionService:
                 e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
                 e.instance_types AS entity_instance_types,e.source_url AS entity_source_url,
                 e.method AS entity_context_method,e.status AS entity_context_status,
-                e.page_namespace,e.is_disambiguation,e.redirected_from,e.page_language
+                e.page_namespace,e.is_disambiguation,e.is_main_page,e.redirected_from,e.page_language
                 FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
                 WHERE k.id IN ({placeholders})""", identifiers).fetchall()
             found = {row["id"] for row in rows}
@@ -700,6 +703,7 @@ class CollectionService:
                     "status": record.get("entity_context_status") or "",
                     "page_namespace": record.get("page_namespace"),
                     "is_disambiguation": bool(record.get("is_disambiguation")),
+                    "is_main_page": bool(record.get("is_main_page")),
                     "redirected_from": record.get("redirected_from") or "",
                     "page_language": record.get("page_language") or "",
                 }

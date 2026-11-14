@@ -119,10 +119,11 @@ class KeywordWorkbenchTests(unittest.TestCase):
                     VALUES(?,?,?,?,?,?,?,?,?,1)""", (identifier, identifier, identifier.casefold(),
                     "wikimedia_pageviews_top_per_country", project, "2026-11-14", "LIVE",
                     json.dumps({"views_ceil": 17}), "",))
-                db.execute("""INSERT INTO entity_context(keyword_id,title,entity_id,description,page_namespace,
+                db.execute("""INSERT INTO entity_context(keyword_id,title,entity_id,description,page_namespace,is_main_page,
                     entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                    VALUES(?,?,?,?,?,'unknown','[]','[]',?,?,?,'CACHED','fixture-v1','2026-11-14')""",
-                    (identifier, identifier, qid, description, namespace, json.dumps(types), url,
+                    VALUES(?,?,?,?,?,?,'unknown','[]','[]',?,?,?,'CACHED','fixture-v1','2026-11-14')""",
+                    (identifier, identifier, qid, description, namespace, int(identifier in {"MediaWiki", "Home"}),
+                     json.dumps(types), url,
                      "WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS" if qid else "WIKIPEDIA_PAGE_WITHOUT_QID"))
             db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'Preserve owner membership',?)",
                        (self.root, "MediaWiki", "2026-11-14"))

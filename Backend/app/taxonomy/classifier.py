@@ -7,9 +7,11 @@ from typing import Literal
 
 from app.taxonomy.classification_policy import (
     ENTITY_DESCRIPTION_RULES,
-    VERSION as CLASSIFICATION_VERSION,
     is_verified_page_context,
     permits_title_rules,
+)
+from app.taxonomy.classification_policy import (
+    VERSION as CLASSIFICATION_VERSION,
 )
 from app.taxonomy.registry import TAXONOMY_VERSION, resolve
 
@@ -216,11 +218,7 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         resolve(other).parent_id == category for other in categories if other != category
     )}
     namespace = context.get("page_namespace")
-    is_wikimedia_project_home = bool(
-        context.get("entity_id")
-        and re.search(r"\bmain page of a wikimedia project\b", description, re.IGNORECASE)
-        and (context.get("instance_types") or ())
-    )
+    is_wikimedia_project_home = context.get("is_main_page") is True
     classification_reason = ""
     if record.get("eligible") is False:
         status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
@@ -244,14 +242,16 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         status = "CLASSIFIED"
         confidence = "HIGH" if context.get("entity_id") and (occupations or instance_types) else "MEDIUM"
         review = "UNREVIEWED"
+    if status == "INELIGIBLE":
+        categories = set()
     evidence = [asdict(item) for item in rule_result.rule_evidence] if rule_result else []
     evidence.extend(description_evidence)
     if classification_reason == "NON_TOPIC_SYSTEM_PAGE":
         evidence.append({"kind": "NON_TOPIC_PAGE_METADATA", "reason": classification_reason,
                          "page_namespace": namespace})
     elif classification_reason == "WIKIMEDIA_PROJECT_HOME_PAGE":
-        evidence.append({"kind": "NON_TOPIC_ENTITY_DESCRIPTION", "reason": classification_reason,
-                         "description": description})
+        evidence.append({"kind": "NON_TOPIC_PAGE_METADATA", "reason": classification_reason,
+                         "is_main_page": True, "page_namespace": namespace})
     if context.get("entity_id"):
         evidence.append({"kind": "WIKIDATA_ENTITY", "entity_id": context["entity_id"],
                          "instance_types": list(instance_types), "occupations": list(occupations),

@@ -13,6 +13,42 @@ def claim(identifier):
 
 
 class EntityContextTests(unittest.TestCase):
+    def test_siteinfo_identifies_the_main_page_and_localized_namespace_without_title_guessing(self):
+        def handler(request):
+            if request.url.host == "www.mediawiki.org":
+                return httpx.Response(200, json={"query": {
+                    "general": {"mainpage": "MediaWiki"},
+                    "pages": [{"pageid": 1, "ns": 0, "title": "MediaWiki", "pageprops": {}}],
+                }}, request=request)
+            if request.url.host == "id.wiktionary.org":
+                return httpx.Response(200, json={"query": {
+                    "general": {"mainpage": "Halaman Utama"},
+                    "namespacealiases": [{"id": -1, "alias": "Istimewa"}],
+                    "pages": [],
+                }}, request=request)
+            return httpx.Response(500, request=request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CollectionStore(Path(directory) / "collections.sqlite")
+            records = []
+            with store.connect() as db:
+                for identifier, title, project in (
+                    ("homepage", "MediaWiki", "mediawiki"),
+                    ("special", "Istimewa:Pencarian", "id.wiktionary"),
+                ):
+                    db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                        data_mode,evidence,context) VALUES(?,?,?, ?,?,'2026-11-13','LIVE','{}','')""",
+                        (identifier, title, title.casefold(), "wikimedia_pageviews_top_per_country", project))
+                    records.append({"id":identifier,"keyword":title,"project":project,
+                                   "source":"wikimedia_pageviews_top_per_country"})
+            resolver = WikimediaEntityContextResolver(store, transport=httpx.MockTransport(handler))
+            contexts = resolver.enrich(records)
+            self.assertTrue(contexts["homepage"].is_main_page)
+            self.assertEqual(contexts["homepage"].page_namespace, 0)
+            self.assertEqual(contexts["special"].page_namespace, -1)
+            self.assertFalse(contexts["special"].is_main_page)
+            self.assertEqual(resolver.last_stats["requested_titles"], 2)
+
     def test_project_host_is_allowlisted_and_special_namespace_is_retained(self):
         calls = []
 

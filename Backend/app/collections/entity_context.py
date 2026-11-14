@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
-CONTEXT_VERSION = "wikimedia-entity-context-v3"
+CONTEXT_VERSION = "wikimedia-entity-context-v4"
 MAX_TITLES_PER_REQUEST = 10
 MAX_TITLE_LENGTH = 256
 MAX_RESPONSE_BYTES = 4_000_000
@@ -157,11 +157,13 @@ class EntityContext:
     is_disambiguation: bool = False
     redirected_from: str = ""
     page_language: str = ""
+    is_main_page: bool = False
 
     def as_row(self) -> tuple:
         return (
             self.keyword_id, self.title, self.page_id, self.entity_id, self.description,
             self.page_namespace, int(self.is_disambiguation), self.redirected_from, self.page_language,
+            int(self.is_main_page),
             self.entity_type, json.dumps(self.occupations), json.dumps(self.category_ids),
             json.dumps(self.instance_types), self.source_url, self.method, self.status, CONTEXT_VERSION, self.captured_at,
         )
@@ -234,7 +236,7 @@ class WikimediaEntityContextResolver:
                 tuple(json.loads(row["category_ids"])), row["source_url"], row["method"],
                 row["status"], row["captured_at"], tuple(json.loads(row["instance_types"] or "[]")),
                 row["page_namespace"], bool(row["is_disambiguation"]), row["redirected_from"],
-                row["page_language"],
+                row["page_language"], bool(row["is_main_page"]),
             )
         return found
 
@@ -269,6 +271,7 @@ class WikimediaEntityContextResolver:
         titles = [row["keyword"] for row in records]
         page_data = self._get_json(client, api, {
             "action": "query", "format": "json", "formatversion": "2",
+            "meta": "siteinfo", "siprop": "general|namespaces|namespacealiases",
             "prop": "pageprops|description|info|extracts", "ppprop": "wikibase_item|disambiguation",
             "inprop": "url", "exintro": "1", "explaintext": "1", "exchars": "1200",
             "redirects": "1", "titles": "|".join(titles),
@@ -277,6 +280,27 @@ class WikimediaEntityContextResolver:
         pages = query.get("pages", [])
         if type(pages) is not list:
             raise ValueError("invalid Wikipedia page response")
+        general = query.get("general", {})
+        if not isinstance(general, dict):
+            general = {}
+        namespace_ids = {}
+        for collection in (query.get("namespaces", {}),):
+            if isinstance(collection, dict):
+                for identifier, item in collection.items():
+                    try:
+                        namespace_ids[_normalize_title(str(item.get("name", "")))] = int(identifier)
+                        namespace_ids[_normalize_title(str(item.get("canonical", "")))] = int(identifier)
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+        aliases = query.get("namespacealiases", [])
+        if isinstance(aliases, list):
+            for item in aliases:
+                if not isinstance(item, dict) or not isinstance(item.get("alias"), str):
+                    continue
+                try:
+                    namespace_ids[_normalize_title(item["alias"])] = int(item["id"])
+                except (KeyError, TypeError, ValueError):
+                    continue
         redirects = {_normalize_title(item["from"]): item["to"] for item in query.get("redirects", [])
                      if isinstance(item, dict) and isinstance(item.get("from"), str)
                      and isinstance(item.get("to"), str)}
@@ -317,6 +341,10 @@ class WikimediaEntityContextResolver:
             if not description and isinstance((page or {}).get("extract"), str):
                 description = page["extract"][:1200]
             page_title = page.get("title", record["keyword"]) if isinstance(page, dict) else record["keyword"]
+            page_namespace = page.get("ns") if isinstance(page, dict) else None
+            if type(page_namespace) is not int and ":" in record["keyword"]:
+                namespace_prefix = _normalize_title(record["keyword"].split(":", 1)[0])
+                page_namespace = namespace_ids.get(namespace_prefix)
             wikidata_descriptions = entity.get("descriptions", {})
             if isinstance(wikidata_descriptions, dict):
                 description = wikidata_descriptions.get("en", {}).get("value") or description
@@ -338,7 +366,7 @@ class WikimediaEntityContextResolver:
                     else "news_politics.current_events")
                 categories = tuple(dict.fromkeys((*categories, political_category)))
             page_id = page.get("pageid") if isinstance(page, dict) else None
-            source_url = page.get("fullurl") or (
+            source_url = (page or {}).get("fullurl") or (
                 api.rsplit("/w/api.php", 1)[0] + "/wiki/" + quote(page_title.replace(" ", "_"))
             )
             status = "CLASSIFIED" if entity_type != "unknown" or categories else "UNKNOWN"
@@ -347,11 +375,14 @@ class WikimediaEntityContextResolver:
                 record["id"], page_title, page_id if type(page_id) is int else None,
                 qid if isinstance(qid, str) else None, description, entity_type,
                 occupations, categories, source_url, method, status, _timestamp(), instance,
-                page.get("ns") if type(page.get("ns")) is int else None,
-                "disambiguation" in (page.get("pageprops") or {}),
+                page_namespace if type(page_namespace) is int else None,
+                "disambiguation" in ((page or {}).get("pageprops") or {}),
                 next((source_title for source_title, target_title in redirects.items()
                       if _normalize_title(target_title) == _normalize_title(page_title)), ""),
-                page.get("pagelanguage") if isinstance(page.get("pagelanguage"), str) else language,
+                (page or {}).get("pagelanguage")
+                if isinstance((page or {}).get("pagelanguage"), str) else language,
+                isinstance(general.get("mainpage"), str)
+                and _normalize_title(general["mainpage"]) == _normalize_title(page_title),
             )
         return output
 
@@ -383,13 +414,13 @@ class WikimediaEntityContextResolver:
             return
         with self.store.connect() as db:
             db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
-                page_namespace,is_disambiguation,redirected_from,page_language,entity_type,occupations,
+                page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,entity_type,occupations,
                 category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
                 title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
                 description=excluded.description,page_namespace=excluded.page_namespace,
                 is_disambiguation=excluded.is_disambiguation,redirected_from=excluded.redirected_from,
-                page_language=excluded.page_language,entity_type=excluded.entity_type,
+                page_language=excluded.page_language,is_main_page=excluded.is_main_page,entity_type=excluded.entity_type,
                 occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
                 source_url=excluded.source_url,method=excluded.method,status=excluded.status,
                 context_version=excluded.context_version,captured_at=excluded.captured_at""",
