@@ -347,6 +347,39 @@ def main():
                     break
                 time.sleep(0.04)
 
+            collection_form_ready = evaluate("(async()=>{document.querySelector('[data-nav=\"collections\"]')?.click();location.hash='#collections';window.dispatchEvent(new Event('hashchange'));for(let i=0;i<100;i++){const trigger=document.querySelector('#collection-create');if(trigger){trigger.focus();return true}await new Promise(resolve=>setTimeout(resolve,30))}return false})()")
+            if not collection_form_ready:
+                raise AssertionError("Collection create action did not become available for keyboard testing")
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32, "text": " "}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32}, session)
+            collection_form_open = evaluate("(()=>{const d=document.querySelector('#workbench-collection-dialog');const id=d.getAttribute('aria-labelledby');return {open:d.open,focusedName:document.activeElement.name==='name',label:id?document.getElementById(id)?.textContent.trim():'',closeName:d.querySelector('.panel-heading button')?.getAttribute('aria-label')}})()")
+            if (not collection_form_open.get("open") or not collection_form_open.get("focusedName")
+                    or not collection_form_open.get("label") or not collection_form_open.get("closeName")):
+                raise AssertionError("Collection create dialog did not expose an accessible keyboard start: " + json.dumps(collection_form_open))
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
+            if evaluate("document.activeElement.name") != "description":
+                raise AssertionError("Collection create dialog Tab order did not advance from name to description")
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            collection_form_closed = evaluate("(()=>({open:document.querySelector('#workbench-collection-dialog').open,focusReturned:document.activeElement.id==='collection-create'}))()")
+            if collection_form_closed.get("open") or not collection_form_closed.get("focusReturned"):
+                raise AssertionError("Escape did not close Collection create and return focus: " + json.dumps(collection_form_closed))
+            collection_settings_ready = evaluate("(()=>{const trigger=document.querySelector('[data-collection-node] .workbench-context-button');trigger?.focus();return Boolean(trigger)})()")
+            if not collection_settings_ready:
+                raise AssertionError("No saved Collection action was available for keyboard testing")
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32, "text": " "}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32}, session)
+            collection_settings_open = evaluate("(()=>{const d=document.querySelector('#workbench-collection-dialog');const id=d.getAttribute('aria-labelledby');return {open:d.open,focusInside:d.contains(document.activeElement),label:id?document.getElementById(id)?.textContent.trim():'',closeName:d.querySelector('.panel-heading button')?.getAttribute('aria-label')}})()")
+            if (not collection_settings_open.get("open") or not collection_settings_open.get("focusInside")
+                    or not collection_settings_open.get("label") or not collection_settings_open.get("closeName")):
+                raise AssertionError("Collection management dialog lacks accessible keyboard state: " + json.dumps(collection_settings_open))
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            collection_settings_closed = evaluate("(()=>{const trigger=document.querySelector('[data-collection-node] .workbench-context-button');return {open:document.querySelector('#workbench-collection-dialog').open,focusReturned:document.activeElement===trigger}})()")
+            if collection_settings_closed.get("open") or not collection_settings_closed.get("focusReturned"):
+                raise AssertionError("Escape did not close Collection management and return focus: " + json.dumps(collection_settings_closed))
+
             after_reload = r"""(async()=>{
               const errors=[];const check=(v,m)=>{if(!v)errors.push(m)};
               const delay=ms=>new Promise(r=>setTimeout(r,ms));
