@@ -284,6 +284,24 @@ def main():
             first_result = evaluate(expression)
             if not first_result or not first_result.get("ok"):
                 raise RuntimeError("Native Chrome Research workflow failed: " + json.dumps(first_result))
+            keyboard_open = evaluate(r"""(async()=>{
+              const delay=ms=>new Promise(r=>setTimeout(r,ms));
+              location.hash='#collections';window.dispatchEvent(new Event('hashchange'));
+              let row=null;for(let n=0;n<100&&!row;n++){row=[...document.querySelectorAll('#workbench-rows tr')].find(item=>item.textContent.includes('Unknown context topic'));if(!row)await delay(30)}
+              await delay(250);row=[...document.querySelectorAll('#workbench-rows tr')].find(item=>item.textContent.includes('Unknown context topic'));
+              window.__unknownDetailTrigger=row?.querySelector('button');window.__unknownDetailTrigger?.click();
+              const dialog=document.querySelector('#workbench-detail');
+              for(let n=0;n<100&&!dialog.open;n++)await delay(30);
+              return {open:dialog.open,focusInside:dialog.contains(document.activeElement)};
+            })()""")
+            if not keyboard_open or not keyboard_open.get("open") or not keyboard_open.get("focusInside"):
+                raise AssertionError("Native Chrome did not move keyboard focus into keyword detail: " + json.dumps(keyboard_open))
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            keyboard_closed = evaluate("(async()=>{await new Promise(resolve=>setTimeout(resolve,50));return JSON.stringify({open:document.querySelector('#workbench-detail').open,focusReturned:document.activeElement===window.__unknownDetailTrigger})})()")
+            keyboard_closed = json.loads(keyboard_closed or "{}")
+            if keyboard_closed.get("open") or not keyboard_closed.get("focusReturned"):
+                raise AssertionError("Escape did not close keyword detail and return focus: " + json.dumps(keyboard_closed))
             with collection_store.connect() as db:
                 expected_history_total = db.execute("SELECT count(*) FROM fetch_jobs").fetchone()[0]
                 expected_partial_history = db.execute("SELECT count(*) FROM fetch_jobs WHERE status='PARTIAL'").fetchone()[0]
@@ -312,7 +330,8 @@ def main():
               document.querySelector('#workbench-collection-dialog .button-primary').click();
               check(await until(()=>!document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'Collection delete removes the saved Collection');
               check(window.__apiCalls.some(x=>x.url==='/api/v1/collections/COLLECTION_ID'&&x.method==='DELETE'),'Collection delete uses the real backend endpoint');
-              check(document.querySelectorAll('#research-records .research-record').length===1&&document.querySelector('#research-records').textContent.includes('Browser workflow hypothesis'),'saved Research survives page reload');
+              await go('research');
+              check(await until(()=>document.querySelectorAll('#research-records .research-record').length===1&&document.querySelector('#research-records').textContent.includes('Browser workflow hypothesis')),'saved Research survives page reload');
               let card=document.querySelector('#research-records .research-record');
               const archive=card.querySelector('select');archive.value='ARCHIVED';archive.dispatchEvent(new Event('change',{bubbles:true}));await delay(180);
 
