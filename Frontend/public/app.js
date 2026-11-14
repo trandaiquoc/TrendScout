@@ -548,7 +548,8 @@ async function loadRunHistory({ append = false } = {}) {
       const duration=Number.isFinite(run.duration_seconds) && run.duration_seconds >= 0
         ? `${number(run.duration_seconds)} ${t('runs.duration-seconds')}` : t('runs.duration-unavailable');
       const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',run.status),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
-      values.forEach((value,index)=>{const cell=element('td',value);cell.dataset.label=headers[index];tr.append(cell);});
+      tr.className='run-history-entry';
+      values.forEach((value,index)=>{const cell=element('td',index===3?'':value);cell.dataset.label=headers[index];if(index===3){const badge=element('span',value,'run-history-status');badge.dataset.status=run.status || 'UNKNOWN';cell.append(badge);}tr.append(cell);});
       const actions=element('td');
       if (run.fetch_id) {
         const button=element('button',t('runs.details'),'button button-secondary');
