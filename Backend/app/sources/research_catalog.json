@@ -97,7 +97,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [X API](https://docs.x.com/); access và giá theo tier cần xác nhận."
+      "source_reference": "G; [Search Posts](https://docs.x.com/x-api/posts/search/introduction).",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Recent Search covers the last seven days; full-archive Search is limited to pay-per-use and Enterprise customers. Results are query-scoped, and TrendScout access, usage cost, and population-representative US coverage are unverified.",
+      "revalidation_note_key": "sources.review.x",
+      "revalidation_links": [
+        {"label": "Official Search Posts documentation", "url": "https://docs.x.com/x-api/posts/search/introduction"}
+      ]
     },
     {
       "source_id": "threads",
@@ -106,7 +112,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Threads API](https://developers.facebook.com/docs/threads/); discovery scope cần xác minh."
+      "source_reference": "G; [Threads keyword search](https://developers.facebook.com/documentation/threads/keyword-search); permission approval và quota cần review.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Keyword Search can return public Threads posts with an approved threads_keyword_search permission; before approval it searches only the authenticated user's posts. The documented per-user limit is 2,200 queries per rolling 24 hours, and results do not represent all US discussion.",
+      "revalidation_note_key": "sources.review.threads",
+      "revalidation_links": [
+        {"label": "Official keyword search documentation", "url": "https://developers.facebook.com/documentation/threads/keyword-search"}
+      ]
     },
     {
       "source_id": "reddit",
@@ -133,7 +145,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Snap developers](https://developers.snap.com/); Spotlight là surface, quyền discovery chưa xác minh."
+      "source_reference": "G; [Public Profile API](https://developers.snap.com/marketing-api/Public-Profile-API/GetStarted); allowlist bắt buộc.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The Public Profile API requires allowlisting and OAuth. Its public endpoints expose a subset of profile metadata and asset statistics; Creator Discovery searches eligible creators, not general public keyword trends. TrendScout access is unverified.",
+      "revalidation_note_key": "sources.review.snapchat",
+      "revalidation_links": [
+        {"label": "Public Profile API access requirements", "url": "https://developers.snap.com/marketing-api/Public-Profile-API/GetStarted"},
+        {"label": "Creator Discovery scope", "url": "https://developers.snap.com/marketing-api/Public-Profile-API/CreatorDiscovery"}
+      ]
     },
     {
       "source_id": "pinterest",
@@ -164,7 +183,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [access](https://learn.microsoft.com/en-us/linkedin/shared/authentication/getting-access), OAuth và nhiều quyền cần approval; không giả định public search rộng."
+      "source_reference": "G; [Community Management API access](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview); app review required.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Community Management API access requires LinkedIn review and has Development and Standard tiers; API requests are authenticated. This is not a general public keyword-search feed, and TrendScout approval or coverage is unverified.",
+      "revalidation_note_key": "sources.review.linkedin",
+      "revalidation_links": [
+        {"label": "Official Community Management API access overview", "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview"},
+        {"label": "Official app review requirements", "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management-app-review"}
+      ]
     },
     {
       "source_id": "whatsapp",
@@ -173,7 +199,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [WhatsApp platform](https://developers.facebook.com/docs/whatsapp/); business API không cấp quyền đọc mọi private conversation/community."
+      "source_reference": "G; [WhatsApp Business Platform](https://developers.facebook.com/documentation/business-messaging/whatsapp/overview/); business messaging API.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The documented Business Platform APIs send and receive messages for a business phone number and manage business messaging; they do not expose a public conversation or keyword-trend search feed. Business API access is not evidence of permission to inspect private conversations, and TrendScout access is unverified.",
+      "revalidation_note_key": "sources.review.whatsapp",
+      "revalidation_links": [
+        {"label": "Official WhatsApp Business Platform overview", "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/overview/"}
+      ]
     },
     {
       "source_id": "nextdoor",

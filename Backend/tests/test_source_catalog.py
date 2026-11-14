@@ -95,6 +95,7 @@ class SourceCatalogTests(unittest.TestCase):
             "youtube", "google_trends", "wikimedia_pageviews", "google_serp", "bing_serp",
             "facebook", "instagram", "tiktok", "reddit", "pinterest",
             "bluesky", "mastodon", "stack_exchange", "hacker_news", "github",
+            "x", "threads", "snapchat", "linkedin", "whatsapp",
         })
         for source_id, item in reviewed.items():
             with self.subTest(source_id=source_id):
