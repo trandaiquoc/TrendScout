@@ -309,3 +309,6 @@ body { font-size:14px; letter-spacing:-.01em; }
 @media (max-width:600px) { .workbench-table td::before { font-size:11px; } }
 .quality-snapshot-grid > .quality-sources { grid-column:1 / -1; }
 .quality-sources dd { font-size:12px; font-weight:600; line-height:1.6; }
+.research-section { display:grid; gap:12px; min-width:0; margin:0; padding:15px; border:1px solid var(--line); border-radius:10px; }
+.research-section legend { padding:0 6px; color:var(--ink-strong); font-size:12px; font-weight:750; }
+@media (max-width:600px) { .research-section { padding:12px; } }

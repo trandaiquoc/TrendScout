@@ -236,7 +236,8 @@ function renderQualitySnapshot(snapshot) {
     const status=String(source.status || 'UNKNOWN');
     const key=`fetch.source-status.${status}`;
     const translated=t(key);
-    return `${localizedSourceName(source.source_id)} · ${translated===key?t('source.status-unknown'):translated}`;
+    const delivery=source.delivery_state==='FRESH'?t('phoenix.delivery-fresh'):source.delivery_state==='CACHED'?t('phoenix.delivery-cached'):null;
+    return [localizedSourceName(source.source_id),translated===key?t('source.status-unknown'):translated,delivery].filter(Boolean).join(' · ');
   });
   sourceRow.append(element('dt',t('phoenix.quality-sources')),element('dd',sourceValues.join(' · ') || t('phoenix.quality-source-unknown')));root.append(sourceRow);
 }
