@@ -40,7 +40,7 @@ export const vi = {
   'analysis.error': 'Không tải được ảnh chụp dữ liệu mới nhất.',
   'analysis.no-snapshot': 'Chưa có ảnh chụp dữ liệu đã lưu.',
   'analysis.insufficient-source-volume': 'Cần ảnh chụp từ một nguồn và có số từ khóa được lưu để hiển thị giá trị này.',
-  'analysis.source-volume-note': 'Số từ khóa được lưu trong ảnh chụp mới nhất từ {source}. Đây là số tại một thời điểm, không phải xu hướng.',
+  'analysis.source-volume-note': 'Số từ khóa hiện đang lưu, phân theo nguồn. Đây là số lượng bản ghi, không phải xu hướng.',
   'analysis.effectiveness-kicker': 'KIỂM ĐỊNH',
   'analysis.effectiveness-title': 'Kiểm định hiệu quả thuật toán',
   'analysis.top-observed-kicker': 'MỨC ĐỘ ĐƯỢC QUAN SÁT',

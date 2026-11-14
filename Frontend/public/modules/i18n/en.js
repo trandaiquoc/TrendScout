@@ -40,7 +40,7 @@ export const en = {
   'analysis.error': 'The latest snapshot could not be loaded.',
   'analysis.no-snapshot': 'No persisted snapshot is available.',
   'analysis.insufficient-source-volume': 'A single-source snapshot with a retained keyword count is required to show this value.',
-  'analysis.source-volume-note': 'Retained keywords in the latest {source} snapshot. This is a snapshot count, not a trend.',
+  'analysis.source-volume-note': 'Saved keywords grouped by source. These are record counts, not trends.',
   'analysis.effectiveness-kicker': 'VALIDATION',
   'analysis.effectiveness-title': 'Algorithm effectiveness validation',
   'analysis.top-observed-kicker': 'OBSERVED POPULARITY',

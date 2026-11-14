@@ -120,6 +120,16 @@ class D2DashboardContractTests(unittest.TestCase):
         self.assertIn("$('#metric-topics-found').textContent = number(run.keyword_count)", legacy_run)
         self.assertNotIn("$('#metric-topics-found').textContent", persisted)
 
+    def test_source_volume_note_describes_saved_ledger_without_unfilled_source(self):
+        for locale, expected in (("vi", "Số từ khóa hiện đang lưu"), ("en", "Saved keywords grouped by source")):
+            catalog = (PUBLIC / "modules" / "i18n" / (locale + ".js")).read_text(encoding="utf-8")
+            match = re.search(r"'analysis\.source-volume-note':\s*'([^']*)'", catalog)
+            self.assertIsNotNone(match, locale)
+            note = match.group(1)
+            self.assertIn(expected, note)
+            self.assertNotIn("{source}", note)
+            self.assertNotIn("latest", note.lower())
+
     def test_source_cards_are_truthful_for_all_four_requested_sources(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         registry = (PUBLIC / "modules" / "capabilities.js").read_text(encoding="utf-8")
