@@ -2212,19 +2212,16 @@ function renderAlgorithmCatalog() {
     const sourceRow = element('div', null, 'algorithm-source-icons');
     item.sources.forEach((entry) => {
       const sourceBadge = element('span', null, 'algorithm-source-badge');
+      const sourceName = entry.display_name || entry.source_id.replaceAll('_', ' ');
       const currentSource = state.runtimeCapabilities?.sources?.find((source) => source.source_id === entry.source_id);
       const activeLive = state.runtimeCapabilities?.data_mode === 'LIVE'
         && state.runtimeCapabilities?.local_live_demo === true
         && currentSource?.enabled_for_current_operation === true;
-      sourceBadge.title = `${entry.display_name || entry.source_id}: ${entry.status}`
-        + ` · runtime ${activeLive ? 'LIVE active' : (entry.runtime_availability || 'unavailable')}`
-        + ` · local ${entry.local_live_verification_status || 'UNKNOWN'}`
-        + ` · ${entry.production_readiness || 'UNKNOWN'}`
-        + (entry.reason ? ` · ${entry.reason}` : '');
       const glyph = element('span', entry.icon || '•', 'algorithm-source-glyph');
       glyph.classList.toggle('algorithm-source-glyph--active', activeLive);
       sourceBadge.append(glyph);
-      sourceBadge.append(element('span', entry.display_name || entry.source_id.replaceAll('_', ' ')));
+      sourceBadge.append(element('span', sourceName));
+      sourceBadge.append(element('span', translatedAlgorithmCode('status', entry.status), 'algorithm-source-status'));
       sourceRow.append(sourceBadge);
     });
     card.append(sourceRow);
