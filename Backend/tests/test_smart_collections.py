@@ -233,9 +233,9 @@ class SmartCollectionsTests(unittest.TestCase):
                         "TEST_VERIFIED_CONTEXT", "CLASSIFIED" if recognized else "UNKNOWN", "2026-11-13T00:00:00Z")
                 with self.store.connect() as db:
                     db.executemany("""INSERT OR REPLACE INTO entity_context(keyword_id,title,page_id,entity_id,
-                        description,page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,entity_type,
+                    description,page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,is_main_page_known,entity_type,
                         occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [value.as_row() for value in self.contexts.values()])
                 return self.contexts
 
             def cached(self, keyword_ids):

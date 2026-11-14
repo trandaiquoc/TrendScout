@@ -157,13 +157,14 @@ class EntityContext:
     is_disambiguation: bool = False
     redirected_from: str = ""
     page_language: str = ""
-    is_main_page: bool = False
+    is_main_page: bool | None = None
+    is_main_page_known: bool = False
 
     def as_row(self) -> tuple:
         return (
             self.keyword_id, self.title, self.page_id, self.entity_id, self.description,
             self.page_namespace, int(self.is_disambiguation), self.redirected_from, self.page_language,
-            int(self.is_main_page),
+            int(self.is_main_page is True), int(self.is_main_page_known),
             self.entity_type, json.dumps(self.occupations), json.dumps(self.category_ids),
             json.dumps(self.instance_types), self.source_url, self.method, self.status, CONTEXT_VERSION, self.captured_at,
         )
@@ -236,7 +237,9 @@ class WikimediaEntityContextResolver:
                 tuple(json.loads(row["category_ids"])), row["source_url"], row["method"],
                 row["status"], row["captured_at"], tuple(json.loads(row["instance_types"] or "[]")),
                 row["page_namespace"], bool(row["is_disambiguation"]), row["redirected_from"],
-                row["page_language"], bool(row["is_main_page"]),
+                row["page_language"],
+                bool(row["is_main_page"]) if bool(row["is_main_page_known"]) else None,
+                bool(row["is_main_page_known"]),
             )
         return found
 
@@ -381,8 +384,9 @@ class WikimediaEntityContextResolver:
                       if _normalize_title(target_title) == _normalize_title(page_title)), ""),
                 (page or {}).get("pagelanguage")
                 if isinstance((page or {}).get("pagelanguage"), str) else language,
-                isinstance(general.get("mainpage"), str)
-                and _normalize_title(general["mainpage"]) == _normalize_title(page_title),
+                (_normalize_title(general["mainpage"]) == _normalize_title(page_title)
+                 if isinstance(general.get("mainpage"), str) and general["mainpage"].strip() else None),
+                isinstance(general.get("mainpage"), str) and bool(general["mainpage"].strip()),
             )
         return output
 
@@ -414,13 +418,14 @@ class WikimediaEntityContextResolver:
             return
         with self.store.connect() as db:
             db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
-                page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,entity_type,occupations,
+                page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,is_main_page_known,entity_type,occupations,
                 category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
                 title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
                 description=excluded.description,page_namespace=excluded.page_namespace,
                 is_disambiguation=excluded.is_disambiguation,redirected_from=excluded.redirected_from,
-                page_language=excluded.page_language,is_main_page=excluded.is_main_page,entity_type=excluded.entity_type,
+                page_language=excluded.page_language,is_main_page=excluded.is_main_page,
+                is_main_page_known=excluded.is_main_page_known,entity_type=excluded.entity_type,
                 occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
                 source_url=excluded.source_url,method=excluded.method,status=excluded.status,
                 context_version=excluded.context_version,captured_at=excluded.captured_at""",

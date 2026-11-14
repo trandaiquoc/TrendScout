@@ -172,3 +172,26 @@ On resuming the still-active goal, a focused native Chrome check found that pres
 Full backend regression was rerun after these changes: **788 tests and 778 subtests passed**, excluding `tests/emulator_tests/`. The first run exposed a locale-contract test parser treating the dynamic `fetch.source-status.` namespace prefix as a complete translation key. The parser now excludes namespace prefixes ending in a dot; the focused locale contract and full non-emulator suite pass. Local test fix: `791af60 Ignore locale namespace prefixes in contract test`. No Firestore emulator test result is implied by this run.
 
 The remaining static keyword-detail dialog was also checked with native Chrome keyboard input: it exposes a labelled title and named close control, Tab/Shift+Tab stay within the modal, and Escape returns focus to its opener. Test commit: `a43e00b Verify detail dialog keyboard focus containment`; the keyboard suite, Ruff, Python compilation and diff check passed. Firestore environment re-check: `wsl.exe` is installed, but its `--list --quiet` and `--status` probes did not return; no `bwrap`, Docker or Podman executable is installed. Those read-only probes were stopped. The guarded emulator tests remain unrun; no safety guard was bypassed.
+
+
+## Cached six-record classification correction ? 2026-11-14
+
+A fresh audit of the active Collections ledger found that `MediaWiki` and `Home` had both been marked `INELIGIBLE` because their saved Wikidata entity was Q5296 (?main page of a Wikimedia project?). The saved page records only established namespace 0; the legacy entity-context schema had not retained whether the official Wikimedia `siteinfo.general.mainpage` matched the page. A generic entity description and title do not prove that a particular page is a project home page.
+
+The entity-context schema now stores `is_main_page_known` separately from `is_main_page`. Existing rows migrate with metadata knowledge set to false, so the old default value is not interpreted as verified negative evidence. Only resolver output containing official siteinfo marks this metadata known. Reclassification also rejects a cached page context whose official project host does not match the keyword's saved project.
+
+Current cached outcomes for the six priority records:
+
+- `YouTube`: `CLASSIFIED` as `technology.internet_services.video_platforms`, supported by Q866 and the saved video-sharing description.
+- `Katie Miller`: `CLASSIFIED` as `celebrity_public_figures.political_advisers`, supported by Q78337779 and its saved political-adviser evidence.
+- `MediaWiki` and `Home`: `AMBIGUOUS`, no topic category or Collection membership. Their saved page metadata has `is_main_page_known=false`, so this cache cannot establish whether either page is the project's home page. `Home` was not relabeled as a navigation page without that metadata.
+- `Istimewa:Pencarian`: `INELIGIBLE` as `NON_TOPIC_SYSTEM_PAGE`, supported by the saved namespace ID -1.
+- `Thank You/en`: remains `UNKNOWN`; the `/en` suffix does not supply entity evidence.
+
+All 154 saved records were reclassified from cached evidence under `contextual-classifier-v1.5`; no Pageviews request or other provider fetch was made. Current ledger counts are 154 keywords, 150 CLASSIFIED / 2 AMBIGUOUS / 1 UNKNOWN / 1 INELIGIBLE, 154 source observations, 1,848 algorithm results, and 217 membership rows across 150 distinct keyword IDs. Relative to the pre-change snapshot, no source keyword, observation, algorithm-result, dataset-snapshot, or existing membership row was removed or changed. Four unpinned LOCAL_AI memberships were added for independently cached classifications; the six priority records' existing memberships and user state were preserved. There are no feedback rows or keyword decisions in the ledger, and none of the six has a pinned or manual membership. SQLite integrity is `ok`; foreign-key violations: 0.
+
+A validated online SQLite backup was made before migration and reclassification at `%LOCALAPPDATA%\TrendScout\backups\overnight-g2-g7\collections-before-cached-six-reclass-20261114.sqlite` (SHA-256 `7f9960cb010bbf4ebdb03b8ea8426fcf3292fe88579f3b47e72e1cf43d253132`; integrity `ok`; zero foreign-key violations).
+
+Regression coverage now includes the six exact records, positive cached entity evidence, missing evidence, project/source mismatch, disambiguation, and official positive main-page metadata. Focused tests passed: 64 tests and 37 subtests. The full backend suite passed: 788 tests and 778 subtests, excluding the guarded Firestore emulator suite. Ruff, Python compilation, and `git diff --check` passed.
+
+Native Chrome loaded the local TrendScout dashboard against the active ledger and showed 154 stored keywords, 150 classified topics, and 3 unclassified items (2 needing review and 1 lacking context). Chrome's local classification endpoints confirmed the six outcomes above. This was a loopback-only verification; Fetch, push, and deployment were not performed.

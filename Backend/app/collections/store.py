@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS entity_context (
  title TEXT NOT NULL, page_id INTEGER, entity_id TEXT, description TEXT NOT NULL DEFAULT '',
  page_namespace INTEGER, is_disambiguation INTEGER NOT NULL DEFAULT 0,
  is_main_page INTEGER NOT NULL DEFAULT 0,
+ is_main_page_known INTEGER NOT NULL DEFAULT 0,
  redirected_from TEXT NOT NULL DEFAULT '', page_language TEXT NOT NULL DEFAULT '',
  entity_type TEXT NOT NULL, occupations TEXT NOT NULL DEFAULT '[]',
  category_ids TEXT NOT NULL DEFAULT '[]', instance_types TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL DEFAULT '',
@@ -191,6 +192,7 @@ class CollectionStore:
             for name, declaration in (("page_namespace", "INTEGER"),
                                       ("is_disambiguation", "INTEGER NOT NULL DEFAULT 0"),
                                       ("is_main_page", "INTEGER NOT NULL DEFAULT 0"),
+                                      ("is_main_page_known", "INTEGER NOT NULL DEFAULT 0"),
                                       ("redirected_from", "TEXT NOT NULL DEFAULT ''"),
                                       ("page_language", "TEXT NOT NULL DEFAULT ''")):
                 if name not in context_columns:

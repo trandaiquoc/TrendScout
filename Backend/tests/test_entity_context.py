@@ -44,9 +44,11 @@ class EntityContextTests(unittest.TestCase):
             resolver = WikimediaEntityContextResolver(store, transport=httpx.MockTransport(handler))
             contexts = resolver.enrich(records)
             self.assertTrue(contexts["homepage"].is_main_page)
+            self.assertTrue(contexts["homepage"].is_main_page_known)
             self.assertEqual(contexts["homepage"].page_namespace, 0)
             self.assertEqual(contexts["special"].page_namespace, -1)
             self.assertFalse(contexts["special"].is_main_page)
+            self.assertTrue(contexts["special"].is_main_page_known)
             self.assertEqual(resolver.last_stats["requested_titles"], 2)
 
     def test_project_host_is_allowlisted_and_special_namespace_is_retained(self):

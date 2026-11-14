@@ -132,9 +132,10 @@ class KeywordWorkbenchTests(unittest.TestCase):
         result = response.json()
         self.assertEqual(result["reclassified"], 6)
         outcomes = {item["keyword_id"]: item for item in result["items"]}
-        self.assertEqual(outcomes["MediaWiki"]["classification_reason"], "WIKIMEDIA_PROJECT_HOME_PAGE")
+        self.assertEqual(outcomes["MediaWiki"]["classification_status"], "AMBIGUOUS")
+        self.assertEqual(outcomes["MediaWiki"]["topic_category_ids"], [])
         self.assertEqual(outcomes["Istimewa:Pencarian"]["classification_reason"], "NON_TOPIC_SYSTEM_PAGE")
-        self.assertEqual(outcomes["Home"]["classification_status"], "INELIGIBLE")
+        self.assertEqual(outcomes["Home"]["classification_status"], "AMBIGUOUS")
         self.assertEqual(outcomes["Thank You/en"]["classification_status"], "UNKNOWN")
         self.assertEqual(outcomes["YouTube"]["topic_category_ids"],
                          ["technology.internet_services.video_platforms"])
@@ -142,7 +143,8 @@ class KeywordWorkbenchTests(unittest.TestCase):
                          ["celebrity_public_figures.political_advisers"])
         unassigned = self.store.search_keywords(state="unassigned", limit=None)
         unassigned_ids = {item["id"] for item in unassigned["items"]}
-        self.assertEqual(unassigned["total"], 2)
+        self.assertEqual(unassigned["total"], 3, unassigned_ids)
+        self.assertIn("Home", unassigned_ids)
         self.assertIn("Thank You/en", unassigned_ids)
         self.assertNotIn("YouTube", unassigned_ids)
         self.assertNotIn("Katie Miller", unassigned_ids)

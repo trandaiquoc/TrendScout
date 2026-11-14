@@ -241,7 +241,8 @@ class ClassificationTests(unittest.TestCase):
                 "instance_types":tuple(item["instance_types"]), "category_ids":(),
                 "source_url":item.get("source_url", ""), "method":item.get("method", ""),
                 "page_namespace":item.get("page_namespace"),
-                "is_main_page":item.get("is_main_page", False)}
+                "is_main_page":item.get("is_main_page"),
+                "is_main_page_known":item.get("is_main_page_known", False)}
             result = classify_contextual({"id":f"context-{index}", "keyword":item["title"],
                 "source":SOURCE, "project":item["project"], "eligible":1}, context)
             self.assertEqual(result["classification_status"], item.get("expected_status", "CLASSIFIED"), item["title"])
@@ -281,10 +282,31 @@ class ClassificationTests(unittest.TestCase):
             "entity_id":"Q5296", "description":"main page of a Wikimedia project",
             "instance_types":("Q17442446",),
         }, project="mediawiki")
-        self.assertNotEqual(homepage_description_without_page_metadata["classification_status"], "INELIGIBLE")
-        verified_homepage = run("MediaWiki", {"is_main_page":True}, project="mediawiki")
-        self.assertEqual(verified_homepage["classification_status"], "INELIGIBLE")
-        self.assertEqual(verified_homepage["classification_reason"], "WIKIMEDIA_PROJECT_HOME_PAGE")
+        self.assertEqual(homepage_description_without_page_metadata["classification_status"], "AMBIGUOUS")
+        self.assertEqual(homepage_description_without_page_metadata["topic_category_ids"], [])
+        self.assertIsNone(homepage_description_without_page_metadata["source_evidence"]["page"]["is_main_page"])
+        self.assertFalse(homepage_description_without_page_metadata["source_evidence"]["page"]["is_main_page_known"])
+        for title, project in (("MediaWiki", "mediawiki"), ("Home", "foundation.wikimedia")):
+            verified_homepage = run(title, {
+                "method":"WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS",
+                "source_url": {
+                    "MediaWiki":"https://www.mediawiki.org/wiki/MediaWiki",
+                    "Home":"https://foundation.wikimedia.org/wiki/Home",
+                }[title],
+                "page_namespace":0,
+                "is_main_page":True,
+                "is_main_page_known":True,
+            }, project=project)
+            self.assertEqual(verified_homepage["classification_status"], "INELIGIBLE", title)
+            self.assertEqual(verified_homepage["classification_reason"], "WIKIMEDIA_PROJECT_HOME_PAGE", title)
+
+        home_context_from_wrong_project = run("YouTube", {
+            "entity_id":"Q866", "description":"video-sharing platform",
+            "method":"WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS",
+            "source_url":"https://en.wikipedia.org/wiki/YouTube",
+        }, project="mediawiki")
+        self.assertEqual(home_context_from_wrong_project["classification_status"], "UNKNOWN")
+        self.assertEqual(home_context_from_wrong_project["topic_category_ids"], [])
 
         ambiguous = run("YouTube", {"entity_id":"Q866", "description":"video-sharing platform",
             "is_disambiguation":True, "source_url":"https://en.wikipedia.org/wiki/YouTube",

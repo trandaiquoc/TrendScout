@@ -15,13 +15,22 @@ class EntityDescriptionRule:
     category_id: str
 
 
-VERSION = "contextual-classifier-v1.4"
+VERSION = "contextual-classifier-v1.5"
 TITLE_RULE_SOURCE = "wikimedia_pageviews_top_per_country"
 TITLE_RULE_PROJECTS = frozenset({"en.wikipedia", "vi.wikipedia"})
 VERIFIED_PAGE_HOSTS = frozenset({
     "en.wikipedia.org", "fr.wikipedia.org", "vi.wikipedia.org", "id.wiktionary.org",
     "foundation.wikimedia.org", "www.mediawiki.org", "thankyou.wikipedia.org",
 })
+PROJECT_PAGE_HOSTS = {
+    "en.wikipedia": frozenset({"en.wikipedia.org"}),
+    "fr.wikipedia": frozenset({"fr.wikipedia.org"}),
+    "vi.wikipedia": frozenset({"vi.wikipedia.org"}),
+    "id.wiktionary": frozenset({"id.wiktionary.org"}),
+    "foundation.wikimedia": frozenset({"foundation.wikimedia.org"}),
+    "mediawiki": frozenset({"mediawiki.org", "www.mediawiki.org"}),
+    "thankyou.wikipedia": frozenset({"thankyou.wikipedia.org"}),
+}
 
 
 def permits_title_rules(source: str, project: str) -> bool:
@@ -37,6 +46,19 @@ def is_verified_page_context(method: str, source_url: str) -> bool:
     except (TypeError, ValueError):
         return False
     return parsed.scheme == "https" and parsed.hostname in VERIFIED_PAGE_HOSTS and parsed.path.startswith("/wiki/")
+
+
+def page_context_matches_project(method: str, source_url: str, project: str) -> bool:
+    """Reject cached page evidence attached to a different Wikimedia project."""
+    if method not in {"WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS", "WIKIPEDIA_PAGE_WITHOUT_QID"}:
+        return True
+    try:
+        parsed = urlparse(source_url)
+    except (TypeError, ValueError):
+        return False
+    allowed_hosts = PROJECT_PAGE_HOSTS.get(project, frozenset())
+    return (is_verified_page_context(method, source_url)
+            and parsed.hostname in allowed_hosts)
 
 
 ENTITY_DESCRIPTION_RULES = (

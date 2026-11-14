@@ -8,6 +8,7 @@ from typing import Literal
 from app.taxonomy.classification_policy import (
     ENTITY_DESCRIPTION_RULES,
     is_verified_page_context,
+    page_context_matches_project,
     permits_title_rules,
 )
 from app.taxonomy.classification_policy import (
@@ -137,6 +138,11 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         stored_evidence = {}
     if not isinstance(stored_evidence, dict):
         stored_evidence = {}
+    if not page_context_matches_project(
+        context.get("method", ""), context.get("source_url", ""), project
+    ):
+        # A page resolved on another Wikimedia project cannot establish this row's identity.
+        context = {}
     entity_type = context.get("entity_type") or "unknown"
     categories = set(context.get("category_ids") or ())
     occupations = tuple(context.get("occupations") or ())
@@ -218,7 +224,9 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         resolve(other).parent_id == category for other in categories if other != category
     )}
     namespace = context.get("page_namespace")
-    is_wikimedia_project_home = context.get("is_main_page") is True
+    is_wikimedia_project_home = (
+        context.get("is_main_page_known") is True and context.get("is_main_page") is True
+    )
     classification_reason = ""
     if record.get("eligible") is False:
         status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
@@ -251,7 +259,8 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
                          "page_namespace": namespace})
     elif classification_reason == "WIKIMEDIA_PROJECT_HOME_PAGE":
         evidence.append({"kind": "NON_TOPIC_PAGE_METADATA", "reason": classification_reason,
-                         "is_main_page": True, "page_namespace": namespace})
+                         "is_main_page": True, "is_main_page_known": True,
+                         "page_namespace": namespace})
     if context.get("entity_id"):
         evidence.append({"kind": "WIKIDATA_ENTITY", "entity_id": context["entity_id"],
                          "instance_types": list(instance_types), "occupations": list(occupations),
@@ -284,6 +293,9 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
                             ) if stored_evidence.get(key, record.get(key)) is not None},
                             "page": {"namespace": namespace,
                                      "is_disambiguation": bool(context.get("is_disambiguation")),
+                                     "is_main_page": context.get("is_main_page")
+                                     if context.get("is_main_page_known") is True else None,
+                                     "is_main_page_known": context.get("is_main_page_known") is True,
                                      "redirected_from": context.get("redirected_from", ""),
                                      "language": context.get("page_language", "")},
                             "source_url": context.get("source_url", "")},
