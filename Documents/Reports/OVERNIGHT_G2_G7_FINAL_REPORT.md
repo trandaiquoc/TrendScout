@@ -247,6 +247,12 @@ Official references: X [Search Posts](https://docs.x.com/x-api/posts/search/intr
 
 Focused validation: `test_source_catalog.py` passed (8 tests), both locale modules passed `node --check`, and the offline translation suite passed (19 tests). `git diff --check` passed. No other phase suite or overall regression was run.
 
+## Focused G6 accessibility and G5 run-detail language review - 2026-11-14
+
+Native Windows Chrome's partial accessibility tree exposed the algorithm signal summary as a named `region` and the native `<details><summary>` control as a named `DisclosureTriangle` in Vietnamese; pressing Space opened the disclosure. The signal-summary region name is now localized through the normal VI/EN catalog instead of a hard-coded English `aria-label`.
+
+Reviewing the Run History detail exposed the label “Chi tiết tác vụ đã lưu” / “Saved task details”, which described a saved run as an internal task. The labels now read “Chi tiết lần chạy” / “Run details”. A Chrome inspection of the previous copy confirmed that the detail region takes focus and is labelled by its heading. A follow-up run to verify the revised copy in that panel did not reach the detail trigger in the temporary browser fixture, so the changed Run History copy is not counted as native-Chrome-verified in this checkpoint. Changed frontend JavaScript passed `node --check`; a focused check confirmed the locale keys are wired to the visible region and both translations. `git diff --check` passed. The full assistive-technology review across detail states remains open; no overall regression was run.
+
 ## Focused G2 merge-picker UX correction - 2026-11-14
 
 LucianLabs pattern [#031, Custom select listbox](https://raw.githubusercontent.com/Seokwoooo/lucian-uxui-prompt/main/api/v1/en/e/031.txt) informed a targeted correction to the Collection merge destination picker. The picker measured only its option list and always opened downward, so a long list could be clipped by the scrollable dialog. It now measures the dialog's available space, opens upward when that gives the list more room, and caps the list to the available height. The offline Chrome fixture now includes 24 destinations and checks list bounds, End-key reachability, scroll, Escape dismissal, and focus return. Focused native Windows Chrome at 390×820 showed all 24 destinations in a 240px list above the trigger, inside the dialog; End reached the last item, and Escape restored focus. No merge action was submitted.
