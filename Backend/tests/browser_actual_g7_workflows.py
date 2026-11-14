@@ -184,6 +184,12 @@ def main():
               await until(()=>document.readyState==='complete'&&!document.documentElement.classList.contains('js-pending'));
               check(document.documentElement.lang==='vi','Research workflow starts in Vietnamese');
               const go=async name=>{const a=document.querySelector('[data-nav="'+name+'"]');a?.click();location.hash='#'+name;window.dispatchEvent(new Event('hashchange'));await delay(250)};
+              await go('sources');
+              check(await until(()=>document.querySelectorAll('#source-registry-list .source-card').length>0),'Source Center renders current capability descriptors');
+              check(document.querySelectorAll('#source-registry-list .source-card').length===4,'Source Center lists the four configured source descriptors');
+              check([...document.querySelectorAll('#source-registry-list .source-card')].every(card=>card.textContent.includes('Tắt')||card.textContent.includes('Đã tắt')),'Source Center reflects the backend disabled fetch policy');
+              check(await until(()=>document.querySelectorAll('#source-library-rows tr').length>0),'Source Center loads the research inventory from the API');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/capabilities')&&window.__apiCalls.some(x=>x.url==='/api/v1/sources/library'),'Source Center uses real capability and catalog endpoints');
               await go('overview');
               check(await until(()=>document.querySelector('#metric-records-stored').textContent==='3'),'Dashboard total comes from saved SQLite keywords');
               check(document.querySelector('#metric-topics-found').textContent==='1'&&document.querySelector('#metric-unclassified').textContent==='1','Dashboard separates classified and unclassified saved topics');
@@ -354,7 +360,7 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Dashboard/Collections counts; Run History cursor/filter/detail; "
+                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center capabilities/catalog; Dashboard/Collections counts; Run History cursor/filter/detail; "
                 "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
