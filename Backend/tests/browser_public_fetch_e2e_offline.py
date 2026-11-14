@@ -57,6 +57,7 @@ check(Boolean(posts[0]?.headers['Idempotency-Key']),'request has an idempotency 
 check(!fetchRequests.some(request=>/token|secret|credential|password/i.test(JSON.stringify(request.headers))),'no credential sent');
 check(statusReads===1,'one bounded status read receives terminal state');
 check(fetchRequests.filter(request=>request.path==='/api/v1/analytics/overview').length>=2,'saved analytics refresh after terminal result');
+check(!document.querySelector('#pageviews-empty').hidden&&document.querySelector('#pageviews-chart').children.length===0,'failed analytics does not leave an old chart looking current');
 check(document.querySelector('#fetch-status').textContent.includes('độ phủ nguồn chưa đầy đủ'),'partial synthetic state announced');
 check(document.querySelector('#runs-current').textContent===RUN_ID,'run results load without user-entered ID');
 check(document.querySelector('#rows').textContent.includes('Synthetic phrase'),'synthetic result rendered');

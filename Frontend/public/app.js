@@ -190,12 +190,17 @@ async function loadAnalytics() {
     }
   } catch (error) {
     if (sequence !== analyticsSequence) return;
+    for (const id of ['metric-records-stored','metric-topics-found','metric-unclassified','metric-last-fetch']) {
+      const value=$('#'+id),note=$('#'+id+'-note');
+      if(value)value.textContent='—';
+      if(note)note.textContent=getErrorMessage(error,'analysis.error');
+    }
     const qualitySnapshot=$('#quality-snapshot');
     if (qualitySnapshot) qualitySnapshot.replaceChildren(element('p',getErrorMessage(error,'analysis.error')));
     for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
-    for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart']) {
+    for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart','analysis-history-chart']) {
       const root = $('#' + id); if (root) root.replaceChildren();
     }
     const top = $('#overview-top-keywords');
