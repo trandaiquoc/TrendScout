@@ -365,7 +365,7 @@ def main():
             collection_form_closed = evaluate("(()=>({open:document.querySelector('#workbench-collection-dialog').open,focusReturned:document.activeElement.id==='collection-create'}))()")
             if collection_form_closed.get("open") or not collection_form_closed.get("focusReturned"):
                 raise AssertionError("Escape did not close Collection create and return focus: " + json.dumps(collection_form_closed))
-            collection_settings_ready = evaluate("(()=>{const trigger=document.querySelector('[data-collection-node] .workbench-context-button');trigger?.focus();return Boolean(trigger)})()")
+            collection_settings_ready = evaluate("(async()=>{for(let i=0;i<100;i++){const trigger=document.querySelector('[data-collection-node] .workbench-context-button');if(trigger){trigger.focus();return true}await new Promise(resolve=>setTimeout(resolve,30))}return false})()")
             if not collection_settings_ready:
                 raise AssertionError("No saved Collection action was available for keyboard testing")
             browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": " ", "code": "Space", "windowsVirtualKeyCode": 32, "nativeVirtualKeyCode": 32, "text": " "}, session)
@@ -395,6 +395,10 @@ def main():
               const persistedNode=[...document.querySelectorAll('[data-collection-node]')].find(node=>node.dataset.collectionId==='COLLECTION_ID');
               persistedNode.querySelector('.workbench-context-button').click();
               document.querySelector('.collection-danger-button').click();
+              const deleteDialog=document.querySelector('#workbench-collection-dialog');
+              const deleteLabelId=deleteDialog.getAttribute('aria-labelledby');
+              check(Boolean(deleteLabelId&&document.getElementById(deleteLabelId)?.textContent.trim()),'Collection delete confirmation has an accessible title');
+              check(document.activeElement===deleteDialog.querySelector('.collection-actions button'),'Collection delete confirmation places focus on the safe Cancel action');
               document.querySelector('#workbench-collection-dialog .button-primary').click();
               check(await until(()=>!document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'Collection delete removes the saved Collection');
               check(window.__apiCalls.some(x=>x.url==='/api/v1/collections/COLLECTION_ID'&&x.method==='DELETE'),'Collection delete uses the real backend endpoint');
