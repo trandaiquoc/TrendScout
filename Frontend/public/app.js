@@ -387,8 +387,8 @@ function renderCoverageHeatmap(rows) {
     dates.add(item.observation_date);
     const source = bySource.get(item.source) || new Map();
     source.set(item.observation_date, {
-      observed: Number.isFinite(item.observed) ? item.observed : 0,
-      unavailable: Number.isFinite(item.unavailable) ? item.unavailable : 0,
+      observed: Number.isFinite(item.observed) && item.observed >= 0 ? item.observed : null,
+      unavailable: Number.isFinite(item.unavailable) && item.unavailable >= 0 ? item.unavailable : null,
     });
     bySource.set(item.source, source);
   }
@@ -412,10 +412,14 @@ function renderCoverageHeatmap(rows) {
       const counts = bySource.get(sourceId).get(date);
       const cell = element('span', '—', 'coverage-cell coverage-cell--missing');
       if (counts) {
-        const status = counts.observed && counts.unavailable ? 'mixed' : counts.observed ? 'observed' : counts.unavailable ? 'unavailable' : 'missing';
+        const status = counts.observed === null || counts.unavailable === null
+          ? 'incomplete'
+          : counts.observed && counts.unavailable ? 'mixed' : counts.observed ? 'observed' : counts.unavailable ? 'unavailable' : 'missing';
         cell.className = `coverage-cell coverage-cell--${status}`;
         cell.textContent = `${number(counts.observed)}/${number(counts.unavailable)}`;
-        cell.title = t('analysis.coverage-cell',{source:localizedSourceName(sourceId),date,observed:number(counts.observed),unavailable:number(counts.unavailable)});
+        const label = counts.observed === null || counts.unavailable === null
+          ? 'analysis.coverage-cell-incomplete' : 'analysis.coverage-cell';
+        cell.title = t(label,{source:localizedSourceName(sourceId),date,observed:number(counts.observed),unavailable:number(counts.unavailable)});
       } else cell.title = t('analysis.coverage-missing-cell',{source:localizedSourceName(sourceId),date});
       cell.setAttribute('aria-label', cell.title);
       row.append(cell);
@@ -457,9 +461,11 @@ function renderObservationHistoryChart(rows) {
   const byDate = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     if (typeof row.observation_date !== 'string') continue;
-    const counts = byDate.get(row.observation_date) || { observed: 0, unavailable: 0 };
-    counts.observed += Number.isFinite(row.observed) ? row.observed : 0;
-    counts.unavailable += Number.isFinite(row.unavailable) ? row.unavailable : 0;
+    const counts = byDate.get(row.observation_date) || { observed: 0, unavailable: 0, observedComplete: true, unavailableComplete: true };
+    if (Number.isFinite(row.observed) && row.observed >= 0) counts.observed += row.observed;
+    else counts.observedComplete = false;
+    if (Number.isFinite(row.unavailable) && row.unavailable >= 0) counts.unavailable += row.unavailable;
+    else counts.unavailableComplete = false;
     byDate.set(row.observation_date, counts);
   }
   const dates = [...byDate.entries()].sort(([left], [right]) => left.localeCompare(right)).slice(-30);
@@ -467,16 +473,20 @@ function renderObservationHistoryChart(rows) {
     chart.append(element('li', t('analysis.history-empty'), 'chart-empty'));
     return;
   }
-  const maximum = Math.max(1, ...dates.map(([, value]) => value.observed + value.unavailable));
+  for (const [, counts] of dates) {
+    if (!counts.observedComplete) counts.observed = null;
+    if (!counts.unavailableComplete) counts.unavailable = null;
+  }
+  const maximum = Math.max(1, ...dates.map(([, value]) => (value.observed || 0) + (value.unavailable || 0)));
   chart.classList.toggle('pageviews-chart--history', true);
   for (const [date, counts] of dates) {
     const row = element('li', null, 'chart-row');
     const label = element('span', date, 'chart-label');
     const track = element('span', null, 'chart-track chart-track--stacked');
     const observed = element('span', null, 'chart-bar');
-    observed.style.width = `${(counts.observed / maximum) * 100}%`;
+    observed.style.width = counts.observed === null ? '0%' : `${(counts.observed / maximum) * 100}%`;
     const unavailable = element('span', null, 'chart-bar chart-bar--unavailable');
-    unavailable.style.width = `${(counts.unavailable / maximum) * 100}%`;
+    unavailable.style.width = counts.unavailable === null ? '0%' : `${(counts.unavailable / maximum) * 100}%`;
     observed.setAttribute('aria-hidden', 'true');
     unavailable.setAttribute('aria-hidden', 'true');
     track.append(observed, unavailable);

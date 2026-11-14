@@ -71,6 +71,7 @@ export const en = {
   'analysis.operations-chart-label': 'Persisted Fetch run counts by source and status',
   'analysis.coverage-chart-label': 'Observed and unavailable keyword record counts by source and date',
   'analysis.coverage-cell': '{source} · {date}: {observed} observed, {unavailable} unavailable',
+  'analysis.coverage-cell-incomplete': '{source} · {date}: incomplete count; {observed} observed, {unavailable} unavailable',
   'analysis.coverage-missing-cell': '{source} · {date}: no observation row',
   'analysis.ops.completed': 'Completed',
   'analysis.ops.skipped': 'Skipped',

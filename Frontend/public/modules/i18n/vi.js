@@ -71,6 +71,7 @@ export const vi = {
   'analysis.operations-chart-label': 'Số lần lấy dữ liệu đã lưu theo nguồn và trạng thái',
   'analysis.coverage-chart-label': 'Số bản ghi quan sát được và không khả dụng theo nguồn, ngày',
   'analysis.coverage-cell': '{source} · {date}: {observed} đã quan sát, {unavailable} không khả dụng',
+  'analysis.coverage-cell-incomplete': '{source} · {date}: thiếu số liệu; {observed} đã quan sát, {unavailable} không khả dụng',
   'analysis.coverage-missing-cell': '{source} · {date}: chưa có hàng dữ liệu quan sát',
   'analysis.ops.completed': 'Hoàn tất',
   'analysis.ops.skipped': 'Bỏ qua',

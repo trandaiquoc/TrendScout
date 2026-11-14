@@ -166,6 +166,18 @@ class D2DashboardContractTests(unittest.TestCase):
                         4.5,
                     )
 
+    def test_missing_observation_counts_remain_distinct_from_zero(self):
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        self.assertIn("observed: Number.isFinite(item.observed) && item.observed >= 0 ? item.observed : null", app)
+        self.assertIn("counts.observed === null || counts.unavailable === null", app)
+        self.assertIn("analysis.coverage-cell-incomplete", app)
+        for locale in ("vi", "en"):
+            catalog = (PUBLIC / "modules" / "i18n" / f"{locale}.js").read_text(encoding="utf-8")
+            self.assertIn("'analysis.coverage-cell-incomplete':", catalog)
+        browser_fixture = (ROOT / "Backend" / "tests" / "browser_d2_visual_offline.py").read_text(encoding="utf-8")
+        self.assertIn("observed:0,unavailable:null", browser_fixture)
+        self.assertIn("dashboard converted missing coverage count to zero", browser_fixture)
+
 
 if __name__ == "__main__":
     unittest.main()
