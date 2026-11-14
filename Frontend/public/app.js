@@ -62,6 +62,7 @@ const state = {
   sourceLibrary: [],
   researchKeywords: [],
   researchEditId: null,
+  researchRecords: [], researchNext: null, researchSequence: 0,
 };
 let schedulerListSequence = 0;
 let schedulerEditId = null;
@@ -851,10 +852,21 @@ async function loadResearchKeywords(query='') {
   } catch(error) { select.replaceChildren(new Option(t('research.keywords-unavailable'),'')); }
 }
 
-async function loadResearchRecords() {
+async function loadResearchRecords({append = false} = {}) {
   const root=$('#research-records'); if(!root)return;
-  try { const result=await getJson('/api/v1/research?limit=50',{locale:getLocale()}); renderResearchRecords(result.items || []); }
-  catch(error) { root.replaceChildren(element('p',getErrorMessage(error,'research.load-error'))); }
+  const sequence=++state.researchSequence;
+  const params=new URLSearchParams({limit:'50',offset:String(append ? state.researchNext ?? 0 : 0)});
+  const query=$('#research-list-search').value.trim(), status=$('#research-list-status').value;
+  if(query)params.set('q',query);if(status)params.set('status',status);
+  try {
+    const result=await getJson('/api/v1/research?'+params.toString(),{locale:getLocale()});
+    if(sequence!==state.researchSequence)return;
+    state.researchRecords=append?[...state.researchRecords,...(result.items || [])]:(result.items || []);
+    state.researchNext=result.next_offset ?? null;
+    $('#research-list-more').hidden=state.researchNext===null;
+    $('#research-list-count').textContent=Number.isInteger(result.total)?t('workbench.results-count',{count:number(result.total)}):t('common.unavailable');
+    renderResearchRecords(state.researchRecords);
+  } catch(error) { if(sequence===state.researchSequence){root.replaceChildren(element('p',getErrorMessage(error,'research.load-error')));$('#research-list-count').textContent='';$('#research-list-more').hidden=true;} }
 }
 
 function renderResearchRecords(items) {
@@ -872,7 +884,7 @@ function renderResearchRecords(items) {
     status.value=item.status; status.addEventListener('change',async()=>{
       const previous=item.status;
       status.disabled=true;
-      try { await requestJson('/api/v1/research/'+encodeURIComponent(item.id),{method:'PATCH',body:{status:status.value},locale:getLocale()});item.status=status.value; }
+      try { await requestJson('/api/v1/research/'+encodeURIComponent(item.id),{method:'PATCH',body:{status:status.value},locale:getLocale()});item.status=status.value;await loadResearchRecords(); }
       catch(error){status.value=previous;announce(getErrorMessage(error,'research.save-error'),true);}
       finally{status.disabled=false;}
     });
@@ -2439,6 +2451,9 @@ function bindEvents() {
   });
   $('#source-library-category').addEventListener('change', renderSourceLibrary);
   $('#research-form').addEventListener('submit',saveResearchRecord);
+  $('#research-list-search').addEventListener('input',()=>{clearTimeout(window.researchListTimer);window.researchListTimer=setTimeout(()=>loadResearchRecords(),250);});
+  $('#research-list-status').addEventListener('change',()=>loadResearchRecords());
+  $('#research-list-more').addEventListener('click',()=>loadResearchRecords({append:true}));
   $('#research-cancel-edit').addEventListener('click',cancelResearchEdit);
   $('#settings-schedule-cancel').addEventListener('click',cancelScheduleEdit);
   $('#research-keyword-search').addEventListener('input',()=>{clearTimeout(window.researchSearchTimer);window.researchSearchTimer=setTimeout(()=>loadResearchKeywords($('#research-keyword-search').value.trim()),250);});

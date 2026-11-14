@@ -198,7 +198,8 @@
         <section class="view-panel" data-view="research" hidden aria-labelledby="research-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="research.kicker"></p><h1 id="research-heading" data-i18n="nav.research"></h1><p data-i18n="research.description"></p></div><span class="page-heading-mark" aria-hidden="true">▧</span></div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="research.evidence-boundary"></p></div>
-          <div class="research-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.workspace-kicker"></p><h2 data-i18n="research.create-title"></h2></div></div>
+          <div class="research-grid"><article class="panel research-library"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.saved-kicker"></p><h2 data-i18n="research.saved-title"></h2></div></div><div class="research-list-tools"><label><span data-i18n="phoenix.research-search"></span><input id="research-list-search" type="search" maxlength="100"></label><label><span data-i18n="research.status"></span><select id="research-list-status"><option value="" data-i18n="phoenix.all-statuses"></option><option value="DRAFT" data-i18n="research.status.draft"></option><option value="RESEARCHING" data-i18n="research.status.researching"></option><option value="NEEDS_REVIEW" data-i18n="research.status.needs_review"></option><option value="VALIDATED" data-i18n="research.status.validated"></option><option value="ARCHIVED" data-i18n="research.status.archived"></option></select></label></div><p id="research-list-count" class="fine-print" aria-live="polite"></p><div id="research-records" class="research-records" aria-live="polite"></div><button id="research-list-more" class="button button-secondary" type="button" hidden data-i18n="runs.load-more"></button></article>
+            <article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.workspace-kicker"></p><h2 data-i18n="research.create-title"></h2></div></div>
             <form id="research-form" class="research-form">
               <label><span data-i18n="research.saved-keyword"></span><input id="research-keyword-search" type="search" maxlength="100" data-i18n-placeholder="research.search-keyword"></label>
               <label><span data-i18n="research.link-keyword"></span><select id="research-keyword"><option value="" data-i18n="research.no-linked-keyword"></option></select></label>
@@ -211,8 +212,7 @@
               <label><span data-i18n="research.findings"></span><textarea id="research-findings" maxlength="4000" rows="3"></textarea></label>
               <label><span data-i18n="research.status"></span><select id="research-status"><option value="DRAFT" data-i18n="research.status.draft"></option><option value="RESEARCHING" data-i18n="research.status.researching"></option><option value="NEEDS_REVIEW" data-i18n="research.status.needs_review"></option><option value="VALIDATED" data-i18n="research.status.validated"></option><option value="ARCHIVED" data-i18n="research.status.archived"></option></select></label>
               <div class="research-form-actions"><button class="button button-primary" type="submit" data-i18n="research.save"></button><button id="research-cancel-edit" class="button button-secondary" type="button" data-i18n="research.cancel-edit" hidden></button></div><p id="research-form-status" role="status" aria-live="polite"></p>
-            </form></article>
-            <article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="research.saved-kicker"></p><h2 data-i18n="research.saved-title"></h2></div></div><div id="research-records" class="research-records" aria-live="polite"></div></article></div>
+            </form></article></div>
         </section>
 
 

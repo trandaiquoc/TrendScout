@@ -1115,6 +1115,8 @@ export const vi = {
   'phoenix.algorithm-results-unavailable': 'Không tải được kết quả đã lưu.',
   'phoenix.quality-latest': 'Tình trạng dữ liệu gần nhất đã lưu',
   'phoenix.no-snapshot': 'Chưa có ảnh chụp dữ liệu được lưu.',
+  'phoenix.research-search': 'Tìm trong nghiên cứu đã lưu',
+  'phoenix.all-statuses': 'Tất cả trạng thái',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',
