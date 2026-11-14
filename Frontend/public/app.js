@@ -156,6 +156,7 @@ async function loadAnalytics() {
     $('#metric-active-sources').textContent = number((data.active_sources || []).length);
     $('#metric-active-sources-note').textContent = t('analysis.sources-in-ledger');
     const latest = data.latest_dataset;
+    renderQualitySnapshot(latest);
     const successful = data.last_successful_fetch;
     if (successful?.fetched_at) {
       $('#metric-last-fetch').textContent = compactTimestamp(successful.fetched_at);
@@ -192,6 +193,8 @@ async function loadAnalytics() {
       renderDataTable(target, [t('analysis.rank'),t('analysis.keyword'),t('analysis.metric'),t('analysis.value')], top.map(row => [number(row.rank),row.keyword,`${row.metric || '—'} (${row.unit || '—'})`,number(row.observed_value)]), note);
     }
   } catch (error) {
+    const qualitySnapshot=$('#quality-snapshot');
+    if (qualitySnapshot) qualitySnapshot.replaceChildren(element('p',getErrorMessage(error,'analysis.error')));
     for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
@@ -205,6 +208,22 @@ async function loadAnalytics() {
     const empty = $('#pageviews-empty');
     if (empty) { empty.hidden = false; empty.textContent = getErrorMessage(error, 'analysis.error'); }
   }
+}
+
+function renderQualitySnapshot(snapshot) {
+  const root=$('#quality-snapshot');
+  if(!root)return;
+  root.replaceChildren();
+  if(!snapshot){root.append(element('p',t('phoenix.no-snapshot')));return;}
+  const fields=[
+    [t('runs.status'),localizedStatus('status.',snapshot.status)],
+    [t('runs.mode'),localizedRunMode(snapshot.data_mode)],
+    [t('quality.fetched'),snapshot.fetched_at ? timestamp(snapshot.fetched_at) : t('common.unavailable')],
+    [t('runs.received'),snapshot.received_record_count == null ? t('common.unavailable') : number(snapshot.received_record_count)],
+    [t('runs.retained'),snapshot.retained_keyword_count == null ? t('common.unavailable') : number(snapshot.retained_keyword_count)],
+    [t('runs.rejected'),snapshot.rejected_record_count == null ? t('common.unavailable') : number(snapshot.rejected_record_count)],
+  ];
+  for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value));root.append(row);}
 }
 
 function localizedAlgorithmName(id) {
@@ -1303,7 +1322,7 @@ function updateRun(run) {
   }
   const observationTime = Date.parse(String(run.data_date || '') + 'T00:00:00Z');
   const isStale = Number.isFinite(observationTime) && Date.now() - observationTime > 3 * 86400000;
-  $('#quality-staleness').textContent = isStale ? t('quality.stale') : t('quality.fresh');
+  $('#quality-staleness').textContent = !Number.isFinite(observationTime) ? t('quality.no-run') : isStale ? t('quality.stale') : t('quality.fresh');
   if (isStale) {
     warnings.push(t('quality.stale'));
   }

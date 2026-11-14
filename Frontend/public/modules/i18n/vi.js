@@ -1113,6 +1113,8 @@ export const vi = {
   'phoenix.source-details': 'Thông tin nguồn và trạng thái',
   'phoenix.search-algorithms': 'Tìm phương pháp',
   'phoenix.algorithm-results-unavailable': 'Không tải được kết quả đã lưu.',
+  'phoenix.quality-latest': 'Tình trạng dữ liệu gần nhất đã lưu',
+  'phoenix.no-snapshot': 'Chưa có ảnh chụp dữ liệu được lưu.',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

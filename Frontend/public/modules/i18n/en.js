@@ -1113,6 +1113,8 @@ export const en = {
   'phoenix.source-details': 'Source details and status',
   'phoenix.search-algorithms': 'Search methods',
   'phoenix.algorithm-results-unavailable': 'Saved results could not be loaded.',
+  'phoenix.quality-latest': 'Latest saved data status',
+  'phoenix.no-snapshot': 'No saved data snapshot is available.',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',
