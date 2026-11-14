@@ -13,6 +13,25 @@ def claim(identifier):
 
 
 class EntityContextTests(unittest.TestCase):
+    def test_legacy_main_page_default_remains_unknown_after_schema_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            store = CollectionStore(path)
+            with store.connect() as db:
+                db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                    data_mode,evidence,context) VALUES('legacy','MediaWiki','mediawiki',
+                    'wikimedia_pageviews_top_per_country','mediawiki','2026-11-13','LIVE','{}','')""")
+                db.execute("""INSERT INTO entity_context(keyword_id,title,description,is_main_page,entity_type,
+                    method,status,context_version,captured_at) VALUES('legacy','MediaWiki',
+                    'main page of a Wikimedia project',0,'unknown','WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS',
+                    'UNKNOWN','wikimedia-entity-context-v4','2026-11-13T00:00:00Z')""")
+                db.execute("ALTER TABLE entity_context DROP COLUMN is_main_page_known")
+
+            migrated = CollectionStore(path)
+            context = WikimediaEntityContextResolver(migrated).cached(["legacy"])["legacy"]
+            self.assertIsNone(context.is_main_page)
+            self.assertFalse(context.is_main_page_known)
+
     def test_siteinfo_identifies_the_main_page_and_localized_namespace_without_title_guessing(self):
         def handler(request):
             if request.url.host == "www.mediawiki.org":
