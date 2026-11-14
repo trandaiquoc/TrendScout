@@ -1121,6 +1121,8 @@ export const en = {
   'phoenix.previous-keyword': 'Previous keyword',
   'phoenix.next-keyword': 'Next keyword',
   'phoenix.keyword-position': '{current} / {total} on this page',
+  'phoenix.filter-keywords': 'Filter keywords',
+  'phoenix.show-results': 'Show results',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

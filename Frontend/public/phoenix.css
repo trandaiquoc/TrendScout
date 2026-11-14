@@ -283,3 +283,11 @@ body { font-size:14px; letter-spacing:-.01em; }
 .workbench-detail-navigation { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 0 16px; border-bottom:1px solid var(--line); }
 .workbench-detail-navigation span { color:var(--muted); font-size:11px; text-align:center; }
 .workbench-detail-navigation .button { min-height:34px; padding:6px 10px; font-size:11px; }
+.workbench-mobile-filter-button { display:none; }
+.workbench-filter-sheet { width:min(100vw,620px); max-width:100vw; max-height:min(85vh,760px); overflow:auto; margin:auto auto 0; padding:20px; border:1px solid var(--line); border-radius:18px 18px 0 0; background:var(--surface); color:var(--ink); }
+.workbench-filter-sheet::backdrop { background:rgb(10 15 30 / 55%); }
+.workbench-filter-sheet h2 { margin:0; color:var(--ink-strong); font-size:18px; }
+.workbench-filter-sheet-count { margin:8px 0 14px; color:var(--muted); font-size:12px; }
+.workbench-filter-sheet .workbench-advanced-fields { display:grid; grid-template-columns:1fr 1fr; margin:0 0 18px; padding:0; border:0; background:transparent; }
+.workbench-filter-sheet > .button-primary { width:100%; }
+@media (max-width:600px) { .workbench-mobile-filter-button { display:inline-flex; justify-content:center; } .workbench-filters > .workbench-advanced-filters { display:none; } }

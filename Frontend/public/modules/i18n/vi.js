@@ -1121,6 +1121,8 @@ export const vi = {
   'phoenix.previous-keyword': 'Từ khóa trước',
   'phoenix.next-keyword': 'Từ khóa tiếp theo',
   'phoenix.keyword-position': '{current} / {total} trên trang này',
+  'phoenix.filter-keywords': 'Lọc từ khóa',
+  'phoenix.show-results': 'Xem kết quả',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',
