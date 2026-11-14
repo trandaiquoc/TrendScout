@@ -1132,7 +1132,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [data](https://commoncrawl.org/get-started); rights từng website và freshness cần review."
+      "source_reference": "G; [URL Index](https://www.commoncrawl.org/url-index) và [Terms](https://commoncrawl.org/terms-of-use); dữ liệu theo đợt crawl, quyền nội dung theo từng website.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Common Crawl provides periodically published web-crawl snapshots and URL indexes for analysis; it is not a real-time trend feed, and coverage reflects what its crawler collected. Its terms say crawled content may remain subject to each site owner's terms and third-party rights; commercial reuse needs rights review. Large-scale queries may require paid cloud compute.",
+      "revalidation_note_key": "sources.review.common_crawl",
+      "revalidation_links": [
+        {"label": "Common Crawl URL Index", "url": "https://www.commoncrawl.org/url-index"},
+        {"label": "Common Crawl Terms of Use", "url": "https://commoncrawl.org/terms-of-use"}
+      ]
     },
     {
       "source_id": "wikimedia_pageviews",
@@ -1207,7 +1214,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [documentation](https://newsapi.org/docs); quyền publisher, giá và attribution cần xem hợp đồng."
+      "source_reference": "G; [News API plans](https://newsapi.org/pricing) and [terms](https://newsapi.org/terms); production requires a paid plan, source coverage is not population-representative.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "News API supports keyword search across indexed news and blog sources. Its Developer plan is limited to development and testing; staging and production require a paid subscription. Results do not include full article text, plan limits and prices can change, and global publisher coverage does not establish representative US audience demand. TrendScout's plan and data-use rights are unverified.",
+      "revalidation_note_key": "sources.review.newsapi",
+      "revalidation_links": [
+        {"label": "News API documentation", "url": "https://newsapi.org/docs"},
+        {"label": "News API pricing and plan limits", "url": "https://newsapi.org/pricing"},
+        {"label": "News API Terms of Service", "url": "https://newsapi.org/terms"}
+      ]
     },
     {
       "source_id": "github",
@@ -1234,7 +1249,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [API](https://docs.openalex.org/); license, quota và US evidence cần kiểm tra."
+      "source_reference": "G; [OpenAlex API reference](https://help.openalex.org/api/); metadata CC0, measures scholarly publishing rather than general demand.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "OpenAlex provides searchable scholarly metadata for works, authors, sources, institutions, and topics; its current API reference states that the data are CC0 and that basic API access is free, with usage limits and higher-volume options. Counts reflect scholarly records and indexing choices, not consumer interest, sales, or broad US demand; article full text retains its own license.",
+      "revalidation_note_key": "sources.review.openalex",
+      "revalidation_links": [
+        {"label": "OpenAlex API reference", "url": "https://help.openalex.org/api/"},
+        {"label": "OpenAlex authentication and rate limits", "url": "https://help.openalex.org/api/authentication/"}
+      ]
     },
     {
       "source_id": "roblox",
@@ -1243,7 +1265,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Open Cloud](https://create.roblox.com/docs/cloud); entitlement và privacy, nhất là trẻ em, cần review."
+      "source_reference": "G; [Open Cloud API](https://create.roblox.com/docs/cloud) and [third-party app policy](https://en.help.roblox.com/hc/en-us/articles/37924211313044-Creator-Third-Party-App-Policy); scoped creator access, not a general trend feed.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Roblox Open Cloud exposes creator resources through API keys and OAuth scopes, with access controlled by the creator's permissions; the reviewed materials do not establish a platform-wide public discovery or keyword-trend API for TrendScout. Roblox's third-party app policy limits requested scopes, prohibits selling Roblox API data and user tracking/profiling, and requires expunging data if API access is lost. TrendScout's access and permitted analytics use are unverified.",
+      "revalidation_note_key": "sources.review.roblox",
+      "revalidation_links": [
+        {"label": "Roblox Open Cloud API reference", "url": "https://create.roblox.com/docs/cloud"},
+        {"label": "Roblox third-party app policy", "url": "https://en.help.roblox.com/hc/en-us/articles/37924211313044-Creator-Third-Party-App-Policy"},
+        {"label": "Roblox Creator third-party app terms", "url": "https://en.help.roblox.com/hc/en-us/articles/15887203369620-Creator-Third-Party-App-Terms"}
+      ]
     },
     {
       "source_id": "steam_community",
@@ -1252,7 +1282,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Steam Web API](https://partner.steamgames.com/doc/webapi_overview); quyền và coverage cần xác minh."
+      "source_reference": "G; [Steam Web API](https://partner.steamgames.com/doc/webapi_overview) and [API terms](https://steamcommunity.com/dev/apiterms); specific API methods and permitted presentation must be reviewed.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Steam documents public Web API methods as well as protected methods requiring keys or publisher permissions; this does not establish a general search API for all Steam Community discussions or a representative demand measure. Steam Web API terms license an identified application to present Steam Data to end users for personal use, require a confidential key, and state a 100,000-call daily limit. TrendScout's proposed analytics, storage, and commercial presentation rights remain unverified.",
+      "revalidation_note_key": "sources.review.steam_community",
+      "revalidation_links": [
+        {"label": "Steam Web API overview", "url": "https://partner.steamgames.com/doc/webapi_overview"},
+        {"label": "Steam Web API authentication", "url": "https://partner.steamgames.com/doc/webapi_overview/auth"},
+        {"label": "Steam Web API Terms of Use", "url": "https://steamcommunity.com/dev/apiterms"}
+      ]
     },
     {
       "source_id": "goodreads",

@@ -105,6 +105,7 @@ class SourceCatalogTests(unittest.TestCase):
             "temu", "shop_app", "wayfair", "houzz", "home_depot",
             "lowes", "target", "nordstrom", "google_shopping", "product_hunt",
             "substack", "medium", "google_news", "gdelt", "public_rss",
+            "common_crawl", "newsapi", "openalex", "roblox", "steam_community",
         })
         locale_root = Path(__file__).resolve().parents[2] / "Frontend" / "public" / "modules" / "i18n"
         catalogs = {locale: (locale_root / f"{locale}.js").read_text(encoding="utf-8")
