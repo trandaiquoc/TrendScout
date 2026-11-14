@@ -20,6 +20,7 @@ from app.main import create_normal_wikimedia_live_app
 from app.normal_wikimedia_live_policy import POLICY_VERSION, STATE_KEY, normal_wikimedia_live_policy
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.orchestration.normal_wikimedia_live_composition import _PersistentOneSecondPacer
+from app.scheduling.persistent import PersistentScheduleStore
 from app.settings import Settings
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.sources.guarded_collector import CollectionLimits
@@ -233,6 +234,64 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(evidence["approximate_views"], 100)
                     self.assertEqual(evidence["data_mode"], "LIVE")
                     self.assertEqual(evidence["source_url"].split("/")[:3], ["https:", "", "en.wikipedia.org"])
+
+    async def test_local_live_scheduler_uses_configured_operator_token_and_stays_disabled(self):
+        def processing_grants(now):
+            return (ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
+                                    now + timedelta(minutes=15), POLICY_VERSION),)
+
+        facade = DistributedPublicFetch(
+            self.admission, self.worker, resolve_grant=self.checkpoint_grant,
+            utcnow=lambda: self.now, normal_wikimedia_live=True,
+            resolve_processing_grants=processing_grants,
+        )
+
+        @asynccontextmanager
+        async def composition():
+            yield facade
+
+        token = "synthetic-local-live-operator-token"
+        app = create_normal_wikimedia_live_app(
+            enabled=True, composition_factory=composition,
+            settings=Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "local", "TREND_SCOUT_RUN_MODE": "live",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+                "TREND_SCOUT_OPERATOR_TOKEN": token,
+            }),
+        )
+        inner = app.app
+        isolated_collections = CollectionStore(self.directory.name + "/scheduler-collections.sqlite")
+        scheduler = PersistentScheduleStore(Path(self.directory.name) / "schedules.sqlite")
+        with (patch("app.collections.store.CollectionStore.local", return_value=isolated_collections),
+              patch("app.main.WikimediaEntityContextResolver", NoEntityContext)):
+            async with inner.router.lifespan_context(inner):
+                inner.state.scheduler_store = scheduler
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1234)),
+                    base_url="http://127.0.0.1",
+                ) as client:
+                    headers = {"Origin": "http://127.0.0.1", "Authorization": f"Bearer {token}"}
+                    created = await client.post("/api/v1/scheduler", headers=headers, json={
+                        "name": "Synthetic schedule", "frequency": "DAILY",
+                        "timezone": "Asia/Bangkok", "hour": 9, "minute": 10,
+                    })
+                    self.assertEqual(created.status_code, 201, created.text)
+                    schedule_id = created.json()["item"]["id"]
+                    edited = await client.patch(f"/api/v1/scheduler/{schedule_id}",
+                        headers=headers, json={"name": "Edited synthetic schedule",
+                            "frequency": "WEEKLY", "timezone": "America/Los_Angeles",
+                            "hour": 14, "minute": 20})
+                    self.assertEqual(edited.status_code, 200, edited.text)
+                    self.assertEqual(edited.json()["item"]["frequency"], "WEEKLY")
+                    enabled = await client.patch(f"/api/v1/scheduler/{schedule_id}",
+                        headers=headers, json={"enabled": True})
+                    self.assertEqual(enabled.status_code, 409, enabled.text)
+                    listing = (await client.get("/api/v1/scheduler")).json()
+                    self.assertFalse(listing["enabled"])
+                    self.assertFalse(listing["worker_running"])
+                    self.assertEqual(len(listing["items"]), 1)
+                    self.assertEqual(listing["items"][0]["name"], "Edited synthetic schedule")
+                    self.assertFalse(listing["items"][0]["enabled"])
 
 
 if __name__ == "__main__":

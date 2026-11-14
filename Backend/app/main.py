@@ -139,6 +139,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         app.state.run_service = None
+        app.state.operator_token = (
+            operator_token if operator_token is not None else settings.operator_token
+        )
+        app.state.scheduler_store = scheduler_store
         runtime_guard = None
         try:
             if local_live_opt_in:
@@ -194,11 +198,7 @@ def create_app(
             )
             if app.state.run_service is not None:
                 await app.state.run_service.recover()
-            app.state.operator_token = (
-                operator_token if operator_token is not None else settings.operator_token
-            )
             app.state.scheduler_worker = None
-            app.state.scheduler_store = scheduler_store
             if settings.scheduler_enabled:
                 if app.state.run_service is None or run_mode != "synthetic" or not app.state.public_fetch_enabled:
                     raise RuntimeError("Scheduler requires an enabled synthetic RunService")

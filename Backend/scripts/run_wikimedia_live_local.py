@@ -20,6 +20,7 @@ def main(argv=None):
         "TREND_SCOUT_RUN_MODE": "live",
         "TREND_SCOUT_READ_ONLY": "false",
         "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+        "TREND_SCOUT_OPERATOR_TOKEN": os.environ.get("TREND_SCOUT_OPERATOR_TOKEN", ""),
     })
     application = create_normal_wikimedia_live_app(
         enabled=True,
