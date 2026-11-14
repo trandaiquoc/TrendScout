@@ -699,7 +699,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Depop](https://www.depop.com/); quyền discovery chưa xác minh."
+      "source_reference": "G; [Depop Selling API](https://partnerapi.depop.com/api-docs/terms/); quyền phân tích cần được cho phép.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Depop's Selling API is an enterprise-partner API with product and shop scopes, not evidence of a public marketplace-wide trend feed. Its terms prohibit using Depop data for analytics or machine learning without written authorization and prohibit scraping; TrendScout has no verified partner access.",
+      "revalidation_note_key": "sources.review.depop",
+      "revalidation_links": [
+        {"label": "Depop Selling API reference", "url": "https://partnerapi.depop.com/api-docs/reference/"},
+        {"label": "Depop API Access Terms", "url": "https://partnerapi.depop.com/api-docs/terms/"}
+      ]
     },
     {
       "source_id": "whatnot",
@@ -708,7 +715,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Whatnot](https://www.whatnot.com/)."
+      "source_reference": "G; [Seller API](https://developers.whatnot.com/getting-started/introduction) phục vụ cửa hàng đã ủy quyền, không phải tìm kiếm thị trường.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Whatnot's Seller API manages an authorized seller's store, products, inventory, orders, shows, and analytics. Its Terms of Service prohibit automated use and scraping; no public marketplace-wide discovery API or TrendScout permission was established.",
+      "revalidation_note_key": "sources.review.whatnot",
+      "revalidation_links": [
+        {"label": "Whatnot Seller API overview", "url": "https://developers.whatnot.com/getting-started/introduction"},
+        {"label": "Whatnot Terms of Service", "url": "https://legal.whatnot.com/"}
+      ]
     },
     {
       "source_id": "mercari",
@@ -717,7 +731,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Mercari US](https://www.mercari.com/)."
+      "source_reference": "U; [Quy tắc Mercari US](https://www.mercari.com/us/help_center/topics/listing/policies/prohibited-conduct/); cấm tự động trích xuất.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Mercari's US prohibited-conduct policy bars robots, spiders, crawlers, scrapers, and other automated interfaces not provided by Mercari from accessing the service or extracting data. The reviewed official materials do not establish an authorized public listing API or TrendScout permission; do not use unofficial endpoints.",
+      "revalidation_note_key": "sources.review.mercari",
+      "revalidation_links": [
+        {"label": "Mercari US prohibited conduct", "url": "https://www.mercari.com/us/help_center/topics/listing/policies/prohibited-conduct/"}
+      ]
     },
     {
       "source_id": "offerup",
@@ -726,7 +746,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [OfferUp](https://offerup.com/)."
+      "source_reference": "U; [Điều khoản OfferUp](https://offerup.com/terms); tự động truy cập phải do OfferUp cung cấp.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "OfferUp's Terms of Service prohibit automated means to use the service or collect/extract its data unless the means are provided by OfferUp. The reviewed official materials do not establish a public discovery API or written permission for TrendScout; do not scrape listings or use unofficial endpoints.",
+      "revalidation_note_key": "sources.review.offerup",
+      "revalidation_links": [
+        {"label": "OfferUp Terms of Service", "url": "https://offerup.com/terms"}
+      ]
     },
     {
       "source_id": "tiktok_shop",
@@ -735,7 +761,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Shop developers](https://partner.tiktokshop.com/); quyền seller/partner không mặc định là market-wide access."
+      "source_reference": "G; [TikTok Shop Partner API](https://partner.tiktokshop.com/docv2/); dữ liệu giới hạn theo shop/creator được ủy quyền.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "TikTok Shop APIs require a partner app and seller or creator authorization; product and performance results are scoped to the linked shop or creator. Keyword product search in affiliate APIs is limited to products linked to an authorized creator/shop, not a public marketplace-wide trend feed. TrendScout access and scopes remain unverified.",
+      "revalidation_note_key": "sources.review.tiktok_shop",
+      "revalidation_links": [
+        {"label": "TikTok Shop Partner Center API documentation", "url": "https://partner.tiktokshop.com/docv2/"},
+        {"label": "Get Shop Products for an authorized creator", "url": "https://partner.tiktokshop.com/docv2/page/ng0l9170"},
+        {"label": "Search Products with seller authorization", "url": "https://partner.tiktokshop.com/docv2/page/6503081a56e2bb0289dd6d7d"}
+      ]
     },
     {
       "source_id": "facebook_marketplace",
