@@ -96,6 +96,7 @@ class SourceCatalogTests(unittest.TestCase):
             "facebook", "instagram", "tiktok", "reddit", "pinterest",
             "bluesky", "mastodon", "stack_exchange", "hacker_news", "github",
             "x", "threads", "snapchat", "linkedin", "whatsapp",
+            "nextdoor", "truth_social", "bereal", "discord", "telegram",
         })
         for source_id, item in reviewed.items():
             with self.subTest(source_id=source_id):

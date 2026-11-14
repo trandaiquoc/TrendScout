@@ -102,7 +102,10 @@
       "revalidation_note": "Recent Search covers the last seven days; full-archive Search is limited to pay-per-use and Enterprise customers. Results are query-scoped, and TrendScout access, usage cost, and population-representative US coverage are unverified.",
       "revalidation_note_key": "sources.review.x",
       "revalidation_links": [
-        {"label": "Official Search Posts documentation", "url": "https://docs.x.com/x-api/posts/search/introduction"}
+        {
+          "label": "Official Search Posts documentation",
+          "url": "https://docs.x.com/x-api/posts/search/introduction"
+        }
       ]
     },
     {
@@ -117,7 +120,10 @@
       "revalidation_note": "Keyword Search can return public Threads posts with an approved threads_keyword_search permission; before approval it searches only the authenticated user's posts. The documented per-user limit is 2,200 queries per rolling 24 hours, and results do not represent all US discussion.",
       "revalidation_note_key": "sources.review.threads",
       "revalidation_links": [
-        {"label": "Official keyword search documentation", "url": "https://developers.facebook.com/documentation/threads/keyword-search"}
+        {
+          "label": "Official keyword search documentation",
+          "url": "https://developers.facebook.com/documentation/threads/keyword-search"
+        }
       ]
     },
     {
@@ -150,8 +156,14 @@
       "revalidation_note": "The Public Profile API requires allowlisting and OAuth. Its public endpoints expose a subset of profile metadata and asset statistics; Creator Discovery searches eligible creators, not general public keyword trends. TrendScout access is unverified.",
       "revalidation_note_key": "sources.review.snapchat",
       "revalidation_links": [
-        {"label": "Public Profile API access requirements", "url": "https://developers.snap.com/marketing-api/Public-Profile-API/GetStarted"},
-        {"label": "Creator Discovery scope", "url": "https://developers.snap.com/marketing-api/Public-Profile-API/CreatorDiscovery"}
+        {
+          "label": "Public Profile API access requirements",
+          "url": "https://developers.snap.com/marketing-api/Public-Profile-API/GetStarted"
+        },
+        {
+          "label": "Creator Discovery scope",
+          "url": "https://developers.snap.com/marketing-api/Public-Profile-API/CreatorDiscovery"
+        }
       ]
     },
     {
@@ -188,8 +200,14 @@
       "revalidation_note": "Community Management API access requires LinkedIn review and has Development and Standard tiers; API requests are authenticated. This is not a general public keyword-search feed, and TrendScout approval or coverage is unverified.",
       "revalidation_note_key": "sources.review.linkedin",
       "revalidation_links": [
-        {"label": "Official Community Management API access overview", "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview"},
-        {"label": "Official app review requirements", "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management-app-review"}
+        {
+          "label": "Official Community Management API access overview",
+          "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview"
+        },
+        {
+          "label": "Official app review requirements",
+          "url": "https://learn.microsoft.com/en-us/linkedin/marketing/community-management-app-review"
+        }
       ]
     },
     {
@@ -204,7 +222,10 @@
       "revalidation_note": "The documented Business Platform APIs send and receive messages for a business phone number and manage business messaging; they do not expose a public conversation or keyword-trend search feed. Business API access is not evidence of permission to inspect private conversations, and TrendScout access is unverified.",
       "revalidation_note_key": "sources.review.whatsapp",
       "revalidation_links": [
-        {"label": "Official WhatsApp Business Platform overview", "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/overview/"}
+        {
+          "label": "Official WhatsApp Business Platform overview",
+          "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/overview/"
+        }
       ]
     },
     {
@@ -214,7 +235,24 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Nextdoor](https://about.nextdoor.com/); quyền và geography theo community chưa xác minh."
+      "source_reference": "G; [API catalog](https://developer.nextdoor.com/reference/introduction) documents neighborhood trend and keyword search; API access is gated.",
+      "revalidation_note": "Official documentation describes trending neighborhood posts and keyword/location search, but says access is closed beta and requires an application, OAuth credentials, and provider approval. A local conversation sample is not nationally representative; TrendScout access, terms, quotas, and geographic coverage are unverified.",
+      "revalidation_note_key": "sources.review.nextdoor",
+      "revalidation_links": [
+        {
+          "label": "Official API products and access requirements",
+          "url": "https://developer.nextdoor.com/reference/introduction"
+        },
+        {
+          "label": "Official access request process",
+          "url": "https://developer.nextdoor.com/reference/applying-for-access"
+        },
+        {
+          "label": "Official availability and region",
+          "url": "https://developer.nextdoor.com/reference/sharing-availability"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "bluesky",
@@ -241,7 +279,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Truth Social](https://truthsocial.com/); access commercial chưa xác minh."
+      "source_reference": "G; [TMTG SEC filing](https://www.sec.gov/Archives/edgar/data/1849635/000143774926026777/djt20260630_10q.htm) documents the paid Truth API feed.",
+      "revalidation_note": "TMTG reported launching Truth API in August 2026 as a business-to-business subscription feed for public posts from certain top accounts. This is a scoped commercial feed, not an unrestricted public API; exact access terms, price, coverage, and TrendScout eligibility remain unverified.",
+      "revalidation_note_key": "sources.review.truth_social",
+      "revalidation_links": [
+        {
+          "label": "TMTG official SEC filing",
+          "url": "https://www.sec.gov/Archives/edgar/data/1849635/000143774926026777/djt20260630_10q.htm"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "bereal",
@@ -250,7 +297,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [BeReal](https://bereal.com/); discovery access chưa xác minh."
+      "source_reference": "G; [BeReal Terms of Service](https://bereal.com/terms); no official public developer discovery API verified.",
+      "revalidation_note": "The official materials reviewed do not verify an approved public developer API for platform-wide post discovery; BeReal?s Terms of Service describe a service for human users and content rights, not a TrendScout search feed. Treat API availability, public-post coverage, terms, and TrendScout eligibility as unknown; do not rely on unofficial app endpoints.",
+      "revalidation_note_key": "sources.review.bereal",
+      "revalidation_links": [
+        {
+          "label": "Official BeReal Terms of Service",
+          "url": "https://bereal.com/terms"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "discord",
@@ -259,7 +315,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [privileged intents](https://support-dev.discord.com/hc/en-us/articles/6207308062871-What-are-Privileged-Intents), [policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy). Không phải kho tin nhắn công khai tải toàn bộ; policy cấm scraping và thương mại hóa API data."
+      "source_reference": "G; [Discord Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy) limits API data use and forbids scraping.",
+      "revalidation_note": "Discord API access is scoped to an application?s authorized servers and permissions; it is not a platform-wide public conversation search feed. The Developer Policy prohibits scraping service data and restricts API data to the approved application purpose, so do not collect Discord content as a broad trend dataset without explicit policy-compatible authorization.",
+      "revalidation_note_key": "sources.review.discord",
+      "revalidation_links": [
+        {
+          "label": "Official Discord Developer Policy",
+          "url": "https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy"
+        },
+        {
+          "label": "Official Discord API data access changes",
+          "url": "https://discord.com/blog/updated-requirements-to-apps-access-data-in-servers"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "telegram",
@@ -268,7 +337,24 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://core.telegram.org/api); private groups không mặc định có quyền thương mại."
+      "source_reference": "G; [Bot API](https://core.telegram.org/bots/api), [privacy mode](https://core.telegram.org/bots/features), and [content licensing terms](https://telegram.org/tos/content-licensing).",
+      "revalidation_note": "Bot API updates cover chats/channels where a bot is present and authorized, with group visibility constrained by privacy mode; they do not provide a general platform-wide post-search feed. Telegram?s terms restrict access to ordinary legitimate platform use and prohibit scraping/indexing/aggregation to create large datasets. TrendScout access and compliant scope are unverified.",
+      "revalidation_note_key": "sources.review.telegram",
+      "revalidation_links": [
+        {
+          "label": "Official Bot API",
+          "url": "https://core.telegram.org/bots/api"
+        },
+        {
+          "label": "Official bot privacy behavior",
+          "url": "https://core.telegram.org/bots/features"
+        },
+        {
+          "label": "Official content licensing terms",
+          "url": "https://telegram.org/tos/content-licensing"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "mastodon",
