@@ -2005,6 +2005,7 @@ function localizedAlgorithmUnit(unit) {
 function renderAlgorithmSignalStatus(algorithms) {
   const root = $('#algorithm-signal-status');
   if (!root) return;
+  if (!state.algorithmResults) { root.replaceChildren(element('p',t('phoenix.algorithm-results-unavailable'))); return; }
   const summaries = new Map((state.algorithmResults?.summary || [])
     .map((item) => [item.algorithm_id, item]));
   const groups = [
