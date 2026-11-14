@@ -280,3 +280,6 @@ body { font-size:14px; letter-spacing:-.01em; }
 .settings-grid .schedule-form input,.settings-grid .schedule-form select { width:100%; min-height:40px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); color:var(--ink); font:inherit; }
 @media (max-width:900px) { .settings-grid { grid-template-columns:1fr; } }
 @media (max-width:600px) { .settings-grid > .panel { padding:17px; } }
+.workbench-detail-navigation { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 0 16px; border-bottom:1px solid var(--line); }
+.workbench-detail-navigation span { color:var(--muted); font-size:11px; text-align:center; }
+.workbench-detail-navigation .button { min-height:34px; padding:6px 10px; font-size:11px; }
