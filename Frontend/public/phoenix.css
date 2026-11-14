@@ -341,3 +341,7 @@ body { font-size:14px; letter-spacing:-.01em; }
 @media (max-width:900px) {
   .workbench-summary { margin:0 0 14px; background:var(--surface); }
 }
+.quality-evidence-grid { margin-top:16px; }
+.quality-evidence-grid .data-table { min-width:380px; }
+.quality-evidence-grid .table-wrap { max-width:100%; overflow-x:auto; }
+.quality-evidence-grid .text-link { display:inline-block; margin-top:14px; }

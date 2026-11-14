@@ -179,6 +179,10 @@ async function loadAnalytics() {
     renderObservationHistoryChart(data.observations_over_time || []);
     renderDataTable($('#analysis-history'), [t('analysis.date'), t('analysis.source'), t('analysis.observed'), t('analysis.unavailable')],
       (data.observations_over_time || []).map(row => [row.observation_date, localizedSourceName(row.source), number(row.observed), number(row.unavailable)]), t('analysis.history-note'));
+    renderDataTable($('#quality-observations'), [t('analysis.date'), t('analysis.source'), t('analysis.observed'), t('analysis.unavailable')],
+      (data.observations_over_time || []).map(row => [row.observation_date, localizedSourceName(row.source), number(row.observed), number(row.unavailable)]), t('phoenix.quality-observations-note'));
+    renderDataTable($('#quality-algorithms'), [t('analysis.evaluation'), t('analysis.reason')],
+      [[translatedAlgorithmCode('evaluation',effectivenessStatus), effectivenessStatus==='NOT_YET_EVALUATED' ? t('analysis.no-comparable-evaluation') : (data.algorithm_effectiveness?.reason || t('analysis.no-comparable-evaluation'))]], t('analysis.effectiveness-note'));
     const top = data.top_observed || [];
     const target = $('#overview-top-keywords');
     renderObservedVolumeChart(top, data.top_observed_context || {});
@@ -197,7 +201,7 @@ async function loadAnalytics() {
     }
     const qualitySnapshot=$('#quality-snapshot');
     if (qualitySnapshot) qualitySnapshot.replaceChildren(element('p',getErrorMessage(error,'analysis.error')));
-    for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
+    for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history','quality-observations','quality-algorithms']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
     for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart','analysis-history-chart']) {
