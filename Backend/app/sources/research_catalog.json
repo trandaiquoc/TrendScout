@@ -191,7 +191,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://docs.bsky.app/docs/api/app-bsky-feed-get-feed) mô tả public reads; commercial, quota, retention và US scope cần review."
+      "source_reference": "G; [API](https://docs.bsky.app/docs/api/app-bsky-feed-get-feed) mô tả public reads; commercial, quota, retention và US scope cần review.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Most app.bsky GET endpoints are public through Bluesky AppView, but feeds and results remain within Bluesky and the selected feed/search. This is not a population-level US demand measure; TrendScout access and collection scope are unverified.",
+      "revalidation_note_key": "sources.review.bluesky",
+      "revalidation_links": [
+        {
+          "label": "Official API documentation",
+          "url": "https://docs.bsky.app/docs/api/app-bsky-feed-get-feed"
+        }
+      ]
     },
     {
       "source_id": "truth_social",
@@ -236,7 +245,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://docs.joinmastodon.org/api/); quyền, scope và coverage theo instance."
+      "source_reference": "G; [API](https://docs.joinmastodon.org/api/); quyền, scope và coverage theo instance.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Public timeline access is per Mastodon instance; an instance may disable unauthenticated access. Instance-specific limits and federation mean one server is not a complete Mastodon sample. No instance coverage or TrendScout access is verified.",
+      "revalidation_note_key": "sources.review.mastodon",
+      "revalidation_links": [
+        {
+          "label": "Official API documentation",
+          "url": "https://docs.joinmastodon.org/methods/timelines/"
+        }
+      ]
     },
     {
       "source_id": "tumblr",
@@ -263,7 +281,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://api.stackexchange.com/); review license và attribution từng nội dung."
+      "source_reference": "G; [API](https://api.stackexchange.com/); review license và attribution từng nội dung.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The API returns activity from a selected Stack Exchange site and applies daily/application throttles; its default quota is 10,000 requests per day per key. This measures network-specific Q&A activity, not general US demand; TrendScout key and attribution compliance are unverified.",
+      "revalidation_note_key": "sources.review.stack_exchange",
+      "revalidation_links": [
+        {
+          "label": "Official API documentation",
+          "url": "https://api.stackexchange.com/docs/throttle"
+        }
+      ]
     },
     {
       "source_id": "slack",
@@ -560,7 +587,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [official API](https://github.com/HackerNews/API); content license và US scope cần review."
+      "source_reference": "G; [official API](https://github.com/HackerNews/API); content license và US scope cần review.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The official Firebase API provides public Hacker News story and item data, with no rate limit stated in its current guide. Top/new story rankings are specific to Hacker News and do not measure overall US demand; TrendScout use is unverified.",
+      "revalidation_note_key": "sources.review.hacker_news",
+      "revalidation_links": [
+        {
+          "label": "Official API documentation",
+          "url": "https://github.com/HackerNews/API"
+        }
+      ]
     },
     {
       "source_id": "product_hunt",
@@ -725,7 +761,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [REST API](https://docs.github.com/en/rest); license từng repo, auth/quota và US scope cần review."
+      "source_reference": "G; [REST API](https://docs.github.com/en/rest); license từng repo, auth/quota và US scope cần review.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Public unauthenticated REST access is limited to 60 requests per hour; authenticated limits are higher and search has separate, stricter limits. Repository activity measures developer activity rather than consumer demand; TrendScout credentials and quota are unverified.",
+      "revalidation_note_key": "sources.review.github",
+      "revalidation_links": [
+        {
+          "label": "Official API documentation",
+          "url": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api"
+        }
+      ]
     },
     {
       "source_id": "openalex",
