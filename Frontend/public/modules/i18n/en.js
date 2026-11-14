@@ -108,6 +108,8 @@ export const en = {
   'runs.type.collection-processing': 'Collection processing',
   'runs.type.collection-reconciliation': 'Collection reconciliation',
   'runs.sources': 'Sources',
+  'runs.provider-records': 'Records reported by source',
+  'runs.observation-window': 'Observation period',
   'runs.status': 'Status',
   'runs.records': 'Processed',
   'runs.received': 'Received',

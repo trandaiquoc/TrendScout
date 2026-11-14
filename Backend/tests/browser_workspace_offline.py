@@ -99,6 +99,7 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/v1/runs/history/'+'f'.repeat(32))return Promise.resolve(new Response(JSON.stringify({item:{
     fetch_id:'f'.repeat(32),status:'PARTIAL',data_mode:'SYNTHETIC',
     source_manifest:[{source_id:'wikimedia_pageviews_top_per_country',status:'PARTIAL',record_count:10}],
+    provider_record_count:20,observation_start:'2026-11-10',observation_end:'2026-11-14',
     received_record_count:12,retained_record_count:10,rejected_record_count:2,
     error_code:'SOURCE_COVERAGE_PARTIAL',quality_flags:['CENSORED_TOP_LIST'],
     fetched_at:'2026-11-14T01:00:00Z'
@@ -271,6 +272,8 @@ CHECK = r"""<script>
     check(historyButton.getAttribute('aria-expanded')==='true'&&historyButton.getAttribute('aria-controls')==='run-history-detail','run detail action exposes expanded state and target');
     check(document.activeElement===historyDetail,'opening run details moves focus to the detail region');
     check(historyDetail.textContent.includes('Dữ liệu một phần')&&historyDetail.textContent.includes('Lượt xem trang Wikimedia'),'run detail localizes source and status values: '+historyDetail.textContent);
+    const runDetailLabels=[...historyDetail.querySelectorAll('dt')].map(label=>label.textContent);
+    check(runDetailLabels.includes('Bản ghi do nguồn báo cáo')&&runDetailLabels.includes('Khoảng thời gian quan sát')&&historyDetail.textContent.includes('20'),'run detail exposes the saved provider count and observation window');
     check(historyDetail.textContent.includes('Dữ liệu mô phỏng')&&!historyDetail.textContent.includes('SYNTHETIC'),'run detail localizes the data mode');
     check(historyDetail.textContent.includes('Một hoặc nhiều nguồn chỉ trả về dữ liệu một phần')&&!historyDetail.textContent.includes('SOURCE_COVERAGE_PARTIAL')&&!historyDetail.textContent.includes('CENSORED_TOP_LIST')&&!historyDetail.textContent.includes('wikimedia_pageviews_top_per_country'),'run detail hides internal identifiers behind a user-facing explanation');
     applyLocale('en');

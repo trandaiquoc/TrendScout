@@ -214,6 +214,29 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(response.json()["items"], [])
         self.assertFalse(response.json()["duration_available"])
 
+    def test_run_history_detail_preserves_saved_source_count_and_observation_window(self):
+        fetch_id = "d" * 32
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
+                       (fetch_id, "PARTIAL", "2026-11-14T02:00:00Z"))
+            db.execute("""INSERT INTO dataset_snapshots
+                (dataset_id,status,data_mode,source_manifest,provider_record_count,received_record_count,
+                retained_keyword_count,rejected_record_count,observation_start,observation_end,fetched_at,
+                quality_flags,processing_status,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    fetch_id, "PARTIAL", "LIVE",
+                    json.dumps([{"source_id":"wikimedia_pageviews_top_per_country","status":"PARTIAL","record_count":38}]),
+                    40, 38, 35, 3, "2026-11-10", "2026-11-14", "2026-11-14T02:00:00Z",
+                    json.dumps(["SOURCE_COVERAGE_PARTIAL"]), "COMPLETED", "2026-11-14T02:00:00Z"))
+        response = self._request("GET", "/api/v1/runs/history/" + fetch_id)
+        self.assertEqual(response.status_code, 200)
+        item = response.json()["item"]
+        self.assertEqual(item["provider_record_count"], 40)
+        self.assertEqual(item["observation_start"], "2026-11-10")
+        self.assertEqual(item["observation_end"], "2026-11-14")
+        self.assertEqual(item["source_manifest"][0]["record_count"], 38)
+        self.assertIsNone(item["duration_seconds"])
+
     def test_run_history_includes_persisted_analysis_storage_runs(self):
         storage = FakeStorage()
         import asyncio

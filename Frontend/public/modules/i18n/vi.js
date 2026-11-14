@@ -108,6 +108,8 @@ export const vi = {
   'runs.type.collection-processing': 'Xử lý Bộ sưu tập',
   'runs.type.collection-reconciliation': 'Đối soát Bộ sưu tập',
   'runs.sources': 'Nguồn',
+  'runs.provider-records': 'Bản ghi do nguồn báo cáo',
+  'runs.observation-window': 'Khoảng thời gian quan sát',
   'runs.status': 'Trạng thái',
   'runs.records': 'Đã xử lý',
   'runs.received': 'Đã nhận',

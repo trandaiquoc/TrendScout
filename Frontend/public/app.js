@@ -571,8 +571,14 @@ function renderRunHistoryDetail(item, errorMessage = null) {
   const quality=(item.quality_flags || []).length
     ? t('runs.outcome.quality-notes',{count:number(item.quality_flags.length)})
     : t('runs.outcome.no-notes');
+  const observationStart=item.observation_start ? date(item.observation_start) : null;
+  const observationEnd=item.observation_end ? date(item.observation_end) : null;
+  const observationWindow=observationStart&&observationEnd
+    ? `${observationStart} – ${observationEnd}` : observationStart || observationEnd || t('common.unavailable');
   const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
+    [t('runs.provider-records'),item.provider_record_count],
+    [t('runs.observation-window'),observationWindow],
     [t('runs.received'),item.received_record_count ?? item.available],
     [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
     [t('runs.outcome'),localizedRunOutcome(item)],[t('runs.quality'),quality],
