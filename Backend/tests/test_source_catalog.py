@@ -97,7 +97,11 @@ class SourceCatalogTests(unittest.TestCase):
             "bluesky", "mastodon", "stack_exchange", "hacker_news", "github",
             "x", "threads", "snapchat", "linkedin", "whatsapp",
             "nextdoor", "truth_social", "bereal", "discord", "telegram",
+            "tumblr", "quora", "slack", "lemmy", "discourse",
         })
+        locale_root = Path(__file__).resolve().parents[2] / "Frontend" / "public" / "modules" / "i18n"
+        catalogs = {locale: (locale_root / f"{locale}.js").read_text(encoding="utf-8")
+                    for locale in ("en", "vi")}
         for source_id, item in reviewed.items():
             with self.subTest(source_id=source_id):
                 self.assertFalse(item["runtime_adapter"])
@@ -108,6 +112,9 @@ class SourceCatalogTests(unittest.TestCase):
                 self.assertTrue(item["revalidation_links"])
                 self.assertTrue(all(link["url"].startswith("https://")
                                     for link in item["revalidation_links"]))
+                for locale, content in catalogs.items():
+                    with self.subTest(source_id=source_id, locale=locale):
+                        self.assertIn(f"'{item['revalidation_note_key']}':", content)
 
     def test_endpoint_and_credential_references_are_not_secrets(self):
         self.assertEqual(

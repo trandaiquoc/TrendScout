@@ -381,7 +381,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://www.tumblr.com/docs/en/api/v2); quyền, quota và commercial review còn mở."
+      "source_reference": "G; [API](https://www.tumblr.com/docs/en/api/v2); quyền, quota và commercial review còn mở.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Tumblr's official API resource lists default limits of 1,000 calls per hour and 5,000 per day per consumer key, with a request process for higher limits. API access and TrendScout approval remain unverified; these limits do not establish representative US trend coverage.",
+      "revalidation_note_key": "sources.review.tumblr",
+      "revalidation_links": [
+        {
+          "label": "Tumblr developer resources and default API limits",
+          "url": "https://help.tumblr.com/knowledge-base/developer-resources/"
+        },
+        {
+          "label": "Official Tumblr API documentation",
+          "url": "https://github.com/tumblr/docs"
+        }
+      ]
     },
     {
       "source_id": "quora",
@@ -390,7 +403,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Quora](https://www.quora.com/); không giả định API discovery phù hợp."
+      "source_reference": "U; [Quora](https://www.quora.com/); không giả định API discovery phù hợp.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The official materials reviewed do not establish a generally available public keyword-search API for TrendScout. Search-engine visibility is not permission for automated collection; API access, licensing, and coverage remain unverified.",
+      "revalidation_note_key": "sources.review.quora",
+      "revalidation_links": [
+        {
+          "label": "Quora platform policies",
+          "url": "https://help.quora.com/hc/en-us/articles/360000470706-Platform-Policies"
+        },
+        {
+          "label": "Quora API partners (advertising integrations)",
+          "url": "https://business.quora.com/api-partners"
+        }
+      ]
     },
     {
       "source_id": "stack_exchange",
@@ -417,7 +443,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Slack API](https://api.slack.com/); workspace consent không tạo quyền quét toàn nền tảng."
+      "source_reference": "G; [Slack API](https://api.slack.com/); workspace consent không tạo quyền quét toàn nền tảng.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Slack Real-time Search is limited to internal or directory-published apps and user/workspace scopes. Slack explicitly prohibits storing or copying its returned data, so this API cannot support TrendScout's persistent cross-workspace trend ledger. No app approval or workspace access is verified.",
+      "revalidation_note_key": "sources.review.slack",
+      "revalidation_links": [
+        {
+          "label": "Slack Real-time Search access and data rules",
+          "url": "https://docs.slack.dev/apis/web-api/real-time-search-api/"
+        },
+        {
+          "label": "Slack search method scope and rate limit",
+          "url": "https://docs.slack.dev/reference/methods/search.messages/"
+        }
+      ]
     },
     {
       "source_id": "lemmy",
@@ -426,7 +465,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Lemmy](https://join-lemmy.org/); access và policy theo instance."
+      "source_reference": "U; [Lemmy](https://join-lemmy.org/); access và policy theo instance.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Lemmy's API connects to a selected instance. What it can return depends on that instance's federation and access state, so one server is not a verified complete view of the network or US activity. Many actions are rate-limited by client IP; TrendScout access and coverage are unverified.",
+      "revalidation_note_key": "sources.review.lemmy",
+      "revalidation_links": [
+        {
+          "label": "Official Lemmy API guide",
+          "url": "https://join-lemmy.org/docs/contributors/04-api.html"
+        },
+        {
+          "label": "Official Lemmy rate-limiting notes",
+          "url": "https://join-lemmy.org/docs/contributors/04-api.html#rate-limiting"
+        }
+      ]
     },
     {
       "source_id": "discourse",
@@ -435,7 +487,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://docs.discourse.org/); consent và terms theo instance."
+      "source_reference": "G; [API](https://docs.discourse.org/); consent và terms theo instance.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Discourse exposes some unauthenticated endpoints, while most API access requires a key created by that forum's administrator and follows the selected user's permissions. This is site-specific forum access, not a cross-site public discovery feed. No target forums, keys, or permission are verified.",
+      "revalidation_note_key": "sources.review.discourse",
+      "revalidation_links": [
+        {
+          "label": "Official Discourse API documentation and authentication",
+          "url": "https://docs.discourse.org/"
+        },
+        {
+          "label": "Create and configure a Discourse API key",
+          "url": "https://meta.discourse.org/t/create-and-configure-an-api-key/230124"
+        }
+      ]
     },
     {
       "source_id": "fandom",
