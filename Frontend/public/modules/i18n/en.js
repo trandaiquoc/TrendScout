@@ -1109,6 +1109,8 @@ export const en = {
   'workbench.all-keywords': 'All keywords',
   'workbench.results-count': '{count} results',
   'phoenix.view-evidence': 'View data and observation scope',
+  'phoenix.all-categories': 'All categories',
+  'phoenix.source-details': 'Source details and status',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

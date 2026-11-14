@@ -64,7 +64,10 @@ export function renderSourceCapabilities(capabilities, translate) {
       const head=document.createElement('div'); head.className='source-card-head';
       const icon=document.createElement('span'); icon.className='source-monogram'; icon.textContent=descriptor.icon || '•';
       const badge=document.createElement('span'); badge.className='pill pill--gray';
-      head.append(icon,badge); card.append(head);
+      const badges=document.createElement('div'); badges.className='source-card-badges';
+      const adapterBadge=document.createElement('span'); adapterBadge.className='source-adapter-badge';
+      adapterBadge.textContent=localizedStatus(descriptor.adapter_status,translate);
+      badges.append(adapterBadge,badge); head.append(icon,badges); card.append(head);
       const title=document.createElement('h2'); title.textContent=descriptor.display_name || descriptor.source_id; card.append(title);
       const summary=document.createElement('p'); summary.textContent=descriptor.metric?.meaning || ''; card.append(summary);
       const list=document.createElement('dl'); list.className='detail-list';
@@ -77,7 +80,9 @@ export function renderSourceCapabilities(capabilities, translate) {
       for (const [label,value] of [[translate('sources.category'),categoryLabel.startsWith('sources.category.')?descriptor.category:categoryLabel],[translate('sources.metric'),`${descriptor.metric?.name || '—'} (${descriptor.metric?.unit || '—'})`],[translate('sources.scope'),descriptor.market_scope || '—'],[translate('sources.quota'),translate('sources.quota-unknown')]]) {
         const dt=document.createElement('dt'); dt.textContent=label; const dd=document.createElement('dd'); dd.textContent=value; const row=document.createElement('div'); row.append(dt,dd); list.append(row);
       }
-      const link=document.createElement('a'); link.textContent=translate('sources.official-docs'); link.href=descriptor.documentation_url || '#'; link.target='_blank'; link.rel='noopener noreferrer'; card.append(list,link);
+      const details=document.createElement('details'); details.className='source-capability-details';
+      const detailSummary=document.createElement('summary'); detailSummary.textContent=translate('phoenix.source-details'); details.append(detailSummary,list);
+      const link=document.createElement('a'); link.textContent=translate('sources.official-docs'); link.href=descriptor.documentation_url || '#'; link.target='_blank'; link.rel='noopener noreferrer'; details.append(link); card.append(details);
       const enabled=descriptor.enabled_for_current_operation===true; card.classList.toggle('source-card--active',enabled);
       badge.textContent=translate(enabled?'source.enabled':'source.disabled'); badge.classList.toggle('pill--green',enabled);
       grid.append(card);

@@ -647,6 +647,11 @@ async function loadSourceLibrary() {
   try {
     const data=await getJson('/api/v1/sources/library',{locale:getLocale()});
     state.sourceLibrary=data.items || [];
+    const category=$('#source-library-category');
+    const previous=category.value;
+    category.replaceChildren(new Option(t('phoenix.all-categories'), ''));
+    for(const group of [...new Set(state.sourceLibrary.map(item=>item.category?.match(/^([A-E])\./)?.[1]).filter(Boolean))].sort()) category.add(new Option(t(`sources.group.${group}`),group));
+    category.value=previous;
     $('#source-library-audit').textContent=t('sources.library-audit',{date:data.audit_date || '—',count:number(state.sourceLibrary.length)});
     renderSourceLibrary();
   } catch (error) { body.replaceChildren(); const row=element('tr'); row.append(element('td',getErrorMessage(error,'sources.library-error'))); body.append(row); }
@@ -921,7 +926,9 @@ function renderSourceLibrary() {
   const expanded=new Set([...body.querySelectorAll('tr[data-source-id]')]
     .filter(row=>row.querySelector('details')?.open).map(row=>row.dataset.sourceId));
   const query=($('#source-library-search')?.value || '').trim().toLocaleLowerCase();
-  const items=state.sourceLibrary.filter(item=>`${item.source_id} ${item.display_name} ${item.category}`.toLocaleLowerCase().includes(query));
+  const category=$('#source-library-category')?.value || '';
+  const items=state.sourceLibrary.filter(item=>`${item.source_id} ${item.display_name} ${item.category}`.toLocaleLowerCase().includes(query)&&(!category||item.category?.startsWith(`${category}.`)));
+  $('#source-library-count').textContent=t('workbench.results-count',{count:number(items.length)});
   body.replaceChildren();
   for (const item of items) {
     const row=element('tr');
@@ -2408,6 +2415,7 @@ function bindEvents() {
     if ($('#source-library-search').value.trim()) $('#source-library-disclosure').open = true;
     renderSourceLibrary();
   });
+  $('#source-library-category').addEventListener('change', renderSourceLibrary);
   $('#research-form').addEventListener('submit',saveResearchRecord);
   $('#research-cancel-edit').addEventListener('click',cancelResearchEdit);
   $('#settings-schedule-cancel').addEventListener('click',cancelScheduleEdit);
