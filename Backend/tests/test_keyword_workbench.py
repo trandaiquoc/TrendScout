@@ -204,6 +204,58 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(detail.status_code, 200)
         self.assertEqual(detail.json()["item"]["status"], "PARTIAL")
 
+    def test_run_history_cursor_pages_past_the_first_hundred_and_binds_filters(self):
+        async def seed():
+            storage = FakeStorage()
+            for index in range(127):
+                await storage.create_run(f"{index + 1:032x}", {
+                    "run_id": f"{index + 1:032x}",
+                    "status": "COMPLETED" if index % 2 == 0 else "PARTIAL",
+                    "mode": "synthetic",
+                    "created_at": f"2026-11-{(index % 14) + 1:02d}T{index:04d}:00+00:00",
+                })
+            self.app.state.read_storage_factory = lambda _token: storage
+
+        __import__("asyncio").run(seed())
+        seen = []
+        cursor = None
+        first_cursor = None
+        while True:
+            params = {"limit": 20, "cursor": cursor or ""}
+            response = self._request("GET", "/api/v1/runs/history", params=params)
+            self.assertEqual(response.status_code, 200)
+            page = response.json()
+            seen.extend(item["fetch_id"] for item in page["items"])
+            cursor = page["next_cursor"]
+            if first_cursor is None:
+                first_cursor = cursor
+            if cursor is None:
+                break
+        self.assertEqual(len(seen), 127)
+        self.assertEqual(len(set(seen)), 127)
+        filtered = self._request("GET", "/api/v1/runs/history", params={"cursor": first_cursor, "status": "COMPLETED"})
+        self.assertEqual(filtered.status_code, 422)
+
+    def test_run_history_cursor_merges_local_jobs_with_analysis_storage(self):
+        async def seed():
+            storage = FakeStorage()
+            for index, created in enumerate(("2026-11-14T09:00:00+00:00", "2026-11-14T07:00:00+00:00")):
+                run_id = f"{index + 1:032x}"
+                await storage.create_run(run_id, {"run_id": run_id, "status": "COMPLETED", "created_at": created})
+            self.app.state.read_storage_factory = lambda _token: storage
+
+        __import__("asyncio").run(seed())
+        with self.store.connect() as db:
+            for index, updated in enumerate(("2026-11-14T08:00:00+00:00", "2026-11-14T06:00:00+00:00")):
+                db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
+                           (f"{index + 3:032x}", "COMPLETED", updated))
+        response = self._request("GET", "/api/v1/runs/history", params={"limit": 2, "cursor": ""})
+        self.assertEqual(response.status_code, 200)
+        first = response.json()
+        self.assertEqual([item["fetch_id"] for item in first["items"]], [f"{1:032x}", f"{3:032x}"])
+        second = self._request("GET", "/api/v1/runs/history", params={"limit": 2, "cursor": first["next_cursor"]}).json()
+        self.assertEqual([item["fetch_id"] for item in second["items"]], [f"{2:032x}", f"{4:032x}"])
+
     def test_product_research_is_persisted_and_status_changes_are_auditable(self):
         created = self._request("POST", "/api/v1/research", json={
             "keyword_id": "k-classified", "subject": "Recycled denim",

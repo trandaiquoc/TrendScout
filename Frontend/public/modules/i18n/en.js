@@ -99,6 +99,7 @@ export const en = {
   'runs.history-limited': 'Showing at most the 100 newest analysis runs. Older runs may not appear.',
   'runs.manual-history-partial': 'Some analysis history could not be loaded. Local Fetch history is still shown.',
   'runs.manual-history-unavailable': 'Analysis history is not available from the current storage connection.',
+  'runs.manual-history-cursor-unavailable': 'The history storage does not support cursor pagination; older records may be limited.',
   'runs.history-error': 'Saved run history could not be loaded.',
   'runs.date': 'Date',
   'runs.type': 'Run type',

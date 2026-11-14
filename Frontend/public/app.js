@@ -53,6 +53,7 @@ const state = {
   latestKeywordTotal: 0,
   analytics: null,
   runHistoryOffset: 0,
+  runHistoryCursor: null,
   runHistoryQuery: '',
   sourceLibrary: [],
   researchKeywords: [],
@@ -494,8 +495,9 @@ function formatAge(seconds) {
 async function loadRunHistory({ append = false } = {}) {
   const root = $('#run-history');
   if (!root) return;
-  if (!append) state.runHistoryOffset = 0;
-  const params = new URLSearchParams({ limit: '20', offset: String(state.runHistoryOffset) });
+  if (!append) { state.runHistoryOffset = 0; state.runHistoryCursor = null; }
+  const params = new URLSearchParams({ limit: '20' });
+  params.set('cursor', state.runHistoryCursor || '');
   const q = $('#run-history-search')?.value.trim() || '';
   const status = $('#run-history-status')?.value || '';
   if (q) params.set('q', q); if (status) params.set('status', status);
@@ -513,6 +515,7 @@ async function loadRunHistory({ append = false } = {}) {
     if (!append && data.history_truncated) root.append(element('p', t('runs.history-limited'), 'fine-print'));
     else if (!append && data.manual_history_status === 'PARTIAL') root.append(element('p', t('runs.manual-history-partial'), 'fine-print'));
     else if (!append && data.manual_history_status === 'LOCAL_LEDGER_ONLY') root.append(element('p', t('runs.manual-history-unavailable'), 'fine-print'));
+    else if (!append && data.manual_history_status === 'CURSOR_UNAVAILABLE') root.append(element('p', t('runs.manual-history-cursor-unavailable'), 'fine-print'));
     const body=table.querySelector('tbody');
     (data.items || []).forEach(run => {
       const tr=element('tr');
@@ -531,8 +534,9 @@ async function loadRunHistory({ append = false } = {}) {
       actions.dataset.label=headers[8];
       tr.append(actions); body.append(tr);
     });
-    state.runHistoryOffset = data.next_offset ?? data.total;
-    $('#run-history-more').hidden = data.next_offset == null;
+    state.runHistoryOffset = data.next_offset ?? state.runHistoryOffset;
+    state.runHistoryCursor = data.next_cursor || null;
+    $('#run-history-more').hidden = data.next_cursor == null && data.next_offset == null;
     if (!data.items?.length && !append) root.append(element('p',t('runs.no-history')));
   } catch (error) { root.replaceChildren(element('p',getErrorMessage(error,'runs.history-error'))); }
 }

@@ -99,6 +99,7 @@ export const vi = {
   'runs.history-limited': 'Đang hiển thị tối đa 100 lượt phân tích mới nhất. Lượt cũ hơn có thể chưa xuất hiện.',
   'runs.manual-history-partial': 'Một phần lịch sử phân tích chưa tải được. Lịch sử Fetch cục bộ vẫn hiển thị.',
   'runs.manual-history-unavailable': 'Không thể đọc lịch sử phân tích từ bộ lưu trữ hiện tại.',
+  'runs.manual-history-cursor-unavailable': 'Bộ lưu trữ lịch sử chưa hỗ trợ tải tiếp bằng con trỏ; danh sách cũ có thể bị giới hạn.',
   'runs.history-error': 'Không tải được lịch sử đã lưu.',
   'runs.date': 'Thời gian',
   'runs.type': 'Loại tác vụ',

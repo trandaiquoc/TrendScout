@@ -31,6 +31,22 @@ class FakeStorage:
         runs = sorted(self._runs.values(), key=lambda run: str(run.get("created_at") or ""), reverse=True)
         return deepcopy(runs[offset : offset + limit])
 
+    async def list_runs_after(self, *, limit: int = 100, after_run_id: str | None = None) -> list[Record]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Invalid run history page")
+        runs = sorted(self._runs.items(), key=lambda pair: (str(pair[1].get("created_at") or ""), pair[0]), reverse=True)
+        if after_run_id is not None:
+            after_index = next((index for index, pair in enumerate(runs) if pair[0] == after_run_id), None)
+            if after_index is None:
+                raise ValueError("Invalid run history cursor")
+            runs = runs[after_index + 1 :]
+        page = []
+        for run_id, record in runs[:limit]:
+            item = deepcopy(record)
+            item.setdefault("run_id", run_id)
+            page.append(item)
+        return page
+
     async def update_run(self, run_id: str, fields: Mapping[str, Any]) -> None:
         validate_id(run_id)
         validate_fields(fields, update=True)

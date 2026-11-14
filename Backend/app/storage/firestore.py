@@ -73,6 +73,26 @@ class FirestoreStorage:
         )
         return await self._call(lambda: [snapshot.to_dict() for snapshot in query.stream()])
 
+    async def list_runs_after(self, *, limit: int = 100, after_run_id: str | None = None) -> list[Record]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Invalid run history page")
+        collection = self._client.collection("analysis_runs")
+        query = collection.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
+        if after_run_id is not None:
+            validate_id(after_run_id)
+            snapshot = await self._call(collection.document(after_run_id).get)
+            if not snapshot.exists:
+                raise ValueError("Invalid run history cursor")
+            query = query.start_after(snapshot)
+        def read_page():
+            page = []
+            for snapshot in query.stream():
+                record = snapshot.to_dict() or {}
+                record.setdefault("run_id", snapshot.id)
+                page.append(record)
+            return page
+        return await self._call(read_page)
+
     async def update_run(self, run_id: str, fields: Mapping[str, Any]) -> None:
         validate_fields(fields, update=True)
         await self._call(self._run(run_id).update, dict(fields))

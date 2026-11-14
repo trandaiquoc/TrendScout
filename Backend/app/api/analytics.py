@@ -1,5 +1,7 @@
 """Read-only summaries over persisted local keyword and algorithm evidence."""
 
+import base64
+import binascii
 import json
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
@@ -287,6 +289,197 @@ def _iso(value):
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
+def _history_cursor_decode(token, filters):
+    if not token:
+        return {"local": None, "manual": None}
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        value = json.loads(raw)
+    except (ValueError, TypeError, UnicodeError, binascii.Error):
+        raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"}) from None
+    if (not isinstance(value, dict) or value.get("v") != 1
+            or any(value.get(key) != expected for key, expected in filters.items())):
+        raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
+    local = value.get("local")
+    manual = value.get("manual")
+    if local is not None and (not isinstance(local, list) or len(local) != 2
+                              or not all(isinstance(part, str) and part for part in local)):
+        raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
+    if manual is not None and (not isinstance(manual, str) or not manual or len(manual) > 1500):
+        raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
+    return {"local": local, "manual": manual}
+
+
+def _history_cursor_encode(filters, local, manual):
+    value = {"v": 1, **filters, "local": local, "manual": manual}
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _history_matches(item, q, status, mode):
+    haystack = " ".join(str(item.get(key) or "") for key in (
+        "fetch_id", "run_type", "status", "error_code", "mode", "source_manifest"
+    )).casefold()
+    return q.casefold() in haystack and (not status or item.get("status") == status) and (not mode or item.get("mode") == mode)
+
+
+def _history_item_from_job(row):
+    item = dict(row)
+    try:
+        manifest = json.loads(item.get("source_manifest") or "[]")
+        item["sources"] = [source.get("source_id") for source in manifest if isinstance(source, dict)]
+    except (TypeError, ValueError):
+        manifest = []
+        item["sources"] = []
+    item["run_type"] = "FETCH" if item.get("dataset_id") else (
+        "COLLECTION_RECONCILIATION" if item.get("membership_reconciliation_id") else "COLLECTION_PROCESSING"
+    )
+    item["mode"] = item.pop("data_mode", None)
+    item["run_at"] = item.get("fetched_at") or item.get("updated_at")
+    item["duration_seconds"] = None
+    item["_cursor_local"] = [str(item.get("history_sort_at") or item.get("updated_at") or ""), str(item["fetch_id"])]
+    return item
+
+
+def _history_item_from_manual(run):
+    run_id = str(run.get("run_id") or "")
+    if not run_id:
+        return None
+    manifest = run.get("source_manifest") or run.get("sources") or []
+    if not isinstance(manifest, list):
+        manifest = []
+    mode_value = run.get("mode") or run.get("data_mode")
+    run_at = run.get("finished_at") or run.get("updated_at") or run.get("created_at")
+    return {
+        "fetch_id": run_id,
+        "run_type": "MANUAL_ANALYSIS",
+        "status": run.get("status") or "UNKNOWN",
+        "mode": mode_value,
+        "data_mode": mode_value,
+        "sources": [entry.get("source_id") if isinstance(entry, dict) else str(entry) for entry in manifest],
+        "source_manifest": json.dumps(manifest),
+        "quality_flags": run.get("quality_flags") or [],
+        "error_code": run.get("error_code") or run.get("error"),
+        "stage": run.get("status"),
+        "available": run.get("keyword_count"),
+        "processed": run.get("scored_count"),
+        "received_record_count": run.get("keyword_count"),
+        "retained_keyword_count": run.get("scored_count"),
+        "rejected_record_count": None,
+        "run_at": _iso(run_at),
+        "created_at": _iso(run.get("created_at")),
+        "updated_at": _iso(run.get("updated_at") or run.get("finished_at")),
+        "fetched_at": _iso(run.get("finished_at")),
+        "duration_seconds": None,
+    }
+
+
+async def _run_history_cursor_page(request, q, status, mode, limit, token):
+    filters = {"q": q, "status": status, "mode": mode}
+    positions = _history_cursor_decode(token, filters)
+    service = getattr(request.app.state, "collection_service", None)
+    local_rows = []
+    local_has_more = False
+    if service:
+        with service.store.connect() as db:
+            cursor = positions["local"]
+            after_sql = ""
+            parameters = []
+            if cursor:
+                after_sql = "WHERE (COALESCE(d.fetched_at,j.updated_at)<? OR (COALESCE(d.fetched_at,j.updated_at)=? AND j.fetch_id<?))"
+                parameters.extend((cursor[0], cursor[0], cursor[1]))
+            local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.data_mode,d.source_manifest,d.provider_record_count,
+                d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
+                d.quality_flags,d.processing_status,COALESCE(d.fetched_at,j.updated_at) AS history_sort_at
+                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
+                {after_sql} ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""",
+                (*parameters, limit + 1)).fetchall()
+        local_has_more = len(local_rows) > limit
+        local_rows = local_rows[:limit]
+    local_page = [_history_item_from_job(row) for row in local_rows]
+
+    history_status = "AVAILABLE"
+    storage = _history_storage(request)
+    manual_page = []
+    manual_has_more = False
+    history_truncated = False
+    if storage is not None and hasattr(storage, "list_runs_after"):
+        try:
+            batch_size = min(limit + 1, 100)
+            runs = await storage.list_runs_after(limit=batch_size, after_run_id=positions["manual"])
+            manual_has_more = len(runs) > limit
+            if limit == 100 and len(runs) == 100:
+                tail_id = str(runs[-1].get("run_id") or "")
+                if tail_id:
+                    manual_has_more = bool(await storage.list_runs_after(limit=1, after_run_id=tail_id))
+            manual_page = [item for item in (_history_item_from_manual(run) for run in runs[:limit]) if item]
+        except ValueError:
+            raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"}) from None
+        except StorageError:
+            history_status = "PARTIAL"
+    elif storage is not None and hasattr(storage, "list_runs"):
+        history_status = "CURSOR_UNAVAILABLE"
+        try:
+            runs = await storage.list_runs(limit=100, offset=0)
+            all_manual = [item for item in (_history_item_from_manual(run) for run in runs) if item]
+            if positions["manual"]:
+                matching_cursor = next((index for index, item in enumerate(all_manual)
+                                        if item["fetch_id"] == positions["manual"]), None)
+                if matching_cursor is not None:
+                    all_manual = all_manual[matching_cursor + 1:]
+                else:
+                    all_manual = []
+            manual_page = all_manual[:limit]
+            manual_has_more = len(all_manual) > limit
+            history_truncated = len(runs) == 100 and not manual_has_more
+        except StorageError:
+            history_status = "PARTIAL"
+    else:
+        history_status = "LOCAL_LEDGER_ONLY"
+
+    local_ids = {item["fetch_id"] for item in local_page}
+    manual_page = [item for item in manual_page if item["fetch_id"] not in local_ids]
+    for item in manual_page:
+        item["_cursor_manual"] = item["fetch_id"]
+    candidates = sorted(local_page + manual_page,
+                        key=lambda item: (str(item.get("created_at") if item["run_type"] == "MANUAL_ANALYSIS"
+                                              else item.get("_cursor_local", [item.get("run_at") or ""])[0]
+                                              or item.get("run_at") or item.get("updated_at") or ""), item["fetch_id"]),
+                        reverse=True)
+    matches = [item for item in candidates if _history_matches(item, q, status, mode)]
+    selected = matches[:limit]
+    if len(matches) >= limit:
+        cutoff = candidates.index(selected[-1])
+        consumed = candidates[:cutoff + 1]
+    else:
+        consumed = candidates
+    next_local, next_manual = positions["local"], positions["manual"]
+    for item in consumed:
+        if item["run_type"] == "MANUAL_ANALYSIS":
+            next_manual = item["_cursor_manual"]
+        else:
+            next_local = item["_cursor_local"]
+    has_unconsumed = len(consumed) < len(candidates)
+    more = has_unconsumed or local_has_more or manual_has_more
+    for item in selected:
+        item.pop("_cursor_local", None)
+        item.pop("_cursor_manual", None)
+    next_cursor = _history_cursor_encode(filters, next_local, next_manual) if more else None
+    return {
+        "items": selected,
+        "total": None,
+        "offset": None,
+        "limit": limit,
+        "next_offset": None,
+        "next_cursor": next_cursor,
+        "duration_available": False,
+        "history_source": "local_sqlite_and_analysis_storage" if storage is not None else "local_sqlite_fetch_jobs",
+        "manual_history_status": history_status,
+        "history_truncated": history_truncated,
+        "cursor_unavailable": history_status == "CURSOR_UNAVAILABLE",
+    }
+
+
 @router.get("/runs/history")
 async def run_history(
     request: Request,
@@ -295,7 +488,12 @@ async def run_history(
     mode: str = Query(default="", max_length=24),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100000),
+    cursor: str | None = Query(default=None, max_length=2048),
 ):
+    if cursor is not None:
+        if offset:
+            raise HTTPException(422, {"code": "CURSOR_AND_OFFSET_CANNOT_BE_COMBINED"})
+        return await _run_history_cursor_page(request, q, status, mode, limit, cursor)
     service = getattr(request.app.state, "collection_service", None)
     if service:
         with service.store.connect() as db:

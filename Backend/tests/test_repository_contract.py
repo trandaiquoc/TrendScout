@@ -17,9 +17,10 @@ RUN = '30e96cf96abe48dbb304fb9808c89873'
 
 
 class Snapshot:
-    def __init__(self, value):
+    def __init__(self, value, document_id=None):
         self.exists = value is not None
         self.value = deepcopy(value)
+        self.id = document_id
 
     def to_dict(self):
         return deepcopy(self.value)
@@ -46,33 +47,40 @@ class Document:
         self.data[self.path] = deepcopy(value)
 
     def get(self):
-        return Snapshot(self.data.get(self.path))
+        return Snapshot(self.data.get(self.path), self.path[-1])
 
 
 class Collection:
-    def __init__(self, data, path, order=None, limit_value=None, offset_value=0):
+    def __init__(self, data, path, order=None, limit_value=None, offset_value=0, after_id=None):
         self.data, self.path = data, path
         self.order, self.limit_value, self.offset_value = order, limit_value, offset_value
+        self.after_id = after_id
 
     def document(self, name):
         return Document(self.data, self.path + (name,))
 
     def order_by(self, field, direction=None):
-        return Collection(self.data, self.path, (field, direction), self.limit_value, self.offset_value)
+        return Collection(self.data, self.path, (field, direction), self.limit_value, self.offset_value, self.after_id)
 
     def offset(self, value):
-        return Collection(self.data, self.path, self.order, self.limit_value, value)
+        return Collection(self.data, self.path, self.order, self.limit_value, value, self.after_id)
 
     def limit(self, value):
-        return Collection(self.data, self.path, self.order, value, self.offset_value)
+        return Collection(self.data, self.path, self.order, value, self.offset_value, self.after_id)
+
+    def start_after(self, snapshot):
+        return Collection(self.data, self.path, self.order, self.limit_value, self.offset_value, snapshot.id)
 
     def stream(self):
-        values = [value for path, value in self.data.items() if path[:-1] == self.path]
+        values = [(path[-1], value) for path, value in self.data.items() if path[:-1] == self.path]
         if self.order:
             field, direction = self.order
-            values.sort(key=lambda value: str(value.get(field) or ""), reverse=direction == "DESCENDING")
+            values.sort(key=lambda item: (str(item[1].get(field) or ""), item[0]), reverse=direction == "DESCENDING")
+        if self.after_id is not None:
+            after_index = next((index for index, item in enumerate(values) if item[0] == self.after_id), None)
+            values = values[after_index + 1:] if after_index is not None else []
         values = values[self.offset_value : self.offset_value + self.limit_value if self.limit_value is not None else None]
-        return [Snapshot(value) for value in values]
+        return [Snapshot(value, document_id) for document_id, value in values]
 
 
 class StubFirestoreClient:
@@ -119,6 +127,10 @@ class ContractMixin:
         page = await self.store.list_runs(limit=2, offset=0)
         self.assertEqual([item['status'] for item in page], ['PARTIAL', 'FAILED'])
         self.assertEqual([item['status'] for item in await self.store.list_runs(limit=2, offset=2)], ['COMPLETED'])
+        page = await self.store.list_runs_after(limit=2)
+        self.assertEqual([item['run_id'] for item in page], ['b' * 32, 'c' * 32])
+        next_page = await self.store.list_runs_after(limit=2, after_run_id=page[-1]['run_id'])
+        self.assertEqual([item['run_id'] for item in next_page], ['a' * 32])
 
     async def test_overwrite_error_and_paths(self):
         await self.store.put_record(RUN, 'observations', 'a', {'old':1})
