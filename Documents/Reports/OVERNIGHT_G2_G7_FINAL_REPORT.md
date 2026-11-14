@@ -396,17 +396,39 @@ Native Windows Chrome (headless DevTools) final checks passed: `browser_keyboard
 After the browser workflows, read-only GETs against the existing port-8123 runtime still reported SQLite integrity `OK`, LLM `NOT_CONFIGURED`, scheduler disabled with `worker_running=false`, and zero saved schedules. The user runtime was not mutated. Broad manual screen-reader testing remains unverified; Chrome's accessibility tree and keyboard behavior were checked for the G5/G6 states described above. Cross-source overlap and algorithm effectiveness remain `NOT_YET_EVALUATED` because the saved evidence covers one source. No push or deployment occurred; the master goal remains partial.
 
 
-## Windows home acceptance — 2026-11-14
+## Windows home acceptance - reverified after manual restart (2026-11-14)
+
+**Overall master goal: PARTIAL.** Windows-local product acceptance passes. External validation gates remain open, so this is not a 100% completion claim.
 
 | Acceptance | Status | Current evidence |
 |---|---|---|
-| A. Windows local product | **FAIL — active backend is stale** | The process on `127.0.0.1:8123` is PID 19476, Python 3.12, working directory `D:\TrendScout\Backend`, launched as `scripts.run_wikimedia_live_local --port 8123` at 14:35. It has no reload flag; current `Backend/app/main.py` and `Backend/scripts/run_wikimedia_live_local.py` were modified at 17:56. |
-| B. Firestore emulator | **BLOCKED_ENVIRONMENT** | `wsl.exe --list --quiet` returned `Wsl/CallMsi/Install/REGDB_E_CLASSNOTREG`; `bwrap`, Docker, and Podman are unavailable. The guard was not bypassed. |
-| Algorithm effectiveness | **NOT_YET_EVALUATED** | The saved runtime has one source and no comparable labeled history. |
-| Screen reader | **NOT_VERIFIED** | NVDA was not found in PATH, common install paths, or the Windows uninstall registry. Chrome AX/keyboard checks are not a screen-reader pass. |
+| A. Windows local product | **PASS** | Current local FastAPI process and SQLite ledger verified; workspace frontend assets match the served files. Native Windows Chrome exercised G2-G7 views against this process. |
+| B. Firestore emulator | **BLOCKED_ENVIRONMENT** | The Windows runner lacks the required Linux network namespace; the Firestore safety guard was not bypassed and WSL was not changed. |
+| Algorithm effectiveness | **NOT_YET_EVALUATED** | Runtime reports `NOT_YET_EVALUATED`; saved evidence has one configured source and no comparable labeled history. |
+| Screen reader | **NOT_VERIFIED** | NVDA is absent from PATH, process list, and Windows uninstall entries. Chrome accessibility-tree/keyboard checks do not count as a screen-reader pass. |
+| Production integrations | **NOT_VERIFIED** | No provider LIVE request or production integration was exercised. |
 
-The running process has `TRENDSCOUT_COLLECTIONS_DIR=%LOCALAPPDATA%\Temp\TrendScout-context-classification-20261113-5`; direct process-environment inspection confirmed the path and the read-only SQLite file matches the runtime-reported size exactly (4,698,112 bytes). Its checked state is 154 keywords, 150 `CLASSIFIED`, 1 `UNKNOWN`, 3 `INELIGIBLE`, 154 entity contexts, 241 memberships / 150 assigned keywords, 55 Collections, 154 observations, 1,848 algorithm results, and zero research records. SQLite `quick_check` is `ok`; foreign-key violations: 0. A fresh online backup at `%LOCALAPPDATA%\TrendScout\backups\collections-before-windows-backend-restart-20261114.sqlite` passed both checks; SHA-256 `b2b6961f824760885ce192841dc4cf7eb39ddd2c6dc63438cf3c6a8ff7c0adb6`.
+### Current Windows process and storage
 
-The six frontend assets (`index.html`, `app.js`, `styles.css`, and the three i18n modules) served by port 8123 match the workspace files byte-for-byte. Windows Chrome opened Overview, Analysis, Collections, Source Center (81 entries), Run History (4 rows), Algorithms (12 methods), Data Quality, Product Research, and Settings. VI/EN and Light/Dark toggles worked and were restored; all captured HTTP requests were GETs to loopback, plus embedded `data:` SVGs. Runtime reports FastAPI local/live, one configured source, FastEmbed on CPU, LLM not configured, and a disabled synthetic-only scheduler with no saved schedules.
+- `127.0.0.1:8123` is served by PID **1940**, Python 3.12 at `C:\Users\Quoc\AppData\Local\Programs\Python\Python312\python.exe`, started **2026-11-14 20:07:13**. Command: `python -m scripts.run_wikimedia_live_local --port 8123`; working directory: `D:\TrendScout\Backend`.
+- The process started after `Backend/app/main.py` and `Backend/scripts/run_wikimedia_live_local.py` were last modified at 17:56:20. Git HEAD was `ccf3046`, equal to `origin/main`, at the pre-report recheck. The untracked user-authored `Documents/UX/G0/LUCIAN_400_TRENDSCOUT_REVIEW_VI.md` remains preserved.
+- `/api/health` returns `ok`. Runtime reports `local/live`, SQLite `AVAILABLE`/`OK`, 216 keywords, one configured source, FastEmbed 0.9.1 on CPU, LLM `NOT_CONFIGURED`, and scheduler `DISABLED` with `LOCAL_SYNTHETIC_ONLY`, no worker, and zero schedules. Capabilities report one live source enabled, but no Fetch endpoint or provider was called during this acceptance.
+- Process environment has `LOCALAPPDATA` and no `TRENDSCOUT_COLLECTIONS_DIR` override. The Windows default database is `%LOCALAPPDATA%\TrendScout\collections-v1\collections.sqlite`; its size matches the runtime, **7,155,712 bytes**. Read-only SQLite verification reports `quick_check=ok` and zero foreign-key violations.
+- Current ledger: 216 keywords; classification results: 185 `CLASSIFIED`, 13 `AMBIGUOUS`, 15 `UNKNOWN`, 3 `INELIGIBLE`; 202 entity contexts; 269 memberships / 185 distinct assigned keywords; 59 Collections; 310 algorithm observations / 2,592 algorithm results; zero research records, feedback rows, or keyword decisions.
 
-The process/backend freshness mismatch is the sole reason A is not marked PASS; the UI and DB checks above do not imply Firestore or live-provider acceptance. A command to replace PID 19476 with the current backend on the same port and exact DB/environment was rejected by the execution policy before it ran. The process remains active, the verified DB is unchanged, and no project source was modified in this acceptance turn. A must remain FAIL until the current backend can be started and checked on port 8123.
+### G2 cached-evidence reconciliation
+
+Read-only inspection found 31 eligible `CLASSIFIED` records with cached entity context and valid taxonomy category IDs but no Collection membership. Every referenced taxonomy Collection was active with auto-match enabled. Existing membership state contained 221 `LOCAL_AI` rows, no pins, no feedback, and no keyword decisions.
+
+Before changing the ledger, an SQLite online backup was created at `%LOCALAPPDATA%\TrendScout\backups\collections-before-classified-membership-repair-20261114.sqlite`. It passed `quick_check=ok` and a clean foreign-key check; SHA-256: `1997e5988723e9ef33f2e854edc9476f10b22ffef22e9e552bade01bad4afe21`.
+
+The local `reclassify-cached` endpoint processed exactly those 31 IDs from stored context and evidence. All 31 remained `CLASSIFIED`; it added 48 taxonomy memberships and preserved every pre-existing membership. Classified records missing membership fell from 31 to 0; distinct assigned keywords rose from 154 to 185; Collections inbox/unassigned fell from 59 to 28. Algorithm observations/results, feedback, decisions, keyword source records, entity context, dataset snapshots, fetch history, Collections, and historical reconciliation records have canonical row SHA-256 digests matching the verified backup. Post-reconciliation SQLite integrity and foreign-key checks pass. No Pageviews re-fetch was made.
+
+### Native Windows Chrome evidence
+
+- Chrome at `C:\Program Files\Google\Chrome\Application\chrome.exe` opened Overview, Collections, Source Center, Run History, Algorithms, Data Quality, Product Research, and Settings against PID 1940. The six served frontend assets (`/dashboard/`, JS, CSS, and VI/EN modules) matched workspace files byte-for-byte.
+- After asynchronous data load, Dashboard displayed 210 provider-returned records, 216 stored keywords, 185 classified, 28 unassigned, and one active source. Collections showed 216 tracked, 185 assigned, 28 not placed, and the 185/13/15/3 classification breakdown. Run History rendered 13 rows; Source Center rendered four active source cards and all 81 catalog entries; Algorithms rendered 12 methods and 24 disclosures with `NOT_YET_EVALUATED`; Data Quality rendered six definition pairs and two subsection headings; Product Research showed its empty state; Settings showed LLM unconfigured, scheduler disabled, and no schedules.
+- VI/EN and Light/Dark toggles worked in an isolated Chrome profile and were restored. At 390px, document/body width remained 390px with no horizontal overflow.
+- Browser API instrumentation observed only GET requests to loopback during Chrome acceptance. The separate local reclassification POST used cached SQLite evidence only. No Pageviews Fetch, Google/Bing/YouTube request, paid LLM call, scheduler activation, push, or deployment occurred.
+
+This checkpoint supersedes the earlier stale-PID Windows status above. Firestore and other external gates remain separate from Windows-local acceptance; the master goal remains partial.
