@@ -195,7 +195,7 @@ The 25 mandatory titles remain present in the active runtime ledger and their ev
 
 After confirming there was no in-progress Fetch, the stale port-8123 process was restarted with the current workspace code and pointed at the same active DB. Native Chrome showed 154 stored, 149 classified and 2 unclassified; the inbox API returns exactly the two UNKNOWN topics (`Thank You/en` and `Wikimedia APIs`) and excludes all three INELIGIBLE pages. Direct Chrome classification endpoints returned the six outcomes above. The fresh dashboard screenshot is `Documents/Reports/windows-evidence/overnight-g2-g7/live-runtime-g2-dashboard-20261114.png`. Server logs show only GET requests during verification; no Fetch or scheduler run occurred. No push or deployment occurred.
 
-Overall G2-G7 implementation progress is estimated at approximately 90% using equal phase weighting: G2 100%, G3 90%, G4 80%, G5 95%, G6 85%, and G7 90%. This is implementation progress, not acceptance: Firestore emulator coverage, actual screen-reader review of remaining dynamic states, comparable labeled algorithm evaluation and multi-source overlap remain open or not yet measurable.
+Overall G2-G7 implementation progress is estimated at approximately 92% using equal phase weighting: G2 100%, G3 100%, G4 80%, G5 95%, G6 85%, and G7 90%. G3's 81-candidate official-source revalidation is complete, but all candidates remain research-only unless separately approved. This is implementation progress, not full product acceptance: Firestore emulator coverage and screen-reader review remain open, while comparable labeled algorithm evaluation and multi-source overlap cannot yet be measured from the one-source saved dataset.
 
 ## Native Chrome accessibility recheck - 2026-11-14
 
