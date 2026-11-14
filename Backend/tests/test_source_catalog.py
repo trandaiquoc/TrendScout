@@ -101,6 +101,7 @@ class SourceCatalogTests(unittest.TestCase):
             "fandom", "twitch", "kick", "rumble", "vimeo",
             "dailymotion", "lemon8", "patreon", "etsy", "poshmark",
             "depop", "whatnot", "mercari", "offerup", "tiktok_shop",
+            "facebook_marketplace", "amazon", "walmart", "ebay", "shein",
         })
         locale_root = Path(__file__).resolve().parents[2] / "Frontend" / "public" / "modules" / "i18n"
         catalogs = {locale: (locale_root / f"{locale}.js").read_text(encoding="utf-8")

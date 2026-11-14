@@ -778,7 +778,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Marketplace](https://www.facebook.com/marketplace/); không coi là nguồn API độc lập được duyệt."
+      "source_reference": "U; [Facebook Marketplace](https://www.facebook.com/marketplace/); tự động thu thập cần Meta cho phép bằng văn bản.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The reviewed official materials do not establish a public Facebook Marketplace listing-search API for TrendScout. Meta's Automated Data Collection Terms require express written permission before automated collection from Meta products; public visibility alone is not authorization.",
+      "revalidation_note_key": "sources.review.facebook_marketplace",
+      "revalidation_links": [
+        {"label": "Meta Automated Data Collection Terms", "url": "https://www.facebook.com/legal/automated_data_collection_terms"},
+        {"label": "Facebook Marketplace", "url": "https://www.facebook.com/marketplace/"}
+      ]
     },
     {
       "source_id": "amazon",
@@ -787,7 +794,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Amazon developers](https://developer.amazon.com/); chương trình, quyền catalog và use case cần xác minh."
+      "source_reference": "G; [Amazon Creators API](https://affiliate-program.amazon.com/creatorsapi/docs/); cần Associates eligibility, tối đa 10 kết quả mỗi truy vấn.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Amazon's Creators API supports keyword product search for enrolled Amazon Associates; access requires marketplace enrollment, at least 10 qualifying sales in the prior 30 days, registration, and credentials. Search returns at most 10 items per request and does not measure demand or sales trends; TrendScout eligibility and permitted use remain unverified.",
+      "revalidation_note_key": "sources.review.amazon",
+      "revalidation_links": [
+        {"label": "Creators API onboarding and eligibility", "url": "https://affiliate-program.amazon.com/creatorsapi/docs/"},
+        {"label": "SearchItems operation", "url": "https://affiliate-program.amazon.com/creatorsapi/docs/en-us/api-reference/operations/search-items"}
+      ]
     },
     {
       "source_id": "walmart",
@@ -796,7 +810,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Marketplace API](https://developer.walmart.com/global-marketplace/page/getting-started) dành seller/delegated solution provider; không mặc định catalog toàn sàn."
+      "source_reference": "G; [Walmart Marketplace API](https://developer.walmart.com/us-marketplace/docs/authentication-authorization); OAuth giới hạn theo seller ủy quyền.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Walmart Marketplace APIs use OAuth permissions granted by a seller and expose that seller's catalog, items, and performance insights. They do not provide verified public marketplace-wide product discovery for TrendScout; seller authorization, API approval, and permitted analytics use remain unverified.",
+      "revalidation_note_key": "sources.review.walmart",
+      "revalidation_links": [
+        {"label": "Walmart Marketplace API authorization", "url": "https://developer.walmart.com/us-marketplace/docs/authentication-authorization"},
+        {"label": "Seller catalog items and insights", "url": "https://developer.walmart.com/us-marketplace/docs/get-item-details"},
+        {"label": "Walmart API License Agreement", "url": "https://developer.walmart.com/us-marketplace/page/terms-and-conditions"}
+      ]
     },
     {
       "source_id": "ebay",
@@ -805,7 +827,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Browse API](https://developer.ebay.com/develop/api/buy/browse_api) search listings, application token; quyền và quota production cần review."
+      "source_reference": "G; [eBay Browse API](https://developer.ebay.com/develop/api/buy/browse_api/item/search); production use requires partner approval and permitted use.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "eBay Browse API supports keyword searches and returns matching marketplace items. Production Buy API use is limited to approved eBay partners and intended buying experiences; eBay says other uses of its data are typically not permitted. TrendScout production approval and a permitted trend-analysis use are unverified.",
+      "revalidation_note_key": "sources.review.ebay",
+      "revalidation_links": [
+        {"label": "Browse API item search", "url": "https://developer.ebay.com/develop/api/buy/browse_api/item/search"},
+        {"label": "Buy API production requirements", "url": "https://developer.ebay.com/api-docs/buy/buy-requirements.html"},
+        {"label": "eBay permitted API uses", "url": "https://developer.ebay.com/support/developer-account-support"}
+      ]
     },
     {
       "source_id": "shein",
@@ -814,7 +844,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [SHEIN US](https://us.shein.com/); quyền API/scrape chưa xác minh."
+      "source_reference": "U; [Điều khoản SHEIN US](https://app.shein.com/9/36ccile61bw3); thu thập tự động cần SHEIN cho phép trước bằng văn bản.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "SHEIN's US Terms of Use restrict access to personal, non-commercial shopping and prohibit robots or automated processes from accessing or indexing the service. The reviewed official materials do not establish a public product-discovery API or prior written consent for TrendScout; do not scrape or analyze listings without authorization.",
+      "revalidation_note_key": "sources.review.shein",
+      "revalidation_links": [
+        {"label": "SHEIN US Terms of Use", "url": "https://app.shein.com/9/36ccile61bw3"}
+      ]
     },
     {
       "source_id": "temu",
