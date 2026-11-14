@@ -265,6 +265,15 @@ CHECK = r"""<script>
     check(document.querySelector('#quality-coverage').textContent.includes('404'),'partial source coverage');
     check(document.querySelector('#quality-staleness').textContent.includes('3 ngày'),'stale observation');
     check(document.querySelector('#global-notice').textContent.includes('SYNTHETIC'),'synthetic mode warning');
+    await go('quality');
+    const qualityCopy=document.querySelector('[data-view=quality]').textContent;
+    check(qualityCopy.includes('Số bản ghi hợp lệ / bị loại / trùng')&&qualityCopy.includes('Chưa có số liệu báo cáo'),'Vietnamese data-quality labels describe reported metrics without API jargon');
+    check(qualityCopy.includes('Danh sách trang chỉ hiển thị một phần')&&qualityCopy.includes('không đồng nghĩa với 0 lượt xem'),'Vietnamese page-list limitation explains absence versus zero');
+    applyLocale('en');
+    const englishQualityCopy=document.querySelector('[data-view=quality]').textContent;
+    check(englishQualityCopy.includes('Valid / rejected / duplicate record counts')&&englishQualityCopy.includes('No figures reported'),'English data-quality labels avoid implementation jargon');
+    check(englishQualityCopy.includes('Partial page list')&&englishQualityCopy.includes('does not mean it had zero views'),'English page-list limitation explains absence versus zero');
+    applyLocale('vi');
 
     await go('overview');await wait(20);
     check(document.querySelector('#rows').textContent.includes('<img'),'untrusted keyword rendered as text');
