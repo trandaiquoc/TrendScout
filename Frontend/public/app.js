@@ -66,6 +66,7 @@ const state = {
 };
 let schedulerListSequence = 0;
 let schedulerEditId = null;
+let analyticsSequence = 0;
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
@@ -140,13 +141,15 @@ function renderDataTable(root, headers, rows, note = '') {
 }
 
 async function loadAnalytics() {
+  const sequence = ++analyticsSequence;
   try {
     const data = await getJson('/api/v1/analytics/overview', { locale: getLocale() });
-    state.analytics = data;
     if (!state.algorithmCatalog) {
       try { state.algorithmCatalog = await getJson('/api/v1/algorithms', { locale: getLocale() }); }
       catch { state.algorithmCatalog = null; }
     }
+    if (sequence !== analyticsSequence) return;
+    state.analytics = data;
     const totals = data.keyword_totals || {};
     $('#metric-records-stored').textContent = number(totals.unique);
     $('#metric-records-stored-note').textContent = t('analysis.unique-keywords');
@@ -194,6 +197,7 @@ async function loadAnalytics() {
       renderDataTable(target, [t('analysis.rank'),t('analysis.keyword'),t('analysis.metric'),t('analysis.value')], top.map(row => [number(row.rank),row.keyword,`${row.metric || '—'} (${row.unit || '—'})`,number(row.observed_value)]), note);
     }
   } catch (error) {
+    if (sequence !== analyticsSequence) return;
     const qualitySnapshot=$('#quality-snapshot');
     if (qualitySnapshot) qualitySnapshot.replaceChildren(element('p',getErrorMessage(error,'analysis.error')));
     for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history']) {
@@ -1139,6 +1143,7 @@ function refreshCollectionJob(fetchId) {
         })));
       }
       await loadLatestDataset();
+      await loadAnalytics();
       if (state.persistedDatasetAvailable) loadKeywords();
       if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
@@ -1232,6 +1237,7 @@ const fetchController = new PublicFetchController({
         loadKeywords();
       }
     }
+    void loadAnalytics();
     scheduleCapabilityRefresh(100);
   },
   locale: getLocale,
@@ -1408,7 +1414,7 @@ function updatePublicDiscoverySummary(discovery, sources) {
       const label = element('span', item.article || '—', 'chart-label');
       const track = element('span', null, 'chart-track');
       const bar = element('span', null, 'chart-bar');
-      bar.style.width = `${Math.max(3, (item.approximate_views / max) * 100)}%`;
+      bar.style.width = `${(item.approximate_views / max) * 100}%`;
       track.append(bar);
       row.append(label, track, element('strong', number(item.approximate_views), 'chart-value'));
       chart.append(row);

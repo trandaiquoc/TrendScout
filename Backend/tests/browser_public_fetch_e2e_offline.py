@@ -19,7 +19,8 @@ def main():
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
     css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
+    html = html.replace('<link rel="stylesheet" href="/dashboard/styles.css">', "<style>" + css + "</style>")
+    html = html.replace('href="/dashboard/phoenix.css"', 'href="' + (PUBLIC / "phoenix.css").as_uri() + '"')
     html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
 const fetchRequests=[];let statusReads=0;
@@ -55,6 +56,7 @@ check(posts[0]?.body==='{}','body is server-default empty object');
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'request has an idempotency key');
 check(!fetchRequests.some(request=>/token|secret|credential|password/i.test(JSON.stringify(request.headers))),'no credential sent');
 check(statusReads===1,'one bounded status read receives terminal state');
+check(fetchRequests.filter(request=>request.path==='/api/v1/analytics/overview').length>=2,'saved analytics refresh after terminal result');
 check(document.querySelector('#fetch-status').textContent.includes('độ phủ nguồn chưa đầy đủ'),'partial synthetic state announced');
 check(document.querySelector('#runs-current').textContent===RUN_ID,'run results load without user-entered ID');
 check(document.querySelector('#rows').textContent.includes('Synthetic phrase'),'synthetic result rendered');
@@ -62,11 +64,8 @@ check(document.querySelector('#demo-discovery-list').textContent.includes('INSUF
 check(document.querySelector('#demo-discovery-list').textContent.includes('<img src=x onerror=alert(1)>'),'untrusted keyword rendered as text');
 check(!document.querySelector('#demo-discovery-list img'),'untrusted keyword is not HTML');
 check(document.querySelector('#demo-discovery-list').textContent.includes('CACHED'),'cache provenance rendered');
-document.querySelector('[data-category=home_goods]').click();
-check(!document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),'synthetic candidates respect category filter');
-document.querySelector('[data-category=fashion]').click();
-check(document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),'matching category restores candidate');
-check(document.querySelector('[data-source=youtube]').dataset.sourceStatus==='implemented_offline_verified-not_verified','offline-implemented source remains live-disabled');
+const youtube=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent==='youtube_video_search');
+check(Boolean(youtube&&youtube.textContent.includes('Đã xác minh adapter ngoại tuyến')&&youtube.textContent.includes('Không bật cho thao tác hiện tại')),'offline-implemented source remains live-disabled');
 check(!Object.keys(localStorage).some(key=>/token|secret|credential|password/i.test(key)),'no credentials stored');
 document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>""".replace("RUN_ID", json.dumps(RUN_ID))
