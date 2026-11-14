@@ -264,3 +264,19 @@ body { font-size:14px; letter-spacing:-.01em; }
 #research-list-more { margin-top:14px; }
 @media (max-width:900px) { .research-grid { grid-template-columns:1fr; } }
 @media (max-width:600px) { .research-grid > .panel { padding:17px; } .research-list-tools { grid-template-columns:1fr; } }
+/* Settings: readable preference controls with operational details disclosed on demand. */
+.settings-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; align-items:start; }
+.settings-grid > .panel { min-width:0; padding:22px; border-radius:14px; }
+.settings-grid h2 { color:var(--ink-strong); font-size:18px; letter-spacing:-.025em; }
+.setting-row { min-height:72px; padding:14px 0; border-top:1px solid var(--line); }
+.setting-row strong { color:var(--ink-strong); font-size:13px; }
+.setting-row small { color:var(--muted); font-size:11px; }
+.settings-details { margin-top:15px; padding-top:13px; border-top:1px solid var(--line); }
+.settings-details > summary { color:var(--accent-strong); cursor:pointer; font-size:12px; font-weight:650; }
+.settings-details .detail-list { margin-top:14px; }
+.settings-details .detail-list > div { padding-block:9px; }
+.settings-grid .schedule-form { margin-top:15px; }
+.settings-grid .schedule-form label { display:grid; gap:5px; color:var(--muted); font-size:11px; font-weight:650; }
+.settings-grid .schedule-form input,.settings-grid .schedule-form select { width:100%; min-height:40px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); color:var(--ink); font:inherit; }
+@media (max-width:900px) { .settings-grid { grid-template-columns:1fr; } }
+@media (max-width:600px) { .settings-grid > .panel { padding:17px; } }

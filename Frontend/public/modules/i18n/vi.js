@@ -1117,6 +1117,7 @@ export const vi = {
   'phoenix.no-snapshot': 'Chưa có ảnh chụp dữ liệu được lưu.',
   'phoenix.research-search': 'Tìm trong nghiên cứu đã lưu',
   'phoenix.all-statuses': 'Tất cả trạng thái',
+  'phoenix.settings-details': 'Xem thông tin chi tiết',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

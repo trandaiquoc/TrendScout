@@ -1117,6 +1117,7 @@ export const en = {
   'phoenix.no-snapshot': 'No saved data snapshot is available.',
   'phoenix.research-search': 'Search saved research',
   'phoenix.all-statuses': 'All statuses',
+  'phoenix.settings-details': 'View details',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',
