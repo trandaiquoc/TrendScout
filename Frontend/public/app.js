@@ -2256,6 +2256,31 @@ function bindEvents() {
     if (event.key === 'Escape') {
       closeMobileNav();
     }
+    if (event.key === 'Tab') {
+      const dialog = $$('dialog[open]').at(-1);
+      if (dialog) {
+        const focusable = $$('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])', dialog)
+          .filter((node) => !node.closest('[hidden]') && node.getClientRects().length > 0);
+        if (!focusable.length) {
+          event.preventDefault();
+          dialog.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable.at(-1);
+        const focusOutside = !dialog.contains(document.activeElement);
+        if (event.shiftKey && (focusOutside || document.activeElement === first)) {
+          event.preventDefault();
+          last.focus();
+          return;
+        }
+        if (!event.shiftKey && (focusOutside || document.activeElement === last)) {
+          event.preventDefault();
+          first.focus();
+          return;
+        }
+      }
+    }
     if (isMobileNav() && $('#app-shell').classList.contains('menu-open') && event.key === 'Tab') {
       const focusable = $$('a[href], button:not(:disabled), summary', $('#workspace-nav-panel'))
         .filter((node) => !node.closest('[hidden]') && node.getClientRects().length > 0);
