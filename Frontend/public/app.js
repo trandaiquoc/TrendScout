@@ -198,6 +198,12 @@ async function loadAnalytics() {
     for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart']) {
       const root = $('#' + id); if (root) root.replaceChildren();
     }
+    const top = $('#overview-top-keywords');
+    if (top) top.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
+    const chart = $('#pageviews-chart');
+    if (chart) chart.replaceChildren();
+    const empty = $('#pageviews-empty');
+    if (empty) { empty.hidden = false; empty.textContent = getErrorMessage(error, 'analysis.error'); }
   }
 }
 
@@ -433,6 +439,7 @@ function renderObservedVolumeChart(rows, context) {
   const empty = $('#pageviews-empty');
   if (!chart || !empty) return;
   chart.replaceChildren();
+  empty.textContent = t('chart.empty');
   const comparable = (Array.isArray(rows) ? rows : []).filter((row) => Number.isFinite(row.observed_value) && row.observed_value >= 0).slice(0, 5);
   empty.hidden = comparable.length > 0;
   if (!comparable.length) return;
@@ -444,7 +451,7 @@ function renderObservedVolumeChart(rows, context) {
     const track = element('span', null, 'chart-track');
     const bar = element('span', null, 'chart-bar');
     bar.setAttribute('aria-hidden', 'true');
-    bar.style.width = `${Math.max(3, (rowData.observed_value / maximum) * 100)}%`;
+    bar.style.width = `${(rowData.observed_value / maximum) * 100}%`;
     track.append(bar);
     const value = element('strong', number(rowData.observed_value), 'chart-value');
     row.title = `${number(rowData.rank)} · ${rowData.metric || '—'} (${rowData.unit || '—'}) · ${context.observation_date || '—'}`;

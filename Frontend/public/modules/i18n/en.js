@@ -1108,6 +1108,7 @@ export const en = {
   'workbench.collection-tree': 'Collection tree',
   'workbench.all-keywords': 'All keywords',
   'workbench.results-count': '{count} results',
+  'phoenix.view-evidence': 'View data and observation scope',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

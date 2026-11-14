@@ -1108,6 +1108,7 @@ export const vi = {
   'workbench.collection-tree': 'Cây bộ sưu tập',
   'workbench.all-keywords': 'Tất cả từ khóa',
   'workbench.results-count': '{count} kết quả',
+  'phoenix.view-evidence': 'Xem dữ liệu và phạm vi quan sát',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

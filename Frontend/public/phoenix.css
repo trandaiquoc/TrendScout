@@ -105,3 +105,45 @@ body { font-size:14px; letter-spacing:-.01em; }
   .workbench-table td:nth-child(2) small { display:block; }
   .workbench-table td:first-child { grid-row:1 / span 6; }
 }
+/* Dashboard: a snapshot, observed evidence and source context, with no invented deltas. */
+.dashboard-tabs { display:inline-flex; gap:3px; padding:4px; border:1px solid var(--line); border-radius:11px; background:var(--surface); }
+.dashboard-tab { min-height:34px; padding:7px 15px; border:0; border-radius:8px; color:var(--muted); background:transparent; font-size:12px; font-weight:650; }
+.dashboard-tab[aria-selected="true"] { color:var(--accent-strong); background:var(--accent-soft); box-shadow:none; }
+.hero { grid-template-columns:minmax(0,1fr) minmax(250px,320px); gap:32px; margin:28px 0 38px; }
+.hero h1 { max-width:650px; font-size:clamp(32px,3.7vw,49px); line-height:1.12; letter-spacing:-.055em; }
+.hero-copy > p:last-child { font-size:14px; }
+.fetch-card { display:grid; gap:12px; padding:17px; border:1px solid var(--line); border-radius:15px; background:var(--surface); box-shadow:var(--shadow); }
+.fetch-card-top { display:flex; align-items:center; justify-content:space-between; }
+.fetch-mode-mark { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; background:var(--accent-soft); color:var(--accent-strong); font-weight:800; }
+.fetch-help,.fetch-status { margin:0; font-size:11px; line-height:1.5; }
+.dashboard-section-heading { display:flex; justify-content:space-between; align-items:end; gap:16px; margin:0 0 14px; }
+.dashboard-section-heading .section-kicker { margin:0 0 4px; }
+.dashboard-section-heading h2 { margin:0; color:var(--ink-strong); font-size:20px; letter-spacing:-.035em; }
+.dashboard-section-heading .text-link { flex-shrink:0; font-size:12px; }
+.metrics-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:var(--line); }
+.metric-card { min-height:126px; padding:20px; border:0; border-radius:0; background:var(--surface); box-shadow:none; }
+.metric-label { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:11px; font-weight:650; }
+.metric-label > span:last-child { color:var(--accent); font-size:15px; }
+.metric-value { display:block; margin:10px 0 5px; color:var(--ink-strong); font-size:27px; line-height:1.1; letter-spacing:-.045em; font-variant-numeric:tabular-nums; }
+.metric-foot { color:var(--muted); font-size:11px; line-height:1.4; }
+.discover-grid { grid-template-columns:minmax(0,1.55fr) minmax(260px,.75fr); gap:16px; margin-top:26px; }
+.chart-panel,.source-context-panel { padding:23px; border-radius:14px; }
+.chart-panel .panel-heading,.source-context-panel .panel-heading { margin-bottom:23px; }
+.chart-panel h2,.source-context-panel h2 { font-size:18px; letter-spacing:-.025em; }
+.chart-panel .panel-subtitle { max-width:600px; font-size:12px; }
+.chart-panel .pageviews-chart { gap:17px; padding:5px 0; }
+.chart-panel .chart-row { grid-template-columns:minmax(120px,1.05fr) minmax(70px,1.4fr) minmax(65px,auto); gap:14px; }
+.chart-panel .chart-label,.chart-panel .chart-value { font-size:12px; }
+.chart-panel .chart-track { height:9px; background:var(--surface-soft); }
+.chart-panel .chart-bar { background:#6878df; }
+.dashboard-evidence { margin-top:22px; padding-top:15px; border-top:1px solid var(--line); }
+.dashboard-evidence > summary { color:var(--accent-strong); cursor:pointer; font-size:12px; font-weight:650; }
+.dashboard-evidence .analysis-state { margin-top:14px; }
+.source-context-panel { display:flex; flex-direction:column; gap:14px; }
+.source-context-panel .panel-heading { margin-bottom:0; }
+.source-context-panel .text-link { margin-top:auto; }
+.source-context-copy,.data-limit-note { color:var(--muted); font-size:12px; line-height:1.65; }
+.analysis-panel .analysis-grid { gap:16px; }
+.analysis-panel .analysis-card { border-radius:14px; }
+@media (max-width:900px) { .hero { grid-template-columns:1fr; margin:24px 0; } .fetch-card { max-width:none; } .discover-grid { grid-template-columns:1fr; } }
+@media (max-width:600px) { .hero h1 { font-size:32px; } .metrics-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .metric-card { min-height:116px; padding:15px; } .metric-value { font-size:23px; } .dashboard-section-heading { align-items:start; } .dashboard-section-heading h2 { font-size:18px; } .chart-panel,.source-context-panel { padding:17px; } .chart-panel .chart-row { grid-template-columns:minmax(65px,1fr) minmax(35px,1fr) auto; gap:8px; } }
