@@ -47,7 +47,7 @@ def seed_keyword(store):
                 classification_status,confidence_level,commercial_relevance,classification_method,
                 classification_version,taxonomy_version,rule_evidence,source_evidence,review_status,classified_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (keyword_id, "topic", "Synthetic browser fixture", "[]", "[]", status, "NONE",
+                (keyword_id, "topic" if status == "CLASSIFIED" else "unknown", "Synthetic browser fixture" if status == "CLASSIFIED" else "", "[]", "[]", status, "NONE",
                  "NOT_ASSESSED", "TEST_FIXTURE", "fixture-v1", "topics-v1.5", "[]", "{}",
                  "UNREVIEWED", "2026-11-14T00:00:00Z"),
             )
@@ -203,6 +203,21 @@ def main():
               const collectionCounts=[...document.querySelectorAll('#workbench-summary .workbench-stat strong')].map(x=>x.textContent);
               check(collectionCounts.join(',')==='3,1,1,0','Collection cards show 3 stored, 1 assigned, 1 unclassified and 0 excluded');
               check(document.querySelector('#workbench-summary').textContent.includes('1 kh\u00f4ng ph\u1ea3i ch\u1ee7 \u0111\u1ec1'),'Collection summary explains the ineligible topic count');
+              check(await until(()=>[...document.querySelectorAll('#workbench-rows tr')].some(row=>row.textContent.includes('Unknown context topic'))),'unassigned saved keyword is visible in the real workbench');
+              document.querySelector('[data-locale-toggle]').click();await delay(100);
+              const unknownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Unknown context topic'));
+              unknownRow.querySelector('button').click();
+              check(await until(()=>document.querySelector('#workbench-detail details dl')),'keyword detail loads its saved classification evidence');
+              let explanation=document.querySelector('#workbench-detail details dl')?.textContent||'';
+              check(explanation.includes('title alone was not used to guess'),'unknown keyword explains that its title was not used to guess');
+              check(!explanation.includes('TEST_FIXTURE')&&!explanation.includes('fixture-v1')&&!explanation.includes('INSUFFICIENT_EVIDENCE'),'classification explanation hides internal method identifiers');
+              document.querySelector('#workbench-detail button')?.click();await delay(100);
+              document.querySelector('[data-locale-toggle]').click();await delay(100);
+              unknownRow.querySelector('button').click();
+              check(await until(()=>document.querySelector('#workbench-detail details dl')),'Vietnamese keyword detail reloads its saved explanation');
+              const viExplanation=document.querySelector('#workbench-detail details dl')?.textContent||'';
+              check(viExplanation.includes('\u0111o\u00e1n ch\u1ec9 t\u1eeb ti\u00eau \u0111\u1ec1'),'Vietnamese detail says title text was not used as a guess');
+              document.querySelector('#workbench-detail button')?.click();await delay(100);
               await go('algorithms');
               check(await until(()=>document.querySelectorAll('#algorithm-catalog .algorithm-card').length>0),'Algorithm catalog loads its registered methods');
               check(Boolean(document.querySelector('#algorithm-evaluation-status').textContent.trim()),'Algorithm evaluation status is shown separately from the catalog');
@@ -372,7 +387,7 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; Data Quality empty state; algorithm registry/results; AI runtime settings; Dashboard/Collections counts; Run History cursor/filter/detail; "
+                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; Data Quality empty state; algorithm registry/results; AI runtime settings; Dashboard/Collections counts and unassigned-keyword explanation; Run History cursor/filter/detail; "
                 "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
