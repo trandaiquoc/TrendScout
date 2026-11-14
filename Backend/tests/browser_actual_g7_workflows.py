@@ -8,7 +8,7 @@ import socket
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -29,22 +29,61 @@ TOKEN = "synthetic-browser-operator-token-only-0001"
 
 def seed_keyword(store):
     with store.connect() as db:
-        db.execute(
-            """INSERT INTO keywords
-            (id,keyword,normalized,source,project,observed_at,data_mode,evidence,context,eligible)
-            VALUES(?,?,?,?,?,?,?,?,?,1)""",
-            (
-                "g7-browser-keyword",
-                "Browser workflow topic",
-                "browser workflow topic",
-                "wikimedia_pageviews_top_per_country",
-                "en.wikipedia",
-                "2026-11-14",
-                "SYNTHETIC",
-                json.dumps({"views_ceil": 0}),
-                "",
-            ),
-        )
+        for keyword_id, keyword, status in (
+            ("g7-browser-keyword", "Browser workflow topic", "CLASSIFIED"),
+            ("g7-browser-unknown", "Unknown context topic", "UNKNOWN"),
+            ("g7-browser-ineligible", "Verified system page", "INELIGIBLE"),
+        ):
+            db.execute(
+                """INSERT INTO keywords
+                (id,keyword,normalized,source,project,observed_at,data_mode,evidence,context,eligible)
+                VALUES(?,?,?,?,?,?,?,?,?,1)""",
+                (keyword_id, keyword, keyword.casefold(), "wikimedia_pageviews_top_per_country",
+                 "en.wikipedia", "2026-11-14", "SYNTHETIC", json.dumps({"views_ceil": 0}), ""),
+            )
+            db.execute(
+                """INSERT INTO classification_results
+                (keyword_id,entity_type,entity_description,topic_category_ids,subcategory_ids,
+                classification_status,confidence_level,commercial_relevance,classification_method,
+                classification_version,taxonomy_version,rule_evidence,source_evidence,review_status,classified_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (keyword_id, "topic", "Synthetic browser fixture", "[]", "[]", status, "NONE",
+                 "NOT_ASSESSED", "TEST_FIXTURE", "fixture-v1", "topics-v1.5", "[]", "{}",
+                 "UNREVIEWED", "2026-11-14T00:00:00Z"),
+            )
+    collection_id = store.create({"name": "Evidence-backed topics", "auto_match": False})
+    with store.connect() as db:
+        db.execute("INSERT INTO memberships VALUES(?,?, 'USER',0,NULL,'Browser fixture',?)",
+                   (collection_id, "g7-browser-keyword", "2026-11-14T00:00:00Z"))
+
+
+def seed_run_history(store):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    with store.connect() as db:
+        for index in range(25):
+            fetch_id = f"{index + 1:032x}"
+            stamp = (now - timedelta(minutes=25 - index)).isoformat()
+            status = "COMPLETED" if index % 5 == 0 else "PARTIAL"
+            count = index + 3
+            manifest = json.dumps(
+                [{"source_id": "wikimedia_pageviews_top_per_country", "status": status, "record_count": count}]
+            )
+            db.execute(
+                """INSERT INTO fetch_jobs(fetch_id,status,available,processed,updated_at,stage,eligible)
+                VALUES(?,?,?,?,?,?,?)""",
+                (fetch_id, status, count, count - 1, stamp, "COMPLETED", count),
+            )
+            db.execute(
+                """INSERT INTO dataset_snapshots
+                (dataset_id,status,data_mode,source_manifest,provider_record_count,received_record_count,
+                retained_keyword_count,rejected_record_count,observation_start,observation_end,fetched_at,
+                quality_flags,processing_status,eligible_keyword_count,assigned_keyword_count,
+                unassigned_keyword_count,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (fetch_id, status, "SYNTHETIC", manifest, count + 1, count, count - 1, 1,
+                 "2026-11-13", "2026-11-14", stamp, json.dumps(["SYNTHETIC_FIXTURE"]),
+                 "COMPLETED", count, count - 1, 1, stamp),
+            )
 
 
 def main():
@@ -57,6 +96,7 @@ def main():
         root = Path(directory)
         collection_store = CollectionStore(root / "collections.sqlite")
         seed_keyword(collection_store)
+        seed_run_history(collection_store)
         schedule_store = PersistentScheduleStore(root / "schedules.sqlite")
         stale_schedule = schedule_store.create(
             name="Previously enabled fixture",
@@ -144,6 +184,15 @@ def main():
               await until(()=>document.readyState==='complete'&&!document.documentElement.classList.contains('js-pending'));
               check(document.documentElement.lang==='vi','Research workflow starts in Vietnamese');
               const go=async name=>{const a=document.querySelector('[data-nav="'+name+'"]');a?.click();location.hash='#'+name;window.dispatchEvent(new Event('hashchange'));await delay(250)};
+              await go('overview');
+              check(await until(()=>document.querySelector('#metric-records-stored').textContent==='3'),'Dashboard total comes from saved SQLite keywords');
+              check(document.querySelector('#metric-topics-found').textContent==='1'&&document.querySelector('#metric-unclassified').textContent==='1','Dashboard separates classified and unclassified saved topics');
+              await go('collections');
+              check(await until(()=>document.querySelectorAll('#workbench-summary .workbench-stat').length===4),'Collections summary loads from the SQLite backend');
+              const collectionCounts=[...document.querySelectorAll('#workbench-summary .workbench-stat strong')].map(x=>x.textContent);
+              check(collectionCounts.join(',')==='3,1,1,0','Collection cards show 3 stored, 1 assigned, 1 unclassified and 0 excluded');
+              check(document.querySelector('#workbench-summary').textContent.includes('1 kh\u00f4ng ph\u1ea3i ch\u1ee7 \u0111\u1ec1'),'Collection summary explains the ineligible topic count');
+              await go('research');
               await until(()=>document.querySelector('#research-keyword option[value="g7-browser-keyword"]'));
               const selector=document.querySelector('#research-keyword');selector.value='g7-browser-keyword';
               document.querySelector('#research-subject').value='Browser workflow hypothesis';
@@ -191,6 +240,21 @@ def main():
               check(document.querySelectorAll('#research-records .research-record').length===1&&document.querySelector('#research-records').textContent.includes('Browser workflow hypothesis'),'saved Research survives page reload');
               let card=document.querySelector('#research-records .research-record');
               const archive=card.querySelector('select');archive.value='ARCHIVED';archive.dispatchEvent(new Event('change',{bubbles:true}));await delay(180);
+
+              await go('runs');
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'Run History loads the first bounded page from SQLite');
+              check(!document.querySelector('#run-history-more').hidden,'Run History exposes the next page when saved rows remain');
+              document.querySelector('#run-history-more').click();
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===25),'Run History cursor loads all saved rows without truncation');
+              check(document.querySelector('#run-history-more').hidden,'Run History hides pagination after the last saved row');
+              const historyStatus=document.querySelector('#run-history-status');historyStatus.value='PARTIAL';historyStatus.dispatchEvent(new Event('change',{bubbles:true}));
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'Run History status filter applies to saved records');
+              check(!document.querySelector('#run-history').textContent.includes('LOCAL_LEDGER_ONLY'),'local-only limitation hides its internal status code');
+              historyStatus.value='';historyStatus.dispatchEvent(new Event('change',{bubbles:true}));
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'clearing Run History filter restores the first saved page');
+              document.querySelector('#run-history tbody tr button')?.click();
+              check(await until(()=>!document.querySelector('#run-history-detail').hidden&&document.querySelector('#run-history-detail dl')),'Run History opens details from the real API');
+              check(document.querySelector('#run-history-detail').textContent.includes('Wikimedia')&&!document.querySelector('#run-history-detail').textContent.includes('wikimedia_pageviews_top_per_country'),'Run History detail localizes the saved source manifest');
 
               await go('settings');
               check(await until(()=>document.querySelector('#settings-schedules .schedule-item')),'Scheduler API renders the previously enabled saved schedule');
@@ -290,8 +354,8 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Product Research create/edit/archive/reload; "
-                "Scheduler disable/create/edit, next-run persistence, and backend enable-policy rejection: PASS"
+                "Native Chrome -> real FastAPI -> temporary SQLite: Dashboard/Collections counts; Run History cursor/filter/detail; "
+                "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
             if browser:
