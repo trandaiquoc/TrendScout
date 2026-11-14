@@ -196,7 +196,7 @@ function build() {
   divider.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End','Escape'].includes(event.key))return;event.preventDefault();setTreeWidth(event.key==='Home'?210:event.key==='End'?380:event.key==='Escape'?270:treeWidth+(event.key==='ArrowLeft'?-10:10));});
 
   const main = make('div', '', 'workbench-main');
-  const summary = make('div', '', 'workbench-summary'); summary.id = 'workbench-summary'; main.append(summary);
+  const summary = make('div', '', 'workbench-summary'); summary.id = 'workbench-summary';
   const context = make('div', '', 'workbench-context');
   const contextTitle = make('h2', '', 'workbench-context-title'); contextTitle.id = 'workbench-context-title';
   const contextCount = make('span', '', 'workbench-context-count'); contextCount.id = 'workbench-context-count'; contextCount.setAttribute('aria-live', 'polite');
@@ -275,7 +275,7 @@ function build() {
   const footer = make('div', '', 'table-footer workbench-footer'); const pageInfo = make('span'); pageInfo.id='workbench-page-info'; footer.append(pageInfo);
   const pager=make('div','','pagination'); const prev=button('←'); prev.id='workbench-prev'; prev.setAttribute('aria-label',labels('a11y.previous-page','Previous page')); prev.addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.limit);loadRows();});
   const next=button('→'); next.id='workbench-next'; next.setAttribute('aria-label',labels('a11y.next-page','Next page')); next.addEventListener('click',()=>{state.offset+=state.limit;loadRows();}); pager.append(prev,next); footer.append(pager); tablePanel.append(footer); main.append(tablePanel);
-  layout.append(scrim,sidebar,divider,main); root.append(layout);
+  layout.append(scrim,summary,sidebar,divider,main); root.append(layout);
   const dialog=make('dialog','','collection-dialog workbench-detail'); dialog.id='workbench-detail'; dialog.addEventListener('close',()=>{state.detailSequence+=1;const trigger=state.detailTrigger;state.detailTrigger=null;if(trigger?.isConnected)setTimeout(()=>{if(!dialog.open&&trigger.isConnected)trigger.focus();},0);}); root.append(dialog);
   const formDialog=make('dialog','','collection-dialog'); formDialog.id='workbench-collection-dialog'; root.append(formDialog);
   renderTree();

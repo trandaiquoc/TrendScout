@@ -330,3 +330,14 @@ body { font-size:14px; letter-spacing:-.01em; }
 .workbench-active-filters { display:flex; flex-wrap:wrap; gap:7px; margin:0 0 14px; }
 .workbench-filter-chip { display:inline-flex; align-items:center; min-height:31px; max-width:100%; padding:5px 10px; border:1px solid var(--line-strong); border-radius:999px; background:var(--accent-soft); color:var(--accent-strong); font:inherit; font-size:11px; cursor:pointer; overflow-wrap:anywhere; }
 .workbench-filter-chip:hover { border-color:var(--accent); }
+/* Global ledger totals sit above both panes; the tree and results share the same workspace. */
+@media (min-width:901px) {
+  .workbench-summary { grid-column:1 / -1; grid-row:1; margin:0; border:0; border-bottom:1px solid var(--line); border-radius:0; }
+  .workbench-sidebar,.workbench-divider,.workbench-main { grid-row:2; }
+  .workbench-sidebar { grid-column:1; }
+  .workbench-divider { grid-column:2; }
+  .workbench-main { grid-column:3; }
+}
+@media (max-width:900px) {
+  .workbench-summary { margin:0 0 14px; background:var(--surface); }
+}
