@@ -99,6 +99,7 @@ class SourceCatalogTests(unittest.TestCase):
             "nextdoor", "truth_social", "bereal", "discord", "telegram",
             "tumblr", "quora", "slack", "lemmy", "discourse",
             "fandom", "twitch", "kick", "rumble", "vimeo",
+            "dailymotion", "lemon8", "patreon", "etsy", "poshmark",
         })
         locale_root = Path(__file__).resolve().parents[2] / "Frontend" / "public" / "modules" / "i18n"
         catalogs = {locale: (locale_root / f"{locale}.js").read_text(encoding="utf-8")

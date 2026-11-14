@@ -619,7 +619,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://developers.dailymotion.com/); quyền và quota chưa xác minh."
+      "source_reference": "G; [API v2](https://developers.dailymotion.com/docs/welcome); mọi yêu cầu cần token; quyền TrendScout chưa xác minh.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Dailymotion API v2 is the current documented API and provides video resources, but its calls require an authenticated access token. API access, usable discovery scope, quota, and permission for TrendScout remain unverified; platform video activity is not general US demand.",
+      "revalidation_note_key": "sources.review.dailymotion",
+      "revalidation_links": [
+        {"label": "API v2 overview", "url": "https://developers.dailymotion.com/docs/welcome"},
+        {"label": "API v2 reference and authentication", "url": "https://developers.dailymotion.com/reference/introduction"},
+        {"label": "Perform an API call", "url": "https://developers.dailymotion.com/reference/perform-an-api-call"}
+      ]
     },
     {
       "source_id": "lemon8",
@@ -628,7 +636,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Lemon8](https://www.lemon8-app.com/); ownership, US access và API cần xác minh."
+      "source_reference": "U; [Điều khoản Lemon8](https://www.lemon8-app.com/legal/terms-of-service); tự động thu thập cần được cho phép.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The official Lemon8 terms reviewed prohibit automated scripts that collect information from or interact with the service unless expressly permitted. The reviewed official materials do not establish a public keyword-discovery API or written permission for TrendScout; do not collect through scraping or unofficial endpoints.",
+      "revalidation_note_key": "sources.review.lemon8",
+      "revalidation_links": [
+        {"label": "Lemon8 Terms of Service", "url": "https://www.lemon8-app.com/legal/terms-of-service"},
+        {"label": "Updated Lemon8 Terms of Service", "url": "https://www.lemon8-app.com/legal/terms-of-service/"}
+      ]
     },
     {
       "source_id": "patreon",
@@ -637,7 +652,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://docs.patreon.com/); nội dung thành viên/consent không mặc định công khai."
+      "source_reference": "G; [API v2](https://docs.patreon.com/); OAuth theo tài khoản/chiến dịch, không phải nguồn xu hướng công khai.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Patreon API v2 exposes creator, campaign, member, and post resources through OAuth scopes tied to the authorizing account. Public API v1 stopped responding on October 7, 2026 (approved extensions run through January 20, 2027); the reviewed API does not establish platform-wide keyword discovery or TrendScout access.",
+      "revalidation_note_key": "sources.review.patreon",
+      "revalidation_links": [
+        {"label": "Patreon API reference", "url": "https://docs.patreon.com/"},
+        {"label": "v1 to v2 migration and retirement", "url": "https://docs.patreon.com/#migrating-from-api-v1-to-api-v2"}
+      ]
     },
     {
       "source_id": "etsy",
@@ -646,7 +668,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Open API](https://developers.etsy.com/) app/key, commercial review; screen-scraping bị cấm; [limits](https://developers.etsy.com/documentation/essentials/rate-limits/)."
+      "source_reference": "G; [Open API](https://developers.etsy.com/documentation/); ứng dụng cần duyệt; phân tích dữ liệu cần Etsy cho phép bằng văn bản.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Etsy Open API access requires a registered app and review for use beyond a seller's own shop. Etsy's API Terms expressly prohibit using Etsy data for analytics or machine learning without written authorization, so TrendScout must not analyze marketplace listings absent that permission; scraping is also prohibited.",
+      "revalidation_note_key": "sources.review.etsy",
+      "revalidation_links": [
+        {"label": "Etsy Open API access and review", "url": "https://developers.etsy.com/documentation/"},
+        {"label": "Etsy API Terms of Use", "url": "https://www.etsy.com/legal/api/"}
+      ]
     },
     {
       "source_id": "poshmark",
@@ -655,7 +684,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Poshmark](https://poshmark.com/); API và parent cần xác minh."
+      "source_reference": "U; [Điều khoản Poshmark](https://poshmark.com/terms); cấm tự động thu thập nếu chưa được cho phép.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Poshmark's current terms prohibit scraping and automated systems that collect service information, and restrict third-party content to explicitly authorized purposes. The reviewed official materials do not establish an authorized public listing-discovery API or TrendScout permission; do not use unofficial endpoints.",
+      "revalidation_note_key": "sources.review.poshmark",
+      "revalidation_links": [
+        {"label": "Poshmark Terms of Service", "url": "https://poshmark.com/terms"}
+      ]
     },
     {
       "source_id": "depop",
