@@ -588,6 +588,7 @@ export const en = {
   'table.warnings': 'WARNINGS',
   'table.details': 'Details',
   'table.open-detail': 'View details for {name}',
+  'table.detail-unavailable': 'This saved keyword is not linked to a run with viewable details.',
   'table.views-evidence': '{value} approximate views · rank {rank}',
   'table.no-comparable-evidence': 'No baseline available for comparison',
   'category.fashion': 'Fashion',

@@ -1483,7 +1483,7 @@ function renderRows(items) {
       name: item.display_keyword || item.canonical_keyword || t('common.keyword'),
     }));
     button.disabled = !state.dataRunId;
-    if (button.disabled) button.title = 'Detailed run evidence is unavailable for this cached ledger row.';
+    if (button.disabled) button.title = t('table.detail-unavailable');
     button.addEventListener('click', () => openDetail(item.keyword_id || item.id));
     action.append(button);
     row.append(action);

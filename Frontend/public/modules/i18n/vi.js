@@ -588,6 +588,7 @@ export const vi = {
   'table.warnings': 'CẢNH BÁO',
   'table.details': 'Chi tiết',
   'table.open-detail': 'Xem chi tiết {name}',
+  'table.detail-unavailable': 'Từ khóa đã lưu này chưa liên kết với lần chạy có thể xem chi tiết.',
   'table.views-evidence': '{value} lượt xem xấp xỉ · hạng {rank}',
   'table.no-comparable-evidence': 'Chưa có đường cơ sở để so sánh',
   'category.fashion': 'Thời trang',

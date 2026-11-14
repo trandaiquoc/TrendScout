@@ -7,6 +7,15 @@ PUBLIC = Path(__file__).resolve().parents[2] / "Frontend" / "public"
 
 
 class WorkspaceStructureTests(unittest.TestCase):
+    def test_dashboard_cached_detail_disabled_explanation_is_localized(self):
+        app = (PUBLIC / "app.js").read_text(encoding="utf-8")
+        english = (PUBLIC / "modules" / "i18n" / "en.js").read_text(encoding="utf-8")
+        vietnamese = (PUBLIC / "modules" / "i18n" / "vi.js").read_text(encoding="utf-8")
+        self.assertIn("button.title = t('table.detail-unavailable')", app)
+        self.assertIn("'table.detail-unavailable': 'This saved keyword is not linked to a run with viewable details.'", english)
+        self.assertIn("'table.detail-unavailable': 'Từ khóa đã lưu này chưa liên kết với lần chạy có thể xem chi tiết.'", vietnamese)
+        self.assertNotIn("Detailed run evidence is unavailable for this cached ledger row.", app)
+
     def test_required_workspace_sections_and_safe_disabled_controls(self):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (
