@@ -936,7 +936,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Lowe's](https://www.lowes.com/); permission catalog chưa xác minh."
+      "source_reference": "G; [Lowe's Developer Hub](https://developer.lowes.com/); API catalog dành đối tác bán sản phẩm, cần quyền truy cập.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Lowe's Developer Hub documents partner APIs and catalog feeds that let a storefront list and sell Lowe's products, with search, pricing, inventory, and promotions. This is a partner shopping integration rather than a public demand-measurement feed; TrendScout's partner access and rights to retain/analyze the catalog remain unverified.",
+      "revalidation_note_key": "sources.review.lowes",
+      "revalidation_links": [
+        {"label": "Lowe's Developer Hub", "url": "https://developer.lowes.com/"},
+        {"label": "Product discovery partner solution", "url": "https://developer.lowes.com/portal/solutions/product-discovery/"},
+        {"label": "Product catalog API", "url": "https://developer.lowes.com/portal/business-components/Product%20Catalog/"}
+      ]
     },
     {
       "source_id": "target",
@@ -945,7 +953,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Target](https://www.target.com/); permission chưa xác minh."
+      "source_reference": "U; [Điều khoản Target](https://www.target.com/c/terms-conditions/-/N-4sr7l); cấm thu thập thương mại và lập chỉ mục sản phẩm.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Target's current Terms prohibit commercial use or collection of product listings and prices, systematic downloading into a database, and unauthorized automated querying or scraping. Approved shopping agents are limited to Target-authorized use and do not authorize TrendScout's research collection; no public catalog API for TrendScout was established.",
+      "revalidation_note_key": "sources.review.target",
+      "revalidation_links": [
+        {"label": "Target Terms and Conditions", "url": "https://www.target.com/c/terms-conditions/-/N-4sr7l"}
+      ]
     },
     {
       "source_id": "nordstrom",
@@ -954,7 +968,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Nordstrom](https://www.nordstrom.com/); permission chưa xác minh."
+      "source_reference": "U; [Điều khoản Nordstrom](https://www.nordstrom.com/browse/customer-service/policy/terms-conditions); cấm scraper và sử dụng thương mại.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Nordstrom's Terms grant only personal, non-commercial use and expressly prohibit robots, spiders, scrapers, and other automated access to or crawling of the site. No authorized public product-discovery API or TrendScout permission was established; do not collect storefront listings.",
+      "revalidation_note_key": "sources.review.nordstrom",
+      "revalidation_links": [
+        {"label": "Nordstrom Terms and Conditions", "url": "https://www.nordstrom.com/browse/customer-service/policy/terms-conditions"}
+      ]
     },
     {
       "source_id": "google_shopping",
@@ -963,7 +983,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Merchant API](https://developers.google.com/merchant/api); merchant-owned data không mặc định là toàn bộ Shopping."
+      "source_reference": "G; [Merchant API](https://developers.google.com/merchant/api); quyền truy cập dữ liệu merchant được ủy quyền, không phải dữ liệu tìm kiếm Shopping.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Google Merchant API manages an individual merchant's products, inventory, and related Merchant Center resources; access depends on that merchant's authorization. It is not an API for searching Google Shopping across merchants or measuring consumer demand. TrendScout access and an eligible use remain unverified.",
+      "revalidation_note_key": "sources.review.google_shopping",
+      "revalidation_links": [
+        {"label": "Google Merchant API overview", "url": "https://developers.google.com/merchant/api"},
+        {"label": "Products API", "url": "https://developers.google.com/merchant/api/reference/rest/products_v1/accounts.products"}
+      ]
     },
     {
       "source_id": "hacker_news",
@@ -990,7 +1017,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API](https://api.producthunt.com/v2/docs); permission và commercial use cần review."
+      "source_reference": "G; [Product Hunt API](https://api.producthunt.com/v2/docs); API công khai cần token, mặc định không dùng thương mại.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Product Hunt exposes public launch data through an authenticated GraphQL API. Its official documentation says commercial use is not permitted by default and requires contacting Product Hunt; documented limits are 6,250 GraphQL complexity points per 15 minutes per app. Launch activity measures Product Hunt's technology community, not overall market demand; TrendScout has no verified commercial permission.",
+      "revalidation_note_key": "sources.review.product_hunt",
+      "revalidation_links": [
+        {"label": "Product Hunt API documentation and commercial use", "url": "https://api.producthunt.com/v2/docs"},
+        {"label": "Product Hunt API rate limits", "url": "https://api.producthunt.com/v2/docs/rate_limits/headers"}
+      ]
     },
     {
       "source_id": "substack",
