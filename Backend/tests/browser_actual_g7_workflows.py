@@ -428,6 +428,32 @@ def main():
             if not browser_result or not browser_result.get("ok"):
                 raise RuntimeError("Native Chrome workflow failed: " + json.dumps(browser_result))
 
+            run_detail_open = evaluate(r"""(async()=>{
+              const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+              const until=async predicate=>{for(let i=0;i<100;i++){if(predicate())return true;await delay(30)}return false};
+              document.querySelector('[data-nav="runs"]')?.click();location.hash='#runs';window.dispatchEvent(new Event('hashchange'));
+              if(!await until(()=>document.querySelectorAll('#run-history tbody tr').length>0))return {loaded:false};
+              const row=[...document.querySelectorAll('#run-history tbody tr')].find(item=>item.querySelector('button[aria-controls="run-history-detail"]'));
+              const trigger=row?.querySelector('button[aria-controls="run-history-detail"]');trigger?.click();
+              const detail=document.querySelector('#run-history-detail');
+              if(!await until(()=>!detail.hidden&&detail.querySelector('dl')))return {loaded:true,open:false};
+              const labelId=detail.getAttribute('aria-labelledby');
+              return {loaded:true,open:true,focused:document.activeElement===detail,label:labelId?document.getElementById(labelId)?.textContent.trim():'',closeName:detail.querySelector('button')?.textContent.trim(),expanded:trigger?.getAttribute('aria-expanded')};
+            })()""")
+            if (not run_detail_open or not run_detail_open.get("loaded") or not run_detail_open.get("open")
+                    or not run_detail_open.get("focused") or not run_detail_open.get("label")
+                    or not run_detail_open.get("closeName")
+                    or run_detail_open.get("expanded") != "true"):
+                raise AssertionError("Native Chrome Run History detail lacks accessible keyboard state: " + json.dumps(run_detail_open))
+            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
+            run_detail_closed = evaluate("(()=>{const detail=document.querySelector('#run-history-detail');const trigger=document.querySelector('#run-history button[aria-controls=run-history-detail][aria-expanded=\"false\"]');return {hidden:detail.hidden,focusReturned:document.activeElement===trigger,expanded:trigger?.getAttribute('aria-expanded')}})()")
+            if not run_detail_closed.get("hidden") or not run_detail_closed.get("focusReturned"):
+                raise AssertionError("Escape did not close Run History detail and return focus: " + json.dumps(run_detail_closed))
+            settings_loaded = evaluate("(async()=>{document.querySelector('[data-nav=\"settings\"]')?.click();location.hash='#settings';window.dispatchEvent(new Event('hashchange'));for(let i=0;i<100;i++){if(document.querySelector('#settings-schedules .schedule-item'))return true;await new Promise(resolve=>setTimeout(resolve,30))}return false})()")
+            if not settings_loaded:
+                raise AssertionError("Settings did not reload the saved schedule after the Run History keyboard check")
+
             browser.call("Page.reload", {"ignoreCache": True}, session)
             for _ in range(150):
                 if evaluate("document.readyState==='complete'&&!document.documentElement.classList.contains('js-pending')"):
