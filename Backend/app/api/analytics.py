@@ -236,7 +236,8 @@ def overview(request: Request):
             "ambiguous": ambiguous,
             "unknown": unknown,
             "ineligible": ineligible,
-            "unclassified": max(0, (totals["eligible"] or 0) - classified),
+            # Ineligible system/non-topic records are excluded from the topic review backlog.
+            "unclassified": ambiguous + unknown,
         },
         "active_sources": (
             [

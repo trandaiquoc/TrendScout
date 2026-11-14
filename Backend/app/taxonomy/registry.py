@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 
-TAXONOMY_VERSION = 'topics-v1.4'
+TAXONOMY_VERSION = 'topics-v1.5'
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,8 @@ _DEFINITIONS = (
     ('entertainment', 'Entertainment', (('film','Movies'),('music','Music'),('television','Television'),('anime','Anime'))),
     ('celebrity_public_figures', 'People & Public Figures', (
         ('performers','Actors & Performers'),('musicians','Musicians & Singers'),
-        ('creators','Content Creators'),('politicians','Politicians & Public Officials'),('coaches','Coaches & Sports Professionals'),
+        ('creators','Content Creators'),('political_advisers','Political Advisers & Communications'),
+        ('politicians','Politicians & Public Officials'),('coaches','Coaches & Sports Professionals'),
         ('comedians','Comedians'),('journalists','Journalists'),('writers','Writers'),('entrepreneurs','Entrepreneurs'),
         ('athletes','Athletes'),('photographers','Photographers & Artists'),
         ('scientists','Scientists & Researchers'),('health_professionals','Health Professionals'),
@@ -48,6 +49,9 @@ _DEFINITIONS = (
     ('unclassified', 'Unclassified', ()),
 )
 _entries = {}
+_NESTED_DEFINITIONS = {
+    'technology.internet_services': (('video_platforms', 'Video Platforms'),),
+}
 _SCOPES = {
     'celebrity_public_figures': 'Identity and profession topics for verified people; occupation labels require entity evidence.',
     'celebrity_public_figures.public_figures': 'Other verified public people without a more specific supported role; never a fallback for unknown entities.',
@@ -72,6 +76,14 @@ for parent, label, children in _DEFINITIONS:
         elif item_id == 'celebrity_public_figures.public_figures':
             child_label = 'Other Public Figures'
         _entries[item_id] = Category(item_id, child_label, parent, scope=_SCOPES.get(item_id, ''))
+for parent, descendants in _NESTED_DEFINITIONS.items():
+    if parent not in _entries:
+        raise ValueError(f'unknown nested taxonomy parent: {parent}')
+    for child, child_label in descendants:
+        item_id = f'{parent}.{child}'
+        if item_id in _entries:
+            raise ValueError(f'duplicate taxonomy ID: {item_id}')
+        _entries[item_id] = Category(item_id, child_label, parent, scope=_SCOPES.get(item_id, ''))
 CATEGORIES = MappingProxyType(_entries)
 ALIASES = MappingProxyType({'home_goods': 'home_living'})
 
@@ -87,9 +99,10 @@ def resolve(category_id: str) -> Category:
 
 def children(parent_id: str) -> tuple[Category, ...]:
     parent = resolve(parent_id)
-    if parent.parent_id is not None:
-        raise ValueError('Expected a parent category')
-    return tuple(item for item in CATEGORIES.values() if item.parent_id == parent.id)
+    items = tuple(item for item in CATEGORIES.values() if item.parent_id == parent.id)
+    if parent.parent_id is not None and not items:
+        raise ValueError('Expected a category with child topics')
+    return items
 
 
 def map_legacy_categories(category_ids: tuple[str, ...]) -> tuple[str, ...]:

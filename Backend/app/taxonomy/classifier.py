@@ -178,6 +178,8 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
                 entity_type = "software_product"
     if "celebrity_public_figures.politicians" in categories:
         categories.discard("news_politics.public_figures")
+    if "celebrity_public_figures.political_advisers" in categories:
+        categories.discard("celebrity_public_figures.creators")
     if entity_type == "unknown" and rule_result and rule_result.rule_evidence:
         first_category = rule_result.rule_evidence[0].subcategory_id or rule_result.rule_evidence[0].category_id
         entity_type = {
@@ -195,6 +197,7 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
             "celebrity_public_figures.scientists": "person", "organizations": "organization",
             "celebrity_public_figures.health_professionals": "person",
             "celebrity_public_figures.writers": "person",
+            "celebrity_public_figures.political_advisers": "person",
             "products_brands": "brand", "science_nature.chemistry": "chemical_compound",
             "science_nature.biology": "scientific_concept", "science_nature.plants": "plant",
             "creative_works.artwork": "artwork", "entertainment.film": "film",
@@ -213,8 +216,21 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         resolve(other).parent_id == category for other in categories if other != category
     )}
     namespace = context.get("page_namespace")
-    if record.get("eligible") is False or (type(namespace) is int and namespace != 0):
+    is_wikimedia_project_home = bool(
+        context.get("entity_id")
+        and re.search(r"\bmain page of a wikimedia project\b", description, re.IGNORECASE)
+        and (context.get("instance_types") or ())
+    )
+    classification_reason = ""
+    if record.get("eligible") is False:
         status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
+        classification_reason = "SOURCE_EXCLUDED"
+    elif type(namespace) is int and namespace != 0:
+        status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
+        classification_reason = "NON_TOPIC_SYSTEM_PAGE"
+    elif is_wikimedia_project_home:
+        status, confidence, review = "INELIGIBLE", "NONE", "NOT_APPLICABLE"
+        classification_reason = "WIKIMEDIA_PROJECT_HOME_PAGE"
     elif context.get("is_disambiguation"):
         status, confidence, review = "AMBIGUOUS", "LOW", "NEEDS_REVIEW"
     elif not categories:
@@ -230,6 +246,12 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         review = "UNREVIEWED"
     evidence = [asdict(item) for item in rule_result.rule_evidence] if rule_result else []
     evidence.extend(description_evidence)
+    if classification_reason == "NON_TOPIC_SYSTEM_PAGE":
+        evidence.append({"kind": "NON_TOPIC_PAGE_METADATA", "reason": classification_reason,
+                         "page_namespace": namespace})
+    elif classification_reason == "WIKIMEDIA_PROJECT_HOME_PAGE":
+        evidence.append({"kind": "NON_TOPIC_ENTITY_DESCRIPTION", "reason": classification_reason,
+                         "description": description})
     if context.get("entity_id"):
         evidence.append({"kind": "WIKIDATA_ENTITY", "entity_id": context["entity_id"],
                          "instance_types": list(instance_types), "occupations": list(occupations),
@@ -245,6 +267,7 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         "topic_category_ids": sorted(categories),
         "subcategory_ids": sorted(category for category in categories if resolve(category).parent_id),
         "classification_status": status,
+        "classification_reason": classification_reason,
         "confidence_level": confidence,
         "commercial_relevance": "NOT_ASSESSED",
         "classification_method": "WIKIDATA_P31_P106_AND_CONTEXT_RULES" if context.get("entity_id") else (

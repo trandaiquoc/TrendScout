@@ -71,6 +71,7 @@ class LocalLiveGuard:
             method == "POST" and path in {
                 "/api/v1/collections", "/api/v1/collections/organize", "/api/v1/collections/mode",
                 "/api/v1/collections/bulk", "/api/v1/collections/reclassify",
+                "/api/v1/collections/reclassify-cached",
             }
         ) or (method == "POST" and re.fullmatch(
             rf"/api/v1/collections/(?:reconciliation/reconcile-[0-9a-f-]{{36}}/rollback|[^/]{{1,64}}/merge|{collection_id}/keywords|suggestions/[0-9a-f-]{{36}}/(?:accept|reject))", path

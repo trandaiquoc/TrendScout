@@ -42,6 +42,10 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
         async def reclassify():
             return {"ok": True}
 
+        @app.post("/api/v1/collections/reclassify-cached")
+        async def reclassify_cached():
+            return {"ok": True}
+
         transport = httpx.ASGITransport(app=LocalLiveGuard(app), client=(peer, 1234))
         async with httpx.AsyncClient(transport=transport, base_url=url) as client:
             return await client.request(method, url, headers=headers)
@@ -65,6 +69,10 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cached_reclassification_route_is_allowed(self):
         response = await self.request(url="http://localhost/api/v1/collections/reclassify", method="POST")
+        self.assertEqual(response.status_code, 200)
+
+    async def test_targeted_cached_reclassification_route_is_allowed(self):
+        response = await self.request(url="http://localhost/api/v1/collections/reclassify-cached", method="POST")
         self.assertEqual(response.status_code, 200)
 
     async def test_classification_evidence_read_is_allowed(self):

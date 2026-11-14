@@ -88,6 +88,70 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(summary["ineligible_topic_keywords"], 1)
         self.assertEqual(summary["unknown_keywords"], 0)
         self.assertEqual(summary["excluded_keywords"], 1)
+        analytics = self._request("GET", "/api/v1/analytics/overview").json()
+        self.assertEqual(analytics["keyword_totals"]["unclassified"], 1)
+
+    def test_non_topic_is_not_counted_as_unassigned_or_actionable(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE classification_results SET classification_status='INELIGIBLE',classification_reason='NON_TOPIC_SYSTEM_PAGE' WHERE keyword_id='k-unknown'")
+        summary = self.store.workbench_summary()
+        self.assertEqual(summary["unclassified_keywords"], 0)
+        self.assertEqual(summary["unknown_keywords"], 0)
+        self.assertEqual(summary["ineligible_topic_keywords"], 1)
+        inbox = self.store.search_keywords(state="unassigned", limit=None)
+        self.assertNotIn("k-unknown", {item["id"] for item in inbox["items"]})
+        self.assertIn("k-unknown", {item["id"] for item in self.store.search_keywords(state="all", limit=None)["items"]})
+
+    def test_targeted_cached_reclassification_updates_results_only(self):
+        ids = ("MediaWiki", "Istimewa:Pencarian", "Home", "Thank You/en", "YouTube", "Katie Miller")
+        rows = [
+            (ids[0], "mediawiki", "Q5296", "main page of a Wikimedia project", ["Q17442446"], 0, "https://www.mediawiki.org/wiki/MediaWiki"),
+            (ids[1], "id.wiktionary", None, "", [], -1, "https://id.wiktionary.org/wiki/Istimewa%3APencarian"),
+            (ids[2], "foundation.wikimedia", "Q5296", "main page of a Wikimedia project", ["Q17442446"], 0, "https://foundation.wikimedia.org/wiki/Home"),
+            (ids[3], "thankyou.wikipedia", None, "", [], 0, "https://thankyou.wikipedia.org/wiki/Thank_You/en"),
+            (ids[4], "en.wikipedia", "Q866", "American video-sharing platform owned by Alphabet Inc.", [], 0, "https://en.wikipedia.org/wiki/YouTube"),
+            (ids[5], "en.wikipedia", "Q78337779", "American political advisor (born 1991)", [], 0, "https://en.wikipedia.org/wiki/Katie_Miller"),
+        ]
+        with self.store.connect() as db:
+            for identifier, project, qid, description, types, namespace, url in rows:
+                db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,data_mode,evidence,context,eligible)
+                    VALUES(?,?,?,?,?,?,?,?,?,1)""", (identifier, identifier, identifier.casefold(),
+                    "wikimedia_pageviews_top_per_country", project, "2026-11-14", "LIVE",
+                    json.dumps({"views_ceil": 17}), "",))
+                db.execute("""INSERT INTO entity_context(keyword_id,title,entity_id,description,page_namespace,
+                    entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                    VALUES(?,?,?,?,?,'unknown','[]','[]',?,?,?,'CACHED','fixture-v1','2026-11-14')""",
+                    (identifier, identifier, qid, description, namespace, json.dumps(types), url,
+                     "WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS" if qid else "WIKIPEDIA_PAGE_WITHOUT_QID"))
+            db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'Preserve owner membership',?)",
+                       (self.root, "MediaWiki", "2026-11-14"))
+            db.execute("INSERT INTO feedback VALUES(?,?, 'REMOVE',?)", (self.child, "YouTube", "2026-11-14"))
+        response = self._request("POST", "/api/v1/collections/reclassify-cached", json={"keyword_ids": ids})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["reclassified"], 6)
+        outcomes = {item["keyword_id"]: item for item in result["items"]}
+        self.assertEqual(outcomes["MediaWiki"]["classification_reason"], "WIKIMEDIA_PROJECT_HOME_PAGE")
+        self.assertEqual(outcomes["Istimewa:Pencarian"]["classification_reason"], "NON_TOPIC_SYSTEM_PAGE")
+        self.assertEqual(outcomes["Home"]["classification_status"], "INELIGIBLE")
+        self.assertEqual(outcomes["Thank You/en"]["classification_status"], "UNKNOWN")
+        self.assertEqual(outcomes["YouTube"]["topic_category_ids"],
+                         ["technology.internet_services.video_platforms"])
+        self.assertEqual(outcomes["Katie Miller"]["topic_category_ids"],
+                         ["celebrity_public_figures.political_advisers"])
+        unassigned = self.store.search_keywords(state="unassigned", limit=None)
+        unassigned_ids = {item["id"] for item in unassigned["items"]}
+        self.assertEqual(unassigned["total"], 4)
+        self.assertTrue({"YouTube", "Katie Miller", "Thank You/en"}.issubset(unassigned_ids))
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM memberships WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE keyword_id IN (?,?)", ("YouTube", "MediaWiki")).fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT classification_reason FROM classification_results WHERE keyword_id='Istimewa:Pencarian'").fetchone()[0], "NON_TOPIC_SYSTEM_PAGE")
+            video = db.execute("SELECT id,parent_id FROM collections WHERE category_id='technology.internet_services.video_platforms'").fetchone()
+            internet = db.execute("SELECT id,parent_id FROM collections WHERE category_id='technology.internet_services'").fetchone()
+            self.assertIsNotNone(video)
+            self.assertEqual(video["parent_id"], internet["id"])
 
     def test_analytics_and_runtime_are_read_only_and_use_saved_evidence(self):
         analytics = self._request("GET", "/api/v1/analytics/overview").json()

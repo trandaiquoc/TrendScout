@@ -56,6 +56,18 @@ class MembershipInput(BaseModel):
     keyword_id: str = Field(min_length=1, max_length=64)
 
 
+class CachedReclassificationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    keyword_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("keyword_ids")
+    @classmethod
+    def valid_ids(cls, values):
+        if any(not value.strip() or len(value) > 64 for value in values):
+            raise ValueError("keyword IDs must be non-empty and at most 64 characters")
+        return list(dict.fromkeys(values))
+
+
 class ModeInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["SUGGEST_ONLY", "AUTO_CREATE", "OFF"]
@@ -189,6 +201,17 @@ def unassigned_keywords(request: Request, limit: int = Query(default=40, ge=1, l
     service = _service(request)
     result = service.store.search_keywords(state="unassigned", sort="recent", limit=limit, offset=offset)
     return {"items": result["items"], "total": result["total"], "limit": limit, "offset": offset}
+
+
+@router.post("/collections/reclassify-cached")
+def reclassify_cached_keywords(value: CachedReclassificationInput, request: Request):
+    _mutating(request)
+    try:
+        return _service(request).reclassify_cached_keywords(value.keyword_ids)
+    except ValueError as exc:
+        code = str(exc)
+        status = 404 if code == "CACHED_KEYWORD_NOT_FOUND" else 422
+        raise HTTPException(status, {"code": code}) from None
 
 
 @router.get("/collections/classifications/{keyword_id}")

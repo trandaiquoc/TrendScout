@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS classification_results (
  confidence_level TEXT NOT NULL, commercial_relevance TEXT NOT NULL DEFAULT 'NOT_ASSESSED', classification_method TEXT NOT NULL,
  classification_version TEXT NOT NULL, taxonomy_version TEXT NOT NULL,
  rule_evidence TEXT NOT NULL DEFAULT '[]', source_evidence TEXT NOT NULL DEFAULT '{}',
- review_status TEXT NOT NULL, classified_at TEXT NOT NULL
+ review_status TEXT NOT NULL, classified_at TEXT NOT NULL,
+ classification_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS membership_reconciliation_runs (
  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL
@@ -164,6 +165,9 @@ class CollectionStore:
             keyword_columns = {row["name"] for row in db.execute("PRAGMA table_info(keywords)")}
             if "eligible" not in keyword_columns:
                 db.execute("ALTER TABLE keywords ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1")
+            classification_columns = {row[1] for row in db.execute("PRAGMA table_info(classification_results)")}
+            if "classification_reason" not in classification_columns:
+                db.execute("ALTER TABLE classification_results ADD COLUMN classification_reason TEXT NOT NULL DEFAULT ''")
             if "rejection_reason" not in keyword_columns:
                 db.execute("ALTER TABLE keywords ADD COLUMN rejection_reason TEXT")
             job_columns = {row["name"] for row in db.execute("PRAGMA table_info(fetch_jobs)")}
@@ -227,7 +231,9 @@ class CollectionStore:
             total, eligible, excluded = db.execute("""SELECT count(*),
                 sum(eligible=1),sum(eligible=0) FROM keywords""").fetchone()
             assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
-            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1
+                AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
+                AND NOT EXISTS
                 (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
             if row is None:
                 legacy = db.execute("""SELECT * FROM fetch_jobs WHERE status IN ('COMPLETED','MODEL_UNAVAILABLE')
@@ -292,7 +298,7 @@ class CollectionStore:
         if state == "excluded":
             clauses.append("k.eligible=0")
         elif state == "unassigned":
-            clauses.append("k.eligible=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)")
+            clauses.append("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)")
         elif state == "ai":
             clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')")
         elif state == "manual":
@@ -300,7 +306,7 @@ class CollectionStore:
         elif state == "mixed":
             clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI') AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
         elif state == "needs_review":
-            clauses.append("k.eligible=1 AND (NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id) OR EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI'))")
+            clauses.append("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND (NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id) OR EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI'))")
         elif state != "all":
             raise ValueError("INVALID_KEYWORD_STATE")
         if classification != "all":
@@ -357,7 +363,7 @@ class CollectionStore:
                 cr.subcategory_ids AS classified_subcategory_ids,cr.classification_status,
                 cr.confidence_level,cr.commercial_relevance,cr.classification_method,cr.classification_version,cr.taxonomy_version,
                 cr.rule_evidence AS classification_rule_evidence,cr.source_evidence AS classification_source_evidence,
-                cr.review_status,cr.classified_at,
+                cr.review_status,cr.classified_at,cr.classification_reason,
                 e.source_url AS entity_source_url,e.method AS entity_classification_method,
                 e.status AS entity_classification_status,e.captured_at AS entity_context_captured_at,
                 (SELECT json_group_array(json_object('id',c.id,'name',c.name,'origin',m.origin,
@@ -407,7 +413,7 @@ class CollectionStore:
         with self.connect() as db:
             totals = db.execute("""SELECT count(*) AS stored,
                 sum(k.eligible=1) AS eligible, sum(k.eligible=0) AS excluded,
-                sum(k.eligible=1 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS unclassified,
+                sum(k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS unclassified,
                 sum(k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS assigned
                 FROM keywords k""").fetchone()
             statuses = {row["classification_status"]: row["total"] for row in db.execute("""SELECT cr.classification_status,

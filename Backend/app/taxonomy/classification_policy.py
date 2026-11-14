@@ -15,7 +15,7 @@ class EntityDescriptionRule:
     category_id: str
 
 
-VERSION = "contextual-classifier-v1.2"
+VERSION = "contextual-classifier-v1.4"
 TITLE_RULE_SOURCE = "wikimedia_pageviews_top_per_country"
 TITLE_RULE_PROJECTS = frozenset({"en.wikipedia", "vi.wikipedia"})
 VERIFIED_PAGE_HOSTS = frozenset({
@@ -48,6 +48,8 @@ ENTITY_DESCRIPTION_RULES = (
     EntityDescriptionRule("actor_description", r"\b(?:actor|actress|film star|media personality)\b", "celebrity_public_figures.performers"),
     EntityDescriptionRule("musician_description", r"\b(?:musician|singer|songwriter)\b", "celebrity_public_figures.musicians"),
     EntityDescriptionRule("content_creator_description", r"\b(?:content creator|digital creator|youtuber|streamer|podcast host|influencer)\b", "celebrity_public_figures.creators"),
+    EntityDescriptionRule("podcast_professional_description", r"\b(?:podcaster|podcast (?:producer|presenter|personality))\b", "celebrity_public_figures.creators"),
+    EntityDescriptionRule("political_communications_adviser_description", r"\b(?:political (?:communications? )?(?:adviser|advisor|consultant|strategist)|press secretary|political spokesperson)\b", "celebrity_public_figures.political_advisers"),
     EntityDescriptionRule("scientist_description", r"\b(?:scientist|researcher)\b", "celebrity_public_figures.scientists"),
     EntityDescriptionRule("health_professional_description", r"\b(?:psychologist|physician|doctor|therapist|health professional)\b", "celebrity_public_figures.health_professionals"),
     EntityDescriptionRule("writer_description", r"\bwriter\b", "celebrity_public_figures.writers"),
@@ -69,6 +71,7 @@ ENTITY_DESCRIPTION_RULES = (
     EntityDescriptionRule("place_description", r"\bgeographic location\b", "places_transportation.geographic_locations"),
     EntityDescriptionRule("software_description", r"\b(?:software product|software platform|operating system|web browser|wiki software)\b", "technology.software"),
     EntityDescriptionRule("internet_service_description", r"\b(?:online (?:repository|encyclopedia|service|platform)|digital platform|website|fanfiction repository)\b", "technology.internet_services"),
+    EntityDescriptionRule("video_sharing_platform_description", r"\bvideo[- ]sharing platform\b", "technology.internet_services.video_platforms"),
     EntityDescriptionRule("api_service_description", r"\b(?:API|application programming interface|developer interface)s?\b", "technology.internet_services"),
     EntityDescriptionRule("television_description", r"\btelevision (?:program|series|show)\b", "entertainment.television"),
     EntityDescriptionRule("film_description", r"\b(?:film|movie)\b", "entertainment.film"),

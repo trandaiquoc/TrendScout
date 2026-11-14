@@ -27,7 +27,11 @@ class TaxonomyRegistryTests(unittest.TestCase):
         self.assertEqual({x.id for x in children('fashion')}, {'fashion.clothing','fashion.footwear','fashion.accessories','fashion.jewelry'})
         self.assertTrue(all(x.parent_id in CATEGORIES for x in CATEGORIES.values() if x.parent_id))
         self.assertTrue(all(x.status == 'active' for x in CATEGORIES.values()))
-        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.4')
+        self.assertEqual(TAXONOMY_VERSION, 'topics-v1.5')
+        self.assertEqual({item.id for item in children('technology.internet_services')},
+                         {'technology.internet_services.video_platforms'})
+        self.assertEqual(resolve('technology.internet_services.video_platforms').parent_id,
+                         'technology.internet_services')
         for rule in RULES:
             self.assertIsNone(resolve(rule.category_id).parent_id)
             if rule.subcategory_id:
@@ -189,6 +193,12 @@ class ClassificationTests(unittest.TestCase):
                 self.assertTrue(any(item.get("kind") == "WIKIDATA_ENTITY" for item in result["rule_evidence"]))
                 resolve(category_id)
         self.assertIn("Q5", INSTANCE_TYPES)
+        from app.collections.entity_context import OCCUPATION_CATEGORIES
+        self.assertEqual(OCCUPATION_CATEGORIES["Q15077007"], ("celebrity_public_figures.creators",))
+        self.assertEqual(OCCUPATION_CATEGORIES["Q8125919"],
+                         ("celebrity_public_figures.political_advisers",))
+        self.assertEqual(OCCUPATION_CATEGORIES["Q1388151"],
+                         ("celebrity_public_figures.political_advisers",))
 
     def test_owner_supplied_regression_title_fixture_never_guesses_bare_names(self):
         from app.taxonomy.classifier import classify_contextual
@@ -216,8 +226,8 @@ class ClassificationTests(unittest.TestCase):
 
         fixture = Path(__file__).parent / "fixtures" / "contextual_classification_cases.json"
         cases = json.loads(fixture.read_text(encoding="utf-8"))
-        self.assertEqual(len(cases), 25)
-        self.assertEqual(len({item["title"] for item in cases}), 25)
+        self.assertEqual(len(cases), 27)
+        self.assertEqual(len({item["title"] for item in cases}), 27)
         for index, item in enumerate(cases):
             bare = classify_contextual({"id":f"bare-{index}", "keyword":item["title"],
                 "source":SOURCE, "project":item["project"], "eligible":1}, {})
@@ -233,6 +243,7 @@ class ClassificationTests(unittest.TestCase):
             result = classify_contextual({"id":f"context-{index}", "keyword":item["title"],
                 "source":SOURCE, "project":item["project"], "eligible":1}, context)
             self.assertEqual(result["classification_status"], item.get("expected_status", "CLASSIFIED"), item["title"])
+            self.assertEqual(result["classification_reason"], item.get("expected_reason", ""), item["title"])
             self.assertTrue(set(item["expected_categories"]).issubset(result["topic_category_ids"]),
                             (item["title"], result["topic_category_ids"]))
             if result["classification_status"] == "CLASSIFIED":
@@ -242,6 +253,33 @@ class ClassificationTests(unittest.TestCase):
             "source":SOURCE, "project":special["project"], "eligible":1},
             {"page_namespace":-1, "entity_type":"unknown"})
         self.assertEqual(result["classification_status"], "INELIGIBLE")
+        self.assertEqual(result["classification_reason"], "NON_TOPIC_SYSTEM_PAGE")
+
+    def test_six_exact_records_require_cached_evidence_and_handle_wrong_project_and_disambiguation(self):
+        from app.taxonomy.classifier import classify_contextual
+
+        def run(title, context, project="en.wikipedia"):
+            return classify_contextual({"id":title, "keyword":title, "source":SOURCE,
+                "project":project, "eligible":1}, context)
+
+        for title in ("YouTube", "Katie Miller", "MediaWiki", "Home", "Thank You/en", "Istimewa:Pencarian"):
+            bare = run(title, {})
+            self.assertEqual(bare["classification_status"], "UNKNOWN", title)
+            self.assertEqual(bare["topic_category_ids"], [], title)
+
+        software = run("MediaWiki", {"entity_id":"Q83", "entity_type":"software_product",
+            "description":"free and open-source wiki software", "instance_types":("Q7397",),
+            "source_url":"https://en.wikipedia.org/wiki/MediaWiki",
+            "method":"WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS"}, project="en.wikipedia")
+        self.assertEqual(software["classification_status"], "CLASSIFIED")
+        self.assertIn("technology.software", software["topic_category_ids"])
+        self.assertEqual(software["classification_reason"], "")
+
+        ambiguous = run("YouTube", {"entity_id":"Q866", "description":"video-sharing platform",
+            "is_disambiguation":True, "source_url":"https://en.wikipedia.org/wiki/YouTube",
+            "method":"WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS"})
+        self.assertEqual(ambiguous["classification_status"], "AMBIGUOUS")
+        self.assertIn("technology.internet_services.video_platforms", ambiguous["topic_category_ids"])
 
     def test_legacy_behavior_and_serialization_unchanged(self):
         titles = ('Paris Fashion Week', 'washing machine', 'General election', 'Stephen Miller')

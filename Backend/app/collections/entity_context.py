@@ -45,7 +45,10 @@ OCCUPATION_CATEGORIES = {
     "Q1650915": ("celebrity_public_figures.scientists",),      # researcher
     "Q109459317": ("celebrity_public_figures.creators",),       # content creator
     "Q111263847": ("celebrity_public_figures.creators",),       # digital creator
-    "Q2906862": ("celebrity_public_figures.creators",),      # podcast host
+    "Q2906862": ("celebrity_public_figures.creators",),       # influencer
+    "Q15077007": ("celebrity_public_figures.creators",),      # podcaster
+    "Q1388151": ("celebrity_public_figures.political_advisers",),  # press secretary
+    "Q8125919": ("celebrity_public_figures.political_advisers",),  # political adviser
 }
 
 INSTANCE_TYPES = {

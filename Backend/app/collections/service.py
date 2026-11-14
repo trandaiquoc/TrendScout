@@ -195,7 +195,7 @@ class CollectionService:
             db.executemany("""INSERT INTO classification_results(keyword_id,entity_type,entity_id,
                 entity_description,topic_category_ids,subcategory_ids,classification_status,confidence_level,
                 commercial_relevance,classification_method,classification_version,taxonomy_version,rule_evidence,source_evidence,
-                review_status,classified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                review_status,classified_at,classification_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(keyword_id) DO UPDATE SET entity_type=excluded.entity_type,entity_id=excluded.entity_id,
                 entity_description=excluded.entity_description,topic_category_ids=excluded.topic_category_ids,
                 subcategory_ids=excluded.subcategory_ids,classification_status=excluded.classification_status,
@@ -203,7 +203,8 @@ class CollectionService:
                 classification_method=excluded.classification_method,
                 classification_version=excluded.classification_version,taxonomy_version=excluded.taxonomy_version,
                 rule_evidence=excluded.rule_evidence,source_evidence=excluded.source_evidence,
-                review_status=excluded.review_status,classified_at=excluded.classified_at""",
+                review_status=excluded.review_status,classified_at=excluded.classified_at,
+                classification_reason=excluded.classification_reason""",
                 [(item["id"], item["classification_result"]["entity_type"],
                   item["classification_result"]["entity_id"], item["classification_result"]["entity_description"],
                   json.dumps(item["classification_result"]["topic_category_ids"], ensure_ascii=False),
@@ -214,20 +215,23 @@ class CollectionService:
                   item["classification_result"]["taxonomy_version"],
                   json.dumps(item["classification_result"]["rule_evidence"], ensure_ascii=False),
                   json.dumps(item["classification_result"]["source_evidence"], ensure_ascii=False),
-                  item["classification_result"]["review_status"], classified_at) for item in classification_records])
+                  item["classification_result"]["review_status"], classified_at,
+                  item["classification_result"]["classification_reason"]) for item in classification_records])
         category_collection_ids = {}
         for category_id in INITIAL_TOPIC_ROOTS:
             self.store.ensure_category_collection(resolve_category(category_id))
         for category_id in sorted({category for record in records
                                    for category in record.get("entity_category_ids", ())}):
             category = resolve_category(category_id)
-            parent_id = None
-            if category.parent_id:
-                parent_id = self.store.ensure_category_collection(resolve_category(category.parent_id))
-                if parent_id is None:
-                    continue
-            category_collection_ids[category_id] = self.store.ensure_category_collection(
-                category, parent_id=parent_id)
+            def ensure_taxonomy_path(item):
+                if item.parent_id:
+                    parent = resolve_category(item.parent_id)
+                    parent_collection_id = ensure_taxonomy_path(parent)
+                    if parent_collection_id is None:
+                        return None
+                    return self.store.ensure_category_collection(item, parent_id=parent_collection_id)
+                return self.store.ensure_category_collection(item)
+            category_collection_ids[category_id] = ensure_taxonomy_path(category)
         for record in records:
             record["category_collection_ids"] = tuple(
                 category_collection_ids[category_id]
@@ -386,7 +390,8 @@ class CollectionService:
             db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
                 eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1),
                 assigned_keyword_count=(SELECT count(DISTINCT keyword_id) FROM memberships),
-                unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+                unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE eligible=1
+                  AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS
                     (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) WHERE dataset_id=?""", (fetch_id,))
         return outcome
 
@@ -441,7 +446,8 @@ class CollectionService:
         with self.store.connect() as db:
             eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
             assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
-            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1 AND NOT EXISTS
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1
+                AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS
                 (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
             db.execute("""INSERT OR REPLACE INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
                 provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
@@ -641,7 +647,9 @@ class CollectionService:
     def _unassigned_count(self):
         with self.store.connect() as db:
             return db.execute("""SELECT count(*) FROM keywords k
-                WHERE k.eligible=1 AND NOT EXISTS (
+                WHERE k.eligible=1
+                AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
+                AND NOT EXISTS (
                     SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
                 )""").fetchone()[0]
 
@@ -649,6 +657,96 @@ class CollectionService:
         """Run cached local matching after Collection creation/edits without a provider fetch."""
         identifier = fetch_id or f"reclassify-{uuid.uuid4()}"
         return await asyncio.to_thread(self._process_fetch, identifier, [])
+
+    def reclassify_cached_keywords(self, keyword_ids):
+        """Reclassify selected saved records from persisted context; never fetch or alter membership."""
+        identifiers = tuple(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {"reclassified": 0, "items": []}
+        placeholders = ",".join("?" for _ in identifiers)
+        with self.store.connect() as db:
+            rows = db.execute(f"""SELECT k.*,e.entity_id,e.entity_type,e.description AS entity_description,
+                e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
+                e.instance_types AS entity_instance_types,e.source_url AS entity_source_url,
+                e.method AS entity_context_method,e.status AS entity_context_status,
+                e.page_namespace,e.is_disambiguation,e.redirected_from,e.page_language
+                FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
+                WHERE k.id IN ({placeholders})""", identifiers).fetchall()
+            found = {row["id"] for row in rows}
+            if found != set(identifiers):
+                raise ValueError("CACHED_KEYWORD_NOT_FOUND")
+            from app.taxonomy.classifier import classify_contextual
+            updated = []
+            for raw in rows:
+                record = dict(raw)
+                try:
+                    evidence = json.loads(record.get("evidence") or "{}")
+                except (TypeError, ValueError):
+                    evidence = {}
+                record.update(evidence)
+                def json_values(name):
+                    try:
+                        return json.loads(record.get(name) or "[]")
+                    except (TypeError, ValueError):
+                        return []
+                context = {
+                    "entity_id": record.get("entity_id"), "entity_type": record.get("entity_type") or "unknown",
+                    "description": record.get("entity_description") or "",
+                    "occupations": json_values("entity_occupations"),
+                    "category_ids": json_values("entity_category_ids"),
+                    "instance_types": json_values("entity_instance_types"),
+                    "source_url": record.get("entity_source_url") or "",
+                    "method": record.get("entity_context_method") or "",
+                    "status": record.get("entity_context_status") or "",
+                    "page_namespace": record.get("page_namespace"),
+                    "is_disambiguation": bool(record.get("is_disambiguation")),
+                    "redirected_from": record.get("redirected_from") or "",
+                    "page_language": record.get("page_language") or "",
+                }
+                result = classify_contextual(record, context)
+                result["classified_at"] = now()
+                updated.append((record["id"], result))
+            for identifier, result in updated:
+                db.execute("""INSERT INTO classification_results(keyword_id,entity_type,entity_id,entity_description,
+                    topic_category_ids,subcategory_ids,classification_status,confidence_level,commercial_relevance,
+                    classification_method,classification_version,taxonomy_version,rule_evidence,source_evidence,
+                    review_status,classified_at,classification_reason)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(keyword_id) DO UPDATE SET entity_type=excluded.entity_type,entity_id=excluded.entity_id,
+                    entity_description=excluded.entity_description,topic_category_ids=excluded.topic_category_ids,
+                    subcategory_ids=excluded.subcategory_ids,classification_status=excluded.classification_status,
+                    confidence_level=excluded.confidence_level,commercial_relevance=excluded.commercial_relevance,
+                    classification_method=excluded.classification_method,classification_version=excluded.classification_version,
+                    taxonomy_version=excluded.taxonomy_version,rule_evidence=excluded.rule_evidence,
+                    source_evidence=excluded.source_evidence,review_status=excluded.review_status,
+                    classified_at=excluded.classified_at,classification_reason=excluded.classification_reason""",
+                    (identifier, result["entity_type"], result["entity_id"], result["entity_description"],
+                     json.dumps(result["topic_category_ids"], ensure_ascii=False),
+                     json.dumps(result["subcategory_ids"], ensure_ascii=False), result["classification_status"],
+                     result["confidence_level"], result["commercial_relevance"], result["classification_method"],
+                     result["classification_version"], result["taxonomy_version"],
+                     json.dumps(result["rule_evidence"], ensure_ascii=False),
+                     json.dumps(result["source_evidence"], ensure_ascii=False), result["review_status"],
+                     result["classified_at"], result["classification_reason"]))
+        for _identifier, result in updated:
+            if result["classification_status"] != "CLASSIFIED":
+                continue
+            for category_id in result["topic_category_ids"]:
+                def ensure_taxonomy_path(item):
+                    if item.parent_id:
+                        parent = resolve_category(item.parent_id)
+                        parent_id = ensure_taxonomy_path(parent)
+                        if parent_id is None:
+                            return None
+                        return self.store.ensure_category_collection(item, parent_id=parent_id)
+                    return self.store.ensure_category_collection(item)
+                ensure_taxonomy_path(resolve_category(category_id))
+        return {"reclassified": len(updated), "items": [
+            {"keyword_id": identifier, "classification_status": result["classification_status"],
+             "classification_reason": result["classification_reason"],
+             "topic_category_ids": result["topic_category_ids"]}
+            for identifier, result in updated
+        ]}
 
     def _propose(self, fetch_id, unassigned, collections):
         if len(unassigned) < MIN_PROPOSAL_SUPPORT:
