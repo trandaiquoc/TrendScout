@@ -1033,7 +1033,13 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [Substack](https://substack.com/); từng feed, bản quyền và paywall cần kiểm tra."
+      "source_reference": "G; [Substack Developer API Terms](https://substack.com/api-tos); API cho phép discovery/analytics dữ liệu hồ sơ công khai, có giới hạn dùng.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Substack's Developer API Terms permit discovery and analytics using specified information creators make public on their profiles or publications, such as subscriber totals and category rankings. Do not infer non-public attributes, redistribute the data as a dataset, or imply completeness; attribution, refresh/removal of changed data, discretionary rate limits, and TrendScout API access must be verified.",
+      "revalidation_note_key": "sources.review.substack",
+      "revalidation_links": [
+        {"label": "Substack Developer API Terms", "url": "https://substack.com/api-tos"}
+      ]
     },
     {
       "source_id": "medium",
@@ -1042,7 +1048,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [Medium](https://medium.com/); feed/license theo tác giả."
+      "source_reference": "F; [Medium API](https://help.medium.com/hc/en-us/articles/213480228-API-Importing) không cấp token tích hợp mới; RSS vẫn có cho hồ sơ/chủ đề.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Medium's help center says it will issue no new API integration tokens or allow new API integrations, though existing tokens continue to work. Medium still documents RSS feeds for profiles, publications, and topics; paywalled stories are not available as full text. Use only publisher-exposed feeds, respect user-content rights and reasonable API caching, and do not assume the feeds cover all Medium content.",
+      "revalidation_note_key": "sources.review.medium",
+      "revalidation_links": [
+        {"label": "Medium API and integration status", "url": "https://help.medium.com/hc/en-us/articles/213480228-API-Importing"},
+        {"label": "Medium RSS feeds", "url": "https://help.medium.com/hc/en-us/articles/214874118-Using-RSS-feeds-of-profiles-publications-and-topics"},
+        {"label": "Medium API Terms of Use", "url": "https://help.medium.com/hc/en-us/articles/214151487-Medium-API-Terms-of-Use"}
+      ]
     },
     {
       "source_id": "google_news",
@@ -1051,7 +1065,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "U; [Google News](https://news.google.com/); access/retention và publisher rights cần xác minh."
+      "source_reference": "U; [Google News](https://news.google.com/); chưa xác nhận API công khai được Google hỗ trợ.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The official Google materials reviewed document Google News as a reader and publisher product, not a general public search API for TrendScout. Google News no longer uses RSS feeds or web locations submitted through Publisher Center for publication pages; this does not authorize using an undocumented News RSS/search endpoint. No supported public discovery API or TrendScout permission was established.",
+      "revalidation_note_key": "sources.review.google_news",
+      "revalidation_links": [
+        {"label": "Google News publisher-page transition", "url": "https://support.google.com/news/publisher-center/answer/15898024"},
+        {"label": "Google News crawling and feed infrastructure", "url": "https://developers.google.com/crawling/docs/crawlers-fetchers/feedfetcher"}
+      ]
     },
     {
       "source_id": "google_trends",
@@ -1078,7 +1099,15 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [GDELT](https://www.gdeltproject.org/); dataset scope và rights theo nội dung."
+      "source_reference": "G; [GDELT DOC API](https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/); tin trực tuyến toàn cầu, khung thời gian và số kết quả có giới hạn.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "GDELT DOC 2.0 provides full-text query search, article lists, and coverage-volume timelines over monitored online news, with a default three-month window (up to one year by timespan) and at most 250 article-list results per query. It measures monitored news coverage, not US population demand; language/geography and publisher coverage are incomplete, and rights to republish source article content remain with publishers.",
+      "revalidation_note_key": "sources.review.gdelt",
+      "revalidation_links": [
+        {"label": "GDELT DOC 2.0 API documentation", "url": "https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/"},
+        {"label": "GDELT search and analysis APIs", "url": "https://gdeltproject.org/data.html"},
+        {"label": "GDELT one-year search update", "url": "https://blog.gdeltproject.org/doc-geo-2-0-api-updates-full-year-searching-and-more/"}
+      ]
     },
     {
       "source_id": "public_rss",
@@ -1087,7 +1116,14 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "F; [RSS specification](https://www.rssboard.org/rss-specification); feed công khai không tự cấp quyền commercial."
+      "source_reference": "F; [RSS 2.0 Specification](https://www.rssboard.org/rss-specification); quyền/độ phủ và điều kiện lưu dùng do từng nhà xuất bản quy định.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "RSS is a feed format, not a centralized source or blanket license. A feed only represents the publisher-selected items and fields; commercial collection, retention, display, attribution, and full-text use must be assessed under each publisher's terms. TrendScout must use a specifically identified, permitted feed and must not treat the universe of RSS feeds as complete or representative.",
+      "revalidation_note_key": "sources.review.public_rss",
+      "revalidation_links": [
+        {"label": "RSS 2.0 specification", "url": "https://www.rssboard.org/rss-specification"},
+        {"label": "Atom Syndication Format standard", "url": "https://www.rfc-editor.org/rfc/rfc4287"}
+      ]
     },
     {
       "source_id": "common_crawl",
