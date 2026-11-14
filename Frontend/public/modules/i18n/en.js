@@ -1139,6 +1139,8 @@ export const en = {
   'phoenix.source-load-error': 'Source status could not be loaded. Check the connection and try again.',
   'phoenix.source-empty': 'This runtime reports no sources.',
   'phoenix.retry': 'Try again',
+  'phoenix.research-no-match': 'No research matches these filters.',
+  'phoenix.clear-research-filters': 'Clear filters',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

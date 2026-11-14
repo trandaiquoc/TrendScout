@@ -53,7 +53,12 @@ async function loadResearchRecords({append = false} = {}) {
 function renderResearchRecords(items) {
   const root=$('#research-records'); if(!root)return;
   root.replaceChildren();
-  if(!items.length){root.append(element('p',t('research.empty')));return;}
+  if(!items.length){
+    const filtered=Boolean($('#research-list-search').value.trim()||$('#research-list-status').value);
+    root.append(element('p',t(filtered?'phoenix.research-no-match':'research.empty')));
+    if(filtered){const clear=element('button',t('phoenix.clear-research-filters'),'text-button');clear.type='button';clear.addEventListener('click',()=>{$('#research-list-search').value='';$('#research-list-status').value='';loadResearchRecords();});root.append(clear);}
+    return;
+  }
   for(const item of items){
     const card=element('article',null,'research-record');
     const heading=element('div',null,'research-record-heading');

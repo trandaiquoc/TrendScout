@@ -1139,6 +1139,8 @@ export const vi = {
   'phoenix.source-load-error': 'Không tải được trạng thái nguồn. Hãy kiểm tra kết nối rồi thử lại.',
   'phoenix.source-empty': 'Phiên hiện tại không báo cáo nguồn nào.',
   'phoenix.retry': 'Thử lại',
+  'phoenix.research-no-match': 'Không có nghiên cứu nào khớp bộ lọc.',
+  'phoenix.clear-research-filters': 'Xóa bộ lọc',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',
