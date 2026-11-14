@@ -232,6 +232,7 @@ def main():
               check(await until(()=>document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection')),'Collection create is persisted and appears in the real workbench');
               const createdCollection=(await (await fetch('/api/v1/collections')).json()).items.find(item=>item.name==='Browser workflow collection');
               check(Boolean(createdCollection?.id),'Collection create returns a saved ID from SQLite');
+              check(await until(()=>createdCollection&&[...document.querySelector('#workbench-target').options].some(option=>option.value===createdCollection.id)),'new Collection becomes available as a bulk-assignment target');
               const knownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Browser workflow topic'));
               knownRow.querySelector('input[type="checkbox"]').click();
               const bulkAction=document.querySelector('#workbench-action');bulkAction.value='ADD';bulkAction.dispatchEvent(new Event('change',{bubbles:true}));
