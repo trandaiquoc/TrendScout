@@ -33,6 +33,8 @@ function labelled(select, key, options, fallback = key) {
 }
 function button(text, className = 'button button-secondary') { const node = make('button', text, className); node.type = 'button'; return node; }
 let collectionPickerSequence = 0;
+// Lucian UX/UI Prompt #031 · MIT · Copyright (c) 2026 Seokwoooo
+// https://lucianlabs.dev/uxui-prompt/#031 · license: /dashboard/licenses/lucian-mit.txt
 function collectionPicker(options, label) {
   const root = make('div', '', 'collection-picker');
   const trigger = button(labels('workbench.choose-target', 'Choose a target Collection'), 'collection-picker-trigger');

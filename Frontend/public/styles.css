@@ -698,7 +698,8 @@ button:disabled { cursor: not-allowed; }
 .collection-no-merge-target button { flex: 0 0 auto; }
 .collection-merge-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 9px; }
 .collection-manage-label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
-/* Inspired by Lucian UX/UI Prompt #031 (MIT); adapted for the Collection merge workflow. */
+/* Lucian UX/UI Prompt #031 · MIT · Copyright (c) 2026 Seokwoooo
+   https://lucianlabs.dev/uxui-prompt/#031 · license: /dashboard/licenses/lucian-mit.txt */
 .collection-picker { position: relative; min-width: 0; }
 .collection-picker-trigger { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 42px; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 9px; color: var(--ink); background: var(--surface); font: inherit; text-align: left; cursor: pointer; }
 .collection-picker-trigger::after { content: ""; width: 8px; height: 8px; flex: 0 0 auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform .18s ease; }
