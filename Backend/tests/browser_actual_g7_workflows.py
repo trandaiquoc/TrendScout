@@ -203,6 +203,11 @@ def main():
               const collectionCounts=[...document.querySelectorAll('#workbench-summary .workbench-stat strong')].map(x=>x.textContent);
               check(collectionCounts.join(',')==='3,1,1,0','Collection cards show 3 stored, 1 assigned, 1 unclassified and 0 excluded');
               check(document.querySelector('#workbench-summary').textContent.includes('1 kh\u00f4ng ph\u1ea3i ch\u1ee7 \u0111\u1ec1'),'Collection summary explains the ineligible topic count');
+              const keywordSearch=document.querySelector('#workbench-query');keywordSearch.value='Unknown context topic';keywordSearch.dispatchEvent(new Event('input',{bubbles:true}));
+              check(await until(()=>document.querySelectorAll('#workbench-rows tr').length===1&&document.querySelector('#workbench-rows').textContent.includes('Unknown context topic')),'keyword search filters actual saved records');
+              check(window.__apiCalls.some(x=>x.url.includes('/api/v1/datasets/latest/keywords?q=Unknown')),'keyword search uses the saved-keyword API');
+              keywordSearch.value='';keywordSearch.dispatchEvent(new Event('input',{bubbles:true}));
+              check(await until(()=>document.querySelectorAll('#workbench-rows tr').length===3),'clearing keyword search restores the saved record set');
               check(await until(()=>[...document.querySelectorAll('#workbench-rows tr')].some(row=>row.textContent.includes('Unknown context topic'))),'unassigned saved keyword is visible in the real workbench');
               document.querySelector('[data-locale-toggle]').click();await delay(100);
               const unknownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Unknown context topic'));
