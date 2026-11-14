@@ -1111,6 +1111,8 @@ export const vi = {
   'phoenix.view-evidence': 'Xem dữ liệu và phạm vi quan sát',
   'phoenix.all-categories': 'Tất cả nhóm',
   'phoenix.source-details': 'Thông tin nguồn và trạng thái',
+  'phoenix.search-algorithms': 'Tìm phương pháp',
+  'phoenix.algorithm-results-unavailable': 'Không tải được kết quả đã lưu.',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

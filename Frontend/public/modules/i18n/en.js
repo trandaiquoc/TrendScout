@@ -1111,6 +1111,8 @@ export const en = {
   'phoenix.view-evidence': 'View data and observation scope',
   'phoenix.all-categories': 'All categories',
   'phoenix.source-details': 'Source details and status',
+  'phoenix.search-algorithms': 'Search methods',
+  'phoenix.algorithm-results-unavailable': 'Saved results could not be loaded.',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',

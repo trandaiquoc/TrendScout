@@ -2174,9 +2174,11 @@ function renderAlgorithmCatalog() {
   const family = $('#algorithm-family-filter').value;
   const source = $('#algorithm-source-filter').value;
   const status = $('#algorithm-status-filter').value;
+  const query = $('#algorithm-search').value.trim().toLocaleLowerCase();
   const methods = all.filter((item) => (!family || item.family === family)
-    && (!source || item.sources.some((entry) => entry.source_id === source))
-    && (!status || item.sources.some((entry) => entry.status === status)));
+    && ((!source && !status) || item.sources.some((entry) => (!source || entry.source_id === source) && (!status || entry.status === status)))
+    && (!query || `${item.algorithm_id} ${item.name || ''} ${localizedAlgorithmName(item.algorithm_id)} ${item.description || ''}`.toLocaleLowerCase().includes(query)));
+  $('#algorithm-filter-count').textContent=t('workbench.results-count',{count:number(methods.length)});
   root.replaceChildren();
   if (!methods.length) {
     root.append(element('p', t('algorithms.filter-empty')));
@@ -2198,7 +2200,7 @@ function renderAlgorithmCatalog() {
     const counts = (state.algorithmResults?.summary || []).find((entry) => entry.algorithm_id === item.algorithm_id);
     card.append(element('p', counts
       ? t('algorithms.execution-summary', { completed: number(counts.completed), skipped: number(counts.skipped), failed: number(counts.failed) })
-      : t('algorithms.no-results'), 'algorithm-execution-summary'));
+      : t(state.algorithmResults ? 'algorithms.no-results' : 'phoenix.algorithm-results-unavailable'), 'algorithm-execution-summary'));
     const examples = (state.algorithmResults?.items || []).filter((entry) => entry.algorithm_id === item.algorithm_id).slice(0, 3);
     if (examples.length) {
       const outputDetails = element('details', null, 'algorithm-details');
@@ -2538,6 +2540,7 @@ function bindEvents() {
   });
   ['#algorithm-family-filter', '#algorithm-source-filter', '#algorithm-status-filter']
     .forEach((selector) => $(selector).addEventListener('change', renderAlgorithmCatalog));
+  $('#algorithm-search').addEventListener('input', renderAlgorithmCatalog);
   $('#detail-dialog').addEventListener('close', () => {
     state.detailSequence += 1;
     state.detail = null;
