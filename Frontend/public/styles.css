@@ -1116,3 +1116,4 @@ button:disabled { filter:saturate(.65); }
   .dashboard-tabs { width:100%; }
   .dashboard-tab { flex:1; padding-inline:10px; }
 }
+.algorithm-result-examples{display:grid;gap:.75rem;margin-top:.75rem}.algorithm-result-example{border:1px solid var(--line);border-radius:.6rem;padding:.75rem;min-width:0}.algorithm-result-example h3{font-size:1rem;margin:0 0 .5rem;overflow-wrap:anywhere}.algorithm-result-example .detail-list{margin:0}

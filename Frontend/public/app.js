@@ -2188,16 +2188,23 @@ function renderAlgorithmCatalog() {
     if (examples.length) {
       const outputDetails = element('details', null, 'algorithm-details');
       outputDetails.append(element('summary', t('algorithms.latest-results')));
-      const outputList = element('ul');
+      const outputList = element('div', null, 'algorithm-result-examples');
       examples.forEach((entry) => {
         let result = {};
         try { result = JSON.parse(entry.result_json || '{}'); } catch { /* malformed old rows remain display-safe */ }
         const flags = Array.isArray(result.quality_flags)
           ? result.quality_flags.map((flag) => translatedAlgorithmCode('quality', flag)).join(', ') : '';
-      const message = [entry.keyword, translatedAlgorithmCode('result', entry.status),
-          entry.value === null ? translatedAlgorithmCode('reason', entry.reason_code) : `${entry.value} ${entry.unit}`,
-          flags].filter(Boolean).join(' · ');
-        outputList.append(element('li', message));
+        const example = element('article', null, 'algorithm-result-example');
+        example.append(element('h3', entry.keyword || t('common.unavailable')));
+        const resultFields = element('dl', null, 'detail-list');
+        addAlgorithmDetail(resultFields, t('algorithms.result-status'), translatedAlgorithmCode('result', entry.status));
+        const value = entry.value == null
+          ? translatedAlgorithmCode('reason', entry.reason_code)
+          : `${number(entry.value)}${entry.unit ? ` ${localizedAlgorithmUnit(entry.unit)}` : ''}`;
+        addAlgorithmDetail(resultFields, t('algorithms.result-value'), value);
+        if (flags) addAlgorithmDetail(resultFields, t('algorithms.result-data-note'), flags);
+        example.append(resultFields);
+        outputList.append(example);
       });
       outputDetails.append(outputList);
       card.append(outputDetails);
@@ -2243,6 +2250,13 @@ function translatedAlgorithmCode(kind, code) {
   const key = `algorithms.${kind}.${String(code).toLowerCase()}`;
   const translated = t(key);
   return translated === key ? String(code).toLowerCase().replaceAll('_', ' ') : translated;
+}
+
+function localizedAlgorithmUnit(unit) {
+  if (!unit) return '';
+  const key = `algorithms.unit.${String(unit).toLowerCase()}`;
+  const translated = t(key);
+  return translated === key ? String(unit).replaceAll('_', ' ') : translated;
 }
 
 function renderAlgorithmSignalStatus(algorithms) {
