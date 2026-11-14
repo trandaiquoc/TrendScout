@@ -20,6 +20,10 @@ UTC = timezone.utc
 FREQUENCIES = {"DAILY": timedelta(days=1), "WEEKLY": timedelta(days=7)}
 
 
+class ScheduleBusyError(ValueError):
+    """A schedule cannot be edited while one of its occurrences is running."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -121,6 +125,37 @@ class PersistentScheduleStore:
     def list(self) -> list[dict]:
         with self._connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM schedules ORDER BY created_at,id")]
+
+    def update(self, schedule_id: str, *, name: str, frequency: str,
+               timezone_name: str, hour: int, minute: int,
+               now: datetime | None = None) -> dict | None:
+        now = now or _utc_now()
+        name = name.strip() if isinstance(name, str) else ""
+        if not name or len(name) > 80:
+            raise ValueError("schedule name must contain 1 to 80 characters")
+        if frequency not in FREQUENCIES or type(hour) is not int or not 0 <= hour <= 23 or type(minute) is not int or not 0 <= minute <= 59:
+            raise ValueError("invalid frequency or local time")
+        _valid_zone(timezone_name)
+        next_run = _iso(_next_run(now, frequency, timezone_name, hour, minute))
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT id,enabled FROM schedules WHERE id=?", (schedule_id,)).fetchone()
+            if row is None:
+                db.rollback()
+                return None
+            running = db.execute(
+                "SELECT 1 FROM schedule_occurrences WHERE schedule_id=? AND status='RUNNING' LIMIT 1",
+                (schedule_id,),
+            ).fetchone()
+            if running:
+                db.rollback()
+                raise ScheduleBusyError("schedule has a running occurrence")
+            db.execute(
+                "UPDATE schedules SET name=?,frequency=?,timezone=?,hour=?,minute=?,next_run_at=?,updated_at=? WHERE id=?",
+                (name, frequency, timezone_name, hour, minute, next_run, _iso(now), schedule_id),
+            )
+            db.commit()
+        return self.get(schedule_id)
 
     def set_enabled(self, schedule_id: str, enabled: bool, *, now: datetime | None = None) -> dict | None:
         if type(enabled) is not bool:

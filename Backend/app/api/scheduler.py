@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.fetches import validate_public_request_origin
-from app.scheduling.persistent import PersistentScheduleStore
+from app.scheduling.persistent import PersistentScheduleStore, ScheduleBusyError
 
 router = APIRouter()
 
@@ -23,9 +23,14 @@ class ScheduleInput(BaseModel):
     minute: int = Field(default=0, ge=0, le=59)
 
 
-class ScheduleEnabled(BaseModel):
+class SchedulePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    enabled: bool
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    frequency: Literal["DAILY", "WEEKLY"] | None = None
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    hour: int | None = Field(default=None, ge=0, le=23)
+    minute: int | None = Field(default=None, ge=0, le=59)
+    enabled: bool | None = None
 
 
 def _store(request: Request) -> PersistentScheduleStore:
@@ -85,13 +90,40 @@ def create_schedule(value: ScheduleInput, request: Request):
 
 
 @router.patch("/scheduler/{schedule_id}")
-def update_schedule(schedule_id: str, value: ScheduleEnabled, request: Request):
+def update_schedule(schedule_id: str, value: SchedulePatch, request: Request):
     _operator(request)
     if len(schedule_id) != 32 or any(character not in "0123456789abcdef" for character in schedule_id):
         raise HTTPException(404, {"code": "SCHEDULE_NOT_FOUND"})
-    item = _store(request).set_enabled(schedule_id, value.enabled)
+    changes = value.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, {"code": "EMPTY_SCHEDULE_UPDATE"})
+    if "enabled" in changes:
+        if len(changes) != 1:
+            raise HTTPException(422, {"code": "MIXED_SCHEDULE_UPDATE"})
+        if changes["enabled"] and not request.app.state.settings.scheduler_enabled:
+            raise HTTPException(409, {"code": "SCHEDULER_DISABLED_IN_BACKEND_CONFIGURATION"})
+        try:
+            item = _store(request).set_enabled(schedule_id, changes["enabled"])
+        except ValueError as exc:
+            raise HTTPException(422, {"code": "INVALID_SCHEDULE_UPDATE", "message": str(exc)}) from None
+    else:
+        store = _store(request)
+        current = store.get(schedule_id)
+        if current is None:
+            raise HTTPException(404, {"code": "SCHEDULE_NOT_FOUND"})
+        changes = {
+            "name": changes.get("name", current["name"]),
+            "frequency": changes.get("frequency", current["frequency"]),
+            "timezone_name": changes.get("timezone", current["timezone"]),
+            "hour": changes.get("hour", current["hour"]),
+            "minute": changes.get("minute", current["minute"]),
+        }
+        try:
+            item = store.update(schedule_id, **changes)
+        except ScheduleBusyError:
+            raise HTTPException(409, {"code": "SCHEDULE_RUN_IN_PROGRESS"}) from None
+        except ValueError as exc:
+            raise HTTPException(422, {"code": "INVALID_SCHEDULE_UPDATE", "message": str(exc)}) from None
     if item is None:
         raise HTTPException(404, {"code": "SCHEDULE_NOT_FOUND"})
-    if value.enabled and not request.app.state.settings.scheduler_enabled:
-        item["execution_blocked"] = "SCHEDULER_DISABLED_IN_BACKEND_CONFIGURATION"
     return {"item": item}

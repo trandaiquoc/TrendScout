@@ -8,7 +8,7 @@ import httpx
 
 from app.demo_local import DemoFixtureAdapter
 from app.main import create_app
-from app.scheduling.persistent import PersistentScheduleStore, ScheduleWorker
+from app.scheduling.persistent import PersistentScheduleStore, ScheduleBusyError, ScheduleWorker
 from app.settings import Settings
 from app.storage.fake import FakeStorage
 
@@ -101,12 +101,37 @@ class PersistentSchedulerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.set_enabled(item["id"], 1, now=self.now)
 
+    def test_edit_recalculates_next_run_and_preserves_enabled_state(self):
+        item = self.create()
+        enabled = self.store.set_enabled(item["id"], True, now=self.now)
+        updated = self.store.update(item["id"], name="Weekly local check", frequency="WEEKLY",
+            timezone_name="America/Los_Angeles", hour=10, minute=30, now=self.now)
+        self.assertEqual(updated["name"], "Weekly local check")
+        self.assertEqual(updated["frequency"], "WEEKLY")
+        self.assertEqual(updated["timezone"], "America/Los_Angeles")
+        self.assertEqual((updated["hour"], updated["minute"]), (10, 30))
+        self.assertTrue(updated["enabled"])
+        self.assertEqual(updated["next_run_at"], "2026-11-16T18:30:00+00:00")
+        self.assertEqual(updated["created_at"], enabled["created_at"])
+
+    def test_edit_rejects_a_schedule_with_a_running_occurrence(self):
+        item = self.create()
+        self.store.set_enabled(item["id"], True, now=self.now)
+        due_at = datetime.fromisoformat(self.store.get(item["id"])["next_run_at"])
+        self.assertIsNotNone(self.store.claim_due(now=due_at))
+        with self.assertRaises(ScheduleBusyError):
+            self.store.update(item["id"], name="Changed", frequency="DAILY",
+                timezone_name="UTC", hour=12, minute=0, now=due_at)
+        self.assertEqual(self.store.get(item["id"])["name"], "Nightly fixture refresh")
+
     def test_operator_api_persists_schedules_and_rejects_missing_token(self):
         async def scenario():
             token = "test-only-scheduler-operator-token"
             settings = Settings.from_environment({
                 "TREND_SCOUT_ENVIRONMENT": "test",
                 "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_SCHEDULER_ENABLED": "true",
+                "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "true",
                 "TREND_SCOUT_OPERATOR_TOKEN": token,
                 "TREND_SCOUT_LOCK_PATH": str(Path(self.directory.name) / "run.lock"),
                 "WIKIMEDIA_USER_AGENT": "TrendScout test (mailto:test@example.invalid)",
@@ -123,10 +148,44 @@ class PersistentSchedulerTests(unittest.TestCase):
                 })
                 self.assertEqual(created.status_code, 201)
                 schedule_id = created.json()["item"]["id"]
+                edited = await client.patch(f"/api/v1/scheduler/{schedule_id}", headers={"Authorization": f"Bearer {token}"}, json={
+                    "name": "Weekly", "frequency": "WEEKLY", "timezone": "America/Los_Angeles", "hour": 10, "minute": 30,
+                })
+                self.assertEqual(edited.status_code, 200)
+                self.assertEqual(edited.json()["item"]["frequency"], "WEEKLY")
+                self.assertEqual(edited.json()["item"]["timezone"], "America/Los_Angeles")
                 enabled = await client.patch(f"/api/v1/scheduler/{schedule_id}", headers={"Authorization": f"Bearer {token}"}, json={"enabled": True})
                 self.assertTrue(enabled.json()["item"]["enabled"])
+                disabled = await client.patch(f"/api/v1/scheduler/{schedule_id}", headers={"Authorization": f"Bearer {token}"}, json={"enabled": False})
+                self.assertFalse(disabled.json()["item"]["enabled"])
                 listed = await client.get("/api/v1/scheduler")
                 self.assertEqual([item["id"] for item in listed.json()["items"]], [schedule_id])
+
+        asyncio.run(scenario())
+
+    def test_disabled_backend_policy_rejects_enable_without_mutating_schedule(self):
+        async def scenario():
+            token = "test-only-scheduler-operator-token"
+            settings = Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "test",
+                "TREND_SCOUT_RUN_MODE": "synthetic",
+                "TREND_SCOUT_OPERATOR_TOKEN": token,
+                "TREND_SCOUT_LOCK_PATH": str(Path(self.directory.name) / "run.lock"),
+                "WIKIMEDIA_USER_AGENT": "TrendScout test (mailto:test@example.invalid)",
+            })
+            app = create_app(settings=settings, read_only=False, scheduler_store=self.store)
+            app.state.operator_token = token
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                created = await client.post("/api/v1/scheduler", headers={"Authorization": f"Bearer {token}"}, json={
+                    "name": "Disabled policy check", "frequency": "DAILY", "timezone": "UTC", "hour": 9,
+                })
+                schedule_id = created.json()["item"]["id"]
+                denied = await client.patch(f"/api/v1/scheduler/{schedule_id}", headers={"Authorization": f"Bearer {token}"}, json={"enabled": True})
+                self.assertEqual(denied.status_code, 409)
+                self.assertFalse(self.store.get(schedule_id)["enabled"])
+                disabled = await client.patch(f"/api/v1/scheduler/{schedule_id}", headers={"Authorization": f"Bearer {token}"}, json={"enabled": False})
+                self.assertEqual(disabled.status_code, 200)
+                self.assertFalse(disabled.json()["item"]["enabled"])
 
         asyncio.run(scenario())
 

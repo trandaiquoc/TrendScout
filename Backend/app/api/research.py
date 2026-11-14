@@ -30,7 +30,13 @@ class ResearchInput(BaseModel):
 
 class ResearchPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    subject: str | None = Field(default=None, min_length=1, max_length=180)
+    hypothesis: str | None = Field(default=None, min_length=1, max_length=2000)
+    product_category: str | None = Field(default=None, max_length=160)
+    niche: str | None = Field(default=None, max_length=160)
+    competitor_notes: str | None = Field(default=None, max_length=4000)
     status: ResearchStatus | None = None
+    ip_notes: str | None = Field(default=None, max_length=3000)
     findings: str | None = Field(default=None, max_length=4000)
     risk_notes: str | None = Field(default=None, max_length=3000)
     market_evidence: str | None = Field(default=None, max_length=4000)
@@ -123,6 +129,14 @@ def update_research(research_id: str, value: ResearchPatch, request: Request):
     updates = value.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(422, {"code": "EMPTY_RESEARCH_UPDATE"})
+    for field, content in updates.items():
+        if content is None:
+            raise HTTPException(422, {"code": "RESEARCH_FIELD_CANNOT_BE_NULL", "field": field})
+        if isinstance(content, str):
+            content = content.strip()
+            if field in {"subject", "hypothesis"} and not content:
+                raise HTTPException(422, {"code": "RESEARCH_FIELD_REQUIRED", "field": field})
+            updates[field] = content
     with service.store.connect() as db:
         if (
             db.execute("SELECT 1 FROM research_records WHERE id=?", (research_id,)).fetchone()

@@ -222,6 +222,24 @@ class KeywordWorkbenchTests(unittest.TestCase):
         updated = self._request("PATCH", f"/api/v1/research/{identifier}", json={"status": "NEEDS_REVIEW"})
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["status"], "NEEDS_REVIEW")
+        edited = self._request("PATCH", f"/api/v1/research/{identifier}", json={
+            "subject": "  Denim repair subscriptions  ",
+            "hypothesis": "  Test whether owners prefer recurring repair supplies.  ",
+            "product_category": " Circular apparel ", "niche": " Subscription kits ",
+            "competitor_notes": " Compare repair clubs ", "market_evidence": " Search data pending ",
+            "ip_notes": " Trademark review pending ", "risk_notes": " Retention unknown ",
+            "findings": " Interview plan updated ",
+        })
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.json()["status"], "NEEDS_REVIEW")
+        persisted = self._request("GET", "/api/v1/research").json()["items"][0]
+        self.assertEqual(persisted["subject"], "Denim repair subscriptions")
+        self.assertEqual(persisted["hypothesis"], "Test whether owners prefer recurring repair supplies.")
+        self.assertEqual(persisted["product_category"], "Circular apparel")
+        blank = self._request("PATCH", f"/api/v1/research/{identifier}", json={"subject": "   "})
+        self.assertEqual(blank.status_code, 422)
+        null_value = self._request("PATCH", f"/api/v1/research/{identifier}", json={"findings": None})
+        self.assertEqual(null_value.status_code, 422)
 
     def test_research_cannot_link_a_nonexistent_keyword(self):
         response = self._request("POST", "/api/v1/research", json={

@@ -56,8 +56,10 @@ const state = {
   runHistoryQuery: '',
   sourceLibrary: [],
   researchKeywords: [],
+  researchEditId: null,
 };
 let schedulerListSequence = 0;
+let schedulerEditId = null;
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
@@ -621,6 +623,8 @@ async function loadSchedulerList() {
       const heading=element('div',null,'schedule-item-heading');
       heading.append(element('strong',item.name || t('common.unavailable')),
         element('span',t(item.enabled?'settings.schedule-enabled':'settings.schedule-disabled'),'pill '+(item.enabled?'pill--green':'pill--gray')));
+      const edit=element('button',t('settings.schedule-edit'),'button button-secondary schedule-edit');
+      edit.type='button';edit.addEventListener('click',()=>beginScheduleEdit(item));heading.append(edit);
       const details=element('dl',null,'schedule-item-details');
       const values=[
         [t('settings.schedule-frequency'),t(item.frequency==='WEEKLY'?'settings.schedule-weekly':'settings.schedule-daily')],
@@ -631,7 +635,7 @@ async function loadSchedulerList() {
       ];
       for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',value));details.append(row);}
       const action=element('button',t(item.enabled?'settings.schedule-disable':'settings.schedule-enable'),'button button-secondary schedule-action');
-      action.type='button';action.disabled=!canToggle;action.addEventListener('click',async()=>{
+      action.type='button';action.disabled=item.enabled?false:!canToggle;action.addEventListener('click',async()=>{
         try{await protectedScheduleRequest(`/api/v1/scheduler/${encodeURIComponent(item.id)}`,'PATCH',{enabled:!item.enabled});await loadSchedulerList();setScheduleFeedback(t('settings.schedule-updated'));}
         catch(error){setScheduleFeedback(error.message || t('settings.schedule-action-failed'));}
       });
@@ -646,6 +650,30 @@ async function loadSchedulerList() {
 }
 
 function setScheduleFeedback(message){const target=$('#settings-schedule-feedback');if(target)target.textContent=message;}
+
+function beginScheduleEdit(item){
+  const form=$('#settings-schedule-form');
+  schedulerEditId=item.id;
+  form.elements.namedItem('name').value=item.name||'';
+  form.elements.namedItem('frequency').value=item.frequency;
+  form.elements.namedItem('timezone').value=item.timezone;
+  form.elements.namedItem('time').value=String(item.hour).padStart(2,'0')+':'+String(item.minute).padStart(2,'0');
+  form.querySelector('[type="submit"]').textContent=t('settings.schedule-update');
+  $('#settings-schedule-cancel').hidden=false;
+  setScheduleFeedback('');
+  form.scrollIntoView({behavior:'smooth',block:'start'});
+  form.elements.namedItem('name').focus();
+}
+
+function cancelScheduleEdit(){
+  schedulerEditId=null;
+  const form=$('#settings-schedule-form');
+  form.reset();
+  form.elements.namedItem('timezone').value=Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Ho_Chi_Minh';
+  form.querySelector('[type="submit"]').textContent=t('settings.schedule-create');
+  $('#settings-schedule-cancel').hidden=true;
+  setScheduleFeedback('');
+}
 
 async function protectedScheduleRequest(path,method,body){
   const form=$('#settings-schedule-form');
@@ -671,9 +699,11 @@ function initializeScheduleForm(){
     const body={name:form.elements.namedItem('name').value.trim(),frequency:form.elements.namedItem('frequency').value,
       timezone:timezone.value.trim(),hour,minute};
     try{
-      await protectedScheduleRequest('/api/v1/scheduler','POST',body);
-      form.elements.namedItem('name').value='';
-      setScheduleFeedback(t('settings.schedule-created-disabled'));
+      const editId=schedulerEditId;
+      await protectedScheduleRequest(editId?'/api/v1/scheduler/'+encodeURIComponent(editId):'/api/v1/scheduler',editId?'PATCH':'POST',body);
+      if(editId)cancelScheduleEdit();
+      else form.elements.namedItem('name').value='';
+      setScheduleFeedback(t(editId?'settings.schedule-updated':'settings.schedule-created-disabled'));
       await loadSchedulerList();
     }catch(error){setScheduleFeedback(error.message||t('settings.schedule-create-failed'));}
   });
@@ -723,12 +753,15 @@ function renderResearchRecords(items) {
     const card=element('article',null,'research-record');
     const heading=element('div',null,'research-record-heading');
     heading.append(element('h3',item.subject));
+    const edit=element('button',t('research.edit'),'button button-secondary');edit.type='button';edit.addEventListener('click',()=>beginResearchEdit(item));
+    heading.append(edit);
     const status=element('select'); status.setAttribute('aria-label',t('research.status-for',{subject:item.subject}));
     for(const value of ['DRAFT','RESEARCHING','NEEDS_REVIEW','VALIDATED','ARCHIVED'])status.add(new Option(t(['research','status',value.toLowerCase()].join('.')),value));
     status.value=item.status; status.addEventListener('change',async()=>{
+      const previous=item.status;
       status.disabled=true;
-      try { await requestJson('/api/v1/research/'+encodeURIComponent(item.id),{method:'PATCH',body:{status:status.value},locale:getLocale()}); }
-      catch(error){status.value=item.status;announce(getErrorMessage(error,'research.save-error'),true);}
+      try { await requestJson('/api/v1/research/'+encodeURIComponent(item.id),{method:'PATCH',body:{status:status.value},locale:getLocale()});item.status=status.value; }
+      catch(error){status.value=previous;announce(getErrorMessage(error,'research.save-error'),true);}
       finally{status.disabled=false;}
     });
     heading.append(status); card.append(heading);
@@ -744,6 +777,38 @@ function renderResearchRecords(items) {
   }
 }
 
+function beginResearchEdit(item) {
+  state.researchEditId=item.id;
+  const fields={
+    '#research-subject':item.subject,
+    '#research-hypothesis':item.hypothesis,
+    '#research-category':item.product_category,
+    '#research-niche':item.niche,
+    '#research-competitors':item.competitor_notes,
+    '#research-market-evidence':item.market_evidence,
+    '#research-ip':item.ip_notes,
+    '#research-risks':item.risk_notes,
+    '#research-findings':item.findings,
+    '#research-status':item.status,
+  };
+  for(const [selector,value] of Object.entries(fields))$(selector).value=value||'';
+  $('#research-keyword').value=item.keyword_id||'';
+  $('#research-form').querySelector('[type="submit"]').textContent=t('research.update');
+  $('#research-cancel-edit').hidden=false;
+  $('#research-form-status').textContent='';
+  $('#research-subject').focus();
+  $('#research-form').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function cancelResearchEdit() {
+  state.researchEditId=null;
+  $('#research-form').reset();
+  $('#research-keyword').value='';
+  $('#research-form').querySelector('[type="submit"]').textContent=t('research.save');
+  $('#research-cancel-edit').hidden=true;
+  $('#research-form-status').textContent='';
+}
+
 async function saveResearchRecord(event) {
   event.preventDefault();
   const selected=$('#research-keyword').selectedOptions[0];
@@ -755,9 +820,11 @@ async function saveResearchRecord(event) {
     market_evidence:$('#research-market-evidence').value.trim(),ip_notes:$('#research-ip').value.trim(),
     risk_notes:$('#research-risks').value.trim(),findings:$('#research-findings').value.trim(),status:$('#research-status').value};
   const status=$('#research-form-status');
-  try { await requestJson('/api/v1/research',{method:'POST',body:payload,locale:getLocale()});
-    status.textContent=t('research.saved'); $('#research-hypothesis').value=''; $('#research-competitors').value='';
-    $('#research-market-evidence').value=''; $('#research-ip').value=''; $('#research-risks').value=''; $('#research-findings').value='';
+  const editId=state.researchEditId;
+  if(editId)delete payload.keyword_id;
+  try { await requestJson(editId?'/api/v1/research/'+encodeURIComponent(editId):'/api/v1/research',{method:editId?'PATCH':'POST',body:payload,locale:getLocale()});
+    cancelResearchEdit();
+    status.textContent=t(editId?'research.updated':'research.saved');
     await loadResearchRecords();
   } catch(error) { status.textContent=getErrorMessage(error,'research.save-error'); }
 }
@@ -2166,6 +2233,8 @@ function bindEvents() {
     renderSourceLibrary();
   });
   $('#research-form').addEventListener('submit',saveResearchRecord);
+  $('#research-cancel-edit').addEventListener('click',cancelResearchEdit);
+  $('#settings-schedule-cancel').addEventListener('click',cancelScheduleEdit);
   $('#research-keyword-search').addEventListener('input',()=>{clearTimeout(window.researchSearchTimer);window.researchSearchTimer=setTimeout(()=>loadResearchKeywords($('#research-keyword-search').value.trim()),250);});
   $('#research-keyword').addEventListener('change',event=>{const item=state.researchKeywords.find(value=>(value.keyword_id || value.id)===event.currentTarget.value);if(item&&!$('#research-subject').value.trim())$('#research-subject').value=item.keyword;});
   $('#open-fetch').addEventListener('click', () => {
