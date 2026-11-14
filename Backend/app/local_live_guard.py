@@ -57,7 +57,7 @@ class LocalLiveGuard:
             "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
         }
         run_history_detail = method == "GET" and re.fullmatch(
-            r"/api/v1/runs/history/[a-f0-9]{32}", path
+            r"/api/v1/runs/history/[A-Za-z0-9_-]{1,64}", path
         )
         research_write = (
             (method == "POST" and path == "/api/v1/research")

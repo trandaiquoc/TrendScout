@@ -36,6 +36,8 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
                 "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/sources/library",
                 "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
                 "/api/v1/runs/history/" + "a" * 32,
+                "/api/v1/runs/history/context-classification-preview",
+                "/api/v1/runs/history/organize-7b406cfd-e1c5-46b3-b592-53e5cbb9eaf4",
             ):
                 with self.subTest(method="GET", path=path):
                     response = await client.get(path)
@@ -54,6 +56,8 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
 
             denied = await client.get("/api/v1/internal-admin")
             self.assertEqual(denied.status_code, 404)
+            denied_run_id = await client.get("/api/v1/runs/history/unsafe.id")
+            self.assertEqual(denied_run_id.status_code, 404)
 
 
 if __name__ == "__main__":
