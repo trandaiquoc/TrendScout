@@ -15,8 +15,8 @@ Collection counts show keywords placed directly in a Collection; parent counts i
 ## Frontend structure
 
 - **public/index.html** contains the semantic workspace shell and all ten views.
-- **public/styles.css** owns design tokens, Light/Dark themes, focus styles, and responsive layouts.
-- **public/app.js** composes views, capability state, and interactions.
+- **public/styles.css** supplies the shared foundations; **public/phoenix.css** supplies the rebuilt shell and workspace layouts, Light/Dark presentation, and responsive refinements.
+- **public/app.js** composes shared views and capability state; **public/modules/source-library.js**, **research-workspace.js**, and **run-history.js** own their respective screen interactions and request state.
 - **public/modules/api.js** is the single HTTP boundary. It issues same-origin GET/POST requests with a bounded timeout and validates JSON/HTTP errors. POST requests are never retried automatically.
 - **public/modules/capabilities.js** loads server-owned source and Fetch readiness.
 - **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch and bounded status polling.
