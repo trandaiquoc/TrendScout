@@ -161,7 +161,7 @@ def main():
                 "Page.addScriptToEvaluateOnNewDocument",
                 {
                     "source": """(()=>{const f=window.fetch.bind(window);window.__apiCalls=[];
-                    window.fetch=(u,o={})=>{window.__apiCalls.push({url:String(u),method:o.method||'GET'});return f(u,o)};})();"""
+                    window.fetch=(u,o={})=>{const call={url:String(u),method:o.method||'GET',body:o.body||null};window.__apiCalls.push(call);return f(u,o).then(r=>{call.status=r.status;r.clone().json().then(v=>call.response=v).catch(()=>{});return r})};})();"""
                 },
                 session,
             )
@@ -174,7 +174,7 @@ def main():
                     session,
                 )
                 if "exceptionDetails" in result:
-                    raise RuntimeError("Chrome evaluation failed: " + expression)
+                    raise RuntimeError("Chrome evaluation failed: " + json.dumps(result["exceptionDetails"]))
                 return result["result"].get("value")
 
             expression = r"""(async()=>{
@@ -218,6 +218,35 @@ def main():
               const viExplanation=document.querySelector('#workbench-detail details dl')?.textContent||'';
               check(viExplanation.includes('\u0111o\u00e1n ch\u1ec9 t\u1eeb ti\u00eau \u0111\u1ec1'),'Vietnamese detail says title text was not used as a guess');
               document.querySelector('#workbench-detail button')?.click();await delay(100);
+              document.querySelector('#collection-create').click();
+              let collectionForm=document.querySelector('#workbench-collection-dialog form');
+              collectionForm.elements.namedItem('name').value='Browser workflow collection';
+              collectionForm.elements.namedItem('description').value='Temporary SQLite browser verification';
+              collectionForm.elements.namedItem('auto_match').checked=false;
+              collectionForm.requestSubmit();
+              check(await until(()=>document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection')),'Collection create is persisted and appears in the real workbench');
+              const createdCollection=(await (await fetch('/api/v1/collections')).json()).items.find(item=>item.name==='Browser workflow collection');
+              check(Boolean(createdCollection?.id),'Collection create returns a saved ID from SQLite');
+              const knownRow=[...document.querySelectorAll('#workbench-rows tr')].find(row=>row.textContent.includes('Browser workflow topic'));
+              knownRow.querySelector('input[type="checkbox"]').click();
+              const bulkAction=document.querySelector('#workbench-action');bulkAction.value='ADD';bulkAction.dispatchEvent(new Event('change',{bubbles:true}));
+              const bulkTarget=document.querySelector('#workbench-target');bulkTarget.value=createdCollection.id;
+              document.querySelector('#workbench-bulk button:last-child').click();
+              check(await until(()=>window.__apiCalls.some(x=>x.url==='/api/v1/collections/bulk'&&x.method==='POST')),'Collection bulk assignment calls the real backend');
+              let assigned=[];
+              for(let attempt=0;attempt<60;attempt++){
+                assigned=(await (await fetch('/api/v1/collections/'+encodeURIComponent(createdCollection.id)+'/keywords')).json()).items;
+                if(assigned.some(item=>item.id==='g7-browser-keyword'))break;
+                await delay(40);
+              }
+              check(assigned.some(item=>item.id==='g7-browser-keyword'),'Collection bulk assignment persists the selected keyword: '+JSON.stringify({assigned,action:bulkAction.value,target:bulkTarget.value,checked:knownRow.querySelector('input[type=\"checkbox\"]').checked,calls:window.__apiCalls.filter(x=>x.url.includes('/api/v1/collections/bulk'))}));
+              let collectionNode=[...document.querySelectorAll('[data-collection-node]')].find(node=>node.dataset.collectionId===createdCollection.id);
+              collectionNode.querySelector('.workbench-context-button').click();
+              document.querySelector('.collection-manage-actions button').click();
+              collectionForm=document.querySelector('#workbench-collection-dialog form');
+              collectionForm.elements.namedItem('name').value='Browser workflow collection edited';
+              collectionForm.requestSubmit();
+              check(await until(()=>document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'Collection edit updates the saved UI');
               await go('algorithms');
               check(await until(()=>document.querySelectorAll('#algorithm-catalog .algorithm-card').length>0),'Algorithm catalog loads its registered methods');
               check(Boolean(document.querySelector('#algorithm-evaluation-status').textContent.trim()),'Algorithm evaluation status is shown separately from the catalog');
@@ -250,11 +279,14 @@ def main():
               document.querySelector('[data-locale-toggle]').click();await delay(180);
               check(document.documentElement.lang==='en'&&document.querySelector('#research-heading').textContent.toLowerCase().includes('product research'),'Research page relocalizes to English');
               document.querySelector('[data-locale-toggle]').click();await delay(180);
-              return {ok:errors.length===0,errors,researchId};
+              return {ok:errors.length===0,errors,researchId,collectionId:createdCollection?.id};
             })()""".replace("TOKEN_VALUE", TOKEN)
             first_result = evaluate(expression)
             if not first_result or not first_result.get("ok"):
                 raise RuntimeError("Native Chrome Research workflow failed: " + json.dumps(first_result))
+            with collection_store.connect() as db:
+                expected_history_total = db.execute("SELECT count(*) FROM fetch_jobs").fetchone()[0]
+                expected_partial_history = db.execute("SELECT count(*) FROM fetch_jobs WHERE status='PARTIAL'").fetchone()[0]
 
             browser.call("Page.reload", {"ignoreCache": True}, session)
             for _ in range(150):
@@ -268,6 +300,18 @@ def main():
               const until=async fn=>{for(let n=0;n<150;n++){if(fn())return true;await delay(40)}return false};
               const go=async name=>{const a=document.querySelector('[data-nav="'+name+'"]');a?.click();location.hash='#'+name;window.dispatchEvent(new Event('hashchange'));await delay(250)};
               await until(()=>document.querySelector('#research-records .research-record'));
+              await go('collections');
+              check(await until(()=>document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'edited Collection survives a browser reload');
+              const persistedCollection=(await (await fetch('/api/v1/collections')).json()).items.find(item=>item.id==='COLLECTION_ID');
+              check(persistedCollection?.name==='Browser workflow collection edited'&&persistedCollection?.auto_match===false,'edited Collection settings persist through the real API');
+              const persistedMembership=(await (await fetch('/api/v1/collections/COLLECTION_ID/keywords')).json()).items;
+              check(persistedMembership.some(item=>item.id==='g7-browser-keyword'),'Collection membership survives a browser reload');
+              const persistedNode=[...document.querySelectorAll('[data-collection-node]')].find(node=>node.dataset.collectionId==='COLLECTION_ID');
+              persistedNode.querySelector('.workbench-context-button').click();
+              document.querySelector('.collection-danger-button').click();
+              document.querySelector('#workbench-collection-dialog .button-primary').click();
+              check(await until(()=>!document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'Collection delete removes the saved Collection');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/collections/COLLECTION_ID'&&x.method==='DELETE'),'Collection delete uses the real backend endpoint');
               check(document.querySelectorAll('#research-records .research-record').length===1&&document.querySelector('#research-records').textContent.includes('Browser workflow hypothesis'),'saved Research survives page reload');
               let card=document.querySelector('#research-records .research-record');
               const archive=card.querySelector('select');archive.value='ARCHIVED';archive.dispatchEvent(new Event('change',{bubbles:true}));await delay(180);
@@ -276,14 +320,14 @@ def main():
               check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'Run History loads the first bounded page from SQLite');
               check(!document.querySelector('#run-history-more').hidden,'Run History exposes the next page when saved rows remain');
               document.querySelector('#run-history-more').click();
-              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===25),'Run History cursor loads all saved rows without truncation');
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===HISTORY_TOTAL),'Run History cursor loads every saved row without truncation');
               check(document.querySelector('#run-history-more').hidden,'Run History hides pagination after the last saved row');
               const historyStatus=document.querySelector('#run-history-status');historyStatus.value='PARTIAL';historyStatus.dispatchEvent(new Event('change',{bubbles:true}));
-              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'Run History status filter applies to saved records');
+              check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===Math.min(PARTIAL_HISTORY_TOTAL,20)),'Run History status filter applies to saved records');
               check(!document.querySelector('#run-history').textContent.includes('LOCAL_LEDGER_ONLY'),'local-only limitation hides its internal status code');
               historyStatus.value='';historyStatus.dispatchEvent(new Event('change',{bubbles:true}));
               check(await until(()=>document.querySelectorAll('#run-history tbody tr').length===20),'clearing Run History filter restores the first saved page');
-              document.querySelector('#run-history tbody tr button')?.click();
+              [...document.querySelectorAll('#run-history tbody tr')].find(row=>row.textContent.includes('Wikimedia'))?.querySelector('button')?.click();
               check(await until(()=>!document.querySelector('#run-history-detail').hidden&&document.querySelector('#run-history-detail dl')),'Run History opens details from the real API');
               check(document.querySelector('#run-history-detail').textContent.includes('Wikimedia')&&!document.querySelector('#run-history-detail').textContent.includes('wikimedia_pageviews_top_per_country'),'Run History detail localizes the saved source manifest');
 
@@ -323,6 +367,9 @@ def main():
               check(window.__apiCalls.every(x=>x.url.startsWith('/')&&!x.url.startsWith('/api/v1/fetches')&&!x.url.startsWith('/api/runs')),'workflow uses only same-origin app routes and no Fetch/run endpoint');
               return {ok:errors.length===0,errors,calls:window.__apiCalls,scheduleIds:[...document.querySelectorAll('#settings-schedules .schedule-item')].map(x=>x.textContent.slice(0,90))};
             })()""".replace("TOKEN_VALUE", TOKEN)
+            after_reload = after_reload.replace("COLLECTION_ID", first_result["collectionId"])
+            after_reload = after_reload.replace("PARTIAL_HISTORY_TOTAL", str(expected_partial_history))
+            after_reload = after_reload.replace("HISTORY_TOTAL", str(expected_history_total))
             browser_result = evaluate(after_reload)
             if not browser_result or not browser_result.get("ok"):
                 raise RuntimeError("Native Chrome workflow failed: " + json.dumps(browser_result))
@@ -359,6 +406,13 @@ def main():
                     raise AssertionError("Research status/evidence did not persist in SQLite")
                 if archived["competitor_notes"] != "Competitor notes edited in Chrome":
                     raise AssertionError("Research competitor edit did not persist in SQLite")
+                if any(item["id"] == first_result["collectionId"] for item in collection_store.list_collections()):
+                    raise AssertionError("Deleted browser Collection remained active in SQLite")
+                with collection_store.connect() as db:
+                    if not db.execute("SELECT 1 FROM keywords WHERE id='g7-browser-keyword'").fetchone():
+                        raise AssertionError("Collection deletion removed the saved keyword")
+                    if db.execute("SELECT count(*) FROM memberships WHERE collection_id=?", (first_result["collectionId"],)).fetchone()[0]:
+                        raise AssertionError("Collection deletion left orphaned memberships")
                 schedules = client.get(base_url + "/api/v1/scheduler", headers=origin).json()["items"]
                 created = next((item for item in schedules if item["name"] == "New local schedule"), None)
                 if not created or (created["frequency"], created["timezone"], created["hour"], created["minute"], created["enabled"]) != ("WEEKLY", "Europe/London", 8, 40, False):
@@ -387,7 +441,7 @@ def main():
                     raise AssertionError("Disabled synthetic schedules unexpectedly executed")
 
             print(
-                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; Data Quality empty state; algorithm registry/results; AI runtime settings; Dashboard/Collections counts and unassigned-keyword explanation; Run History cursor/filter/detail; "
+                "Native Chrome -> real FastAPI -> temporary SQLite: Source Center; Data Quality empty state; algorithm registry/results; AI runtime settings; Dashboard/Collections counts and explanation; Collection CRUD/bulk membership persistence; Run History cursor/filter/detail; "
                 "Product Research create/edit/archive/reload; Scheduler disable/create/edit/reload and policy denial: PASS"
             )
         finally:
