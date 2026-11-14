@@ -1123,6 +1123,7 @@ export const vi = {
   'phoenix.keyword-position': '{current} / {total} trên trang này',
   'phoenix.filter-keywords': 'Lọc từ khóa',
   'phoenix.show-results': 'Xem kết quả',
+  'phoenix.resize-collections': 'Điều chỉnh độ rộng cây bộ sưu tập',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

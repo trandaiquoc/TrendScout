@@ -182,6 +182,16 @@ function build() {
   const unassigned = button(labels('workbench.unclassified', 'Not in a Collection'), 'workbench-tree-item'); unassigned.addEventListener('click', () => selectView('', 'unassigned')); unassigned.dataset.virtual = 'unassigned'; tree.append(unassigned);
   const proposals=make('details','','workbench-proposals');proposals.id='workbench-proposals';const proposalSummary=make('summary');proposalSummary.id='workbench-proposals-summary';proposals.append(proposalSummary);const proposalList=make('div','','workbench-proposal-list');proposalList.id='workbench-proposal-list';proposals.append(proposalList);sidebar.append(proposals);
 
+  const divider=button('⋮','workbench-divider');
+  divider.setAttribute('role','separator');divider.setAttribute('aria-orientation','vertical');
+  divider.setAttribute('aria-label',labels('phoenix.resize-collections','Resize the Collection tree'));
+  divider.setAttribute('aria-valuemin','210');divider.setAttribute('aria-valuemax','380');divider.setAttribute('aria-valuenow','270');
+  let treeWidth=270;
+  const setTreeWidth=(value)=>{const maximum=Math.max(210,Math.min(380,layout.getBoundingClientRect().width-360));treeWidth=Math.max(210,Math.min(maximum,Math.round(value)));layout.style.setProperty('--workbench-tree-width',`${treeWidth}px`);divider.setAttribute('aria-valuemax',String(maximum));divider.setAttribute('aria-valuenow',String(treeWidth));};
+  divider.addEventListener('pointerdown',event=>{if(event.button!==0)return;divider.setPointerCapture(event.pointerId);});
+  divider.addEventListener('pointermove',event=>{if(divider.hasPointerCapture(event.pointerId))setTreeWidth(event.clientX-layout.getBoundingClientRect().left);});
+  divider.addEventListener('keydown',event=>{if(!['ArrowLeft','ArrowRight','Home','End','Escape'].includes(event.key))return;event.preventDefault();setTreeWidth(event.key==='Home'?210:event.key==='End'?380:event.key==='Escape'?270:treeWidth+(event.key==='ArrowLeft'?-10:10));});
+
   const main = make('div', '', 'workbench-main');
   const summary = make('div', '', 'workbench-summary'); summary.id = 'workbench-summary'; main.append(summary);
   const context = make('div', '', 'workbench-context');
@@ -261,7 +271,7 @@ function build() {
   const footer = make('div', '', 'table-footer workbench-footer'); const pageInfo = make('span'); pageInfo.id='workbench-page-info'; footer.append(pageInfo);
   const pager=make('div','','pagination'); const prev=button('←'); prev.id='workbench-prev'; prev.setAttribute('aria-label',labels('a11y.previous-page','Previous page')); prev.addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.limit);loadRows();});
   const next=button('→'); next.id='workbench-next'; next.setAttribute('aria-label',labels('a11y.next-page','Next page')); next.addEventListener('click',()=>{state.offset+=state.limit;loadRows();}); pager.append(prev,next); footer.append(pager); tablePanel.append(footer); main.append(tablePanel);
-  layout.append(scrim,sidebar,main); root.append(layout);
+  layout.append(scrim,sidebar,divider,main); root.append(layout);
   const dialog=make('dialog','','collection-dialog workbench-detail'); dialog.id='workbench-detail'; dialog.addEventListener('close',()=>{state.detailSequence+=1;const trigger=state.detailTrigger;state.detailTrigger=null;if(trigger?.isConnected)setTimeout(()=>{if(!dialog.open&&trigger.isConnected)trigger.focus();},0);}); root.append(dialog);
   const formDialog=make('dialog','','collection-dialog'); formDialog.id='workbench-collection-dialog'; root.append(formDialog);
   renderTree();

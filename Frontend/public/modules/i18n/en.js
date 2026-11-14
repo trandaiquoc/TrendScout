@@ -1123,6 +1123,7 @@ export const en = {
   'phoenix.keyword-position': '{current} / {total} on this page',
   'phoenix.filter-keywords': 'Filter keywords',
   'phoenix.show-results': 'Show results',
+  'phoenix.resize-collections': 'Resize the Collection tree',
   'workbench.unclassified': 'Not in a Collection',
   'workbench.state-all': 'All placement methods',
   'workbench.state-mixed': 'Automatic and added by you',
