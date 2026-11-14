@@ -1347,4 +1347,13 @@ export const en = {
   "algorithms.meta.rolling-mean-baseline.v1.runtime_limit": "O(n)",
   "algorithms.meta.theil-sen-slope.v1.runtime_limit": "O(n²), capped at 31 observations.",
   "algorithms.meta.wikimedia-trend.v0.1.runtime_limit": "Linear in observation count.",
+
+  "phoenix.source.wikimedia_pageviews_top_per_country.meaning": "Approximate upper-bound pageviews for listed pages",
+  "phoenix.source.wikimedia_pageviews_top_per_country.scope": "US country-scoped Wikimedia top list",
+  "phoenix.source.youtube_video_search.meaning": "Position in query-scoped YouTube search results",
+  "phoenix.source.youtube_video_search.scope": "US regionCode filter; not author or viewer residence",
+  "phoenix.source.google_web_serp.meaning": "Position in the returned Google SERP sample",
+  "phoenix.source.google_web_serp.scope": "Google gl=us localization filter; not author or viewer residence",
+  "phoenix.source.bing_web_serp.meaning": "Position in the returned Bing SERP sample",
+  "phoenix.source.bing_web_serp.scope": "Bing mkt=en-US localization filter; not author or viewer residence",
 };

@@ -1347,4 +1347,13 @@ export const vi = {
   "algorithms.meta.rolling-mean-baseline.v1.runtime_limit": "O(n)",
   "algorithms.meta.theil-sen-slope.v1.runtime_limit": "O(n²), giới hạn 31 quan sát.",
   "algorithms.meta.wikimedia-trend.v0.1.runtime_limit": "Tuyến tính theo số quan sát.",
+
+  "phoenix.source.wikimedia_pageviews_top_per_country.meaning": "Giới hạn trên xấp xỉ của lượt xem cho các trang có trong danh sách.",
+  "phoenix.source.wikimedia_pageviews_top_per_country.scope": "Danh sách trang Wikimedia hàng đầu được lọc theo quốc gia US.",
+  "phoenix.source.youtube_video_search.meaning": "Vị trí trong kết quả tìm kiếm YouTube của một truy vấn.",
+  "phoenix.source.youtube_video_search.scope": "Bộ lọc regionCode US; không xác định nơi cư trú của tác giả hay người xem.",
+  "phoenix.source.google_web_serp.meaning": "Vị trí trong mẫu kết quả Google Search được trả về.",
+  "phoenix.source.google_web_serp.scope": "Bộ lọc địa phương hóa gl=us; không xác định nơi cư trú của tác giả hay người xem.",
+  "phoenix.source.bing_web_serp.meaning": "Vị trí trong mẫu kết quả Bing Search được trả về.",
+  "phoenix.source.bing_web_serp.scope": "Bộ lọc địa phương hóa mkt=en-US; không xác định nơi cư trú của tác giả hay người xem.",
 };

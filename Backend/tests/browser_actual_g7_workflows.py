@@ -192,6 +192,8 @@ def main():
               await go('sources');
               check(await until(()=>document.querySelectorAll('#source-registry-list .source-card').length>0),'Source Center renders current capability descriptors');
               check(document.querySelectorAll('#source-registry-list .source-card').length===4,'Source Center lists the four configured source descriptors');
+              const youtubeCard=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent==='YouTube');
+              check(Boolean(youtubeCard?.textContent.includes('Vị trí trong kết quả tìm kiếm YouTube')&&youtubeCard.textContent.includes('không xác định nơi cư trú')),'Vietnamese source metadata explains metric and geography without changing the provider scope');
               check([...document.querySelectorAll('#source-registry-list .source-card')].every(card=>card.textContent.includes('Tắt')||card.textContent.includes('Đã tắt')),'Source Center reflects the backend disabled fetch policy');
               check(await until(()=>document.querySelectorAll('#source-library-rows tr').length>0),'Source Center loads the research inventory from the API');
               const youtubeResearch=document.querySelector('#source-library-rows [data-source-id="youtube"]');

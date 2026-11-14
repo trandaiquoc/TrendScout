@@ -1,5 +1,25 @@
 import { getJson } from './api.js';
 
+// Translate only exact known registry text; changed provider metadata remains visible as supplied.
+const SOURCE_TEXT = {
+  "wikimedia_pageviews_top_per_country": {
+    "meaning": "Approximate upper-bound pageviews for listed pages",
+    "scope": "US country-scoped Wikimedia top list"
+  },
+  "youtube_video_search": {
+    "meaning": "Position in query-scoped YouTube search results",
+    "scope": "US regionCode filter; not author or viewer residence"
+  },
+  "google_web_serp": {
+    "meaning": "Position in the returned Google SERP sample",
+    "scope": "Google gl=us localization filter; not author or viewer residence"
+  },
+  "bing_web_serp": {
+    "meaning": "Position in the returned Bing SERP sample",
+    "scope": "Bing mkt=en-US localization filter; not author or viewer residence"
+  }
+};
+
 const STATUS_FIELDS = [
   ['sources.adapter', 'adapter_status'],
   ['sources.configuration', 'configuration_status'],
@@ -39,6 +59,21 @@ function localizedStatus(value, translate) {
   return translate('source.status.' + value.toLowerCase());
 }
 
+function localizedSourceText(descriptor, field, value, translate) {
+  if(!value)return '—';
+  if(SOURCE_TEXT[descriptor.source_id]?.[field]!==value)return value;
+  const key=`phoenix.source.${descriptor.source_id}.${field}`;
+  const translated=translate(key);
+  return translated===key?value:translated;
+}
+
+function localizedMetric(value, kind, translate) {
+  if(!value)return '—';
+  const key=`algorithms.${kind}.${String(value).toLowerCase().replaceAll(' ','_')}`;
+  const translated=translate(key);
+  return translated===key?value:translated;
+}
+
 function savedFetchSummary(activity, translate) {
   if (!activity) return translate('source.fetch-no-saved-data');
   const status = ['SUCCESS', 'PARTIAL', 'FAILED'].includes(activity.status)
@@ -76,7 +111,7 @@ export function renderSourceCapabilities(capabilities, translate) {
       adapterBadge.textContent=localizedStatus(descriptor.adapter_status,translate);
       badges.append(adapterBadge,badge); head.append(icon,badges); card.append(head);
       const title=document.createElement('h2'); title.textContent=descriptor.display_name || descriptor.source_id; card.append(title);
-      const summary=document.createElement('p'); summary.textContent=descriptor.metric?.meaning || ''; card.append(summary);
+      const summary=document.createElement('p'); summary.textContent=localizedSourceText(descriptor,'meaning',descriptor.metric?.meaning,translate); card.append(summary);
       const list=document.createElement('dl'); list.className='detail-list';
       for (const [labelKey,field] of STATUS_FIELDS) {
         const label=document.createElement('dt'); label.textContent=translate(labelKey);
@@ -84,7 +119,7 @@ export function renderSourceCapabilities(capabilities, translate) {
         const row=document.createElement('div'); row.append(label,value); list.append(row);
       }
       const categoryLabel=translate(`sources.category.${descriptor.category}`);
-      for (const [label,value] of [[translate('sources.category'),categoryLabel.startsWith('sources.category.')?descriptor.category:categoryLabel],[translate('sources.metric'),`${descriptor.metric?.name || '—'} (${descriptor.metric?.unit || '—'})`],[translate('sources.scope'),descriptor.market_scope || '—'],[translate('sources.quota'),translate('sources.quota-unknown')]]) {
+      for (const [label,value] of [[translate('sources.category'),categoryLabel.startsWith('sources.category.')?descriptor.category:categoryLabel],[translate('sources.metric'),`${localizedMetric(descriptor.metric?.name,'metric',translate)} (${localizedMetric(descriptor.metric?.unit,'unit',translate)})`],[translate('sources.scope'),localizedSourceText(descriptor,'scope',descriptor.market_scope,translate)],[translate('sources.quota'),translate('sources.quota-unknown')]]) {
         const dt=document.createElement('dt'); dt.textContent=label; const dd=document.createElement('dd'); dd.textContent=value; const row=document.createElement('div'); row.append(dt,dd); list.append(row);
       }
       const details=document.createElement('details'); details.className='source-capability-details';
