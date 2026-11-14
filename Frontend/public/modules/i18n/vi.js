@@ -1107,6 +1107,7 @@ export const vi = {
   'workbench.collections': 'Bộ sưu tập',
   'workbench.collection-tree': 'Cây bộ sưu tập',
   'workbench.all-keywords': 'Tất cả từ khóa',
+  'workbench.results-count': '{count} kết quả',
   'workbench.unclassified': 'Chưa xếp vào Bộ sưu tập',
   'workbench.state-all': 'Mọi cách thêm',
   'workbench.state-mixed': 'Tự động và bạn đã thêm',

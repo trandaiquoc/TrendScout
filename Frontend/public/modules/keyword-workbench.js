@@ -161,7 +161,12 @@ function build() {
   });
   modeLabel.append(mode);
   const reclassify=button(labels('workbench.reclassify','Organize saved keywords again'),'button button-secondary');reclassify.addEventListener('click',async()=>{reclassify.disabled=true;status(labels('workbench.reclassify-running','Organizing from saved evidence…'));try{const job=await requestJson('/api/v1/collections/reclassify',{method:'POST',locale:getLocale()});await refresh();if(job.status==='MODEL_UNAVAILABLE')status(labels('collections.model-unavailable','Keywords could not be organized automatically. Existing data was kept.'),true);else if(job.status==='COMPLETED')status(formatted('workbench.reclassify-complete',{processed:number(job.processed),eligible:number(job.eligible),assigned:number(job.assigned),unassigned:number(job.unassigned)},'Reviewed {processed} of {eligible} keywords; placed {assigned}; left {unassigned} outside Collections.'));else if(job.status==='FAILED')status(labels('workbench.reclassify-failed','Keywords could not be organized. Existing data was kept.'),true);else status(labels('workbench.reclassify-pending','Organization is still running. Check back shortly.'));}catch(error){status(error.message||labels('collections.error','Could not organize keywords'),true);}finally{reclassify.disabled=false;}});
-  toolbar.append(toggle, modeLabel,reclassify);
+  const organization = make('details', '', 'workbench-organization');
+  organization.append(make('summary', labels('collections.mode', 'Automatic classification')));
+  const organizationContent = make('div', '', 'workbench-organization-content');
+  organizationContent.append(modeLabel, reclassify);
+  organization.append(organizationContent);
+  toolbar.append(toggle, organization);
   root.append(toolbar);
   const statusNode = make('p', '', 'notice notice--info'); statusNode.id = 'workbench-status'; statusNode.setAttribute('role', 'status'); statusNode.setAttribute('aria-live', 'polite'); root.append(statusNode);
   const layout = make('div', '', 'workbench-layout');
@@ -177,8 +182,12 @@ function build() {
   const unassigned = button(labels('workbench.unclassified', 'Not in a Collection'), 'workbench-tree-item'); unassigned.addEventListener('click', () => selectView('', 'unassigned')); unassigned.dataset.virtual = 'unassigned'; tree.append(unassigned);
   const proposals=make('details','','workbench-proposals');proposals.id='workbench-proposals';const proposalSummary=make('summary');proposalSummary.id='workbench-proposals-summary';proposals.append(proposalSummary);const proposalList=make('div','','workbench-proposal-list');proposalList.id='workbench-proposal-list';proposals.append(proposalList);sidebar.append(proposals);
 
-  const main = make('main', '', 'workbench-main');
+  const main = make('div', '', 'workbench-main');
   const summary = make('div', '', 'workbench-summary'); summary.id = 'workbench-summary'; main.append(summary);
+  const context = make('div', '', 'workbench-context');
+  const contextTitle = make('h2', '', 'workbench-context-title'); contextTitle.id = 'workbench-context-title';
+  const contextCount = make('span', '', 'workbench-context-count'); contextCount.id = 'workbench-context-count'; contextCount.setAttribute('aria-live', 'polite');
+  context.append(contextTitle, contextCount); main.append(context);
   const filters = make('form', '', 'workbench-filters'); filters.addEventListener('submit', (event) => event.preventDefault());
   const query = make('input'); query.type = 'search'; query.maxLength = 100; query.placeholder = labels('keywords.search-placeholder', 'Search keywords'); query.setAttribute('aria-label', labels('keywords.search-label', 'Search keywords')); query.id = 'workbench-query';
   query.addEventListener('input', debounce(() => { state.query = query.value.trim(); state.offset = 0; changedFilters(); }, 250));
@@ -209,8 +218,12 @@ function build() {
   query.value=state.query;statusSelect.value=state.filterState;classification.value=state.classification;evidence.value=state.evidence;sort.value=state.sort;
   from.value=state.dateFrom;to.value=state.dateTo;
   main.append(filters);
+  const mobilePageLabel = make('label', '', 'workbench-mobile-select');
+  const mobilePageCheck = make('input'); mobilePageCheck.type = 'checkbox'; mobilePageCheck.id = 'workbench-mobile-page-check';
+  mobilePageLabel.append(mobilePageCheck, make('span', labels('dataset.select-page', 'Select page'))); main.append(mobilePageLabel);
   const bulk = make('div', '', 'workbench-bulk'); bulk.id = 'workbench-bulk';
   const pageCheck = make('input'); pageCheck.type = 'checkbox'; pageCheck.id = 'workbench-page-check'; pageCheck.addEventListener('change', () => { if(pageCheck.checked&&state.selected.size+state.rows.filter(item=>!state.selected.has(item.id)).length>500){pageCheck.checked=false;status(labels('workbench.selection-limit','Select at most 500 rows manually, or use Select all matching for larger results.'),true);return;}state.allFiltered = false; for (const item of state.rows) pageCheck.checked ? state.selected.add(item.id) : state.selected.delete(item.id); renderTable(); });
+  mobilePageCheck.addEventListener('change', () => { pageCheck.checked = mobilePageCheck.checked; pageCheck.dispatchEvent(new Event('change')); });
   const pageLabel = make('label', labels('dataset.select-page', 'Select page')); pageLabel.prepend(pageCheck); bulk.append(pageLabel);
   const allButton = button(labels('dataset.select-filtered', 'Select all matching results'), 'text-button'); allButton.addEventListener('click', () => { state.allFiltered = true; state.selected.clear(); renderTable(); }); bulk.append(allButton);
   const clearSelection=button(labels('workbench.clear-selection','Clear selection'),'text-button');clearSelection.addEventListener('click',()=>{state.allFiltered=false;state.selected.clear();renderTable();});bulk.append(clearSelection);
@@ -225,8 +238,13 @@ function build() {
   const tablePanel = make('div', '', 'panel table-panel workbench-table-panel');
   const tableWrap = make('div', '', 'table-wrap workbench-table-wrap');
   const table = make('table', '', 'workbench-table');
-  const head = make('thead'); const header = make('tr'); header.append(make('th',labels('dataset.select-page','Select')));
-  for (const key of ['workbench.keyword','workbench.collection','workbench.source','workbench.metric','table.date','workbench.classification']) header.append(make('th', labels(key, key)));
+  const head = make('thead'); const header = make('tr');
+  const selectionHeading = make('th');
+  const headerCheck = make('input'); headerCheck.type = 'checkbox'; headerCheck.id = 'workbench-header-check';
+  headerCheck.setAttribute('aria-label', labels('dataset.select-page', 'Select page'));
+  headerCheck.addEventListener('change', () => { pageCheck.checked = headerCheck.checked; pageCheck.dispatchEvent(new Event('change')); });
+  selectionHeading.append(headerCheck); header.append(selectionHeading);
+  for (const key of ['workbench.keyword','workbench.collection','workbench.metric','table.date','workbench.classification']) header.append(make('th', labels(key, key)));
   const actionHead = make('th', labels('table.details','Details')); header.append(actionHead); head.append(header); table.append(head);
   const body = make('tbody'); body.id = 'workbench-rows'; table.append(body); tableWrap.append(table); tablePanel.append(tableWrap);
   const empty = make('div', '', 'empty-state'); empty.id = 'workbench-empty'; tablePanel.append(empty);
@@ -258,6 +276,8 @@ function selectView(id, filter) { state.collectionId=id; state.filterState=filte
 function nameOf(item) { const local=t(`topic.${item.category_id}`); return item.category_id&&local!==`topic.${item.category_id}`?local:item.name; }
 function renderTree() {
   const tree=$('#workbench-tree'); if(!tree) return;
+  const contextTitle=$('#workbench-context-title');
+  if(contextTitle) contextTitle.textContent=state.collectionId ? nameOf(state.items.find(item=>item.id===state.collectionId)||{name:labels('workbench.collections','Collections')}) : state.filterState==='unassigned' ? labels('workbench.unclassified','Not in a Collection') : labels('workbench.all-keywords','All keywords');
   const sidebar=tree.closest('.workbench-sidebar');const scrollTop=sidebar?.scrollTop??0;const pageX=window.scrollX,pageY=window.scrollY;const renderSequence=++state.treeRenderSequence;
   const focused=document.activeElement;const focusedRow=focused?.closest?.('[data-collection-node]');const focusId=focusedRow?.dataset.collectionId;const focusClass=focused?.classList.contains('workbench-disclosure')?'workbench-disclosure':focused?.classList.contains('workbench-tree-item')?'workbench-tree-item':focused?.classList.contains('workbench-context-button')?'workbench-context-button':'';
   const search=$('input[type="search"]',tree.parentElement)?.value.trim().toLocaleLowerCase()||'';
@@ -306,14 +326,13 @@ function renderTable(){const body=$('#workbench-rows');if(!body)return;body.repl
   for(const item of state.rows){const row=make('tr');const selection=make('td');selection.dataset.label=labels('dataset.select-page','Select');const check=make('input');check.type='checkbox';check.checked=state.selected.has(item.id);check.setAttribute('aria-label',`${labels('workbench.select','Select')} ${item.keyword}`);check.addEventListener('change',()=>{if(check.checked&&state.selected.size>=500){check.checked=false;status(labels('workbench.selection-limit','Select at most 500 rows manually, or use Select all matching for larger results.'),true);return;}state.allFiltered=false;check.checked?state.selected.add(item.id):state.selected.delete(item.id);renderSelection();});selection.append(check);row.append(selection);
     const title=make('td');title.dataset.label=labels('workbench.keyword','Keyword');title.append(make('strong',item.keyword),make('small',sourceName(item.source)));row.append(title);
     const collection=make('td');collection.dataset.label=labels('workbench.collection','Collection');const assignedTo=(item.memberships||[]).map(m=>nameOf(m)).join(', ');const collectionState=item.classification_status==='INELIGIBLE'?labels(`classification-reason.${item.classification_reason||'SOURCE_EXCLUDED'}`,item.classification_reason||'Not a topic'):labels(item.eligible===0?'dataset.excluded':'workbench.unclassified',item.eligible===0?'Excluded':'Not in a Collection');collection.append(make('span',assignedTo||collectionState));row.append(collection);
-    const source=make('td',sourceName(item.source));source.dataset.label=labels('workbench.source','Source');row.append(source);
     const metric=make('td');metric.dataset.label=labels('workbench.metric','Metric');const evidence=item.evidence&&typeof item.evidence==='object'?item.evidence:{};const evs=Array.isArray(evidence.evidence)?evidence.evidence:[];const measured=evs.find(e=>e.views_ceil!=null||e.approximate_views!=null)||evidence;const metricValue=measured.views_ceil??measured.approximate_views;metric.textContent=metricValue!=null?`${number(metricValue)} ${labels('workbench.views','views')}`:labels('workbench.no-metric','No metric');row.append(metric);
     const observed=make('td',date(item.observed_at));observed.dataset.label=labels('table.date','Observed');row.append(observed);
     const classificationText=item.classification_reason?labels(`classification-reason.${item.classification_reason}`,item.classification_reason):labels(`classification.${item.classification_status||'UNKNOWN'}`,item.classification_status||'Unknown');const classification=make('td',classificationText);classification.dataset.label=labels('workbench.classification','Classification');row.append(classification);
     const details=make('td');details.dataset.label=labels('table.details','Details');const open=button(labels('workbench.details','Open details'),'text-button');open.addEventListener('click',()=>openDetail(item.id,open));details.append(open);row.append(details);body.append(row);}
-  const prev=$('#workbench-prev'),next=$('#workbench-next');prev.disabled=state.total===null||state.offset===0;next.disabled=state.total===null||state.offset+state.rows.length>=state.total;$('#workbench-page-info').textContent=state.total===null?displayCount(null):state.total?`${number(state.offset+1)}–${number(state.offset+state.rows.length)} / ${number(state.total)}`:labels('table.zero-results','No results');$('#workbench-page-check').checked=!!state.rows.length&&state.rows.every(item=>state.selected.has(item.id));$('#workbench-page-check').disabled=state.allFiltered||state.total===null;renderSelection();
+  const prev=$('#workbench-prev'),next=$('#workbench-next');prev.disabled=state.total===null||state.offset===0;next.disabled=state.total===null||state.offset+state.rows.length>=state.total;$('#workbench-page-info').textContent=state.total===null?displayCount(null):state.total?`${number(state.offset+1)}–${number(state.offset+state.rows.length)} / ${number(state.total)}`:labels('table.zero-results','No results');$('#workbench-page-check').checked=!!state.rows.length&&state.rows.every(item=>state.selected.has(item.id));$('#workbench-page-check').disabled=state.allFiltered||state.total===null;const headerCheck=$('#workbench-header-check');headerCheck.checked=$('#workbench-page-check').checked;headerCheck.disabled=$('#workbench-page-check').disabled||!state.rows.length;renderSelection();
 }
-function renderSelection(){const count=state.allFiltered?state.total:state.selected.size;$('#workbench-selection-count').textContent=state.allFiltered?formatted('dataset.all-filtered-selected',{count:number(count)},'All {count} filtered keywords selected'):formatted('dataset.selected',{count:number(count)},'{count} selected');$('#workbench-bulk').classList.toggle('has-selection',count>0);}
+function renderSelection(){const count=state.allFiltered?state.total:state.selected.size;$('#workbench-selection-count').textContent=state.allFiltered?formatted('dataset.all-filtered-selected',{count:number(count)},'All {count} filtered keywords selected'):formatted('dataset.selected',{count:number(count)},'{count} selected');$('#workbench-bulk').classList.toggle('has-selection',count>0);const selectedOnPage=state.rows.filter(item=>state.selected.has(item.id)).length;for(const control of [$('#workbench-page-check'),$('#workbench-header-check'),$('#workbench-mobile-page-check')]){control.checked=state.rows.length>0&&(state.allFiltered||selectedOnPage===state.rows.length);control.indeterminate=!state.allFiltered&&selectedOnPage>0&&selectedOnPage<state.rows.length;control.disabled=state.allFiltered||state.total===null||!state.rows.length;}const contextCount=$('#workbench-context-count');if(contextCount)contextCount.textContent=state.total===null?displayCount(null):formatted('workbench.results-count',{count:number(state.total)},'{count} results');}
 async function runBulk(){const action=$('#workbench-action').value;if(!action||(!state.allFiltered&&!state.selected.size))return;const body={action,keyword_ids:state.allFiltered?[]:[...state.selected],all_filtered:state.allFiltered};if(!['EXCLUDE','RESTORE'].includes(action)){if(!$('#workbench-target').value){status(labels('dataset.choose-collection-error','Choose a Collection first'),true);return;}body.collection_id=$('#workbench-target').value;}if(state.allFiltered){const p=queryParams();body.query=p.get('q');body.state=p.get('state');body.classification=p.get('classification');body.evidence=p.get('evidence');body.source=p.get('source')||'';body.date_from=p.get('date_from');body.date_to=p.get('date_to');body.collection_ids=p.getAll('collection_ids');}if(action==='MOVE'){if(!$('#workbench-source-target').value){status(labels('workbench.choose-source','Choose the source Collection'),true);return;}body.source_collection_id=$('#workbench-source-target').value;}
   try{const result=await requestJson('/api/v1/collections/bulk',{method:'POST',body,locale:getLocale()});state.selected.clear();state.allFiltered=false;status(formatted('collections.bulk-result',{updated:number(result.updated??0)},'{updated} updated'));await refresh();}catch(error){status(error.message||labels('collections.error','Could not apply action'),true);}}
 
