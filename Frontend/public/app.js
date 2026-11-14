@@ -253,6 +253,32 @@ function localizedAlgorithmName(id) {
   return method?.name || t('algorithms.unknown-name');
 }
 
+function localizedAlgorithmMetadata(item, field) {
+  const key=`algorithms.meta.${item.algorithm_id}.${item.version}.${field}`;
+  const translated=t(key);
+  if(translated!==key)return translated;
+  const value=item[field];
+  return Array.isArray(value)?value.join(' '):value || t('common.unavailable');
+}
+
+function localizedAlgorithmMetric(metric) {
+  if(!metric)return t('common.unavailable');
+  const key=`algorithms.metric.${String(metric).toLowerCase().replaceAll(' ','_')}`;
+  const translated=t(key);
+  return translated===key?String(metric).replaceAll('_',' '):translated;
+}
+
+function formatWindowRanges(values) {
+  const sorted=[...new Set((Array.isArray(values)?values:[]).filter(Number.isInteger))].sort((a,b)=>a-b);
+  const ranges=[];
+  for(let i=0;i<sorted.length;i++){
+    const start=sorted[i];let end=start;
+    while(i+1<sorted.length&&sorted[i+1]===end+1)end=sorted[++i];
+    ranges.push(start===end?number(start):`${number(start)}–${number(end)}`);
+  }
+  return ranges.join(', ') || t('common.unavailable');
+}
+
 function localizedSourceName(id) {
   const keys = {
     wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
@@ -1910,7 +1936,7 @@ function renderAlgorithmCatalog() {
   const query = $('#algorithm-search').value.trim().toLocaleLowerCase();
   const methods = all.filter((item) => (!family || item.family === family)
     && ((!source && !status) || item.sources.some((entry) => (!source || entry.source_id === source) && (!status || entry.status === status)))
-    && (!query || `${item.algorithm_id} ${item.name || ''} ${localizedAlgorithmName(item.algorithm_id)} ${item.description || ''}`.toLocaleLowerCase().includes(query)));
+    && (!query || `${item.algorithm_id} ${item.name || ''} ${localizedAlgorithmName(item.algorithm_id)} ${item.description || ''} ${localizedAlgorithmMetadata(item,'description')}`.toLocaleLowerCase().includes(query)));
   $('#algorithm-filter-count').textContent=t('workbench.results-count',{count:number(methods.length)});
   root.replaceChildren();
   if (!methods.length) {
@@ -1929,7 +1955,7 @@ function renderAlgorithmCatalog() {
     const compatible = item.sources.filter((entry) => entry.status !== 'INCOMPATIBLE');
     heading.append(element('span', translatedAlgorithmCode('status', compatible.length ? compatible[0].status : 'INCOMPATIBLE'), 'pill pill--gray'));
     card.append(heading);
-    card.append(element('p', item.description));
+    card.append(element('p', localizedAlgorithmMetadata(item,'description')));
     const counts = (state.algorithmResults?.summary || []).find((entry) => entry.algorithm_id === item.algorithm_id);
     card.append(element('p', counts
       ? t('algorithms.execution-summary', { completed: number(counts.completed), skipped: number(counts.skipped), failed: number(counts.failed) })
@@ -1978,14 +2004,14 @@ function renderAlgorithmCatalog() {
     const detail = element('details', null, 'algorithm-details');
     detail.append(element('summary', t('algorithms.requirements')));
     const list = element('dl', null, 'detail-list');
-    addAlgorithmDetail(list, t('algorithms.input'), `${item.input_metric} (${item.input_unit})`);
-    addAlgorithmDetail(list, t('algorithms.output'), `${item.metric} (${item.unit})`);
+    addAlgorithmDetail(list, t('algorithms.input'), `${localizedAlgorithmMetric(item.input_metric)} (${localizedAlgorithmUnit(item.input_unit)})`);
+    addAlgorithmDetail(list, t('algorithms.output'), `${localizedAlgorithmMetric(item.metric)} (${localizedAlgorithmUnit(item.unit)})`);
     addAlgorithmDetail(list, t('algorithms.minimum-samples'), item.minimum_samples);
-    addAlgorithmDetail(list, t('algorithms.windows'), (item.supported_windows || []).join(', '));
-    addAlgorithmDetail(list, t('algorithms.missing-data'), item.missing_data);
-    addAlgorithmDetail(list, t('algorithms.runtime'), item.runtime_limit);
-    addAlgorithmDetail(list, t('algorithms.interpretation'), item.interpretation || t('algorithms.descriptive-output'));
-    addAlgorithmDetail(list, t('algorithms.limitations'), (item.limitations || []).join(' '));
+    addAlgorithmDetail(list, t('algorithms.windows'), formatWindowRanges(item.supported_windows));
+    addAlgorithmDetail(list, t('algorithms.missing-data'), localizedAlgorithmMetadata(item,'missing_data'));
+    addAlgorithmDetail(list, t('algorithms.runtime'), localizedAlgorithmMetadata(item,'runtime_limit'));
+    addAlgorithmDetail(list, t('algorithms.interpretation'), localizedAlgorithmMetadata(item,'interpretation'));
+    addAlgorithmDetail(list, t('algorithms.limitations'), localizedAlgorithmMetadata(item,'limitations'));
     detail.append(list);
     card.append(detail);
     root.append(card);
@@ -2001,7 +2027,7 @@ function translatedAlgorithmCode(kind, code) {
 
 function localizedAlgorithmUnit(unit) {
   if (!unit) return '';
-  const key = `algorithms.unit.${String(unit).toLowerCase()}`;
+  const key = `algorithms.unit.${String(unit).toLowerCase().replaceAll(' ','_')}`;
   const translated = t(key);
   return translated === key ? String(unit).replaceAll('_', ' ') : translated;
 }

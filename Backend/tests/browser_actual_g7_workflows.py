@@ -264,6 +264,8 @@ def main():
               check(await until(()=>document.querySelector('#workbench-tree').textContent.includes('Browser workflow collection edited')),'Collection edit updates the saved UI');
               await go('algorithms');
               check(await until(()=>document.querySelectorAll('#algorithm-catalog .algorithm-card').length>0),'Algorithm catalog loads its registered methods');
+              const ewmaCard=[...document.querySelectorAll('#algorithm-catalog .algorithm-card')].find(card=>card.querySelector('h2')?.textContent.includes('trung bình có trọng số gần đây'));
+              check(Boolean(ewmaCard?.textContent.includes('Cần lịch sử hằng ngày đầy đủ')&&ewmaCard.textContent.includes('7–90')),'Vietnamese method details translate requirements and compress a contiguous supported window');
               check(Boolean(document.querySelector('#algorithm-evaluation-status').textContent.trim()),'Algorithm evaluation status is shown separately from the catalog');
               check(!document.querySelector('#algorithm-catalog').textContent.includes('INSUFFICIENT_DATA'),'Algorithm catalog does not expose raw evaluation status codes');
               check(window.__apiCalls.some(x=>x.url==='/api/v1/algorithms')&&window.__apiCalls.some(x=>x.url==='/api/v1/algorithms/results'),'Algorithm catalog and results use actual backend endpoints');
