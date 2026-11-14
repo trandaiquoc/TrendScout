@@ -1053,6 +1053,12 @@ dialog::backdrop { background: rgb(12 20 34 / 58%); backdrop-filter: blur(3px); 
 .source-library-search { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:10px; color:var(--muted); font-size:11px; }
 .source-library-search input { flex:1 1 220px; min-width:0; }
 .source-library-content .table-wrap { margin:0; }
+.source-candidate-details { min-width:180px; }
+.source-candidate-details > summary { color:var(--accent); cursor:pointer; font-weight:650; }
+.source-candidate-details > p { max-width:560px; margin:8px 0 0; white-space:normal; }
+.source-candidate-details .fine-print { color:var(--muted); }
+.source-reference-note a,.source-reference-links a { color:var(--accent); text-underline-offset:2px; }
+.source-reference-links { display:grid; gap:4px; margin:8px 0 0; padding-left:18px; }
 .run-history-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; }
 .run-history-controls label { color:var(--muted); font-size:11px; }
 .run-history-controls input { flex:1 1 220px; }

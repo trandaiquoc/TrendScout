@@ -27,7 +27,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "R; [Data API](https://developers.google.com/youtube/v3/docs/search/list); D3B synthetic."
+      "source_reference": "R; [Data API](https://developers.google.com/youtube/v3/docs/search/list); D3B synthetic.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Search.list returns query results, not audience size. Its default project limit is 100 calls per day; this account's actual quota and TrendScout approval remain unverified.",
+      "revalidation_links": [
+        {
+          "label": "Search: list",
+          "url": "https://developers.google.com/youtube/v3/docs/search/list"
+        },
+        {
+          "label": "Quota calculator",
+          "url": "https://developers.google.com/youtube/data/determine_quota_cost"
+        }
+      ],
+      "revalidation_note_key": "sources.review.youtube"
     },
     {
       "source_id": "tiktok",
@@ -531,7 +544,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [API alpha](https://developers.google.com/search/apis/trends) giới hạn tester, không mặc định được cấp. Interest không là sales."
+      "source_reference": "G; [API alpha](https://developers.google.com/search/apis/trends) giới hạn tester, không mặc định được cấp. Interest không là sales.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "The API remains an alpha for a limited set of testers. Google documents a rolling five-year window and daily, weekly, monthly, and yearly intervals; TrendScout access is not approved or verified.",
+      "revalidation_links": [
+        {
+          "label": "Google Trends API alpha",
+          "url": "https://developers.google.com/search/apis/trends"
+        }
+      ],
+      "revalidation_note_key": "sources.review.google_trends"
     },
     {
       "source_id": "gdelt",
@@ -567,7 +589,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "R; [AQS](https://wikitech.wikimedia.org/wiki/Analytics/AQS/Pageviews); pageviews không là unique audience hay intent."
+      "source_reference": "R; [AQS](https://wikitech.wikimedia.org/wiki/Analytics/AQS/Pageviews); pageviews không là unique audience hay intent.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "Wikimedia AQS provides aggregate project metrics. This source measures page views, not unique people or demand; the current adapter remains limited to its censored top list.",
+      "revalidation_links": [
+        {
+          "label": "Wikimedia Analytics Query Service",
+          "url": "https://wikitech.wikimedia.org/wiki/Data_Platform/AQS"
+        },
+        {
+          "label": "Pageviews API documentation",
+          "url": "https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/"
+        }
+      ],
+      "revalidation_note_key": "sources.review.wikimedia_pageviews"
     },
     {
       "source_id": "google_serp",
@@ -576,7 +611,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "R; [SerpApi Google](https://serpapi.com/search-api), shared account với Bing; rank không là volume."
+      "source_reference": "R; [SerpApi Google](https://serpapi.com/search-api), shared account với Bing; rank không là volume.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "This candidate shares the SerpApi provider with Bing. Pricing and search limits vary by plan; check current terms before any purchase. Account quota, usage rights, and approval are unverified.",
+      "revalidation_links": [
+        {
+          "label": "Google Search API",
+          "url": "https://serpapi.com/search-api"
+        },
+        {
+          "label": "Current pricing",
+          "url": "https://serpapi.com/pricing"
+        }
+      ],
+      "revalidation_note_key": "sources.review.google_serp"
     },
     {
       "source_id": "bing_serp",
@@ -585,7 +633,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "R; [SerpApi Bing](https://serpapi.com/bing-search-api); không dùng API Bing Search cũ của Microsoft."
+      "source_reference": "R; [SerpApi Bing](https://serpapi.com/bing-search-api); không dùng API Bing Search cũ của Microsoft.",
+      "revalidated_on": "2026-11-14",
+      "revalidation_note": "This candidate shares the SerpApi provider with Google. Pricing and search limits vary by plan; check current terms before any purchase. Account quota, usage rights, and approval are unverified.",
+      "revalidation_links": [
+        {
+          "label": "Bing Search API",
+          "url": "https://serpapi.com/bing-search-api"
+        },
+        {
+          "label": "Current pricing",
+          "url": "https://serpapi.com/pricing"
+        }
+      ],
+      "revalidation_note_key": "sources.review.bing_serp"
     },
     {
       "source_id": "newsapi",

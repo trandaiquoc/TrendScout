@@ -86,6 +86,25 @@ class SourceCatalogTests(unittest.TestCase):
                 self.assertTrue(item.metric_name)
                 self.assertTrue(item.metric_unit)
 
+    def test_focused_official_rechecks_keep_candidates_locked(self):
+        path = Path(__file__).resolve().parents[1] / "app" / "sources" / "research_catalog.json"
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+        reviewed = {item["source_id"]: item for item in catalog["items"]
+                    if item.get("revalidated_on") == "2026-11-14"}
+        self.assertEqual(set(reviewed), {
+            "youtube", "google_trends", "wikimedia_pageviews", "google_serp", "bing_serp",
+        })
+        for source_id, item in reviewed.items():
+            with self.subTest(source_id=source_id):
+                self.assertFalse(item["runtime_adapter"])
+                self.assertEqual(item["research_status"], "LOCKED_RESEARCH_CANDIDATE")
+                self.assertEqual(item["approval_status"], "NOT_APPROVED")
+                self.assertTrue(item["revalidation_note"])
+                self.assertIn("sources.review.", item["revalidation_note_key"])
+                self.assertTrue(item["revalidation_links"])
+                self.assertTrue(all(link["url"].startswith("https://")
+                                    for link in item["revalidation_links"]))
+
     def test_endpoint_and_credential_references_are_not_secrets(self):
         self.assertEqual(
             source_capability(WIKIMEDIA_SOURCE_ID).endpoint,

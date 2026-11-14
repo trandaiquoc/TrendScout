@@ -901,12 +901,59 @@ async function saveResearchRecord(event) {
 
 function renderSourceLibrary() {
   const body=$('#source-library-rows'); if (!body) return;
+  const expanded=new Set([...body.querySelectorAll('tr[data-source-id]')]
+    .filter(row=>row.querySelector('details')?.open).map(row=>row.dataset.sourceId));
   const query=($('#source-library-search')?.value || '').trim().toLocaleLowerCase();
   const items=state.sourceLibrary.filter(item=>`${item.source_id} ${item.display_name} ${item.category}`.toLocaleLowerCase().includes(query));
   body.replaceChildren();
   for (const item of items) {
     const row=element('tr');
-    [item.display_name || item.source_id,item.category,t('sources.candidate-locked'),t('sources.candidate-not-integrated')].forEach(value=>row.append(element('td',value)));
+    row.dataset.sourceId=item.source_id || '';
+    const candidate=element('td');candidate.append(element('strong',item.display_name || t('sources.candidate-unnamed')));row.append(candidate);
+    const group=item.category?.match(/^([A-E])\./)?.[1];
+    row.append(element('td',group?t(`sources.group.${group}`):item.category));
+    row.append(element('td',t('sources.candidate-locked')));
+    const availability=element('td');availability.append(element('span',t('sources.candidate-not-integrated')));
+    const reference=typeof item.source_reference==='string'?item.source_reference.trim().replace(/^[A-Z];\s*/,''):'';
+    const noteKey=typeof item.revalidation_note_key==='string'?item.revalidation_note_key:'';
+    const translatedNote=noteKey?t(noteKey):'';
+    const reviewNote=translatedNote&&translatedNote!==noteKey?translatedNote:(typeof item.revalidation_note==='string'?item.revalidation_note.trim():'');
+    const references=Array.isArray(item.revalidation_links)?item.revalidation_links:[];
+    const referenceUrls=new Set();
+    if(reference||reviewNote||references.length){
+      const details=element('details','','source-candidate-details');
+      details.open=expanded.has(item.source_id);
+      const summary=element('summary',t('sources.candidate-details'));
+      details.append(summary);
+      if(item.revalidated_on)details.append(element('p',t('sources.revalidated-on',{date:item.revalidated_on}),'fine-print'));
+      if(reviewNote)details.append(element('p',reviewNote));
+      if(reference){
+        const note=element('p','','source-reference-note');
+        const matcher=/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g;
+        let offset=0,match;
+        while((match=matcher.exec(reference))){
+          note.append(document.createTextNode(reference.slice(offset,match.index).replace(/\bD\d[A-Z]\s+synthetic\.?/gi,t('sources.synthetic-fixture'))));
+          try{
+            const url=new URL(match[2]);
+            if(url.protocol==='https:'&&!url.username&&!url.password){referenceUrls.add(url.href);const link=element('a',match[1]);link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';note.append(link);}
+            else note.append(document.createTextNode(match[0]));
+          }catch{note.append(document.createTextNode(match[0]));}
+          offset=matcher.lastIndex;
+        }
+        note.append(document.createTextNode(reference.slice(offset).replace(/\bD\d[A-Z]\s+synthetic\.?/gi,t('sources.synthetic-fixture'))));
+        details.append(note);
+      }
+      if(references.length){
+        const links=element('ul','','source-reference-links');
+        for(const itemLink of references){
+          if(typeof itemLink?.label!=='string'||typeof itemLink?.url!=='string')continue;
+          try{const url=new URL(itemLink.url);if(url.protocol!=='https:'||url.username||url.password||referenceUrls?.has(url.href))continue;const link=element('a',itemLink.label);link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';const entry=element('li');entry.append(link);links.append(entry);}catch{}
+        }
+        if(links.childElementCount)details.append(links);
+      }
+      availability.append(details);
+    }
+    row.append(availability);
     body.append(row);
   }
   if (!items.length) { const row=element('tr'); row.append(element('td',t('sources.no-candidates'))); body.append(row); }
