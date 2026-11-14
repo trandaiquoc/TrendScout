@@ -9,7 +9,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Meta developers](https://developers.facebook.com/). Group bị hạn chế không mặc định truy cập."
+      "source_reference": "G; [Meta developers](https://developers.facebook.com/). Group bị hạn chế không mặc định truy cập.",
+      "revalidation_note": "Meta Content Library exposes selected public content through a researcher product; ordinary Graph API access is permission and app-review controlled. This does not establish a general public trend feed or TrendScout access.",
+      "revalidation_note_key": "sources.review.facebook",
+      "revalidation_links": [
+        {
+          "label": "Meta Content Library scope",
+          "url": "https://developers.facebook.com/docs/content-library-and-api/content-library"
+        },
+        {
+          "label": "Meta app permissions and review",
+          "url": "https://developers.facebook.com/docs/graph-api/webhooks/"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "instagram",
@@ -18,7 +31,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Instagram platform](https://developers.facebook.com/docs/instagram-platform/); scopes/use case cần duyệt."
+      "source_reference": "G; [Instagram platform](https://developers.facebook.com/docs/instagram-platform/); scopes/use case cần duyệt.",
+      "revalidation_note": "The Instagram Media endpoint returns media owned by Instagram professional accounts. Meta Content Library provides a defined public-content subset for approved researchers; this is not general public discovery. TrendScout access is unverified.",
+      "revalidation_note_key": "sources.review.instagram",
+      "revalidation_links": [
+        {
+          "label": "Instagram Media endpoint requirements",
+          "url": "https://developers.facebook.com/docs/instagram-platform/reference/instagram-media/v21.0/"
+        },
+        {
+          "label": "Meta Content Library scope",
+          "url": "https://developers.facebook.com/docs/content-library-and-api/content-library"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "youtube",
@@ -49,7 +75,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Research Tools](https://developers.tiktok.com/products/research-api/) yêu cầu điều kiện phi thương mại; [Commercial Content API](https://developers.tiktok.com/products/commercial-content-api) nêu phạm vi EU, chưa xác nhận phù hợp US."
+      "source_reference": "G; [Research Tools](https://developers.tiktok.com/products/research-api/) yêu cầu điều kiện phi thương mại; [Commercial Content API](https://developers.tiktok.com/products/commercial-content-api) nêu phạm vi EU, chưa xác nhận phù hợp US.",
+      "revalidation_note": "Research Tools require an eligible, approved public-interest research project and non-commercial research. They do not establish access for a commercial TrendScout product; no TrendScout approval or credentials are verified.",
+      "revalidation_note_key": "sources.review.tiktok",
+      "revalidation_links": [
+        {
+          "label": "Research Tools eligibility",
+          "url": "https://developers.tiktok.com/products/research-api/"
+        },
+        {
+          "label": "Research API FAQ and quota",
+          "url": "https://developers.tiktok.com/docs/en/research-api-faq"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "x",
@@ -76,7 +115,16 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [Data API terms](https://redditinc.com/policies/data-api-terms): thương mại cần thỏa thuận riêng; nội dung/retention có hạn chế."
+      "source_reference": "G; [Data API terms](https://redditinc.com/policies/data-api-terms): thương mại cần thỏa thuận riêng; nội dung/retention có hạn chế.",
+      "revalidation_note": "Reddit requires a separate agreement for commercial Data API use or use beyond the expressly permitted terms. API credentials, rate limits, content retention/removal rules, and TrendScout approval remain unverified.",
+      "revalidation_note_key": "sources.review.reddit",
+      "revalidation_links": [
+        {
+          "label": "Reddit Data API Terms",
+          "url": "https://redditinc.com/policies/data-api-terms"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "snapchat",
@@ -94,7 +142,20 @@
       "research_status": "LOCKED_RESEARCH_CANDIDATE",
       "runtime_adapter": false,
       "approval_status": "NOT_APPROVED",
-      "source_reference": "G; [terms](https://developers.pinterest.com/terms/) hạn chế lưu và platform insights nếu thiếu quyền; [rate limits](https://developers.pinterest.com/docs/reference/rate-limits/) theo tier."
+      "source_reference": "G; [terms](https://developers.pinterest.com/terms/) hạn chế lưu và platform insights nếu thiếu quyền; [rate limits](https://developers.pinterest.com/docs/reference/rate-limits/) theo tier.",
+      "revalidation_note": "Pinterest documents a trends_read rate-limit category for trending keyword information. API use requires an approved app; Trial and Standard tiers have different limits. This does not establish TrendScout access or measure overall US demand.",
+      "revalidation_note_key": "sources.review.pinterest",
+      "revalidation_links": [
+        {
+          "label": "Pinterest API rate limits",
+          "url": "https://developers.pinterest.com/docs/reference/rate-limits/"
+        },
+        {
+          "label": "Trial and Standard access tiers",
+          "url": "https://developers.pinterest.com/docs/key-concepts/access-tiers/"
+        }
+      ],
+      "revalidated_on": "2026-11-14"
     },
     {
       "source_id": "linkedin",

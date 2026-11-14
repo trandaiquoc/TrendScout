@@ -93,6 +93,7 @@ class SourceCatalogTests(unittest.TestCase):
                     if item.get("revalidated_on") == "2026-11-14"}
         self.assertEqual(set(reviewed), {
             "youtube", "google_trends", "wikimedia_pageviews", "google_serp", "bing_serp",
+            "facebook", "instagram", "tiktok", "reddit", "pinterest",
         })
         for source_id, item in reviewed.items():
             with self.subTest(source_id=source_id):
