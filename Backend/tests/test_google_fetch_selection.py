@@ -63,6 +63,17 @@ class _OfflineApprovals:
 
 
 class GoogleFetchSourceSelectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_windows_launcher_stays_on_wikimedia_profile(self):
+        launcher = Path(__file__).resolve().parents[2] / "start.ps1"
+        script = launcher.read_text(encoding="utf-8")
+
+        google_branch = script.index("if ($GoogleLive)")
+        cloud_branch = script.index("} elseif ($Cloud) {", google_branch)
+        default_branch = script.index("} else {", cloud_branch)
+        self.assertIn("scripts.run_google_live_local", script[google_branch:cloud_branch])
+        self.assertIn("scripts.run_wikimedia_live_local", script[default_branch:])
+        self.assertIn("[switch]$GoogleLive", script)
+
     async def _fetch(self, source_ids):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

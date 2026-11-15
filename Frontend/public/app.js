@@ -1186,7 +1186,10 @@ function updatePublicDiscoverySummary(discovery, sources) {
   const lastFetch = state.publicFetchFinishedAt || fetchedAt;
   $('#metric-last-fetch').textContent = lastFetch ? compactTimestamp(lastFetch) : '—';
   $('#metric-last-fetch-note').textContent = lastFetch ? t('metric.last-fetch-context') : t('metric.fetch-to-begin');
-  const context = [t('chart.scope'), 'LIVE', delivery, observedDate ? date(observedDate) : '—',
+  const dataMode = discovery.data_mode === 'LIVE' ? t('fetch.live-label')
+    : discovery.data_mode === 'SYNTHETIC' ? t('fetch.synthetic-label')
+      : discovery.data_mode || t('common.unavailable');
+  const context = [t('chart.scope'), dataMode, delivery, observedDate ? date(observedDate) : '—',
     fetchedAt ? t('overview.context-source-fetched', { value: timestamp(fetchedAt) }) : '—'].join(' · ');
   $('#overview-context').replaceChildren(element('span', '◉', 'meta-mark'), element('span', context));
 
