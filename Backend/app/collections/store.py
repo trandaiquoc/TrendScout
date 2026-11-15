@@ -155,10 +155,13 @@ def fingerprint(value: str) -> str:
 
 
 class CollectionStore:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, data_mode_scope: str | None = None):
+        if data_mode_scope not in {None, "LIVE"}:
+            raise ValueError("unsupported Collections data mode scope")
         path = Path(path)
         secure_private_directory(path.parent)
         self.path = path
+        self.data_mode_scope = data_mode_scope
         with self.connect() as db:
             db.executescript(SCHEMA)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(suppression)")}
@@ -219,7 +222,7 @@ class CollectionStore:
             directory = Path(app_data) / "TrendScout" / "collections-v1"
         else:
             directory = state_dir or Path.home() / ".local/state/trendscout/collections-v1"
-        return cls(Path(directory) / "collections.sqlite")
+        return cls(Path(directory) / "collections.sqlite", data_mode_scope="LIVE")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10, factory=ClosingConnection)
@@ -230,25 +233,43 @@ class CollectionStore:
 
     def latest_dataset(self):
         """Return durable local dataset metadata, with an honest legacy fallback."""
+        mode = self.data_mode_scope
+        mode_parameters = (mode,) if mode else ()
         with self.connect() as db:
-            row = db.execute("SELECT * FROM dataset_snapshots ORDER BY created_at DESC LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM dataset_snapshots "
+                + ("WHERE data_mode=? " if mode else "")
+                + "ORDER BY created_at DESC LIMIT 1", mode_parameters).fetchone()
+            keyword_filter = " WHERE data_mode=?" if mode else ""
             total, eligible, excluded = db.execute("""SELECT count(*),
-                sum(eligible=1),sum(eligible=0) FROM keywords""").fetchone()
-            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
-            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1
+                sum(k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE'),
+                sum((k.eligible=0 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE') OR
+                    EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED'))
+                FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id"""
+                + (" WHERE k.data_mode=?" if mode else ""),
+                mode_parameters).fetchone()
+            assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' """
+                + ("AND k.data_mode=?" if mode else ""), mode_parameters).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1 """
+                + ("AND k.data_mode=? " if mode else "") + """
                 AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
                 AND NOT EXISTS
-                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
+                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""",
+                mode_parameters).fetchone()[0]
             if row is None:
-                legacy = db.execute("""SELECT * FROM fetch_jobs WHERE status IN ('COMPLETED','MODEL_UNAVAILABLE')
+                legacy = None if mode else db.execute("""SELECT * FROM fetch_jobs WHERE status IN ('COMPLETED','MODEL_UNAVAILABLE')
                     ORDER BY updated_at DESC LIMIT 1""").fetchone()
                 if legacy is None and not total:
                     return None
-                sources = [item[0] for item in db.execute("SELECT DISTINCT source FROM keywords ORDER BY source")]
-                modes = [item[0] for item in db.execute("SELECT DISTINCT data_mode FROM keywords ORDER BY data_mode")]
+                sources = [item[0] for item in db.execute("SELECT DISTINCT source FROM keywords" + keyword_filter
+                    + " ORDER BY source", mode_parameters)]
+                modes = [item[0] for item in db.execute("SELECT DISTINCT data_mode FROM keywords" + keyword_filter
+                    + " ORDER BY data_mode", mode_parameters)]
                 fetched = None
                 dates = []
-                for evidence, observed in db.execute("SELECT evidence,observed_at FROM keywords"):
+                for evidence, observed in db.execute("SELECT evidence,observed_at FROM keywords" + keyword_filter,
+                                                      mode_parameters):
                     try:
                         metadata = json.loads(evidence)
                         fetched = max(fetched or '', metadata.get('fetched_at') or '') or None
@@ -289,6 +310,9 @@ class CollectionStore:
                         keyword_id=None):
         normalized = " ".join(query.casefold().split())
         clauses, parameters = [], []
+        if self.data_mode_scope:
+            clauses.append("k.data_mode=?")
+            parameters.append(self.data_mode_scope)
         if normalized:
             escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
             clauses.append("k.normalized LIKE ? ESCAPE '!'")
@@ -300,15 +324,18 @@ class CollectionStore:
             clauses.append("k.id=?")
             parameters.append(keyword_id)
         if state == "excluded":
-            clauses.append("k.eligible=0")
+            clauses.append("k.eligible=0 AND (COALESCE(cr.classification_status,'')<>'INELIGIBLE' OR "
+                "EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED'))")
+        elif state == "non_topic":
+            clauses.append("cr.classification_status='INELIGIBLE'")
         elif state == "unassigned":
             clauses.append("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)")
         elif state == "ai":
-            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')")
+            clauses.append("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')")
         elif state == "manual":
-            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
+            clauses.append("EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
         elif state == "mixed":
-            clauses.append("k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI') AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
+            clauses.append("COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI') AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')")
         elif state == "needs_review":
             clauses.append("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' AND (NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id) OR EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI'))")
         elif state != "all":
@@ -405,6 +432,13 @@ class CollectionStore:
                     item["classified_subcategory_ids"] = []
                     item["classification_rule_evidence"] = []
                     item["classification_source_evidence"] = {}
+                if item.get("classification_status") == "INELIGIBLE":
+                    item["eligible"] = 0
+                    item["topic_eligible"] = False
+                    if not item.get("rejection_reason"):
+                        item["rejection_reason"] = "CLASSIFICATION_INELIGIBLE"
+                else:
+                    item["topic_eligible"] = bool(item.get("eligible"))
                 item["algorithm_results"] = [dict(result) for result in db.execute(
                     "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
                     (item["id"],))]
@@ -414,24 +448,48 @@ class CollectionStore:
 
     def workbench_summary(self):
         """Return unique-keyword status counts and the latest persisted AI job."""
+        scoped = self.data_mode_scope == "LIVE"
+        keyword_scope = " AND k.data_mode=?" if scoped else ""
+        mode_parameters = ("LIVE",) if scoped else ()
         with self.connect() as db:
+            topic_status = "COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'"
             totals = db.execute("""SELECT count(*) AS stored,
-                sum(k.eligible=1) AS eligible, sum(k.eligible=0) AS excluded,
-                sum(k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS unclassified,
-                sum(k.eligible=1 AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS assigned
-                FROM keywords k""").fetchone()
+                sum(k.eligible=1 AND """ + topic_status + ") AS eligible, "
+                "sum((k.eligible=0 AND " + topic_status + ") OR EXISTS(SELECT 1 FROM keyword_decisions kd "
+                "WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')) AS excluded, "
+                "sum(k.eligible=1 AND " + topic_status + " AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS unclassified, "
+                "sum(k.eligible=1 AND " + topic_status + " AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) AS assigned "
+                "FROM keywords k WHERE 1=1" + keyword_scope, mode_parameters).fetchone()
             statuses = {row["classification_status"]: row["total"] for row in db.execute("""SELECT cr.classification_status,
                 count(DISTINCT cr.keyword_id) AS total FROM classification_results cr
-                JOIN keywords k ON k.id=cr.keyword_id WHERE k.eligible=1 GROUP BY cr.classification_status""")}
+                JOIN keywords k ON k.id=cr.keyword_id WHERE (k.eligible=1 OR cr.classification_status='INELIGIBLE')
+                AND NOT EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')"""
+                + keyword_scope + " GROUP BY cr.classification_status",
+                mode_parameters)}
             assignment = {row["origin"]: row["total"] for row in db.execute("""SELECT m.origin,
                 count(DISTINCT m.keyword_id) AS total FROM memberships m JOIN keywords k ON k.id=m.keyword_id
-                WHERE k.eligible=1 GROUP BY m.origin""")}
-            mixed = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1
-                AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI')
-                AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')""").fetchone()[0]
-            ai_created = db.execute("SELECT count(*) FROM collections WHERE status='ACTIVE' AND created_by='AI' AND category_id IS NULL").fetchone()[0]
-            sources = [row[0] for row in db.execute("SELECT DISTINCT source FROM keywords ORDER BY source")]
-            latest_job = db.execute("SELECT fetch_id,status,stage,available,eligible,processed,assigned,unassigned,created_collections,suggestions,skipped,error_code,updated_at FROM fetch_jobs ORDER BY updated_at DESC LIMIT 1").fetchone()
+                WHERE (m.origin='USER' OR """ + topic_status + ")" + keyword_scope + " GROUP BY m.origin", mode_parameters)}
+            mixed_sql = ("SELECT count(*) FROM keywords k WHERE " + topic_status + " AND k.eligible=1 "
+                "AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='LOCAL_AI') "
+                "AND EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id AND m.origin='USER')"
+                + keyword_scope)
+            mixed = db.execute(mixed_sql, mode_parameters).fetchone()[0]
+            if scoped:
+                ai_created = db.execute("""SELECT count(DISTINCT c.id) FROM collections c
+                    LEFT JOIN memberships m ON m.collection_id=c.id
+                    LEFT JOIN keywords k ON k.id=m.keyword_id AND k.data_mode='LIVE'
+                    WHERE c.status='ACTIVE' AND c.created_by='AI' AND c.category_id IS NULL
+                    AND k.id IS NOT NULL""").fetchone()[0]
+                sources = [row[0] for row in db.execute(
+                    "SELECT DISTINCT source FROM keywords WHERE data_mode='LIVE' ORDER BY source")]
+                latest_job = db.execute("""SELECT f.fetch_id,f.status,f.stage,f.available,f.eligible,f.processed,
+                    f.assigned,f.unassigned,f.created_collections,f.suggestions,f.skipped,f.error_code,f.updated_at
+                    FROM fetch_jobs f JOIN dataset_snapshots d ON d.dataset_id=f.fetch_id
+                    WHERE d.data_mode='LIVE' ORDER BY f.updated_at DESC LIMIT 1""").fetchone()
+            else:
+                ai_created = db.execute("SELECT count(*) FROM collections WHERE status='ACTIVE' AND created_by='AI' AND category_id IS NULL").fetchone()[0]
+                sources = [row[0] for row in db.execute("SELECT DISTINCT source FROM keywords ORDER BY source")]
+                latest_job = db.execute("SELECT fetch_id,status,stage,available,eligible,processed,assigned,unassigned,created_collections,suggestions,skipped,error_code,updated_at FROM fetch_jobs ORDER BY updated_at DESC LIMIT 1").fetchone()
             return {
                 "stored_keywords": totals["stored"] or 0,
                 "eligible_keywords": totals["eligible"] or 0,
@@ -452,16 +510,26 @@ class CollectionStore:
 
     def list_collections(self):
         with self.connect() as db:
-            rows = db.execute("""SELECT c.*, count(m.keyword_id) AS membership_count
+            member_scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+            mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+            rows = db.execute("""SELECT c.*, count(k.id) AS membership_count
                 FROM collections c LEFT JOIN memberships m ON m.collection_id=c.id
-                WHERE c.status='ACTIVE' GROUP BY c.id ORDER BY c.updated_at DESC""").fetchall()
+                LEFT JOIN keywords k ON k.id=m.keyword_id""" + member_scope + """
+                WHERE c.status='ACTIVE'"""
+                + (" AND (c.created_by<>'AI' OR c.category_id IS NOT NULL OR EXISTS ("
+                   "SELECT 1 FROM memberships lm JOIN keywords lk ON lk.id=lm.keyword_id "
+                   "WHERE lm.collection_id=c.id AND lk.data_mode=?))" if self.data_mode_scope else "")
+                + " GROUP BY c.id ORDER BY c.updated_at DESC",
+                (*mode_parameters, self.data_mode_scope) if self.data_mode_scope else ()).fetchall()
             items = [self._collection(row) for row in rows]
             by_id = {item["id"]: item for item in items}
             for item in items:
                 item["direct_membership_count"] = item["membership_count"]
                 item["subtree_unique_keyword_count"] = 0
             membership_ids = {item["id"]: set() for item in items}
-            for row in db.execute("SELECT collection_id,keyword_id FROM memberships"):
+            for row in db.execute("SELECT m.collection_id,m.keyword_id FROM memberships m "
+                                  "JOIN keywords k ON k.id=m.keyword_id "
+                                  + ("WHERE k.data_mode=?" if self.data_mode_scope else ""), mode_parameters):
                 if row["collection_id"] in membership_ids:
                     membership_ids[row["collection_id"]].add(row["keyword_id"])
             for item in sorted(items, key=lambda row: self._collection_depth(row, by_id), reverse=True):
@@ -637,11 +705,17 @@ class CollectionStore:
         with self.connect() as db:
             db.execute("INSERT INTO membership_reconciliation_runs VALUES(?,?,?,'APPLYING')",
                        (run_id, stamp, reason))
+            scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+            mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
             db.execute("""INSERT INTO membership_reconciliation_items
                 SELECT ?,collection_id,keyword_id,origin,pinned,score,reason,created_at
-                FROM memberships WHERE origin='LOCAL_AI' AND pinned=0""", (run_id,))
+                FROM memberships m JOIN keywords k ON k.id=m.keyword_id
+                WHERE origin='LOCAL_AI' AND pinned=0""" + scope,
+                (run_id, *mode_parameters))
             archived = db.execute("SELECT changes()").fetchone()[0]
-            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0")
+            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0 "
+                + ("AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)" if self.data_mode_scope else ""),
+                mode_parameters)
             db.execute("UPDATE membership_reconciliation_runs SET status='APPLIED' WHERE id=?", (run_id,))
             return archived
 
@@ -665,6 +739,9 @@ class CollectionStore:
                 feedback = db.execute("SELECT 1 FROM feedback WHERE collection_id=? LIMIT 1", (item["id"],)).fetchone()
                 if not user_membership and not feedback:
                     db.execute("DELETE FROM collections WHERE id=?", (item["id"],))
+            live_scope = (" AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)"
+                          if self.data_mode_scope else "")
+            scoped_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
             db.execute("""DELETE FROM memberships
                 WHERE origin='LOCAL_AI' AND pinned=0 AND (
                     created_at>=? OR EXISTS (
@@ -672,32 +749,52 @@ class CollectionStore:
                         WHERE i.run_id=? AND i.collection_id=memberships.collection_id
                           AND i.keyword_id=memberships.keyword_id
                     )
-                )""", (run["created_at"], run_id))
+                )""" + live_scope, (run["created_at"], run_id, *scoped_parameters))
             db.execute("""INSERT OR IGNORE INTO memberships(collection_id,keyword_id,origin,pinned,score,reason,created_at)
                 SELECT i.collection_id,i.keyword_id,i.origin,i.pinned,i.score,i.reason,i.created_at
                 FROM membership_reconciliation_items i
                 JOIN collections c ON c.id=i.collection_id
-                JOIN keywords k ON k.id=i.keyword_id WHERE i.run_id=?""", (run_id,))
+                JOIN keywords k ON k.id=i.keyword_id WHERE i.run_id=?"""
+                + (" AND k.data_mode=?" if self.data_mode_scope else ""),
+                (run_id, *scoped_parameters))
             db.execute("UPDATE membership_reconciliation_runs SET status='ROLLED_BACK' WHERE id=?", (run_id,))
             return True
 
     def keywords_for(self, collection_id):
+        scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+        parameters = (collection_id, self.data_mode_scope) if self.data_mode_scope else (collection_id,)
         with self.connect() as db:
-            return [dict(row) for row in db.execute("""SELECT k.*,m.origin,m.pinned,m.score,m.reason,
+            rows = db.execute("""SELECT k.*,m.origin,m.pinned,m.score,m.reason,
                 e.entity_id,e.entity_type,e.description AS entity_description,
                 e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
-                e.source_url AS entity_source_url,e.method AS entity_classification_method
+                e.source_url AS entity_source_url,e.method AS entity_classification_method,
+                cr.classification_status
                 FROM memberships m JOIN keywords k ON k.id=m.keyword_id
                 LEFT JOIN entity_context e ON e.keyword_id=k.id
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id
                 WHERE m.collection_id IN (
                     WITH RECURSIVE topic_tree(id) AS (
                         SELECT id FROM collections WHERE id=?
                         UNION ALL SELECT child.id FROM collections child JOIN topic_tree parent ON child.parent_id=parent.id
                     ) SELECT id FROM topic_tree
-                ) ORDER BY k.keyword COLLATE NOCASE""", (collection_id,))]
+                )""" + scope + " ORDER BY k.keyword COLLATE NOCASE", parameters).fetchall()
+            items = [dict(row) for row in rows]
+            for item in items:
+                if item.get("classification_status") == "INELIGIBLE":
+                    item["eligible"] = 0
+                    item["topic_eligible"] = False
+                else:
+                    item["topic_eligible"] = bool(item.get("eligible"))
+            return items
 
     def feedback_action(self, collection_id, record, action, *, pinned=True):
+        if self.data_mode_scope and record.get("data_mode") != self.data_mode_scope:
+            raise ValueError("KEYWORD_DATA_MODE_MISMATCH")
         with self.connect() as db:
+            if self.data_mode_scope:
+                existing = db.execute("SELECT data_mode FROM keywords WHERE id=?", (record["id"],)).fetchone()
+                if existing and existing["data_mode"] != self.data_mode_scope:
+                    raise ValueError("KEYWORD_DATA_MODE_MISMATCH")
             db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,data_mode,evidence,context)
                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET evidence=excluded.evidence,
                 observed_at=excluded.observed_at WHERE excluded.keyword<>''""", tuple(record[k] for k in (
@@ -725,23 +822,45 @@ class CollectionStore:
                 raise ValueError("COLLECTION_NOT_FOUND")
             for keyword_id in ids:
                 if action in {"EXCLUDE", "RESTORE"}:
-                    keyword = db.execute("SELECT 1 FROM keywords WHERE id=?", (keyword_id,)).fetchone()
+                    keyword = db.execute("SELECT 1 FROM keywords WHERE id=? "
+                        + ("AND data_mode=?" if self.data_mode_scope else ""),
+                        (keyword_id, self.data_mode_scope) if self.data_mode_scope else (keyword_id,)).fetchone()
                     if not keyword:
                         skipped += 1
                         continue
                     if action == "EXCLUDE":
                         db.execute("INSERT OR REPLACE INTO keyword_decisions VALUES(?,'EXCLUDED','User excluded',?)",
                                    (keyword_id, stamp))
-                        db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=?",
-                                   (keyword_id,))
-                        db.execute("DELETE FROM memberships WHERE keyword_id=? AND origin='LOCAL_AI'", (keyword_id,))
+                        db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=? "
+                            + ("AND data_mode=?" if self.data_mode_scope else ""),
+                            (keyword_id, self.data_mode_scope) if self.data_mode_scope else (keyword_id,))
+                        db.execute("DELETE FROM memberships WHERE keyword_id=? AND origin='LOCAL_AI' "
+                            + ("AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)" if self.data_mode_scope else ""),
+                            (keyword_id, self.data_mode_scope) if self.data_mode_scope else (keyword_id,))
                     else:
                         db.execute("INSERT OR REPLACE INTO keyword_decisions VALUES(?,'RESTORED','User restored',?)",
                                    (keyword_id, stamp))
-                        db.execute("UPDATE keywords SET eligible=1,rejection_reason=NULL WHERE id=?", (keyword_id,))
+                        db.execute("""UPDATE keywords SET eligible=CASE WHEN COALESCE((SELECT classification_status
+                            FROM classification_results WHERE keyword_id=keywords.id),'')='INELIGIBLE' THEN 0 ELSE 1 END,
+                            rejection_reason=CASE WHEN COALESCE((SELECT classification_status
+                            FROM classification_results WHERE keyword_id=keywords.id),'')='INELIGIBLE'
+                            THEN 'CLASSIFICATION_INELIGIBLE' ELSE NULL END WHERE id=? """
+                            + ("AND data_mode=?" if self.data_mode_scope else ""),
+                            (keyword_id, self.data_mode_scope) if self.data_mode_scope else (keyword_id,))
                     updated += 1
                     continue
-                keyword = db.execute("SELECT 1 FROM keywords WHERE id=? AND eligible=1", (keyword_id,)).fetchone()
+                if action in {"REMOVE", "REJECT"}:
+                    keyword = db.execute("""SELECT 1 FROM memberships m JOIN keywords k ON k.id=m.keyword_id
+                        WHERE m.collection_id=? AND m.keyword_id=? """
+                        + ("AND k.data_mode=?" if self.data_mode_scope else ""),
+                        (collection_id, keyword_id, self.data_mode_scope) if self.data_mode_scope
+                        else (collection_id, keyword_id)).fetchone()
+                else:
+                    keyword = db.execute("""SELECT 1 FROM keywords k WHERE k.id=? AND k.eligible=1
+                        AND COALESCE((SELECT classification_status FROM classification_results cr
+                            WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' """
+                        + ("AND data_mode=?" if self.data_mode_scope else ""),
+                        (keyword_id, self.data_mode_scope) if self.data_mode_scope else (keyword_id,)).fetchone()
                 if not keyword:
                     skipped += 1
                     continue
@@ -786,13 +905,24 @@ class CollectionStore:
 
     def suggestions(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM proposals WHERE status='PENDING' ORDER BY created_at DESC")]
+            return [dict(row) for row in db.execute("SELECT * FROM proposals p WHERE p.status='PENDING' "
+                + ("AND EXISTS (SELECT 1 FROM json_each(p.support_ids) s JOIN keywords k ON k.id=s.value WHERE k.data_mode=?) "
+                   if self.data_mode_scope else "")
+                + "ORDER BY p.created_at DESC",
+                (self.data_mode_scope,) if self.data_mode_scope else ())]
 
     def resolve_proposal(self, proposal_id, accept):
         with self.connect() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=? AND status='PENDING'", (proposal_id,)).fetchone()
             if row is None:
                 return None
+            support_ids = json.loads(row["support_ids"])
+            if self.data_mode_scope and support_ids:
+                placeholders = ",".join("?" for _ in support_ids)
+                supported = db.execute(f"SELECT count(*) FROM keywords WHERE id IN ({placeholders}) AND data_mode=?",
+                    (*support_ids, self.data_mode_scope)).fetchone()[0]
+                if supported != len(set(support_ids)):
+                    return None
             status = "ACCEPTED" if accept else "REJECTED"
             db.execute("UPDATE proposals SET status=?,updated_at=? WHERE id=?", (status, now(), proposal_id))
             if not accept:
@@ -803,7 +933,6 @@ class CollectionStore:
                 db.execute("""INSERT INTO collections(id,name,description,created_by,reason,created_at,updated_at)
                     VALUES(?,?,?,'AI',?,?,?)""",
                     (identifier, row["name"], row["description"], row["reason"], stamp, stamp))
-                support_ids = json.loads(row["support_ids"])
                 for keyword_id in support_ids:
                     db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,NULL,?,?)",
                                (identifier, keyword_id, "Representative keyword in accepted AI suggestion", now()))

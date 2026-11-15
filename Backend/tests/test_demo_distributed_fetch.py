@@ -11,7 +11,7 @@ from app.demo_local import create_demo_app
 
 class DemoDistributedFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_fetch_uses_local_synthetic_fixtures_end_to_end(self):
-        application = create_demo_app()
+        application = create_demo_app(test_fixture=True)
         async with application.router.lifespan_context(application):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=application),

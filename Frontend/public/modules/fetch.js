@@ -21,10 +21,15 @@ const wait = (milliseconds) => new Promise((resolve) => {
 });
 
 export class PublicFetchController {
-  constructor({ onState, onTerminal, locale }) {
+  constructor({ onState, onTerminal, locale, historyDays = null }) {
+    if (historyDays !== null && (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2)) {
+      throw new RangeError('Historical Fetch is limited to one or two days.');
+    }
     this.onState = onState;
     this.onTerminal = onTerminal;
     this.locale = locale;
+    this.historyDays = historyDays;
+    this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
     this.busy = false;
@@ -42,20 +47,21 @@ export class PublicFetchController {
     }
     this.busy = true;
     this.key = this.key || newIdempotencyKey();
-    this.onState({ kind: 'submitting', busy: true });
+    this.emit({ kind: 'submitting', busy: true });
     try {
-      const accepted = await requestJson('/api/v1/fetches', {
+      const accepted = await requestJson(this.historyDays === null
+        ? '/api/v1/fetches' : '/api/v1/fetches/history', {
         method: 'POST',
-        body: {},
+        body: this.historyDays === null ? {} : { days: this.historyDays },
         headers: { 'Idempotency-Key': this.key },
         locale: this.locale(),
       });
       this.fetchId = accepted.fetch_id;
-      this.onState({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
+      this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       await this.poll();
     } catch (error) {
       this.busy = false;
-      this.onState({ kind: this.kindForError(error), busy: false, error });
+      this.emit({ kind: this.kindForError(error), busy: false, error });
     }
   }
 
@@ -67,23 +73,27 @@ export class PublicFetchController {
         status = await getJson('/api/v1/fetches/' + encodeURIComponent(this.fetchId), {
           locale: this.locale(),
         });
-        this.onState({ kind: 'running', busy: true, fetch: status });
+        this.emit({ kind: 'running', busy: true, fetch: status });
         if (TERMINAL.has(status.status)) {
           this.busy = false;
           this.key = null;
           this.fetchId = null;
-          this.onState({ kind: status.status.toLowerCase(), busy: false, fetch: status });
+          this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
           return;
         }
         await wait(POLL_INTERVAL_MS);
       }
       this.busy = false;
-      this.onState({ kind: 'poll-limit', busy: false, fetch: status });
+      this.emit({ kind: 'poll-limit', busy: false, fetch: status });
     } catch (error) {
       this.busy = false;
-      this.onState({ kind: this.kindForError(error), busy: false, error, fetch: status });
+      this.emit({ kind: this.kindForError(error), busy: false, error, fetch: status });
     }
+  }
+
+  emit(presentation) {
+    this.onState({ ...presentation, requestKind: this.requestKind });
   }
 
   kindForError(error) {

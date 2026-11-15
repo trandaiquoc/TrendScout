@@ -207,7 +207,8 @@ function build() {
   const statusSelect = make('select'); statusSelect.id = 'workbench-state';
   option(statusSelect, 'all', 'workbench.state-all', 'All placement methods'); option(statusSelect, 'unassigned', 'workbench.unclassified', 'Not in a Collection');
   option(statusSelect, 'ai', 'workbench.auto-assigned', 'Organized automatically'); option(statusSelect, 'manual', 'workbench.user-added', 'Added by you');
-  option(statusSelect, 'mixed', 'workbench.state-mixed', 'Mixed'); option(statusSelect, 'excluded', 'dataset.state-excluded', 'Excluded');
+  option(statusSelect, 'mixed', 'workbench.state-mixed', 'Mixed'); option(statusSelect, 'excluded', 'dataset.state-excluded', 'Excluded by you');
+  option(statusSelect, 'non_topic', 'dataset.state-non-topic', 'Not a topic / system page');
   statusSelect.addEventListener('change', () => { state.filterState = statusSelect.value; state.offset = 0; changedFilters(); });
   const classification = make('select'); classification.id = 'workbench-classification';
   option(classification, 'all', 'workbench.classification-all', 'All classification results');

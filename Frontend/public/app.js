@@ -790,6 +790,7 @@ function renderFetchPresentation() {
   const blockKey = FETCH_BLOCK_MESSAGES[state.fetchBlockReason] || 'fetch.disabled';
   const isActionState = Boolean(messageKey);
   const button = $('#open-fetch');
+  const historyButton = $('#open-history-fetch');
   const badge = $('#fetch-badge');
   const readiness = $('#fetch-readiness');
   const status = $('#fetch-status');
@@ -802,6 +803,18 @@ function renderFetchPresentation() {
     : canRetry ? 'fetch.check-status' : 'fetch.cta';
   button.querySelector('[data-i18n="fetch.cta"]').textContent = t(buttonKey);
   const liveDemo = isLocalLiveDemo(state.capabilities);
+  historyButton.hidden = !liveDemo;
+  historyButton.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited';
+  const historyStateKey = presentation.requestKind === 'history'
+    ? ({
+      submitting: 'fetch.history-submitting-live', queued: 'fetch.history-queued-live',
+      running: 'fetch.history-running-live', partial: 'fetch.history-partial-live',
+      completed: 'fetch.history-completed-live', failed: 'fetch.history-failed-live',
+    })[presentation.kind]
+    : null;
+  const historyButtonKey = presentation.requestKind === 'history' && canRetry
+    ? 'fetch.check-status' : historyStateKey || 'fetch.history-cta';
+  historyButton.textContent = t(historyButtonKey);
   badge.textContent = t(state.fetchReady
     ? (liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
   badge.classList.toggle('pill--green', state.fetchReady);
@@ -826,7 +839,7 @@ function renderFetchPresentation() {
       .join(' | ')
     : '';
   status.textContent = isActionState
-    ? [t(liveDemo ? liveFetchMessage(presentation.kind) || messageKey : messageKey),
+    ? [t(liveDemo ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey),
       sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '']
       .filter(Boolean).join(' ')
     : '';
@@ -870,7 +883,14 @@ function refreshCollectionJob(fetchId) {
   poll();
 }
 
-function liveFetchMessage(kind) {
+function liveFetchMessage(kind, requestKind = 'latest') {
+  if (requestKind === 'history') {
+    return ({
+      submitting: 'fetch.history-submitting-live', queued: 'fetch.history-queued-live',
+      running: 'fetch.history-running-live', partial: 'fetch.history-partial-live',
+      completed: 'fetch.history-completed-live', failed: 'fetch.history-failed-live',
+    })[kind] || null;
+  }
   return ({
     submitting: 'fetch.submitting-live', queued: 'fetch.queued-live',
     running: 'fetch.running-live', partial: 'fetch.partial-live',
@@ -922,16 +942,16 @@ async function loadPublicCapabilities() {
   }
 }
 
-const fetchController = new PublicFetchController({
-  onState(presentation) {
+function handleFetchState(presentation) {
     state.fetchPresentation = presentation;
     renderFetchPresentation();
     if (presentation.kind === 'busy-error' || presentation.kind === 'rate-limited') {
       const delay = presentation.error?.retryAfterSeconds || 5;
       scheduleCapabilityRefresh(Math.min(delay, 60) * 1000);
     }
-  },
-  onTerminal(runId, fetchStatus) {
+}
+
+function handleFetchTerminal(runId, fetchStatus) {
     if (runId) {
       state.publicFetchDiscovery = null;
       state.publicFetchSources = [];
@@ -960,8 +980,13 @@ const fetchController = new PublicFetchController({
     }
     void loadAnalytics();
     scheduleCapabilityRefresh(100);
-  },
-  locale: getLocale,
+}
+
+const fetchController = new PublicFetchController({
+  onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale,
+});
+const historyFetchController = new PublicFetchController({
+  onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale, historyDays: 2,
 });
 
 function localizedStatus(prefix, status) {
@@ -1296,7 +1321,9 @@ function renderRows(items) {
     const category = Array.isArray(item.memberships) && item.memberships.length
       ? item.memberships.map((membership) => `${membership.name} (${t(membership.origin === 'LOCAL_AI' ? 'workbench.auto-assigned' : 'workbench.user-added')})`).join(', ')
       : Array.isArray(item.categories) && item.categories.length
-        ? item.categories.map((value) => t('category.' + value)).join(', ') : t(item.eligible === 0 ? 'dataset.excluded' : 'dataset.unassigned');
+        ? item.categories.map((value) => t('category.' + value)).join(', ')
+        : item.classification_status === 'INELIGIBLE'
+          ? t('dataset.non-topic') : t(item.eligible === 0 ? 'dataset.excluded' : 'dataset.unassigned');
     appendCell(row, category, '', t('table.category'));
     const evidence = item.current_views_ceil != null
       ? t('table.views-evidence', { value: number(item.current_views_ceil), rank: item.provider_rank ?? '—' })
@@ -2173,6 +2200,9 @@ function bindEvents() {
     if (state.fetchReady) {
       fetchController.activate();
     }
+  });
+  $('#open-history-fetch').addEventListener('click', () => {
+    if (state.fetchReady) historyFetchController.activate();
   });
   $('#empty-fetch').addEventListener('click', () => {
     if (state.fetchReady) fetchController.activate();

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.ports.storage import StorageError
-from app.sources.catalog import SOURCE_CAPABILITIES
+from app.sources.catalog import SOURCE_CAPABILITIES, WIKIMEDIA_SOURCE_ID
 from app.sources.query_plan import get_query_plan
 
 router = APIRouter()
@@ -19,11 +19,15 @@ def _saved_source_activity(request):
     service = getattr(request.app.state, "collection_service", None)
     if service is None:
         return {}
+    data_mode_scope = getattr(service.store, "data_mode_scope", None)
     try:
         with service.store.connect() as db:
             rows = db.execute(
                 "SELECT status,data_mode,source_manifest,fetched_at,observation_start,observation_end "
-                "FROM dataset_snapshots ORDER BY created_at DESC LIMIT 100"
+                "FROM dataset_snapshots "
+                + ("WHERE data_mode=? " if data_mode_scope else "")
+                + "ORDER BY created_at DESC LIMIT 100",
+                (data_mode_scope,) if data_mode_scope else (),
             ).fetchall()
     except (OSError, sqlite3.Error):
         return {}
@@ -98,6 +102,12 @@ async def capabilities(request: Request, response: Response):
                     block_reason = "ADMISSION_STATE_UNAVAILABLE"
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
     saved_activity = _saved_source_activity(request)
+    distributed = request.app.state.distributed_public_fetch
+    wikimedia_live_runtime = bool(
+        distributed is not None
+        and getattr(distributed, "normal_wikimedia_live", False)
+        and distributed.data_mode == "LIVE"
+    )
     response.headers["Cache-Control"] = "no-store"
     return {
         "contract_version": "1.0",
@@ -173,7 +183,9 @@ async def capabilities(request: Request, response: Response):
                 "live_verification_status": item.live_verification_status,
                 "local_live_verification_status": item.local_live_verification_status,
                 "production_readiness": item.production_readiness,
-                "supported_data_modes": list(item.supported_data_modes),
+                "supported_data_modes": (["LIVE"] if wikimedia_live_runtime
+                    and item.source_id == WIKIMEDIA_SOURCE_ID
+                    else list(item.supported_data_modes)),
                 "query_based": item.query_based,
                 "metric": {
                     "name": item.metric_name,

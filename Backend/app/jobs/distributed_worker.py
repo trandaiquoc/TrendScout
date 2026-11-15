@@ -8,7 +8,7 @@ Offline tests use a multi-process SQLite harness only.
 
 import inspect
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Mapping
 
@@ -41,6 +41,7 @@ class SourceWorkContext:
     resume_snapshot: dict | None
     checkpoint: Callable[[dict], int]
     heartbeat: Callable[[], str]
+    request_metadata: dict = field(default_factory=dict)
 
 
 SourceHandler = Callable[[SourceWorkContext], dict | Awaitable[dict]]
@@ -59,7 +60,8 @@ class DistributedFetchWorker:
     def __init__(self, admission: PublicAdmission, *,
                  handlers: Mapping[str, SourceHandler],
                  resolve_grant: GrantResolver,
-                 utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+                 utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                 snapshot_blobs=None):
         if not isinstance(admission, PublicAdmission):
             raise TypeError("PublicAdmission required")
         if (set(handlers) != set(admission.policy.enabled_sources)
@@ -77,7 +79,7 @@ class DistributedFetchWorker:
             raise ValueError("invalid server-owned source mode declaration")
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
-        self.journal = SourceCheckpointJournal(admission)
+        self.journal = SourceCheckpointJournal(admission, snapshot_blobs=snapshot_blobs)
 
     async def run_once(self, owner: str) -> dict | None:
         now = self.utcnow()
@@ -131,7 +133,8 @@ class DistributedFetchWorker:
 
             context = SourceWorkContext(job_id, owner, fence, source_id,
                                         self.admission.policy.plan_fingerprint, job_expires_at, resume,
-                                        checkpoint, heartbeat)
+                                        checkpoint, heartbeat,
+                                        request_metadata=claim.get("request_metadata", {}))
             try:
                 result = self.handlers[source_id](context)
                 if inspect.isawaitable(result):
@@ -201,7 +204,7 @@ class DistributedFetchWorker:
         if value.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}:
             raise ValueError("invalid result delivery state")
         records = value.get("records")
-        if not isinstance(records, list) or len(records) > 1000 or any(
+        if not isinstance(records, list) or len(records) > 2000 or any(
             not isinstance(record, dict) for record in records
         ):
             raise ValueError("source records must be a bounded normalized list")

@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import json
 import math
-from dataclasses import fields, is_dataclass
+from dataclasses import fields, is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Callable, Mapping
@@ -64,14 +64,14 @@ def _jsonable(value, *, depth=0):
     raise ValueError("unsupported normalized evidence value")
 
 
-def _bounded_records(records):
+def _bounded_records(records, *, byte_budget=_NORMALIZED_RESULT_BUDGET_BYTES):
     """Keep normalized rows within checkpoint budget and report every omission."""
     selected, used, omitted = [], 2, 0
     for record in records:
         encoded = json.dumps(record, ensure_ascii=False, allow_nan=False,
                              separators=(",", ":")).encode("utf-8")
         addition = len(encoded) + (1 if selected else 0)
-        if used + addition > _NORMALIZED_RESULT_BUDGET_BYTES:
+        if byte_budget is not None and used + addition > byte_budget:
             omitted += 1
             continue
         selected.append(record)
@@ -127,11 +127,10 @@ class D5SourceHandlers:
                              else self._unavailable_handler()) for source in sorted(_QUERY_SOURCES)}
         async def collect_wikimedia(context):
             observation_date = self.observation_date()
-            return await self._with_cache(
-                WIKIMEDIA_SOURCE_ID, context,
-                lambda: self._wikimedia_handler(context, observation_date),
-                query_scope=f"{self.plan.fingerprint}:{observation_date.isoformat()}",
-            )
+            history_days = context.request_metadata.get("history_days")
+            if context.request_metadata.get("kind") == "WIKIMEDIA_HISTORY":
+                return await self._wikimedia_history_handler(context, observation_date, history_days)
+            return await self._wikimedia_handler(context, observation_date)
 
         if self.wikimedia is None:
             handlers[WIKIMEDIA_SOURCE_ID] = self._unavailable_handler()
@@ -247,14 +246,23 @@ class D5SourceHandlers:
         if not isinstance(result, dict):
             return result
         result.setdefault("delivery_state", "FRESH")
-        if (scope is not None and grant.allowed is True
-                and result.get("status") in {"SUCCESS", "PARTIAL"}
-                and result.get("record_count", 0) > 0
+        negative_day_cache = (result.get("status") == "UNAVAILABLE"
+                              and result.get("error_code") == "DAY_UNAVAILABLE")
+        cache_grant = grant
+        if negative_day_cache and isinstance(grant, CacheGrant):
+            short_ttl = min(6 * 60 * 60, grant.max_retention_seconds)
+            cache_grant = replace(grant,
+                max_fresh_seconds=min(grant.max_fresh_seconds, short_ttl),
+                max_stale_seconds=min(grant.max_stale_seconds, short_ttl),
+                max_retention_seconds=short_ttl)
+        if (scope is not None and cache_grant.allowed is True
+                and (result.get("status") in {"SUCCESS", "PARTIAL"}
+                     and result.get("record_count", 0) > 0 or negative_day_cache)
                 and result.get("data_mode") in {"SYNTHETIC", "LIVE"}):
             fetched_at = self.utcnow()
             try:
                 self.shared_cache.put(
-                    scope, grant=grant, origin=result["data_mode"], payload=result,
+                    scope, grant=cache_grant, origin=result["data_mode"], payload=result,
                     fetched_at=fetched_at, now=self.utcnow(),
                 )
             except Exception:
@@ -282,9 +290,14 @@ class D5SourceHandlers:
                 "canonical_keyword": row.canonical_keyword,
                 "fetched_at": _jsonable(row.fetched_at),
                 "source_url": row.source_url,
-            } for row in page.observations])
+            } for row in page.observations], byte_budget=None)
             coverage = {"observation_date": page.observation_date.isoformat(),
                         "rejected": page.rejected_count,
+                        "provider_returned_records": page.item_count,
+                        "accepted_records": len(records),
+                        "rejected_records": page.rejected_count,
+                        "explicitly_omitted_records": omitted,
+                        "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
                         "records_omitted_storage_limit": omitted,
                         "item_count": page.item_count}
             if self.include_wikimedia_transport_metrics:
@@ -346,6 +359,7 @@ class D5SourceHandlers:
         # treating 404 as unavailable (never as zero), and stop on any other
         # result. The gateway reserves every date independently before GET.
         last_error = None
+        last_error_code = None
         for fallback_days in range(self.max_wikimedia_date_attempts):
             request_date = date_value - timedelta(days=fallback_days)
             request = WikimediaRequest(request_date, context.plan_fingerprint)
@@ -355,7 +369,7 @@ class D5SourceHandlers:
 
             def persist_page_receipt(page):
                 result = result_for(page)
-                context.checkpoint({"wikimedia_receipt": {
+                receipt = {
                     "schema": 1,
                     "source_id": WIKIMEDIA_SOURCE_ID,
                     "plan_fingerprint": context.plan_fingerprint,
@@ -363,46 +377,68 @@ class D5SourceHandlers:
                     "attempt_id": attempt_id,
                     "data_mode": page.data_mode,
                     "result": result,
-                }})
+                }
+                context.checkpoint({"wikimedia_receipt": receipt})
+
+            async def fetch_date():
+                try:
+                    page = await self.wikimedia.fetch_day(
+                        request=request, job_id=context.job_id, owner=context.owner,
+                        fence=context.fence, attempt_id=attempt_id,
+                        timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
+                            WIKIMEDIA_SOURCE_ID)), on_page_receipt=persist_page_receipt,
+                    )
+                except (WikimediaGatewayError, GatewayError) as exc:
+                    if exc.code != "DAY_UNAVAILABLE":
+                        raise
+                    return {"status": "UNAVAILABLE", "data_mode": self.wikimedia.data_mode,
+                        "records": [], "record_count": 0, "error_code": exc.code,
+                        "coverage": {"observation_date": request_date.isoformat(),
+                                     "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST"}}
+                return result_for(page)
 
             try:
-                page = await self.wikimedia.fetch_day(
-                    request=request,
-                    job_id=context.job_id,
-                    owner=context.owner,
-                    fence=context.fence,
-                    attempt_id=attempt_id,
-                    timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
-                        WIKIMEDIA_SOURCE_ID)),
-                    on_page_receipt=persist_page_receipt,
+                result = await self._with_cache(
+                    WIKIMEDIA_SOURCE_ID, context, fetch_date,
+                    query_scope=f"{self.plan.fingerprint}:{request_date.isoformat()}",
                 )
             except (WikimediaGatewayError, GatewayError) as exc:
                 if (exc.code == "DAY_UNAVAILABLE"
                         and fallback_days < self.max_wikimedia_date_attempts - 1):
                     last_error = exc
+                    last_error_code = exc.code
                     continue
                 last_error = exc
+                last_error_code = exc.code
                 break
-            result = result_for(page)
-            context.checkpoint({"observation_date": page.observation_date.isoformat(),
-                                "records": result["record_count"],
-                                "rejected": page.rejected_count})
+            if (not isinstance(result, dict) or result.get("data_mode") != self.wikimedia.data_mode
+                    or result.get("status") not in {"SUCCESS", "PARTIAL", "UNAVAILABLE"}):
+                raise AdmissionDenied("SOURCE_RESULT_INVALID")
+            if (result.get("status") == "UNAVAILABLE"
+                    and result.get("error_code") == "DAY_UNAVAILABLE"):
+                last_error_code = "DAY_UNAVAILABLE"
+                continue
+            coverage_date = (result.get("coverage") or {}).get("observation_date")
+            if coverage_date != request_date.isoformat():
+                raise AdmissionDenied("SOURCE_OBSERVATION_DATE_MISMATCH")
             return result
 
         exc = last_error
-        if exc is None:
+        if exc is None and last_error_code is None:
             return {"status": "FAILED", "data_mode": self.wikimedia.data_mode,
                     "records": [], "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED"}
-        if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
-            raise AdmissionDenied(exc.code) from None
-        context.checkpoint({"status": "UNAVAILABLE", "error_code": exc.code})
-        status = "PARTIAL" if exc.code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
+        error_code = exc.code if exc is not None else last_error_code
+        if error_code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
+            raise AdmissionDenied(error_code) from None
+        context.checkpoint({"status": "UNAVAILABLE", "error_code": error_code})
+        status = "PARTIAL" if error_code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
         result = {"status": status, "data_mode": self.wikimedia.data_mode,
-                  "records": [], "record_count": 0, "error_code": exc.code}
-        if exc.code == "RATE_LIMITED" and exc.retry_after_unbounded_seconds is not None:
+                  "records": [], "record_count": 0, "error_code": error_code}
+        if (exc is not None and exc.code == "RATE_LIMITED"
+                and exc.retry_after_unbounded_seconds is not None):
             result["retry_after_seconds"] = min(
                 31_536_000, max(1, math.ceil(exc.retry_after_unbounded_seconds)))
-        diagnostic = getattr(exc, "diagnostic", None)
+        diagnostic = getattr(exc, "diagnostic", None) if exc is not None else None
         if diagnostic is not None:
             result["transport_diagnostic"] = {
                 "source_id": diagnostic.source_id,
@@ -414,6 +450,238 @@ class D5SourceHandlers:
                 "attempt_id": diagnostic.attempt_id,
                 "error_code": diagnostic.error_code,
             }
+        return result
+
+    async def _wikimedia_history_handler(self, context, start_date, history_days):
+        """Fetch an explicitly requested, bounded set of recent LIVE daily snapshots."""
+        if (self.wikimedia.data_mode != "LIVE" or type(history_days) is not int
+                or not 1 <= history_days <= 2):
+            raise AdmissionDenied("HISTORICAL_FETCH_UNAVAILABLE")
+        dates = [start_date - timedelta(days=offset) for offset in range(history_days)]
+        allowed_dates = {item.isoformat() for item in dates}
+        progress = (context.resume_snapshot or {}).get("progress", {})
+        saved_receipts = progress.get("wikimedia_history_receipts", []) if isinstance(progress, dict) else []
+        records = progress.get("wikimedia_history_records", []) if isinstance(progress, dict) else []
+        if (not isinstance(saved_receipts, list) or len(saved_receipts) > 2
+                or not isinstance(records, list) or len(records) > history_days * 1000
+                or any(not isinstance(row, dict) or row.get("observation_date") not in allowed_dates
+                       for row in records)):
+            raise AdmissionDenied("CHECKPOINT_INVALID")
+        receipts = {}
+        for receipt in saved_receipts:
+            if (not isinstance(receipt, dict) or receipt.get("schema") != 1
+                    or receipt.get("source_id") != WIKIMEDIA_SOURCE_ID
+                    or receipt.get("plan_fingerprint") != context.plan_fingerprint
+                    or receipt.get("data_mode") != "LIVE"
+                    or receipt.get("observation_date") not in allowed_dates
+                    or receipt.get("status") not in {"SUCCESS", "PARTIAL", "UNAVAILABLE"}
+                    or type(receipt.get("record_count")) is not int
+                    or not 0 <= receipt["record_count"] <= 1000
+                    or receipt["observation_date"] in receipts):
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            attempt_id = receipt.get("attempt_id")
+            expected_attempt = hashlib.sha256(
+                f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{receipt['observation_date']}:page-1".encode()
+            ).hexdigest()
+            if attempt_id is not None and attempt_id != expected_attempt:
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            receipts[receipt["observation_date"]] = dict(receipt)
+
+        records_by_date = {day: [row for row in records if row["observation_date"] == day]
+                           for day in allowed_dates}
+        for day, receipt in receipts.items():
+            if receipt["status"] in {"SUCCESS", "PARTIAL"}:
+                if len(records_by_date[day]) != receipt["record_count"]:
+                    raise AdmissionDenied("CHECKPOINT_INVALID")
+                if receipt.get("attempt_id"):
+                    try:
+                        settle_recovered = getattr(self.wikimedia.runner, "settle_recovered_attempt", None)
+                        if callable(settle_recovered):
+                            await asyncio.to_thread(
+                                settle_recovered, context.job_id, context.owner, context.fence,
+                                attempt_id=receipt["attempt_id"], now=self.utcnow(),
+                            )
+                        else:
+                            await asyncio.to_thread(
+                                self.wikimedia.runner.admission.settle_attempt,
+                                context.job_id, context.owner, context.fence,
+                                attempt_id=receipt["attempt_id"], now=self.utcnow(),
+                            )
+                    except Exception:
+                        raise AdmissionDenied("SETTLEMENT_PENDING") from None
+            elif records_by_date[day]:
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+
+        def save_progress():
+            context.checkpoint({
+                "wikimedia_history_receipts": [receipts[day] for day in sorted(receipts)],
+                "wikimedia_history_records": [row for day in sorted(records_by_date)
+                                               for row in records_by_date[day]],
+            })
+
+        def result_for(page):
+            normalized = [{
+                "source": row.source, "country_scope": row.country_scope, "access": row.access,
+                "observation_date": _jsonable(row.observation_date), "project": row.project,
+                "article_original": row.article_original, "article_display": row.article_display,
+                "views_ceil": row.views_ceil, "provider_rank": row.provider_rank,
+                "quality_flags": list(row.quality_flags), "canonical_keyword": row.canonical_keyword,
+                "fetched_at": _jsonable(row.fetched_at), "source_url": row.source_url,
+            } for row in page.observations]
+            normalized, omitted = _bounded_records(normalized, byte_budget=None)
+            coverage = {"observation_date": page.observation_date.isoformat(),
+                "rejected": page.rejected_count, "provider_returned_records": page.item_count,
+                "accepted_records": len(normalized), "rejected_records": page.rejected_count,
+                "explicitly_omitted_records": omitted, "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
+                "records_omitted_storage_limit": omitted, "item_count": page.item_count}
+            if self.include_wikimedia_transport_metrics:
+                coverage.update(http_status=page.http_status, response_bytes=page.response_bytes)
+            return {"status": "PARTIAL" if page.rejected_count or omitted else "SUCCESS",
+                    "data_mode": page.data_mode, "records": normalized,
+                    "record_count": len(normalized), "coverage": coverage}
+
+        rate_limited = None
+        for day in dates:
+            day_key = day.isoformat()
+            receipt = receipts.get(day_key)
+            if receipt and receipt["status"] in {"SUCCESS", "PARTIAL", "UNAVAILABLE"}:
+                continue
+            context.heartbeat()
+            attempt_id = hashlib.sha256(
+                f"{context.job_id}:{WIKIMEDIA_SOURCE_ID}:{day_key}:page-1".encode()
+            ).hexdigest()
+
+            def fetch_live_day():
+                async def fetch():
+                    request = WikimediaRequest(day, context.plan_fingerprint)
+
+                    def persist_page_receipt(page):
+                        daily = result_for(page)
+                        records_by_date[day_key] = daily["records"]
+                        receipts[day_key] = {
+                            "schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
+                            "plan_fingerprint": context.plan_fingerprint,
+                            "observation_date": day_key, "attempt_id": attempt_id,
+                            "data_mode": "LIVE", "status": daily["status"],
+                            "record_count": daily["record_count"],
+                            "coverage": daily["coverage"], "delivery_state": "FRESH",
+                        }
+                        save_progress()
+
+                    page = await self.wikimedia.fetch_day(
+                        request=request, job_id=context.job_id, owner=context.owner,
+                        fence=context.fence, attempt_id=attempt_id,
+                        timeout_seconds=min(15, self.wikimedia.runner.admission.max_attempt_seconds(
+                            WIKIMEDIA_SOURCE_ID)), on_page_receipt=persist_page_receipt,
+                    )
+                    return result_for(page)
+                return fetch()
+
+            try:
+                daily = await self._with_cache(
+                    WIKIMEDIA_SOURCE_ID, context, fetch_live_day,
+                    query_scope=f"{self.plan.fingerprint}:{day_key}",
+                )
+            except (WikimediaGatewayError, GatewayError) as exc:
+                if exc.code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
+                    raise AdmissionDenied(exc.code) from None
+                receipts[day_key] = {
+                    "schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
+                    "plan_fingerprint": context.plan_fingerprint,
+                    "observation_date": day_key, "data_mode": "LIVE",
+                    "status": "UNAVAILABLE", "record_count": 0,
+                    "error_code": exc.code,
+                }
+                records_by_date[day_key] = []
+                save_progress()
+                if exc.code == "RATE_LIMITED":
+                    rate_limited = exc
+                    break
+                continue
+
+            if (isinstance(daily, dict) and daily.get("data_mode") == "LIVE"
+                    and daily.get("status") == "UNAVAILABLE"
+                    and daily.get("error_code") == "DAY_UNAVAILABLE"):
+                receipts[day_key] = {
+                    "schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
+                    "plan_fingerprint": context.plan_fingerprint,
+                    "observation_date": day_key, "data_mode": "LIVE",
+                    "status": "UNAVAILABLE", "record_count": 0,
+                    "error_code": "DAY_UNAVAILABLE",
+                    "delivery_state": daily.get("delivery_state", "FRESH"),
+                }
+                records_by_date[day_key] = []
+                save_progress()
+                continue
+
+            if (not isinstance(daily, dict) or daily.get("data_mode") != "LIVE"
+                    or daily.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or not isinstance(daily.get("records"), list)
+                    or len(daily["records"]) > 1000
+                    or any(row.get("observation_date") != day_key for row in daily["records"])):
+                raise AdmissionDenied("SOURCE_RESULT_INVALID")
+            records_by_date[day_key] = daily["records"]
+            existing_receipt = receipts.get(day_key, {})
+            receipts[day_key] = {
+                "schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
+                "plan_fingerprint": context.plan_fingerprint,
+                "observation_date": day_key,
+                "attempt_id": existing_receipt.get("attempt_id")
+                    if daily.get("delivery_state") != "CACHED" else None,
+                "data_mode": "LIVE", "status": daily["status"],
+                "record_count": len(daily["records"]),
+                "coverage": daily.get("coverage", {}),
+                "delivery_state": daily.get("delivery_state", "FRESH"),
+            }
+            save_progress()
+
+        ordered_records = [row for day in sorted(records_by_date)
+                           for row in records_by_date[day]]
+        successful = [receipts[day.isoformat()] for day in dates
+                      if day.isoformat() in receipts
+                      and receipts[day.isoformat()]["status"] in {"SUCCESS", "PARTIAL"}]
+        missing = [receipts[day.isoformat()] for day in dates
+                   if day.isoformat() in receipts
+                   and receipts[day.isoformat()]["status"] == "UNAVAILABLE"]
+        provider_count = sum(item.get("coverage", {}).get("provider_returned_records", 0)
+                             for item in successful)
+        rejected_count = sum(item.get("coverage", {}).get("rejected_records", 0)
+                             for item in successful)
+        omitted_count = sum(item.get("coverage", {}).get("explicitly_omitted_records", 0)
+                            for item in successful)
+        accepted_count = len(ordered_records)
+        if provider_count != accepted_count + rejected_count + omitted_count:
+            raise AdmissionDenied("SOURCE_COVERAGE_INVALID")
+        all_requested_dates = all(day.isoformat() in receipts for day in dates)
+        all_success = (all_requested_dates and len(successful) == history_days
+                       and all(item["status"] == "SUCCESS" for item in successful))
+        delivery = "CACHED" if successful and all(
+            item.get("delivery_state") == "CACHED" for item in successful) else "FRESH"
+        coverage = {
+            "history_days_requested": history_days,
+            "history_dates": [{"date": day.isoformat(),
+                "status": receipts[day.isoformat()]["status"] if day.isoformat() in receipts else "NOT_REQUESTED",
+                "record_count": receipts[day.isoformat()]["record_count"] if day.isoformat() in receipts else 0,
+                "delivery_state": receipts[day.isoformat()].get("delivery_state") if day.isoformat() in receipts else None,
+                "error_code": receipts[day.isoformat()].get("error_code") if day.isoformat() in receipts else None}
+                for day in dates],
+            "provider_returned_records": provider_count,
+            "accepted_records": accepted_count,
+            "rejected_records": rejected_count,
+            "explicitly_omitted_records": omitted_count,
+            "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
+            "missing_dates": [item["observation_date"] for item in missing],
+        }
+        result = {"status": "SUCCESS" if all_success else "PARTIAL", "data_mode": "LIVE",
+                  "delivery_state": delivery, "records": ordered_records,
+                  "record_count": accepted_count, "coverage": coverage}
+        if rate_limited is not None:
+            result["error_code"] = rate_limited.code
+            retry_after = getattr(rate_limited, "retry_after_unbounded_seconds", None)
+            if retry_after is not None:
+                result["retry_after_seconds"] = min(31_536_000, max(1, math.ceil(retry_after)))
+        elif missing:
+            result["error_code"] = missing[0].get("error_code", "DAY_UNAVAILABLE")
         return result
 
 

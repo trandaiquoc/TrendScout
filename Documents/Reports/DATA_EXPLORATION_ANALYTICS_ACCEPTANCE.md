@@ -1,6 +1,10 @@
 # TrendScout data exploration and analytics — implementation status
 
-## Windows resume and contextual-classification acceptance (2026-11-13)
+## Current acceptance
+
+See [Windows G2?G7 final acceptance](WIKIMEDIA_LIVE_G2_G7_ACCEPTANCE.md) for current results. The remaining entries in this file are historical snapshots.
+
+## Historical Windows resume and contextual-classification acceptance (2026-11-13)
 
 This is the current native-Windows acceptance record. It supersedes older machine-specific counts and statuses below for the Windows Collections database only. Earlier Linux counts and test totals remain historical evidence; they are not Windows database state.
 

@@ -54,6 +54,9 @@ def list_research(
     query = " ".join(q.casefold().split())
     where = []
     parameters = []
+    if service.store.data_mode_scope:
+        where.append("(r.keyword_id IS NULL OR k.data_mode=?)")
+        parameters.append(service.store.data_mode_scope)
     if status:
         where.append("r.status=?")
         parameters.append(status)
@@ -65,7 +68,7 @@ def list_research(
     clause = " WHERE " + " AND ".join(where) if where else ""
     with service.store.connect() as db:
         total = db.execute(
-            "SELECT count(*) FROM research_records r" + clause, parameters
+            "SELECT count(*) FROM research_records r LEFT JOIN keywords k ON k.id=r.keyword_id" + clause, parameters
         ).fetchone()[0]
         rows = db.execute(
             """SELECT r.*,k.keyword,k.source,k.project,k.observed_at,k.data_mode
@@ -93,7 +96,10 @@ def create_research(value: ResearchInput, request: Request):
     if data["keyword_id"]:
         with service.store.connect() as db:
             if (
-                db.execute("SELECT 1 FROM keywords WHERE id=?", (data["keyword_id"],)).fetchone()
+                db.execute("SELECT 1 FROM keywords WHERE id=? "
+                    + ("AND data_mode=?" if service.store.data_mode_scope else ""),
+                    (data["keyword_id"], service.store.data_mode_scope) if service.store.data_mode_scope
+                    else (data["keyword_id"],)).fetchone()
                 is None
             ):
                 raise HTTPException(422, {"code": "RESEARCH_KEYWORD_NOT_FOUND"})

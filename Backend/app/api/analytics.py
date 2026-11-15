@@ -31,7 +31,9 @@ def runtime_status(request: Request):
             (embeddings.MODEL_VERSION,),
         ).fetchone()
         integrity = db.execute("PRAGMA quick_check(1)").fetchone()[0]
-        keyword_count = db.execute("SELECT count(*) FROM keywords").fetchone()[0]
+        keyword_count = db.execute("SELECT count(*) FROM keywords "
+            + ("WHERE data_mode=?" if service.store.data_mode_scope else ""),
+            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchone()[0]
     database_path = getattr(service.store, "path", None)
     try:
         database_size_bytes = int(database_path.stat().st_size) if database_path else None
@@ -92,40 +94,61 @@ def _scheduler_status(request: Request):
 @router.get("/analytics/overview")
 def overview(request: Request):
     service = _service(request)
+    mode = service.store.data_mode_scope
+    parameters = (mode,) if mode else ()
+    keyword_filter = " AND k.data_mode=?" if mode else ""
+    dataset_filter = " WHERE data_mode=?" if mode else ""
     with service.store.connect() as db:
         totals = db.execute("""SELECT count(*) AS keywords,
-            sum(CASE WHEN eligible=1 THEN 1 ELSE 0 END) AS eligible,
-            sum(CASE WHEN eligible=0 THEN 1 ELSE 0 END) AS excluded
-            FROM keywords""").fetchone()
-        classifications = db.execute("""SELECT classification_status,count(*) AS count
-            FROM classification_results GROUP BY classification_status""").fetchall()
+            sum(CASE WHEN k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' THEN 1 ELSE 0 END) AS eligible,
+            sum(CASE WHEN (k.eligible=0 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE')
+                OR EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')
+                THEN 1 ELSE 0 END) AS excluded
+            FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id"""
+            + (" WHERE k.data_mode=?" if mode else ""), parameters).fetchone()
+        classifications = db.execute("""SELECT cr.classification_status,count(*) AS count
+            FROM classification_results cr JOIN keywords k ON k.id=cr.keyword_id
+            WHERE (k.eligible=1 OR cr.classification_status='INELIGIBLE')
+            AND NOT EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')"""
+            + keyword_filter + " GROUP BY cr.classification_status", parameters).fetchall()
         source_rows = db.execute("""SELECT source,count(DISTINCT id) AS keywords,
             min(substr(observed_at,1,10)) AS first_seen,max(substr(observed_at,1,10)) AS last_seen
-            FROM keywords GROUP BY source ORDER BY keywords DESC,source""").fetchall()
-        algorithm_rows = db.execute("""SELECT algorithm_id,version,status,count(*) AS count
-            FROM algorithm_results GROUP BY algorithm_id,version,status ORDER BY algorithm_id,status""").fetchall()
-        observations = db.execute("""SELECT source,observation_date,count(DISTINCT keyword_id) AS keywords,
-            sum(status='OBSERVED') AS observed,sum(status<>'OBSERVED') AS unavailable
-            FROM algorithm_observations GROUP BY source,observation_date ORDER BY observation_date,source""").fetchall()
+            FROM keywords k WHERE 1=1""" + keyword_filter + " GROUP BY source ORDER BY keywords DESC,source", parameters).fetchall()
+        algorithm_rows = db.execute("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
+            FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+            LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+            WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'"""
+            + keyword_filter + " GROUP BY r.algorithm_id,r.version,r.status ORDER BY r.algorithm_id,r.status", parameters).fetchall()
+        observations = db.execute("""SELECT o.source,o.observation_date,count(DISTINCT o.keyword_id) AS keywords,
+            sum(o.status='OBSERVED') AS observed,sum(o.status<>'OBSERVED') AS unavailable
+            FROM algorithm_observations o JOIN keywords k ON k.id=o.keyword_id WHERE 1=1"""
+            + keyword_filter + " GROUP BY o.source,o.observation_date ORDER BY o.observation_date,o.source", parameters).fetchall()
         top = db.execute("""SELECT k.id,k.keyword,k.source,k.project,k.observed_at,r.value,r.metric,r.unit,r.updated_at,r.result_json
             FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
             WHERE r.algorithm_id='observed-volume-rank' AND r.status='COMPLETED' AND r.value IS NOT NULL
-            AND k.eligible=1 ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE LIMIT 1000""").fetchall()
+            AND k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
+                WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'""" + keyword_filter + " ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE LIMIT 1000",
+            parameters).fetchall()
         latest = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
             received_record_count,retained_keyword_count,rejected_record_count,observation_start,
             observation_end,fetched_at,quality_flags,processing_status,eligible_keyword_count,
             assigned_keyword_count,unassigned_keyword_count FROM dataset_snapshots
-            ORDER BY created_at DESC LIMIT 1""").fetchone()
+            """ + dataset_filter + " ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
         history = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
             received_record_count,retained_keyword_count,rejected_record_count,observation_start,
             observation_end,fetched_at,quality_flags,processing_status FROM dataset_snapshots
-            ORDER BY created_at DESC LIMIT 30""").fetchall()
+            """ + dataset_filter + " ORDER BY created_at DESC LIMIT 30", parameters).fetchall()
         successful = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,fetched_at,observation_start,
             observation_end,quality_flags FROM dataset_snapshots WHERE status IN ('SUCCESS','PARTIAL')
-            ORDER BY created_at DESC LIMIT 1""").fetchone()
-        membership_count = db.execute(
-            "SELECT count(DISTINCT keyword_id) FROM memberships"
-        ).fetchone()[0]
+            """ + ("AND data_mode=? " if mode else "") + "ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
+        membership_count = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
+            "JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id "
+            "WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'" + keyword_filter, parameters).fetchone()[0]
+        unassigned_topic_count = db.execute("""SELECT count(*) FROM keywords k
+            WHERE k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
+                WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS(
+                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)"""
+            + keyword_filter, parameters).fetchone()[0]
     classified = sum(
         int(row["count"]) for row in classifications if row["classification_status"] == "CLASSIFIED"
     )
@@ -145,6 +168,9 @@ def overview(request: Request):
                 latest_item[key] = json.loads(latest_item[key])
             except (TypeError, ValueError):
                 latest_item[key] = []
+        latest_item["eligible_keyword_count"] = totals["eligible"] or 0
+        latest_item["assigned_keyword_count"] = membership_count
+        latest_item["unassigned_keyword_count"] = unassigned_topic_count
     snapshots = []
     for row in history:
         item = dict(row)

@@ -90,6 +90,75 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(classification_response.json()["classification_status"], "UNKNOWN")
         self.assertEqual(classification_response.json()["taxonomy_version"], "topics-v1.5")
 
+    def test_live_scope_keeps_legacy_synthetic_rows_and_excludes_them_from_product_counts(self):
+        import asyncio
+        import json
+
+        path = Path(self.temp.name) / "mixed.sqlite"
+        legacy_store = CollectionStore(path)
+        legacy_service = CollectionService(legacy_store)
+        row = {"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 1, "views_ceil": 1000}
+        synthetic = live_source([dict(row)])
+        synthetic[0]["data_mode"] = "SYNTHETIC"
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            legacy_service._process_fetch("legacy-synthetic", synthetic)
+        legacy_item = legacy_store.search_keywords(query="robot")["items"][0]
+        legacy_id = legacy_item["id"]
+        archive_id = legacy_store.create({"name": "Legacy synthetic archive", "auto_match": False})
+        legacy_store.feedback_action(archive_id, {
+            "id": legacy_id, "keyword": legacy_item["keyword"], "normalized": legacy_item["normalized"],
+            "source": legacy_item["source"], "project": legacy_item["project"],
+            "observed_at": legacy_item["observed_at"], "data_mode": "SYNTHETIC",
+            "evidence": json.dumps(legacy_item["evidence"]), "context": legacy_item["context"],
+        }, "ADD")
+        with legacy_store.connect() as db:
+            before = {
+                "keyword": tuple(db.execute("SELECT data_mode,eligible,evidence FROM keywords WHERE id=?", (legacy_id,)).fetchone()),
+                "classification": tuple(db.execute("SELECT classification_status,topic_category_ids,classified_at FROM classification_results WHERE keyword_id=?", (legacy_id,)).fetchone()),
+                "observations": db.execute("SELECT count(*) FROM algorithm_observations WHERE keyword_id=?", (legacy_id,)).fetchone()[0],
+                "memberships": db.execute("SELECT count(*) FROM memberships WHERE keyword_id=?", (legacy_id,)).fetchone()[0],
+            }
+
+        live_store = CollectionStore(path, data_mode_scope="LIVE")
+        live_service = CollectionService(live_store)
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            outcome = live_service._process_fetch("current-live", live_source([dict(row)]))
+        self.assertEqual(outcome["status"], "COMPLETED")
+        with live_store.connect() as db:
+            after = {
+                "keyword": tuple(db.execute("SELECT data_mode,eligible,evidence FROM keywords WHERE id=?", (legacy_id,)).fetchone()),
+                "classification": tuple(db.execute("SELECT classification_status,topic_category_ids,classified_at FROM classification_results WHERE keyword_id=?", (legacy_id,)).fetchone()),
+                "observations": db.execute("SELECT count(*) FROM algorithm_observations WHERE keyword_id=?", (legacy_id,)).fetchone()[0],
+                "memberships": db.execute("SELECT count(*) FROM memberships WHERE keyword_id=?", (legacy_id,)).fetchone()[0],
+            }
+            live_rows = db.execute("SELECT id,data_mode FROM keywords WHERE data_mode='LIVE'").fetchall()
+        self.assertEqual(after, before)
+        self.assertEqual(len(live_rows), 1)
+        self.assertNotEqual(live_rows[0]["id"], legacy_id)
+        self.assertEqual(live_rows[0]["data_mode"], "LIVE")
+        self.assertEqual(live_store.workbench_summary()["stored_keywords"], 1)
+        self.assertEqual(live_store.search_keywords(query="robot")["total"], 1)
+        self.assertEqual(live_store.latest_dataset()["data_mode"], "LIVE")
+        self.assertEqual(live_store.keywords_for(archive_id), [])
+        self.assertEqual(next(item for item in live_store.list_collections() if item["id"] == archive_id)["membership_count"], 0)
+
+        app = create_app(read_only=True, settings=Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true"}))
+        app.state.collection_service = live_service
+
+        async def read_overview():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                return await client.get("/api/v1/analytics/overview"), await client.get("/api/v1/algorithms/results")
+
+        overview, algorithms = asyncio.run(read_overview())
+        self.assertEqual(overview.status_code, 200)
+        self.assertEqual(overview.json()["keyword_totals"]["unique"], 1)
+        self.assertEqual(overview.json()["latest_dataset"]["data_mode"], "LIVE")
+        self.assertEqual(algorithms.status_code, 200)
+        self.assertTrue(all(item["keyword_id"] != legacy_id for item in algorithms.json()["items"]))
+
     async def _classification_request(self, app, keyword_id):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
             return await client.get(f"/api/v1/collections/classifications/{keyword_id}")
@@ -316,6 +385,24 @@ class SmartCollectionsTests(unittest.TestCase):
             replay = self.service._process_fetch("live-fetch-1", sources)
             self.assertEqual(replay["assigned"], 1)
 
+    def test_local_embedding_input_is_bounded_without_changing_source_text(self):
+        calls = []
+
+        def measured(texts):
+            calls.append(texts)
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+        self.service._thread_state.embedding_counts = {
+            "cached_embeddings": 0, "inferred_embeddings": 0,
+        }
+        long_context = "verified context " * 100
+        with patch.object(embeddings, "embed", side_effect=measured):
+            vectors = self.service._embed_cached([long_context], [0])
+
+        self.assertEqual(len(vectors), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0][0]), embeddings.MAX_INPUT_CHARS)
+
     def test_full_record_input_and_cache_reuse(self):
         with self.store.connect() as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','OFF')")
@@ -468,6 +555,17 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(self.store.keywords_for(target), [])
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE action='REMOVE'").fetchone()[0], 2)
+
+    def test_auto_proposal_rejects_single_word_name_from_distinct_titles(self):
+        unassigned = [
+            ({"id": "harry-r", "keyword": "Harry R. Truman"}, [1.0, 0.0]),
+            ({"id": "harry-s", "keyword": "Harry S. Truman"}, [1.0, 0.0]),
+        ]
+        with patch("app.collections.service.cosine", return_value=0.99):
+            created, suggestions = self.service._propose("test-single-word-name", unassigned, [])
+
+        self.assertEqual((created, suggestions), (0, 0))
+        self.assertEqual(self.store.list_collections(), [])
 
     def test_platform_titles_do_not_form_auto_collection_proposals(self):
         records = [

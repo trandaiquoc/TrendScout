@@ -188,6 +188,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
     observations = []
     rejected_records = 0
     processing_blocked = False
+    source_coverage = []
     for source_result in source_results:
         if not isinstance(source_result, dict):
             rejected_records += 1
@@ -196,6 +197,18 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_id not in _ALLOWED:
             rejected_records += 1
             continue
+        coverage = source_result.get("coverage", {})
+        if source_id == WIKIMEDIA_SOURCE_ID and isinstance(coverage, dict):
+            source_coverage.append({
+                "source_id": source_id,
+                "provider_returned_records": coverage.get(
+                    "provider_returned_records", source_result.get("record_count", 0)),
+                "accepted_records": coverage.get("accepted_records", source_result.get("record_count", 0)),
+                "rejected_records": coverage.get("rejected_records", coverage.get("rejected", 0)),
+                "explicitly_omitted_records": coverage.get(
+                    "explicitly_omitted_records", coverage.get("records_omitted_storage_limit", 0)),
+                "source_coverage": coverage.get("source_coverage", "TOP_PER_COUNTRY_DAILY_LIST"),
+            })
         grant = grants.get(source_id)
         extraction_granted = (
             isinstance(grant, ProcessingGrant)
@@ -208,8 +221,9 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_result.get("data_mode") == "LIVE" and not extraction_granted:
             processing_blocked = True
         records = source_result.get("records", [])
-        if not isinstance(records, list) or len(records) > 512:
-            rejected_records += 1
+        maximum_records = 2000 if source_id == WIKIMEDIA_SOURCE_ID else 512
+        if not isinstance(records, list) or len(records) > maximum_records:
+            rejected_records += len(records) if isinstance(records, list) else 1
             continue
         if source_result.get("data_mode") == "LIVE":
             if not extraction_granted:
@@ -294,6 +308,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         "candidate_count": len(candidates),
         "shown_count": len(shown),
         "rejected_record_count": rejected_records,
+        "source_coverage": source_coverage,
         "candidates": shown,
         "limitations": (["SYNTHETIC_ONLY", "NOT_LIVE_VERIFIED"] if result_mode == "SYNTHETIC" else [])
                        + (["DISCOVERY_PROCESSING_BLOCKED"] if processing_blocked else [])

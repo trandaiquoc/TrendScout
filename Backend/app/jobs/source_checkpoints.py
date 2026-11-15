@@ -1,8 +1,4 @@
-"""Fenced checkpoint journal for normalized source data; not runtime-wired.
-
-The caller must supply a current, server-owned retention grant on every read and
-write. A production grant provider and proactive deletion remain unimplemented.
-"""
+"""Fenced, expiring journal for normalized source results and recovery receipts."""
 
 import hashlib
 import json
@@ -13,7 +9,13 @@ from datetime import datetime, timedelta, timezone
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.shared_cache import _safe_payload
 
-_MAX_CHECKPOINT_BYTES = 150_000
+_MAX_INLINE_CHECKPOINT_BYTES = 150_000
+_MAX_RESOLVED_CHECKPOINT_BYTES = 5_000_000
+_RECORD_PATHS = (
+    ("progress", "wikimedia_receipt", "result", "records"),
+    ("progress", "wikimedia_history_records"),
+    ("result", "records"),
+)
 
 
 def _utc(value):
@@ -42,10 +44,13 @@ class CheckpointGrant:
 
 
 class SourceCheckpointJournal:
-    def __init__(self, admission: PublicAdmission):
+    def __init__(self, admission: PublicAdmission, *, snapshot_blobs=None):
         if not isinstance(admission, PublicAdmission):
             raise TypeError("public admission boundary required")
+        if snapshot_blobs is not None and not callable(getattr(snapshot_blobs, "put", None)):
+            raise TypeError("snapshot blob store must support durable writes")
         self.admission = admission
+        self.snapshot_blobs = snapshot_blobs
 
     def _authorize(self, source_id, grant, now):
         if (source_id not in self.admission.policy.enabled_sources
@@ -53,9 +58,88 @@ class SourceCheckpointJournal:
                 or grant.allowed is not True or _utc(grant.expires_at) <= now):
             raise AdmissionDenied("CHECKPOINT_POLICY_UNAVAILABLE")
 
+    @staticmethod
+    def _at_path(value, path):
+        current = value
+        for component in path[:-1]:
+            current = current.get(component) if isinstance(current, dict) else None
+        return current.get(path[-1]) if isinstance(current, dict) else None
+
+    @staticmethod
+    def _set_path(value, path, replacement):
+        current = value
+        for component in path[:-1]:
+            current = current.get(component) if isinstance(current, dict) else None
+        if not isinstance(current, dict) or path[-1] not in current:
+            raise ValueError("snapshot record path is invalid")
+        current[path[-1]] = replacement
+
+    def _resolve_snapshot(self, entry, *, source_id, data_mode, now):
+        stored = entry.get("snapshot")
+        if not isinstance(stored, dict):
+            raise ValueError("invalid checkpoint snapshot")
+        storage = entry.get("snapshot_storage", "INLINE")
+        if storage == "EXTERNAL_RECORDS":
+            reference = entry.get("snapshot_ref")
+            if (self.snapshot_blobs is None or not isinstance(reference, dict)
+                    or tuple(reference.get("path", ())) not in _RECORD_PATHS):
+                raise ValueError("external checkpoint reference is invalid")
+            snapshot = deepcopy(stored)
+            records = self.snapshot_blobs.get(reference, now=now)
+            self._set_path(snapshot, tuple(reference["path"]), records)
+        elif storage == "INLINE" and entry.get("snapshot_ref") is None:
+            snapshot = deepcopy(stored)
+        else:
+            raise ValueError("unknown checkpoint storage mode")
+
+        if (snapshot.get("schema") != 1 or snapshot.get("source_id") != source_id
+                or snapshot.get("data_mode") != data_mode
+                or snapshot.get("plan_fingerprint") != self.admission.policy.plan_fingerprint):
+            raise ValueError("invalid checkpoint scope")
+        _safe_payload(snapshot)
+        encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=False,
+                             allow_nan=False, separators=(",", ":")).encode("utf-8")
+        if (len(encoded) > _MAX_RESOLVED_CHECKPOINT_BYTES
+                or hashlib.sha256(encoded).hexdigest() != entry.get("digest")):
+            raise ValueError("checkpoint integrity check failed")
+        return snapshot
+
+    def _validate_existing_entry(self, entry, *, source_id, grant):
+        if (entry.get("policy_version") != grant.policy_version
+                or entry.get("data_mode") != grant.data_mode
+                or type(entry.get("revision")) is not int or entry["revision"] < 1
+                or not isinstance(entry.get("digest"), str) or len(entry["digest"]) != 64):
+            raise ValueError("invalid checkpoint metadata")
+        snapshot = entry.get("snapshot")
+        if (not isinstance(snapshot, dict) or snapshot.get("schema") != 1
+                or snapshot.get("source_id") != source_id
+                or snapshot.get("data_mode") != grant.data_mode
+                or snapshot.get("plan_fingerprint") != self.admission.policy.plan_fingerprint):
+            raise ValueError("invalid checkpoint scope")
+        storage = entry.get("snapshot_storage", "INLINE")
+        if storage == "EXTERNAL_RECORDS":
+            reference = entry.get("snapshot_ref")
+            if (self.snapshot_blobs is None or not isinstance(reference, dict)
+                    or tuple(reference.get("path", ())) not in _RECORD_PATHS
+                    or not isinstance(reference.get("digest"), str)
+                    or len(reference["digest"]) != 64
+                    or type(reference.get("raw_bytes")) is not int
+                    or type(reference.get("item_count")) is not int):
+                raise ValueError("invalid external checkpoint reference")
+            return
+        if storage != "INLINE" or entry.get("snapshot_ref") is not None:
+            raise ValueError("invalid inline checkpoint reference")
+        _safe_payload(snapshot)
+        encoded = json.dumps(snapshot, sort_keys=True, ensure_ascii=False,
+                             allow_nan=False, separators=(",", ":")).encode("utf-8")
+        if (len(encoded) > _MAX_INLINE_CHECKPOINT_BYTES
+                or hashlib.sha256(encoded).hexdigest() != entry["digest"]):
+            raise ValueError("invalid inline checkpoint integrity")
+
     def load(self, job_id, owner, fence, *, source_id, grant, now):
         now = _utc(now)
         self._authorize(source_id, grant, now)
+
         def operation(job):
             entries = job.setdefault("source_checkpoints", {})
             entry = entries.get(source_id)
@@ -65,19 +149,10 @@ class SourceCheckpointJournal:
                     or entry.get("data_mode") != grant.data_mode):
                 raise AdmissionDenied("CHECKPOINT_POLICY_MISMATCH")
             try:
-                if (type(entry.get("revision")) is not int or entry["revision"] < 1
-                        or not isinstance(entry.get("snapshot"), dict)
-                        or entry["snapshot"].get("schema") != 1
-                        or entry["snapshot"].get("source_id") != source_id
-                        or entry["snapshot"].get("data_mode") != grant.data_mode
-                        or entry["snapshot"].get("plan_fingerprint") != self.admission.policy.plan_fingerprint):
-                    raise ValueError("invalid checkpoint scope")
-                _safe_payload(entry["snapshot"])
-                encoded = json.dumps(entry["snapshot"], sort_keys=True, ensure_ascii=False,
-                                     allow_nan=False, separators=(",", ":")).encode("utf-8")
-                if (len(encoded) > _MAX_CHECKPOINT_BYTES
-                        or hashlib.sha256(encoded).hexdigest() != entry["digest"]):
-                    raise ValueError("invalid digest")
+                if type(entry.get("revision")) is not int or entry["revision"] < 1:
+                    raise ValueError("invalid checkpoint revision")
+                snapshot = self._resolve_snapshot(entry, source_id=source_id,
+                                                  data_mode=grant.data_mode, now=now)
                 expiry = min(_utc(datetime.fromisoformat(entry["retain_until"])),
                              _utc(datetime.fromisoformat(entry["created_at"]))
                              + timedelta(seconds=grant.max_retention_seconds),
@@ -88,12 +163,13 @@ class SourceCheckpointJournal:
                 del entries[source_id]
                 return None
             entry["retain_until"] = expiry.isoformat()
-            return {"revision": entry["revision"], "snapshot": deepcopy(entry["snapshot"]),
+            return {"revision": entry["revision"], "snapshot": snapshot,
                     "retain_until": expiry.isoformat()}
+
         return self.admission.transact_owned(job_id, owner, fence, now=now, operation=operation)
 
     def completed_result(self, job, *, source_id, grant, now):
-        """Validate a terminal job's retained source result before public readback."""
+        """Validate and return a terminal source result within the retention grant."""
         now = _utc(now)
         self._authorize(source_id, grant, now)
         if (not isinstance(job, dict) or job.get("state") not in {"COMPLETED", "PARTIAL"}
@@ -103,32 +179,23 @@ class SourceCheckpointJournal:
         if not isinstance(entry, dict):
             return None
         try:
-            snapshot = entry.get("snapshot")
             if (entry.get("policy_version") != grant.policy_version
                     or entry.get("data_mode") != grant.data_mode
-                    or not isinstance(snapshot, dict)
-                    or snapshot.get("schema") != 1
-                    or snapshot.get("source_id") != source_id
-                    or snapshot.get("data_mode") != grant.data_mode
-                    or snapshot.get("plan_fingerprint") != self.admission.policy.plan_fingerprint
-                    or snapshot.get("phase") != "COMPLETE"
+                    or type(entry.get("revision")) is not int or entry["revision"] < 1):
+                raise ValueError("invalid completed result metadata")
+            snapshot = self._resolve_snapshot(entry, source_id=source_id,
+                                              data_mode=grant.data_mode, now=now)
+            if (snapshot.get("phase") != "COMPLETE"
                     or not isinstance(snapshot.get("result"), dict)
                     or snapshot["result"].get("data_mode") != grant.data_mode
                     or not isinstance(snapshot["result"].get("records"), list)
                     or type(snapshot["result"].get("record_count")) is not int
                     or snapshot["result"]["record_count"] != len(snapshot["result"]["records"])):
                 raise ValueError("invalid completed result scope")
-            _safe_payload(snapshot)
-            serialized = json.dumps(snapshot, sort_keys=True, ensure_ascii=False,
-                                    allow_nan=False, separators=(",", ":")).encode("utf-8")
             created_at = _utc(datetime.fromisoformat(entry["created_at"]))
             expiry = min(_utc(datetime.fromisoformat(entry["retain_until"])),
                          created_at + timedelta(seconds=grant.max_retention_seconds),
                          _utc(grant.expires_at))
-            revision = entry.get("revision")
-            if (type(revision) is not int or revision < 1 or len(serialized) > _MAX_CHECKPOINT_BYTES
-                    or hashlib.sha256(serialized).hexdigest() != entry.get("digest")):
-                raise ValueError("invalid completed result integrity")
         except (KeyError, TypeError, ValueError, UnicodeError):
             raise AdmissionDenied("CHECKPOINT_INVALID") from None
         if now >= expiry:
@@ -152,29 +219,48 @@ class SourceCheckpointJournal:
                                     separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError, UnicodeError):
             raise ValueError("checkpoint must be finite JSON") from None
-        if len(serialized) > _MAX_CHECKPOINT_BYTES:
-            raise ValueError("checkpoint exceeds storage budget")
-        snapshot_copy = json.loads(serialized)
+        if len(serialized) > _MAX_RESOLVED_CHECKPOINT_BYTES:
+            raise ValueError("checkpoint exceeds bounded resolved storage budget")
         digest = hashlib.sha256(serialized).hexdigest()
+        snapshot_copy = json.loads(serialized)
+        snapshot_ref = None
+        snapshot_storage = "INLINE"
+        if len(serialized) > _MAX_INLINE_CHECKPOINT_BYTES:
+            if self.snapshot_blobs is None:
+                raise ValueError("checkpoint exceeds inline storage budget")
+            record_path = next((path for path in _RECORD_PATHS
+                                if isinstance(self._at_path(snapshot_copy, path), list)), None)
+            if record_path is None:
+                raise ValueError("large checkpoint has no supported source record list")
+            records = self._at_path(snapshot_copy, record_path)
+            reference = self.snapshot_blobs.put(
+                records, now=now,
+                retain_until=min(_utc(grant.expires_at),
+                                 now + timedelta(seconds=grant.max_retention_seconds)),
+            )
+            self._set_path(snapshot_copy, record_path, [])
+            snapshot_ref = {**reference, "path": list(record_path)}
+            snapshot_storage = "EXTERNAL_RECORDS"
+            shell = json.dumps(snapshot_copy, sort_keys=True, ensure_ascii=False,
+                               allow_nan=False, separators=(",", ":")).encode("utf-8")
+            if len(shell) > _MAX_INLINE_CHECKPOINT_BYTES:
+                raise ValueError("checkpoint metadata exceeds inline storage budget")
+
         def operation(job):
             entries = job.setdefault("source_checkpoints", {})
             existing = entries.get(source_id)
-            expiry = min(_utc(grant.expires_at), now + timedelta(seconds=grant.max_retention_seconds),
-                         _utc(datetime.fromisoformat(job["expires_at"])))
+            # The job deadline bounds execution and recovery claims. A separate
+            # retention grant controls how long an already completed result can
+            # be read; tying both to job expiry made results disappear before
+            # the idempotency receipt and status UI expired.
+            expiry = min(_utc(grant.expires_at),
+                         now + timedelta(seconds=grant.max_retention_seconds))
             if existing:
                 try:
-                    if (existing.get("policy_version") != grant.policy_version
-                            or existing.get("data_mode") != grant.data_mode):
-                        raise AdmissionDenied("CHECKPOINT_POLICY_MISMATCH")
+                    self._validate_existing_entry(existing, source_id=source_id, grant=grant)
                     old_expiry = _utc(datetime.fromisoformat(existing["retain_until"]))
                     created_at = _utc(datetime.fromisoformat(existing["created_at"]))
                     revision = existing["revision"]
-                    if (type(revision) is not int or revision < 1
-                            or hashlib.sha256(json.dumps(existing["snapshot"], sort_keys=True,
-                                ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-                                .encode("utf-8")).hexdigest() != existing["digest"]):
-                        raise ValueError("invalid checkpoint entry")
-                    _safe_payload(existing["snapshot"])
                 except AdmissionDenied:
                     raise
                 except (KeyError, TypeError, ValueError, UnicodeError):
@@ -194,9 +280,14 @@ class SourceCheckpointJournal:
                 raise AdmissionDenied("CHECKPOINT_REVISION_CONFLICT")
             if expiry <= now:
                 raise AdmissionDenied("CHECKPOINT_EXPIRED")
-            entries[source_id] = {"revision": revision + 1, "digest": digest,
-                "data_mode": grant.data_mode, "policy_version": grant.policy_version,
-                "created_at": existing["created_at"] if existing else now.isoformat(),
-                "retain_until": expiry.isoformat(), "snapshot": snapshot_copy}
+            entry = {"revision": revision + 1, "digest": digest,
+                     "data_mode": grant.data_mode, "policy_version": grant.policy_version,
+                     "created_at": existing["created_at"] if existing else now.isoformat(),
+                     "retain_until": expiry.isoformat(), "snapshot": snapshot_copy,
+                     "snapshot_storage": snapshot_storage}
+            if snapshot_ref is not None:
+                entry["snapshot_ref"] = snapshot_ref
+            entries[source_id] = entry
             return revision + 1
+
         return self.admission.transact_owned(job_id, owner, fence, now=now, operation=operation)

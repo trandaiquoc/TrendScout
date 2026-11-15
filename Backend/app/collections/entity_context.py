@@ -14,6 +14,7 @@ import httpx
 
 CONTEXT_VERSION = "wikimedia-entity-context-v4"
 MAX_TITLES_PER_REQUEST = 10
+MAX_TITLES_PER_ENRICHMENT = 10
 MAX_TITLE_LENGTH = 256
 MAX_RESPONSE_BYTES = 4_000_000
 USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
@@ -178,10 +179,14 @@ class WikimediaEntityContextResolver:
     row unknown and do not fail the user's keyword processing.
     """
 
-    def __init__(self, store, *, transport=None, user_agent: str = USER_AGENT, timeout: float = 5.0):
+    def __init__(self, store, *, transport=None, user_agent: str = USER_AGENT, timeout: float = 5.0,
+                 before_request=None):
         self.store = store
         self.transport = transport
         self.user_agent = user_agent
+        self.before_request = before_request or (lambda: None)
+        if not callable(self.before_request):
+            raise TypeError("a bounded Wikimedia request pacer is required")
         self.timeout = httpx.Timeout(timeout, connect=min(timeout, 3.0))
         self.last_stats = {"requested_titles": 0, "resolved_titles": 0, "failed_batches": 0}
 
@@ -200,10 +205,14 @@ class WikimediaEntityContextResolver:
     def enrich(self, records: list[dict]) -> dict[str, EntityContext]:
         uncached = self._uncached_records(records)
         if not uncached:
-            self.last_stats = {"requested_titles": 0, "resolved_titles": 0, "failed_batches": 0}
+            self.last_stats = {"requested_titles": 0, "resolved_titles": 0,
+                               "failed_batches": 0, "deferred_titles": 0}
             return self.cached(record["id"] for record in records)
+        deferred_titles = max(0, len(uncached) - MAX_TITLES_PER_ENRICHMENT)
+        uncached = uncached[:MAX_TITLES_PER_ENRICHMENT]
         results: dict[str, EntityContext] = {}
-        stats = {"requested_titles": len(uncached), "resolved_titles": 0, "failed_batches": 0}
+        stats = {"requested_titles": len(uncached), "resolved_titles": 0,
+                 "failed_batches": 0, "deferred_titles": deferred_titles}
         with httpx.Client(timeout=self.timeout, transport=self.transport,
                           headers={"User-Agent": self.user_agent}, follow_redirects=False) as client:
             for project, (api, language, group) in self._groups(uncached).items():
@@ -272,6 +281,7 @@ class WikimediaEntityContextResolver:
 
     def _resolve_batch(self, client, api, language, records):
         titles = [row["keyword"] for row in records]
+        self.before_request()
         page_data = self._get_json(client, api, {
             "action": "query", "format": "json", "formatversion": "2",
             "meta": "siteinfo", "siprop": "general|namespaces|namespacealiases",
@@ -324,6 +334,7 @@ class WikimediaEntityContextResolver:
 
         entities = {}
         if qids:
+            self.before_request()
             entity_data = self._get_json(client, "https://www.wikidata.org/w/api.php", {
                 "action": "wbgetentities", "format": "json", "formatversion": "2",
                 "ids": "|".join(dict.fromkeys(qids)), "props": "claims|descriptions",

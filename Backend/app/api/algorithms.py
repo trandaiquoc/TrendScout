@@ -18,14 +18,22 @@ def list_algorithm_results(request: Request, limit: int = Query(default=100, ge=
     service = getattr(request.app.state, 'collection_service', None)
     if service is None:
         raise HTTPException(503, {'code': 'ANALYTICS_UNAVAILABLE'})
+    mode = service.store.data_mode_scope
+    keyword_filter = " AND k.data_mode=?" if mode else ""
+    parameters = (mode,) if mode else ()
     with service.store.connect() as db:
-        counts = db.execute('''SELECT algorithm_id,version,
+        counts = db.execute('''SELECT r.algorithm_id,r.version,
             sum(status='COMPLETED') AS completed,sum(status='SKIPPED') AS skipped,
             sum(status='FAILED') AS failed,count(*) AS total, max(updated_at) AS updated_at
-            FROM algorithm_results GROUP BY algorithm_id,version ORDER BY algorithm_id''').fetchall()
+            FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+            LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+            WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
+            + keyword_filter + ' GROUP BY r.algorithm_id,r.version ORDER BY r.algorithm_id', parameters).fetchall()
         rows = db.execute('''SELECT r.keyword_id,k.keyword,r.algorithm_id,r.version,r.status,r.reason_code,
             r.value,r.metric,r.unit,r.result_json,r.updated_at FROM algorithm_results r
-            JOIN keywords k ON k.id=r.keyword_id WHERE k.eligible=1
-            ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ?''', (limit,)).fetchall()
+            JOIN keywords k ON k.id=r.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+            WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
+            + keyword_filter + ' ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ?',
+            (*parameters, limit)).fetchall()
     return {'summary': [dict(row) for row in counts], 'items': [dict(row) for row in rows],
             'limit': limit, 'evaluation_status': catalog()['evaluation_status']}

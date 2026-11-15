@@ -12,6 +12,7 @@ import httpx
 
 from app.collections.store import CollectionStore
 from app.discovery.contracts import ProcessingGrant
+from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
 from app.jobs.shared_cache import CacheGrant, SharedCache
@@ -32,6 +33,7 @@ from app.sources.wikimedia.live_gateway import (
     WikimediaTopPageGateway,
 )
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
 from app.workers.d5_source_handlers import D5SourceHandlers
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
@@ -40,7 +42,7 @@ USER_AGENT = "TrendScoutTest/1.0 (https://github.com/trandaiquoc/TrendScout)"
 
 
 class NoEntityContext:
-    def __init__(self, _store):
+    def __init__(self, _store, **_kwargs):
         pass
 
     def enrich(self, _records):
@@ -50,11 +52,13 @@ class NoEntityContext:
         return {}
 
 
-def payload(day):
+def payload(day, count=1):
     return {"items": [{"country": "US", "access": "all-access",
         "year": day.strftime("%Y"), "month": day.strftime("%m"), "day": day.strftime("%d"),
-        "articles": [{"article": "Coffee", "project": "en.wikipedia",
-                      "views_ceil": 100, "rank": 1}]}]}
+        "articles": [{"article": "Coffee" if count == 1 else f"Live topic {index:04d}",
+                      "project": "en.wikipedia",
+                      "views_ceil": 100 if count == 1 else 1000 - index,
+                      "rank": index + 1} for index in range(count)]}]}
 
 
 class LiveMockGateway(WikimediaTopPageGateway):
@@ -87,15 +91,17 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
             telemetry_controls_verified=True, scope="LOCAL_NORMAL", local_controls_verified=True,
         ) if source == WIKIMEDIA_SOURCE_ID else None})()
         self.requests = []
+        self.response_count = 1
+        self.first_response_404 = True
         self.day = (NOW - timedelta(days=2)).date()
 
         def handle(request):
             self.requests.append(request)
-            if len(self.requests) == 1:
+            if self.first_response_404 and len(self.requests) == 1:
                 return httpx.Response(404, request=request)
             date_parts = request.url.path.rstrip("/").split("/")[-3:]
             response_day = datetime.strptime("/".join(date_parts), "%Y/%m/%d").date()
-            return httpx.Response(200, json=payload(response_day), request=request)
+            return httpx.Response(200, json=payload(response_day, self.response_count), request=request)
 
         self.gateway = LiveMockGateway.offline_fixture(
             self.approvals, self.runner, user_agent=USER_AGENT,
@@ -122,7 +128,8 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
         ).build()[WIKIMEDIA_SOURCE_ID]
         self.worker = DistributedFetchWorker(self.admission,
             handlers={WIKIMEDIA_SOURCE_ID: self.handler},
-            resolve_grant=self.checkpoint_grant, utcnow=lambda: self.now)
+            resolve_grant=self.checkpoint_grant, utcnow=lambda: self.now,
+            snapshot_blobs=LocalSQLiteSnapshotBlobs(self.store))
 
     async def asyncTearDown(self):
         await self.gateway.aclose()
@@ -153,6 +160,202 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["data_mode"], "LIVE")
         self.assertEqual(cached["records"][0]["source"], WIKIMEDIA_SOURCE_ID)
         self.assertEqual(len(self.requests), 2)
+
+    async def test_complete_provider_list_survives_checkpoint_cache_and_discovery(self):
+        self.response_count = 1000
+        finished = await self.fetch("normal-wikimedia-full-top-list")
+        grant = self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now)
+        result = self.worker.journal.completed_result(
+            finished, source_id=WIKIMEDIA_SOURCE_ID, grant=grant, now=self.now)
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["record_count"], 1000)
+        self.assertEqual(len(result["records"]), 1000)
+        self.assertEqual(result["coverage"]["provider_returned_records"], 1000)
+        self.assertEqual(result["coverage"]["accepted_records"], 1000)
+        self.assertEqual(result["coverage"]["rejected_records"], 0)
+        self.assertEqual(result["coverage"]["explicitly_omitted_records"], 0)
+
+        processing_grant = ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
+            self.now + timedelta(minutes=15), POLICY_VERSION)
+        discovered = discover_fetch_results([{"source_id": WIKIMEDIA_SOURCE_ID, **result}],
+            now=self.now, processing_grants=(processing_grant,), empty_mode="LIVE")
+        self.assertGreater(discovered["candidate_count"], 0)
+        self.assertEqual(discovered["rejected_record_count"], 0)
+        self.assertEqual(discovered["source_coverage"][0]["provider_returned_records"], 1000)
+
+        restarted_journal = type(self.worker.journal)(self.admission,
+            snapshot_blobs=LocalSQLiteSnapshotBlobs(self.store))
+        restored = restarted_journal.completed_result(
+            finished, source_id=WIKIMEDIA_SOURCE_ID, grant=grant, now=self.now)
+        self.assertEqual(len(restored["records"]), 1000)
+
+        self.now += timedelta(seconds=2)
+        cached_job = await self.fetch("normal-wikimedia-full-top-list-cache")
+        cached = restarted_journal.completed_result(
+            cached_job, source_id=WIKIMEDIA_SOURCE_ID,
+            grant=self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now), now=self.now)
+        self.assertEqual(cached["delivery_state"], "CACHED")
+        self.assertEqual(len(cached["records"]), 1000)
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_public_fetch_restores_large_terminal_result_from_worker_blob_store(self):
+        self.response_count = 1000
+        job = await self.fetch("normal-wikimedia-public-large-result")
+
+        def processing_grants(now):
+            return (ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
+                                    now + timedelta(minutes=15), POLICY_VERSION),)
+
+        facade = DistributedPublicFetch(
+            self.admission, self.worker, resolve_grant=self.checkpoint_grant,
+            utcnow=lambda: self.now, normal_wikimedia_live=True,
+            resolve_processing_grants=processing_grants,
+        )
+        status = facade.status(job["job_id"], include_records=True)
+
+        self.assertEqual(facade.journal, self.worker.journal)
+        self.assertEqual(status["data_mode"], "LIVE")
+        self.assertEqual(status["sources"][0]["status"], "SUCCESS")
+        self.assertEqual(status["sources"][0]["record_count"], 1000)
+        self.assertEqual(len(status["sources"][0]["records"]), 1000)
+        self.assertGreater(status["discovery"]["candidate_count"], 0)
+
+    async def test_completed_fetch_result_survives_worker_deadline_until_receipt_expiry(self):
+        job = await self.fetch("normal-wikimedia-result-outlives-worker")
+
+        def processing_grants(now):
+            return (ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
+                                    now + timedelta(minutes=15), POLICY_VERSION),)
+
+        facade = DistributedPublicFetch(
+            self.admission, self.worker, resolve_grant=self.checkpoint_grant,
+            utcnow=lambda: self.now, normal_wikimedia_live=True,
+            resolve_processing_grants=processing_grants,
+        )
+        self.now += timedelta(seconds=self.policy.max_job_seconds + 1)
+        status = facade.status(job["job_id"])
+
+        self.assertTrue(status["terminal"])
+        self.assertEqual(status["data_mode"], "LIVE")
+        self.assertEqual(status["sources"][0]["status"], "SUCCESS")
+        self.assertGreater(status["sources"][0]["record_count"], 0)
+
+    async def test_explicit_two_day_history_preserves_complete_lists_across_restart(self):
+        self.response_count = 1000
+        self.first_response_404 = False
+        accepted = self.admission.admit(
+            "normal-wikimedia-history-two-days",
+            now=self.now,
+            request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 2},
+        )
+        finished = await self.worker.run_once("history-worker")
+        self.assertEqual(finished["job_id"], accepted["job_id"])
+        job = self.admission.read_job(accepted["job_id"], now=self.now)
+        grant = self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now)
+        result = self.worker.journal.completed_result(
+            job, source_id=WIKIMEDIA_SOURCE_ID, grant=grant, now=self.now)
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["data_mode"], "LIVE")
+        self.assertEqual(result["record_count"], 2000)
+        self.assertEqual(len(result["records"]), 2000)
+        self.assertEqual(result["coverage"]["provider_returned_records"], 2000)
+        self.assertEqual(result["coverage"]["accepted_records"], 2000)
+        self.assertEqual(result["coverage"]["rejected_records"], 0)
+        self.assertEqual(result["coverage"]["explicitly_omitted_records"], 0)
+        observed_days = sorted({row["observation_date"] for row in result["records"]})
+        self.assertEqual(observed_days, [
+            (self.day - timedelta(days=1)).isoformat(), self.day.isoformat(),
+        ])
+        self.assertEqual(len(self.requests), 2)
+        self.assertTrue(all("wikimedia.org" in request.url.host for request in self.requests))
+
+        restarted = type(self.worker.journal)(self.admission,
+            snapshot_blobs=LocalSQLiteSnapshotBlobs(self.store))
+        restored = restarted.completed_result(job, source_id=WIKIMEDIA_SOURCE_ID,
+            grant=grant, now=self.now)
+        self.assertEqual(len(restored["records"]), 2000)
+
+        self.now += timedelta(seconds=2)
+        cached_job = self.admission.admit(
+            "normal-wikimedia-history-two-days-cached", now=self.now,
+            request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 2})
+        await self.worker.run_once("history-worker")
+        cached_job = self.admission.read_job(cached_job["job_id"], now=self.now)
+        cached = restarted.completed_result(cached_job, source_id=WIKIMEDIA_SOURCE_ID,
+            grant=self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now), now=self.now)
+        self.assertEqual(cached["delivery_state"], "CACHED")
+        self.assertEqual(cached["record_count"], 2000)
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_history_persists_each_observation_before_semantic_model_matching(self):
+        from app.collections.service import CollectionService
+
+        self.first_response_404 = False
+        accepted = self.admission.admit(
+            "normal-wikimedia-history-observation-persistence", now=self.now,
+            request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 2})
+        await self.worker.run_once("history-worker")
+        job = self.admission.read_job(accepted["job_id"], now=self.now)
+        result = self.worker.journal.completed_result(job, source_id=WIKIMEDIA_SOURCE_ID,
+            grant=self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now), now=self.now)
+        local_store = CollectionStore(Path(self.directory.name) / "history-collections.sqlite")
+        with patch.object(CollectionService, "_embed_cached",
+                          side_effect=RuntimeError("offline model intentionally unavailable")):
+            await CollectionService(local_store, NoEntityContext(local_store)).process_fetch(
+                accepted["job_id"], [{"source_id": WIKIMEDIA_SOURCE_ID, **result}])
+        with local_store.connect() as db:
+            rows = db.execute("SELECT observation_date,value,snapshot_status FROM algorithm_observations "
+                "ORDER BY observation_date").fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row[0] for row in rows], [
+                (self.day - timedelta(days=1)).isoformat(), self.day.isoformat(),
+            ])
+            self.assertTrue(all(row[1] == 100 for row in rows))
+            self.assertTrue(all(row[2] == "SUCCESS" for row in rows))
+            snapshot = db.execute("SELECT data_mode,observation_start,observation_end "
+                "FROM dataset_snapshots WHERE dataset_id=?", (accepted["job_id"],)).fetchone()
+            self.assertEqual(tuple(snapshot), ("LIVE", (self.day - timedelta(days=1)).isoformat(),
+                                                self.day.isoformat()))
+
+    async def test_live_result_replays_after_model_failure_without_snapshot(self):
+        from app.collections.service import CollectionService
+
+        accepted = self.admission.admit("normal-wikimedia-live-replay-after-model-failure",
+                                        now=self.now)
+        await self.worker.run_once("replay-worker")
+        job = self.admission.read_job(accepted["job_id"], now=self.now)
+        result = self.worker.journal.completed_result(job, source_id=WIKIMEDIA_SOURCE_ID,
+            grant=self.checkpoint_grant(WIKIMEDIA_SOURCE_ID, self.now), now=self.now)
+        local_store = CollectionStore(Path(self.directory.name) / "retry-collections.sqlite",
+                                      data_mode_scope="LIVE")
+        with local_store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at,stage) "
+                       "VALUES(?,'MODEL_UNAVAILABLE','LOCAL_MODEL_UNAVAILABLE',?,'MODEL_UNAVAILABLE')",
+                       (accepted["job_id"], self.now.isoformat()))
+        with patch.object(CollectionService, "_embed_cached",
+                          side_effect=RuntimeError("offline model intentionally unavailable")):
+            replayed = await CollectionService(local_store, NoEntityContext(local_store)).process_fetch(
+                accepted["job_id"], [{"source_id": WIKIMEDIA_SOURCE_ID, **result}])
+
+        self.assertEqual(replayed["status"], "MODEL_UNAVAILABLE")
+        with local_store.connect() as db:
+            snapshot = db.execute("SELECT data_mode,provider_record_count,received_record_count "
+                "FROM dataset_snapshots WHERE dataset_id=?", (accepted["job_id"],)).fetchone()
+            self.assertEqual(tuple(snapshot), ("LIVE", 1, 1))
+            self.assertEqual(db.execute("SELECT count(*) FROM keywords WHERE data_mode='LIVE'").fetchone()[0], 1)
+        with patch.object(CollectionService, "_embed_cached",
+                          side_effect=lambda texts, _versions: [[1.0, 0.0, 0.0] for _ in texts]):
+            retried = await CollectionService(local_store, NoEntityContext(local_store)).reclassify_unassigned(
+                accepted["job_id"])
+        self.assertEqual(retried["status"], "COMPLETED")
+        with local_store.connect() as db:
+            self.assertEqual(db.execute("SELECT processing_status FROM dataset_snapshots WHERE dataset_id=?",
+                (accepted["job_id"],)).fetchone()[0], "COMPLETED")
+            fetch_job = db.execute("SELECT available,skipped FROM fetch_jobs WHERE fetch_id=?",
+                (accepted["job_id"],)).fetchone()
+            self.assertEqual(tuple(fetch_job), (1, 0))
 
     def test_policy_has_repeating_user_budget_without_lifetime_ceiling(self):
         self.assertEqual(self.policy.enabled_sources, frozenset({WIKIMEDIA_SOURCE_ID}))
@@ -218,6 +421,11 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
                     transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 1234)),
                     base_url="http://127.0.0.1",
                 ) as client:
+                    capabilities = await client.get("/api/v1/capabilities")
+                    self.assertEqual(capabilities.status_code, 200)
+                    wikimedia = next(item for item in capabilities.json()["sources"]
+                                     if item["source_id"] == WIKIMEDIA_SOURCE_ID)
+                    self.assertEqual(wikimedia["supported_data_modes"], ["LIVE"])
                     response = await client.post("/api/v1/fetches", json={}, headers={
                         "Idempotency-Key": "normal-wikimedia-http-test-0001",
                     })
@@ -234,6 +442,18 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(evidence["approximate_views"], 100)
                     self.assertEqual(evidence["data_mode"], "LIVE")
                     self.assertEqual(evidence["source_url"].split("/")[:3], ["https:", "", "en.wikipedia.org"])
+                    self.now += timedelta(seconds=2)
+                    history = await client.post("/api/v1/fetches/history", json={"days": 2}, headers={
+                        "Idempotency-Key": "normal-wikimedia-history-http-test-0001",
+                    })
+                    self.assertEqual(history.status_code, 202, history.text)
+                    self.assertEqual(history.json()["request_kind"], "WIKIMEDIA_HISTORY")
+                    self.assertEqual(history.json()["history_days"], 2)
+                    history_status = await client.get(history.json()["status_url"])
+                    self.assertEqual(history_status.status_code, 200, history_status.text)
+                    history_source = history_status.json()["sources"][0]
+                    self.assertEqual(history_source["data_mode"], "LIVE")
+                    self.assertEqual(history_source["coverage"]["history_days_requested"], 2)
 
     async def test_local_live_scheduler_uses_configured_operator_token_and_stays_disabled(self):
         def processing_grants(now):

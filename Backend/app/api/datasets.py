@@ -30,7 +30,7 @@ def latest_dataset(request: Request):
 
 @router.get('/datasets/latest/keywords')
 def latest_keywords(request: Request, q: str = Query(default='', max_length=100),
-                    state: str = Query(default='all', pattern='^(all|unassigned|ai|manual|mixed|needs_review|excluded)$'),
+                    state: str = Query(default='all', pattern='^(all|unassigned|ai|manual|mixed|needs_review|excluded|non_topic)$'),
                     classification: Literal['all', 'CLASSIFIED', 'AMBIGUOUS', 'UNKNOWN', 'INELIGIBLE'] = 'all',
                     evidence: Literal['all', 'metric', 'algorithm', 'missing'] = 'all',
                     collection_ids: list[str] = Query(default=[]), source: str = Query(default='', max_length=100),

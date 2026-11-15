@@ -87,6 +87,7 @@ class LocalLiveGuard:
             })
             or (method == "GET" and path.startswith("/dashboard/"))
             or (method == "POST" and path == "/api/v1/fetches")
+            or (method == "POST" and path == "/api/v1/fetches/history")
             or (method == "GET" and path.startswith("/api/v1/fetches/"))
             or collection_read or collection_write or algorithm_read or dataset_read
             or product_read or run_history_detail or research_write or scheduler_write
@@ -94,7 +95,7 @@ class LocalLiveGuard:
         if not allowed:
             status = 405 if path in {
                 "/", "/dashboard", "/dashboard/", "/api/v1/capabilities",
-                "/api/health", "/api/v1/fetches",
+                "/api/health", "/api/v1/fetches", "/api/v1/fetches/history",
                 "/api/v1/algorithms", "/api/v1/algorithms/results",
                 "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",
             } or path.startswith("/api/v1/fetches/") else 404

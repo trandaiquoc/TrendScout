@@ -10,8 +10,8 @@ from pathlib import Path
 
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
-from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_file_security import secure_private_directory, verify_private_file
+from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 
@@ -83,6 +83,23 @@ class PublicAdmissionTests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_history_request_metadata_is_idempotent_and_survives_worker_claim(self):
+        metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": 2}
+        accepted = self.control.admit("explicit-history-request", now=NOW,
+                                      request_metadata=metadata)
+        replay = self.control.admit("explicit-history-request", now=NOW,
+                                    request_metadata=metadata)
+        self.assertEqual(replay["result"], "REPLAY")
+        with self.assertRaisesRegex(AdmissionDenied, "IDEMPOTENCY_KEY_CONFLICT"):
+            self.control.admit("explicit-history-request", now=NOW,
+                               request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 1})
+        claim = self.control.claim_next("history-worker", now=NOW)
+        self.assertEqual(claim["job_id"], accepted["job_id"])
+        self.assertEqual(claim["request_metadata"], metadata)
+        with self.assertRaises(ValueError):
+            self.control.admit("oversized-history-request", now=NOW,
+                               request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 3})
 
     def test_independent_processes_coalesce_and_share_provider_budget(self):
         context = multiprocessing.get_context("spawn")

@@ -285,10 +285,22 @@ class PublicAdmission:
 
         return self.store.transact(self.state_key, operation)
 
-    def admit(self, idempotency_key: str, *, now: datetime) -> dict:
+    @staticmethod
+    def _request_metadata(value):
+        if value is None:
+            return {}
+        if (not isinstance(value, dict) or set(value) != {"kind", "history_days"}
+                or value.get("kind") != "WIKIMEDIA_HISTORY"
+                or type(value.get("history_days")) is not int
+                or not 1 <= value["history_days"] <= 2):
+            raise ValueError("invalid bounded Fetch request metadata")
+        return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
+
+    def admit(self, idempotency_key: str, *, now: datetime, request_metadata=None) -> dict:
         now = _utc(now)
         if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key):
             raise ValueError("invalid idempotency key")
+        request_metadata = self._request_metadata(request_metadata)
         if not self.policy.enabled:
             raise AdmissionDenied("FEATURE_DISABLED")
         digest = hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
@@ -301,13 +313,16 @@ class PublicAdmission:
             existing = keys.get(digest)
             if existing:
                 job = jobs.get(existing["job_id"], {})
+                if job.get("request_metadata", {}) != request_metadata:
+                    raise AdmissionDenied("IDEMPOTENCY_KEY_CONFLICT")
                 return {"job_id": existing["job_id"], "result": "REPLAY",
                         "status": job.get("state", "EXPIRED"),
                         "created_at": job.get("created_at")}
             active = next((job for job in jobs.values()
                            if job["state"] in {"QUEUED", "RUNNING"}
                            and _parse(job["expires_at"]) > now
-                           and job["plan_fingerprint"] == self.policy.plan_fingerprint), None)
+                           and job["plan_fingerprint"] == self.policy.plan_fingerprint
+                           and job.get("request_metadata", {}) == request_metadata), None)
             if len(keys) >= self.policy.max_records:
                 raise AdmissionDenied("RECEIPT_CAPACITY")
             if active:
@@ -329,7 +344,8 @@ class PublicAdmission:
                                 "created_at": now.isoformat(),
                                 "available_at": now.isoformat(),
                                 "expires_at": (now + timedelta(seconds=self.policy.max_job_seconds)).isoformat(),
-                                "plan_fingerprint": self.policy.plan_fingerprint, "status_polls": 0,
+                                "plan_fingerprint": self.policy.plan_fingerprint,
+                                "request_metadata": request_metadata, "status_polls": 0,
                                 "receipts": {}}
                 starts.append(now.isoformat())
             keys[digest] = {"job_id": job_id,
@@ -395,7 +411,8 @@ class PublicAdmission:
                                    _parse(job["expires_at"])).isoformat(),
                    updated_at=now.isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
-                "lease_until": job["lease_until"], "expires_at": job["expires_at"]}
+                "lease_until": job["lease_until"], "expires_at": job["expires_at"],
+                "request_metadata": deepcopy(job.get("request_metadata", {}))}
 
     def claim_next(self, owner: str, *, now: datetime) -> dict | None:
         """Claim one due job or reclaim an expired lease, in the same transaction."""

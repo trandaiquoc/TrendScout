@@ -19,7 +19,9 @@ from app.sources.catalog import source_capability
 _HASH = re.compile(r"^[a-f0-9]{64}$")
 _FORBIDDEN = frozenset({"api_key", "apikey", "access_token", "token", "authorization", "password",
                         "secret", "credential", "raw_response"})
-_MAX_BYTES = 300_000
+# Wikimedia's official top-list is bounded to a finite daily result. Allow its
+# complete normalized payload to be cached while retaining a strict byte ceiling.
+_MAX_BYTES = 2_000_000
 _SECRET_IN_TEXT = re.compile(r"(?:api[_-]?key|access[_-]?token|authorization|password|secret|token)\s*=", re.I)
 
 

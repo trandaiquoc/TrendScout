@@ -31,9 +31,13 @@ def legacy_fixture_app(*, adapter_factory=None, synthetic_supplement=collect_syn
 
 
 class LocalDemoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_demo_app_requires_explicit_test_fixture_opt_in(self):
+        with self.assertRaisesRegex(ValueError, "only to explicit test fixtures"):
+            create_demo_app()
+
     async def test_anonymous_fetch_is_synthetic_without_cloud_configuration(self):
         with patch.dict("os.environ", {"GOOGLE_CLOUD_PROJECT": "personal-project"}):
-            app = create_demo_app()
+            app = create_demo_app(test_fixture=True)
         self.assertIsNone(app.state.settings.google_cloud_project)
         self.assertIsNone(app.state.settings.operator_token)
         async with app.router.lifespan_context(app):

@@ -196,6 +196,47 @@ class EntityContextTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM keywords").fetchone()[0], 1)
                 self.assertEqual(db.execute("SELECT count(*) FROM entity_context").fetchone()[0], 0)
 
+    def test_uncached_entity_requests_are_paced_and_bounded_per_fetch(self):
+        titles = [f"Verified topic {index:02d}" for index in range(15)]
+        calls = []
+        paced = []
+
+        def handler(request):
+            calls.append(request)
+            requested = request.url.params["titles"].split("|")
+            return httpx.Response(200, json={"query": {"pages": [
+                {"pageid": index + 1, "ns": 0, "title": title, "pageprops": {}}
+                for index, title in enumerate(requested)
+            ]}}, request=request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CollectionStore(Path(directory) / "collections.sqlite")
+            records = []
+            with store.connect() as db:
+                for index, title in enumerate(titles):
+                    identifier = f"topic-{index:02d}"
+                    db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                        data_mode,evidence,context) VALUES(?,?,?,?,?,'2026-11-13','LIVE','{}','')""",
+                        (identifier, title, title.casefold(),
+                         "wikimedia_pageviews_top_per_country", "en.wikipedia"))
+                    records.append({"id": identifier, "keyword": title, "project": "en.wikipedia",
+                        "source": "wikimedia_pageviews_top_per_country"})
+            resolver = WikimediaEntityContextResolver(store,
+                transport=httpx.MockTransport(handler), before_request=lambda: paced.append(True))
+            first = resolver.enrich(records)
+            self.assertEqual(resolver.last_stats["requested_titles"], 10)
+            self.assertEqual(resolver.last_stats["deferred_titles"], 5)
+            self.assertEqual(len(first), 10)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(paced, [True])
+
+            second = resolver.enrich(records)
+            self.assertEqual(resolver.last_stats["requested_titles"], 5)
+            self.assertEqual(resolver.last_stats["deferred_titles"], 0)
+            self.assertEqual(len(second), 15)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(paced, [True, True])
+
 
 if __name__ == "__main__":
     unittest.main()

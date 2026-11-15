@@ -1,4 +1,4 @@
-"""Anonymous one-click Fetch API; execution remains offline synthetic only."""
+"""Manual Fetch API; the active backend composition owns its data mode."""
 
 import ipaddress
 import json
@@ -20,6 +20,7 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.ports.storage import StorageError
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
 router = APIRouter()
 MAX_BODY_BYTES = 1024
@@ -93,7 +94,7 @@ def validate_public_request_origin(request: Request, profile: str) -> None:
         raise HTTPException(403, {"code": "CROSS_SITE_REQUEST"})
 
 
-async def _read_small_json_object(request: Request) -> dict:
+async def _read_small_json_object(request: Request, *, allowed_fields=()) -> dict:
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/json":
         raise HTTPException(415, {"code": "JSON_REQUIRED"})
@@ -118,7 +119,7 @@ async def _read_small_json_object(request: Request) -> dict:
         raise HTTPException(400, {"code": "INVALID_JSON"}) from None
     if not isinstance(value, dict):
         raise HTTPException(422, {"code": "EMPTY_OBJECT_REQUIRED"})
-    if value:
+    if set(value) - set(allowed_fields):
         raise HTTPException(422, {"code": "UNKNOWN_REQUEST_FIELDS"})
     return value
 
@@ -253,6 +254,52 @@ async def create_fetch(
     }
 
 
+@router.post("/fetches/history", status_code=202)
+async def create_history_fetch(
+    request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """Explicitly collect at most two recent LIVE Wikimedia observation dates."""
+    response.headers["Cache-Control"] = "no-store"
+    _require_enabled(request)
+    validate_public_request_origin(request, request.app.state.settings.environment_profile)
+    if not idempotency_key or len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LENGTH:
+        raise HTTPException(400, {"code": "IDEMPOTENCY_KEY_REQUIRED"})
+    if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+        raise HTTPException(400, {"code": "INVALID_IDEMPOTENCY_KEY"})
+    body = await _read_small_json_object(request, allowed_fields={"days"})
+    days = body.get("days")
+    if set(body) != {"days"} or type(days) is not int or not 1 <= days <= 2:
+        raise HTTPException(422, {"code": "HISTORY_WINDOW_OUT_OF_RANGE", "maximum_days": 2})
+    distributed = request.app.state.distributed_public_fetch
+    if distributed is None or not getattr(distributed, "normal_wikimedia_live", False):
+        raise HTTPException(409, {"code": "HISTORICAL_FETCH_UNAVAILABLE"})
+    try:
+        accepted = distributed.submit(idempotency_key, history_days=days)
+    except AdmissionDenied as exc:
+        _raise_distributed_admission_error(exc.code, distributed)
+    except ValueError:
+        raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
+    if accepted["status"] in {"QUEUED", "RUNNING"}:
+        background_tasks.add_task(
+            _run_fetch_and_collections, request, distributed, accepted["job_id"],
+            f"api-{secrets.token_hex(12)}"
+        )
+    response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
+    return {
+        "fetch_id": accepted["job_id"],
+        "status": accepted["status"],
+        "data_mode": "LIVE",
+        "sources": [WIKIMEDIA_SOURCE_ID],
+        "request_kind": "WIKIMEDIA_HISTORY",
+        "history_days": days,
+        "created_at": accepted.get("created_at"),
+        "status_url": f"/api/v1/fetches/{accepted['job_id']}",
+    }
+
+
 @router.get("/fetches/{fetch_id}")
 async def get_fetch(fetch_id: str, request: Request, response: Response):
     response.headers["Cache-Control"] = "no-store"
@@ -326,4 +373,6 @@ def _raise_distributed_admission_error(code: str, service) -> None:
         raise HTTPException(429, {"code": code}, headers={"Retry-After": str(retry_after)}) from None
     if code in {"LEASE_BUSY", "FETCH_ALREADY_RUNNING"}:
         raise HTTPException(409, {"code": "FETCH_ALREADY_RUNNING"}) from None
+    if code in {"IDEMPOTENCY_KEY_CONFLICT", "HISTORICAL_FETCH_UNAVAILABLE"}:
+        raise HTTPException(409, {"code": code}) from None
     raise HTTPException(503, {"code": code}) from None

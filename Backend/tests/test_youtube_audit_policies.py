@@ -10,7 +10,7 @@ from app.main import create_app
 
 class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_policy_links_and_unapproved_status(self):
-        app = create_demo_app()
+        app = create_demo_app(test_fixture=True)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://127.0.0.1") as client:
             homepage = await client.get("/dashboard/")

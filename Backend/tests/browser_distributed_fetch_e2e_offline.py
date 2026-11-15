@@ -19,7 +19,7 @@ from app.demo_local import create_demo_app  # noqa: E402
 
 
 async def demo_api_snapshot():
-    application = create_demo_app()
+    application = create_demo_app(test_fixture=True)
     async with application.router.lifespan_context(application):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=application), base_url="http://127.0.0.1"

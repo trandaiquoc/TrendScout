@@ -79,7 +79,7 @@ class BulkMembershipInput(BaseModel):
     keyword_ids: list[str] = Field(default_factory=list, max_length=500)
     all_filtered: bool = False
     query: str = Field(default="", max_length=100)
-    state: Literal["all", "unassigned", "ai", "manual", "mixed", "needs_review", "excluded"] = "all"
+    state: Literal["all", "unassigned", "ai", "manual", "mixed", "needs_review", "excluded", "non_topic"] = "all"
     classification: Literal["all", "CLASSIFIED", "AMBIGUOUS", "UNKNOWN", "INELIGIBLE"] = "all"
     evidence: Literal["all", "metric", "algorithm", "missing"] = "all"
     date_from: str = Field(default="", max_length=10)
@@ -218,7 +218,9 @@ def reclassify_cached_keywords(value: CachedReclassificationInput, request: Requ
 def keyword_classification(keyword_id: str, request: Request):
     service = _service(request)
     with service.store.connect() as db:
-        row = db.execute("SELECT * FROM classification_results WHERE keyword_id=?", (keyword_id,)).fetchone()
+        row = db.execute("SELECT cr.* FROM classification_results cr JOIN keywords k ON k.id=cr.keyword_id "
+            "WHERE cr.keyword_id=? " + ("AND k.data_mode=?" if service.store.data_mode_scope else ""),
+            (keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope else (keyword_id,)).fetchone()
     if row is None:
         raise HTTPException(404, {"code": "CLASSIFICATION_NOT_FOUND"})
     item = dict(row)
@@ -243,7 +245,10 @@ async def organize(request: Request):
     _mutating(request)
     service = _service(request)
     with service.store.connect() as db:
-        rows = db.execute("SELECT * FROM keywords ORDER BY observed_at DESC").fetchall()
+        rows = db.execute("SELECT * FROM keywords "
+            + ("WHERE data_mode=? " if service.store.data_mode_scope else "")
+            + "ORDER BY observed_at DESC",
+            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchall()
     grouped = {}
     for row in rows:
         item = dict(row)
@@ -266,7 +271,10 @@ async def reclassify_from_cached_evidence(request: Request):
     _mutating(request)
     service = _service(request)
     with service.store.connect() as db:
-        rows = db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY observed_at DESC").fetchall()
+        rows = db.execute("SELECT * FROM keywords WHERE eligible=1 "
+            + ("AND data_mode=? " if service.store.data_mode_scope else "")
+            + "ORDER BY observed_at DESC",
+            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchall()
     grouped = {}
     for row in rows:
         item = dict(row)
@@ -292,7 +300,10 @@ def add_keyword(collection_id: str, value: MembershipInput, request: Request):
     _mutating(request)
     service = _service(request)
     with service.store.connect() as db:
-        keyword = db.execute("SELECT * FROM keywords WHERE id=?", (value.keyword_id,)).fetchone()
+        keyword = db.execute("SELECT * FROM keywords WHERE id=? "
+            + ("AND data_mode=?" if service.store.data_mode_scope else ""),
+            (value.keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope
+            else (value.keyword_id,)).fetchone()
         collection = db.execute("SELECT 1 FROM collections WHERE id=? AND status='ACTIVE'", (collection_id,)).fetchone()
     if not keyword or not collection:
         raise HTTPException(404, {"code": "KEYWORD_OR_COLLECTION_NOT_FOUND"})
@@ -364,8 +375,11 @@ def remove_keyword(collection_id: str, keyword_id: str, request: Request):
     _mutating(request)
     service = _service(request)
     with service.store.connect() as db:
-        exists = db.execute("SELECT 1 FROM memberships WHERE collection_id=? AND keyword_id=?",
-                            (collection_id, keyword_id)).fetchone()
+        exists = db.execute("SELECT 1 FROM memberships m JOIN keywords k ON k.id=m.keyword_id "
+            "WHERE m.collection_id=? AND m.keyword_id=? "
+            + ("AND k.data_mode=?" if service.store.data_mode_scope else ""),
+            (collection_id, keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope
+            else (collection_id, keyword_id)).fetchone()
     if not exists:
         raise HTTPException(404, {"code": "MEMBERSHIP_NOT_FOUND"})
     service.store.feedback_action(collection_id, {"id": keyword_id, "keyword": "", "normalized": "",
@@ -403,7 +417,10 @@ def reject_suggestion(proposal_id: str, request: Request):
 def get_job(fetch_id: str, request: Request):
     service = _service(request)
     with service.store.connect() as db:
-        row = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+        row = db.execute("SELECT f.* FROM fetch_jobs f "
+            + ("JOIN dataset_snapshots d ON d.dataset_id=f.fetch_id AND d.data_mode=? " if service.store.data_mode_scope else "")
+            + "WHERE f.fetch_id=?", (service.store.data_mode_scope, fetch_id)
+            if service.store.data_mode_scope else (fetch_id,)).fetchone()
         created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? ORDER BY created_at",
                              (f"%{fetch_id}%",)).fetchall()
     if row is None:

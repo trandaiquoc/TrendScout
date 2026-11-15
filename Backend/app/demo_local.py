@@ -1,4 +1,4 @@
-"""Explicit loopback-only synthetic presentation app; never contacts providers."""
+"""Offline synthetic app fixture used only by tests; never contacts providers."""
 
 import hashlib
 import tempfile
@@ -138,7 +138,10 @@ class DemoFixtureAdapter:
         return CollectionResult(_END, tuple(days))
 
 
-def create_demo_app():
+def create_demo_app(*, test_fixture=False):
+    """Create a disposable test fixture; normal product launch is Wikimedia LIVE."""
+    if test_fixture is not True:
+        raise ValueError("synthetic demo app is available only to explicit test fixtures")
     # Explicit mapping prevents inherited cloud credentials or .env configuration
     # from selecting a cloud project, provider, or legacy operator token.
     settings = Settings.from_environment({

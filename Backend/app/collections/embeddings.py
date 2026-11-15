@@ -10,6 +10,7 @@ from app.storage.local_file_security import secure_private_directory
 
 MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MODEL_VERSION = "fastembed-0.9.1"
+MAX_INPUT_CHARS = 1200
 _lock = Lock()
 _model = None
 
@@ -33,7 +34,7 @@ def embed(texts: list[str]) -> list[list[float]]:
     """Return CPU vectors for at most 256 short strings; never download on requests."""
     global _model
     if not isinstance(texts, list) or len(texts) > 256 or any(
-        not isinstance(text, str) or not text.strip() or len(text) > 1200 for text in texts
+        not isinstance(text, str) or not text.strip() or len(text) > MAX_INPUT_CHARS for text in texts
     ):
         raise ValueError("embedding input must contain at most 256 bounded strings")
     if not texts:

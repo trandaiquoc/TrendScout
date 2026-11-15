@@ -71,14 +71,55 @@ class CollectionService:
 
     def _process_fetch(self, fetch_id, sources, cached_context_only=False):
         self._thread_state.embedding_counts = {"cached_embeddings": 0, "inferred_embeddings": 0}
+        if self.store.data_mode_scope:
+            sources = [source for source in sources
+                       if source.get("data_mode") == self.store.data_mode_scope]
         with self.store.connect() as db:
             prior = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
-            if prior and prior["status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}:
+            retry_missing_snapshot = False
+            retry_existing_snapshot = False
+            replay_available = 0
+            replay_skipped = 0
+            if prior and self.store.data_mode_scope:
+                existing_snapshot = db.execute(
+                    "SELECT data_mode,processing_status,received_record_count,rejected_record_count "
+                    "FROM dataset_snapshots WHERE dataset_id=?",
+                    (fetch_id,)
+                ).fetchone()
+                if existing_snapshot and existing_snapshot["data_mode"] != self.store.data_mode_scope:
+                    return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "FETCH_ID_MODE_CONFLICT"}
+                if (existing_snapshot
+                        and prior["status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
+                        and existing_snapshot["processing_status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
+                        and not sources):
+                    retry_existing_snapshot = True
+                    replay_available = existing_snapshot["received_record_count"]
+                    replay_skipped = existing_snapshot["rejected_record_count"]
+                if not existing_snapshot:
+                    # A prior local model failure can happen before source data
+                    # is persisted. Allow its retry only when this call carries
+                    # successful records with explicit provenance for this
+                    # store's mode; an existing snapshot from another mode is
+                    # always a conflict.
+                    replayable_sources = [source for source in sources
+                        if source.get("data_mode") == self.store.data_mode_scope
+                        and source.get("status") in {"SUCCESS", "PARTIAL"}
+                        and isinstance(source.get("records"), list) and source["records"]]
+                    if (prior["status"] not in {"FAILED", "MODEL_UNAVAILABLE"}
+                            or not replayable_sources):
+                        return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "FETCH_ID_MODE_CONFLICT"}
+                    retry_missing_snapshot = True
+            if (prior and prior["status"] == "COMPLETED" and not retry_existing_snapshot
+                    or prior and prior["status"] == "MODEL_UNAVAILABLE"
+                    and not (retry_missing_snapshot or retry_existing_snapshot)):
                 return dict(prior)
             db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at)
                 VALUES(?,'PROCESSING','CLEANING',?)""", (fetch_id, now()))
-        records, skipped, rejected = [], 0, []
-        available = sum(len(source.get("records", [])) for source in sources if isinstance(source.get("records"), list))
+        records, rejected = [], []
+        skipped = replay_skipped if retry_existing_snapshot and not sources else 0
+        available = (sum(len(source.get("records", [])) for source in sources
+                          if isinstance(source.get("records"), list))
+                     if sources else replay_available if retry_existing_snapshot else 0)
         self._update_job(fetch_id, stage="EXTRACTING_KEYWORDS", available=available, skipped=skipped)
         for source in sources:
             source_id, mode = source.get("source_id", ""), source.get("data_mode", "")
@@ -97,10 +138,21 @@ class CollectionService:
                         rejected.append((identifier, reason))
                 else:
                     records.append(record)
+        # Keep legacy synthetic identities immutable when a live keyword has the same key.
+        if self.store.data_mode_scope and records:
+            with self.store.connect() as db:
+                for record in records:
+                    existing = db.execute("SELECT data_mode FROM keywords WHERE id=?", (record["id"],)).fetchone()
+                    if existing and existing["data_mode"] != self.store.data_mode_scope:
+                        record["id"] = hashlib.sha256(
+                            f"{self.store.data_mode_scope}:{record['id']}".encode("utf-8")
+                        ).hexdigest()
         if rejected:
             with self.store.connect() as db:
-                db.executemany("UPDATE keywords SET eligible=0,rejection_reason=? WHERE id=?",
-                               [(reason, identifier) for identifier, reason in rejected])
+                db.executemany("UPDATE keywords SET eligible=0,rejection_reason=? WHERE id=? "
+                    + ("AND data_mode=?" if self.store.data_mode_scope else ""),
+                    [(reason, identifier, self.store.data_mode_scope) if self.store.data_mode_scope
+                     else (reason, identifier) for identifier, reason in rejected])
         # Keep cleaned source evidence available for manual work or an inference retry.
         with self.store.connect() as db:
             db.executemany("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
@@ -128,10 +180,13 @@ class CollectionService:
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.
         with self.store.connect() as db:
-            persisted = db.execute("""SELECT k.* FROM keywords k WHERE k.eligible=1
-                ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""").fetchall()
+            keyword_scope = " AND k.data_mode=?" if self.store.data_mode_scope else ""
+            mode_parameters = (self.store.data_mode_scope,) if self.store.data_mode_scope else ()
+            persisted = db.execute("""SELECT k.* FROM keywords k WHERE k.eligible=1""" + keyword_scope + """
+                ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""", mode_parameters).fetchall()
             records = [dict(row) for row in persisted]
-            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.store.data_mode_scope else ""), mode_parameters).fetchone()[0]
         if self.entity_context_resolver is not None:
             contexts = self.entity_context_resolver.cached(record["id"] for record in records)
             for record in records:
@@ -155,8 +210,9 @@ class CollectionService:
                     record["page_language"] = context.page_language
         with self.store.connect() as db:
             excluded_records = [dict(row) for row in db.execute(
-                "SELECT * FROM keywords WHERE eligible=0 ORDER BY observed_at DESC,keyword COLLATE NOCASE"
-            ).fetchall()]
+                "SELECT * FROM keywords WHERE eligible=0 "
+                + ("AND data_mode=? " if self.store.data_mode_scope else "")
+                + "ORDER BY observed_at DESC,keyword COLLATE NOCASE", mode_parameters).fetchall()]
         classification_records = [*records, *excluded_records]
         if self.entity_context_resolver is not None and excluded_records:
             excluded_contexts = self.entity_context_resolver.cached(row["id"] for row in excluded_records)
@@ -223,6 +279,26 @@ class CollectionService:
                   json.dumps(item["classification_result"]["source_evidence"], ensure_ascii=False),
                   item["classification_result"]["review_status"], classified_at,
                   item["classification_result"]["classification_reason"]) for item in classification_records])
+            decisions = dict(db.execute("SELECT keyword_id,decision FROM keyword_decisions"))
+            for item in classification_records:
+                decision = decisions.get(item["id"])
+                result = item["classification_result"]
+                if decision == "EXCLUDED":
+                    item["eligible"] = 0
+                    db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=?",
+                               (item["id"],))
+                elif result["classification_status"] == "INELIGIBLE":
+                    item["eligible"] = 0
+                    item["entity_category_ids"] = ()
+                    db.execute("""UPDATE keywords SET eligible=0,rejection_reason='CLASSIFICATION_INELIGIBLE'
+                        WHERE id=?""", (item["id"],))
+                elif item.get("rejection_reason") == "CLASSIFICATION_INELIGIBLE":
+                    item["eligible"] = 1
+                    item["entity_category_ids"] = tuple(result["topic_category_ids"])
+                    db.execute("UPDATE keywords SET eligible=1,rejection_reason=NULL WHERE id=?",
+                               (item["id"],))
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.store.data_mode_scope else ""), mode_parameters).fetchone()[0]
         category_collection_ids = {}
         for category_id in INITIAL_TOPIC_ROOTS:
             self.store.ensure_category_collection(resolve_category(category_id))
@@ -251,8 +327,10 @@ class CollectionService:
                 for item in collections:
                     item["member_examples"] = [row["keyword"] for row in db.execute(
                         "SELECT k.keyword FROM memberships m JOIN keywords k ON k.id=m.keyword_id "
-                        "WHERE m.collection_id=? AND m.origin='USER' ORDER BY m.created_at DESC LIMIT 100",
-                        (item["id"],))]
+                        "WHERE m.collection_id=? AND m.origin='USER' "
+                        + ("AND k.data_mode=? " if self.store.data_mode_scope else "")
+                        + "ORDER BY m.created_at DESC LIMIT 100",
+                        (item["id"], self.store.data_mode_scope) if self.store.data_mode_scope else (item["id"],))]
             vectors = self._embed_cached([self._candidate_text(row) for row in records], [0] * len(records))
             topic_vectors = self._embed_cached([self._topic_text(row) for row in records], [0] * len(records))
             collection_prototypes = [self._collection_prototypes(item) for item in collections]
@@ -290,7 +368,9 @@ class CollectionService:
         with self.store.connect() as db:
             # Recompute automatic memberships from the complete eligible ledger after
             # inference succeeds. Pinned USER memberships and explicit REMOVE feedback stay intact.
-            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0")
+            db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0 "
+                + ("AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)" if self.store.data_mode_scope else ""),
+                (self.store.data_mode_scope,) if self.store.data_mode_scope else ())
             for record, vector, topic_vector in zip(records, vectors, topic_vectors):
                 if record.get("classification_result", {}).get("classification_status") == "INELIGIBLE":
                     continue
@@ -373,7 +453,10 @@ class CollectionService:
         self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
         created, suggestions = self._propose(reconciliation_id, unassigned_rows, collections)
         with self.store.connect() as db:
-            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships WHERE origin='LOCAL_AI'").fetchone()[0]
+            assigned = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
+                "JOIN keywords k ON k.id=m.keyword_id WHERE m.origin='LOCAL_AI' "
+                + ("AND k.data_mode=?" if self.store.data_mode_scope else ""),
+                (self.store.data_mode_scope,) if self.store.data_mode_scope else ()).fetchone()[0]
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                    "processed": len(records), "assigned": assigned,
                    "unassigned": self._unassigned_count(), "created_collections": created,
@@ -393,12 +476,19 @@ class CollectionService:
             inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"],
             membership_reconciliation_id=reconciliation_id)
         with self.store.connect() as db:
+            snapshot_mode_parameters = ([self.store.data_mode_scope] * 3 if self.store.data_mode_scope else [])
             db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
-                eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1),
-                assigned_keyword_count=(SELECT count(DISTINCT keyword_id) FROM memberships),
-                unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE eligible=1
+                eligible_keyword_count=(SELECT count(*) FROM keywords WHERE eligible=1 """
+                + ("AND data_mode=?" if self.store.data_mode_scope else "") + """),
+                assigned_keyword_count=(SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                    JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                    WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' """
+                + ("AND k.data_mode=?" if self.store.data_mode_scope else "") + """),
+                unassigned_keyword_count=(SELECT count(*) FROM keywords k WHERE k.eligible=1"""
+                + (" AND k.data_mode=?" if self.store.data_mode_scope else "") + """
                   AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS
-                    (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) WHERE dataset_id=?""", (fetch_id,))
+                    (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)) WHERE dataset_id=?""",
+                (*snapshot_mode_parameters, fetch_id))
         return outcome
 
     def _update_job(self, fetch_id, **values):
@@ -450,11 +540,15 @@ class CollectionService:
             except (TypeError, ValueError):
                 continue
         with self.store.connect() as db:
-            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1").fetchone()[0]
-            assigned = db.execute("SELECT count(DISTINCT keyword_id) FROM memberships").fetchone()[0]
-            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE eligible=1
+            mode_parameters = (self.store.data_mode_scope,) if self.store.data_mode_scope else ()
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.store.data_mode_scope else ""), mode_parameters).fetchone()[0]
+            assigned = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m JOIN keywords k ON k.id=m.keyword_id "
+                + ("WHERE k.data_mode=?" if self.store.data_mode_scope else ""), mode_parameters).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1"""
+                + (" AND k.data_mode=?" if self.store.data_mode_scope else "") + """
                 AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS
-                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
+                (SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""", mode_parameters).fetchone()[0]
             db.execute("""INSERT OR REPLACE INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
                 provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
                 observation_start,observation_end,fetched_at,quality_flags,processing_status,
@@ -475,7 +569,10 @@ class CollectionService:
         from app.composition import algorithm_engine
 
         with self.store.connect() as db:
-            rows = db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id").fetchall()
+            mode_parameters = (self.store.data_mode_scope,) if self.store.data_mode_scope else ()
+            rows = db.execute("SELECT * FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=? " if self.store.data_mode_scope else "") + "ORDER BY id",
+                mode_parameters).fetchall()
             records = [dict(row) for row in rows]
             for record in changed_records:
                 evidence = json.loads(record["evidence"])
@@ -498,7 +595,9 @@ class CollectionService:
                     (record["id"], record["source"], observed.isoformat(), evidence.get("country_scope") or "US",
                      evidence.get("access") or "all-access", record["project"], metric, unit,
                      "OBSERVED", value, rank, snapshot_status, digest))
-            records = [dict(row) for row in db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id")]
+            records = [dict(row) for row in db.execute("SELECT * FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=? " if self.store.data_mode_scope else "") + "ORDER BY id",
+                mode_parameters)]
             engine = algorithm_engine()
             keys = engine.registry.keys()
             snapshot_cohorts = defaultdict(list)
@@ -585,6 +684,14 @@ class CollectionService:
                 "registered_algorithms": len(keys)}
 
     def _embed_cached(self, texts, versions):
+        if (not isinstance(texts, list) or not isinstance(versions, list)
+                or len(texts) != len(versions)
+                or any(not isinstance(text, str) or not text.strip() for text in texts)):
+            raise ValueError("embedding text and version lists must be aligned and non-empty")
+        # Entity descriptions and Collection examples can exceed the local
+        # model's input budget. Bound model context while keeping full source
+        # evidence unchanged in storage and classification results.
+        texts = [text[:embeddings.MAX_INPUT_CHARS] for text in texts]
         results, pending, keys = [None] * len(texts), [], []
         with self.store.connect() as db:
             for index, (text, version) in enumerate(zip(texts, versions)):
@@ -653,11 +760,41 @@ class CollectionService:
     def _unassigned_count(self):
         with self.store.connect() as db:
             return db.execute("""SELECT count(*) FROM keywords k
-                WHERE k.eligible=1
+                WHERE k.eligible=1""" + (" AND k.data_mode=?" if self.store.data_mode_scope else "") + """
                 AND COALESCE((SELECT classification_status FROM classification_results cr WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
                 AND NOT EXISTS (
                     SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
-                )""").fetchone()[0]
+                )""", (self.store.data_mode_scope,) if self.store.data_mode_scope else ()).fetchone()[0]
+
+    def _refresh_latest_topic_counts(self):
+        """Refresh the latest saved run's topic-only counts after cached reclassification."""
+        if not self.store.data_mode_scope:
+            return
+        with self.store.connect() as db:
+            latest = db.execute("SELECT dataset_id FROM dataset_snapshots WHERE data_mode=? "
+                "ORDER BY created_at DESC LIMIT 1", (self.store.data_mode_scope,)).fetchone()
+            if latest is None:
+                return
+            dataset_id = latest["dataset_id"]
+            topic_filter = "k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE'"
+            eligible = db.execute("""SELECT count(*) FROM keywords k
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE """ + topic_filter
+                + " AND k.data_mode=?", (self.store.data_mode_scope,)).fetchone()[0]
+            assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE """ + topic_filter + " AND k.data_mode=?", (self.store.data_mode_scope,)).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE """ + topic_filter
+                + " AND k.data_mode=? AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)",
+                (self.store.data_mode_scope,)).fetchone()[0]
+            ai_assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE """ + topic_filter + " AND k.data_mode=? AND m.origin='LOCAL_AI'",
+                (self.store.data_mode_scope,)).fetchone()[0]
+            db.execute("""UPDATE dataset_snapshots SET eligible_keyword_count=?,assigned_keyword_count=?,
+                unassigned_keyword_count=? WHERE dataset_id=?""", (eligible, assigned, unassigned, dataset_id))
+            db.execute("""UPDATE fetch_jobs SET eligible=?,assigned=?,unassigned=? WHERE fetch_id=?""",
+                       (eligible, ai_assigned, unassigned, dataset_id))
 
     async def reclassify_unassigned(self, fetch_id: str | None = None):
         """Run cached local matching after Collection creation/edits without a provider fetch."""
@@ -678,12 +815,18 @@ class CollectionService:
                 e.page_namespace,e.is_disambiguation,e.is_main_page,e.is_main_page_known,
                 e.redirected_from,e.page_language
                 FROM keywords k LEFT JOIN entity_context e ON e.keyword_id=k.id
-                WHERE k.id IN ({placeholders})""", identifiers).fetchall()
+                WHERE k.id IN ({placeholders})"""
+                + (" AND k.data_mode=?" if self.store.data_mode_scope else ""),
+                (*identifiers, self.store.data_mode_scope) if self.store.data_mode_scope else identifiers).fetchall()
             found = {row["id"] for row in rows}
             if found != set(identifiers):
                 raise ValueError("CACHED_KEYWORD_NOT_FOUND")
             from app.taxonomy.classifier import classify_contextual
             updated = []
+            source_records = {row["id"]: dict(row) for row in rows}
+            decisions = {row["keyword_id"]: row["decision"] for row in db.execute(
+                "SELECT keyword_id,decision FROM keyword_decisions WHERE keyword_id IN (" + placeholders + ")",
+                identifiers)}
             for raw in rows:
                 record = dict(raw)
                 try:
@@ -737,7 +880,21 @@ class CollectionService:
                      json.dumps(result["rule_evidence"], ensure_ascii=False),
                      json.dumps(result["source_evidence"], ensure_ascii=False), result["review_status"],
                      result["classified_at"], result["classification_reason"]))
-        source_records = {row["id"]: row for row in rows}
+                source_record = source_records[identifier]
+                if decisions.get(identifier) == "EXCLUDED":
+                    source_record["eligible"] = 0
+                    db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=?",
+                               (identifier,))
+                elif result["classification_status"] == "INELIGIBLE":
+                    source_record["eligible"] = 0
+                    db.execute("""UPDATE keywords SET eligible=0,rejection_reason='CLASSIFICATION_INELIGIBLE'
+                        WHERE id=?""", (identifier,))
+                    db.execute("DELETE FROM memberships WHERE keyword_id=? AND origin='LOCAL_AI' AND pinned=0",
+                               (identifier,))
+                elif source_record.get("rejection_reason") == "CLASSIFICATION_INELIGIBLE":
+                    source_record["eligible"] = 1
+                    db.execute("UPDATE keywords SET eligible=1,rejection_reason=NULL WHERE id=?",
+                               (identifier,))
         for keyword_id, result in updated:
             source_record = source_records[keyword_id]
             if not source_record["eligible"] or result["classification_status"] != "CLASSIFIED":
@@ -768,10 +925,12 @@ class CollectionService:
                         VALUES(?,?,'LOCAL_AI',0,NULL,?,?)""",
                         (collection_id, keyword_id,
                          f"Verified cached entity classification: {category_id}", now()))
+        self._refresh_latest_topic_counts()
         return {"reclassified": len(updated), "items": [
             {"keyword_id": identifier, "classification_status": result["classification_status"],
              "classification_reason": result["classification_reason"],
-             "topic_category_ids": result["topic_category_ids"]}
+             "topic_category_ids": result["topic_category_ids"],
+             "eligible": bool(source_records[identifier]["eligible"])}
             for identifier, result in updated
         ]}
 
@@ -808,6 +967,10 @@ class CollectionService:
                 continue
             name = self._representative_name(titles)
             if len(name.strip()) < 3:
+                continue
+            if len(name.split()) < 2:
+                # A single shared word such as "Harry" does not identify a
+                # cohesive topic when the source titles differ.
                 continue
             key = fingerprint(name)
             if any(fingerprint(item["name"]) == key for item in collections):
@@ -849,7 +1012,10 @@ class CollectionService:
         with self.store.connect() as db:
             if db.execute("SELECT 1 FROM suppression WHERE fingerprint=?", (fingerprint(name),)).fetchone():
                 return True
-            labels = [row["name"] for row in db.execute("SELECT name FROM proposals WHERE status='PENDING'")]
+            labels = [row["name"] for row in db.execute("SELECT p.name FROM proposals p WHERE p.status='PENDING' "
+                + ("AND EXISTS (SELECT 1 FROM json_each(p.support_ids) s JOIN keywords k ON k.id=s.value "
+                   "WHERE k.data_mode=?)" if self.store.data_mode_scope else ""),
+                (self.store.data_mode_scope,) if self.store.data_mode_scope else ())]
             labels.extend(row["label"] for row in db.execute("SELECT label FROM suppression WHERE label<>''"))
             active = [dict(row) for row in db.execute(
                 "SELECT name,category_id FROM collections WHERE status='ACTIVE'")]

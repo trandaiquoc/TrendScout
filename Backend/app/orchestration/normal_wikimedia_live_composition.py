@@ -3,6 +3,7 @@
 import asyncio
 import math
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
 from app.workers.d5_source_handlers import D5SourceHandlers
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
@@ -35,6 +37,9 @@ class _PersistentOneSecondPacer:
         self.store, self.clock = store, clock
 
     async def __call__(self):
+        await asyncio.to_thread(self.wait_sync)
+
+    def wait_sync(self):
         now = self.clock().astimezone(timezone.utc)
 
         def reserve(state):
@@ -45,10 +50,10 @@ class _PersistentOneSecondPacer:
             slot = max(now, previous)
             return {"next_allowed_at": (slot + timedelta(seconds=1)).isoformat()}, slot
 
-        slot = await asyncio.to_thread(self.store.transact, _PACING_STATE_KEY, reserve)
+        slot = self.store.transact(_PACING_STATE_KEY, reserve)
         delay = (slot - self.clock().astimezone(timezone.utc)).total_seconds()
         if delay > 0:
-            await asyncio.sleep(delay)
+            time.sleep(delay)
 
     async def defer(self, seconds):
         if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds < 0:
@@ -130,6 +135,8 @@ async def normal_wikimedia_live_composition(*, user_agent,
     )
     secure_private_directory(directory)
     store = LocalSQLiteAtomicStateStore.for_local_live(directory / "state.sqlite")
+    snapshot_blobs = LocalSQLiteSnapshotBlobs(store)
+    snapshot_blobs.purge_expired(now=utcnow())
     policy = normal_wikimedia_live_policy()
     admission = PublicAdmission(store, policy, state_key=STATE_KEY)
     runner = GuardedAttemptRunner(admission, clock=utcnow)
@@ -156,8 +163,10 @@ async def normal_wikimedia_live_composition(*, user_agent,
         def resolve_checkpoint(source_id, now):
             if source_id != WIKIMEDIA_SOURCE_ID:
                 return None
-            return CheckpointGrant(source_id, "LIVE", POLICY_VERSION,
-                                   now + timedelta(minutes=15), 600, True)
+            return CheckpointGrant(
+                source_id, "LIVE", POLICY_VERSION,
+                now + timedelta(seconds=policy.receipt_seconds), policy.receipt_seconds, True,
+            )
 
         def resolve_processing(now):
             return (ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
@@ -172,7 +181,7 @@ async def normal_wikimedia_live_composition(*, user_agent,
             wikimedia=wiki,
             plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(max_queries=1, max_pages_per_query=1,
-                max_requests=3, max_retries_per_page=0, deadline_seconds=60, max_results=10),
+                max_requests=3, max_retries_per_page=0, deadline_seconds=60),
             observation_date=lambda: (utcnow().astimezone(timezone.utc) - timedelta(days=2)).date(),
             shared_cache=cache,
             resolve_cache_grant=resolve_cache_grant,
@@ -184,11 +193,14 @@ async def normal_wikimedia_live_composition(*, user_agent,
         worker = DistributedFetchWorker(
             admission, handlers={WIKIMEDIA_SOURCE_ID: handlers},
             resolve_grant=resolve_checkpoint, utcnow=utcnow,
+            snapshot_blobs=snapshot_blobs,
         )
-        yield DistributedPublicFetch(
+        facade = DistributedPublicFetch(
             admission, worker, resolve_grant=resolve_checkpoint, utcnow=utcnow,
             normal_wikimedia_live=True, resolve_processing_grants=resolve_processing,
             provider_retry_after_seconds=pace_request.retry_after_seconds,
         )
+        facade.entity_lookup_before_request = pace_request.wait_sync
+        yield facade
     finally:
         await wiki.aclose()

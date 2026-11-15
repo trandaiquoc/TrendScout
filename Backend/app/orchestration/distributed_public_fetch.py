@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
-from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
+from app.jobs.source_checkpoints import CheckpointGrant
 
 
 class DistributedPublicFetch:
@@ -34,7 +34,10 @@ class DistributedPublicFetch:
         self.utcnow = utcnow
         self.local_live = local_live
         self.normal_wikimedia_live = normal_wikimedia_live
-        self.journal = SourceCheckpointJournal(admission)
+        # Results larger than the inline checkpoint budget are stored by the
+        # worker's journal in its durable snapshot blob store. Reads must use
+        # that same journal so terminal status can restore the full result.
+        self.journal = worker.journal
         declared_modes = set(worker.source_modes.values())
         if normal_wikimedia_live:
             from app.normal_wikimedia_live_policy import normal_wikimedia_live_policy
@@ -71,7 +74,13 @@ class DistributedPublicFetch:
         self.resolve_processing_grants = resolve_processing_grants
         self.provider_retry_after_seconds = provider_retry_after_seconds
 
-    def submit(self, idempotency_key: str) -> dict:
+    def submit(self, idempotency_key: str, *, history_days: int | None = None) -> dict:
+        if history_days is not None:
+            if not self.normal_wikimedia_live or type(history_days) is not int or not 1 <= history_days <= 2:
+                raise AdmissionDenied("HISTORICAL_FETCH_UNAVAILABLE")
+            request_metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": history_days}
+        else:
+            request_metadata = None
         if self.provider_retry_after_seconds is not None:
             try:
                 retry_after = self.provider_retry_after_seconds()
@@ -81,7 +90,8 @@ class DistributedPublicFetch:
                 raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE")
             if retry_after:
                 raise AdmissionDenied("PROVIDER_RATE_LIMITED")
-        accepted = self.admission.admit(idempotency_key, now=self.utcnow())
+        accepted = self.admission.admit(idempotency_key, now=self.utcnow(),
+                                        request_metadata=request_metadata)
         return {"job_id": accepted["job_id"], "result": accepted["result"],
                 "status": accepted["status"], "created_at": accepted.get("created_at")}
 
@@ -153,6 +163,9 @@ class DistributedPublicFetch:
             "fetch_id": job["job_id"],
             "status": job["state"],
             "stage": job["state"],
+            "request_kind": job.get("request_metadata", {}).get("kind", "LATEST"),
+            **({"history_days": job["request_metadata"]["history_days"]}
+               if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY" else {}),
             "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else None,
             "sources": visible_sources if terminal else [
                 {"source_id": source_id, "status": job["state"]}

@@ -1,13 +1,11 @@
 param(
     [int]$Port = 8000,
-    [switch]$Synthetic,
     [switch]$Cloud
 )
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
 $ErrorActionPreference = 'Continue'
 if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
-if ($Synthetic -and $Cloud) { throw 'Choose one runtime: -Synthetic or -Cloud.' }
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root 'Backend'
@@ -26,11 +24,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location $backend
 try {
-    if ($Synthetic) {
-        Write-Output "Starting the local SYNTHETIC demo at http://127.0.0.1:$Port/"
-        Write-Output 'Fixture data is temporary. One worker; press Ctrl+C to stop.'
-        & $venvPython -m uvicorn app.demo_local:create_demo_app --factory --host 127.0.0.1 --port $Port --workers 1
-    } elseif ($Cloud) {
+    if ($Cloud) {
         if (-not $env:GOOGLE_CLOUD_PROJECT) { throw 'Set GOOGLE_CLOUD_PROJECT before selecting -Cloud.' }
         if (-not $env:TREND_SCOUT_OPERATOR_TOKEN -or $env:TREND_SCOUT_OPERATOR_TOKEN.Length -lt 24) {
             throw 'Set TREND_SCOUT_OPERATOR_TOKEN (at least 24 characters) before selecting -Cloud.'

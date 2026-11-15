@@ -155,7 +155,11 @@ def create_app(
                         collection_store = CollectionStore.local()
                         app.state.collection_service = CollectionService(
                             collection_store,
-                            entity_context_resolver=WikimediaEntityContextResolver(collection_store),
+                            entity_context_resolver=WikimediaEntityContextResolver(
+                                collection_store,
+                                before_request=getattr(local_live_fetch,
+                                                       "entity_lookup_before_request", None),
+                            ),
                         )
                     except Exception:
                         _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")

@@ -35,7 +35,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
             ("k-classified", "Recycled denim", "2026-11-10", {"views_ceil": 0, "provider_rank": 4}, 1, "CLASSIFIED"),
             ("k-ambiguous", "Denim collection", "2026-11-11", {"views_ceil": 25, "provider_rank": 2}, 1, "AMBIGUOUS"),
             ("k-unknown", "A name without context", "2026-11-12", {}, 1, "UNKNOWN"),
-            ("k-excluded", "Excluded record", "2026-11-13", {"views_ceil": 9}, 0, "INELIGIBLE"),
+            ("k-excluded", "Excluded record", "2026-11-13", {"views_ceil": 9}, 0, "UNKNOWN"),
         ]
         with self.store.connect() as db:
             for identifier, keyword, observed, evidence, eligible, status in rows:
@@ -89,6 +89,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(summary["ineligible_topic_keywords"], 1)
         self.assertEqual(summary["unknown_keywords"], 0)
         self.assertEqual(summary["excluded_keywords"], 1)
+        self.assertEqual(summary["eligible_keywords"], 2)
         analytics = self._request("GET", "/api/v1/analytics/overview").json()
         self.assertEqual(analytics["keyword_totals"]["unclassified"], 1)
 
@@ -99,9 +100,24 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(summary["unclassified_keywords"], 0)
         self.assertEqual(summary["unknown_keywords"], 0)
         self.assertEqual(summary["ineligible_topic_keywords"], 1)
+        self.assertEqual(summary["eligible_keywords"], 2)
+        self.assertEqual(summary["excluded_keywords"], 1)
         inbox = self.store.search_keywords(state="unassigned", limit=None)
         self.assertNotIn("k-unknown", {item["id"] for item in inbox["items"]})
-        self.assertIn("k-unknown", {item["id"] for item in self.store.search_keywords(state="all", limit=None)["items"]})
+        all_items = {item["id"]: item for item in self.store.search_keywords(state="all", limit=None)["items"]}
+        self.assertIn("k-unknown", all_items)
+        self.assertEqual(all_items["k-unknown"]["eligible"], 0)
+        self.assertFalse(all_items["k-unknown"]["topic_eligible"])
+        self.assertEqual({item["id"] for item in self.store.search_keywords(
+            state="non_topic", limit=None)["items"]}, {"k-unknown"})
+        self.assertNotIn("k-unknown", {item["id"] for item in self.store.search_keywords(
+            state="excluded", limit=None)["items"]})
+        filtered = self._request("GET", "/api/v1/datasets/latest/keywords?state=non_topic")
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual([item["id"] for item in filtered.json()["items"]], ["k-unknown"])
+        analytics = self._request("GET", "/api/v1/analytics/overview").json()
+        self.assertEqual(analytics["keyword_totals"]["eligible"], 2)
+        self.assertEqual(analytics["keyword_totals"]["ineligible"], 1)
 
     def test_targeted_cached_reclassification_updates_results_and_taxonomy_memberships(self):
         ids = ("MediaWiki", "Istimewa:Pencarian", "Home", "Thank You/en", "YouTube", "Katie Miller")
@@ -127,6 +143,8 @@ class KeywordWorkbenchTests(unittest.TestCase):
                      "WIKIPEDIA_PAGE_ID_AND_WIKIDATA_CLAIMS" if qid else "WIKIPEDIA_PAGE_WITHOUT_QID"))
             db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'Preserve owner membership',?)",
                        (self.root, "MediaWiki", "2026-11-14"))
+            db.execute("INSERT INTO memberships VALUES(?,?, 'USER',1,NULL,'Preserve system-page decision',?)",
+                       (self.root, "Istimewa:Pencarian", "2026-11-14"))
         response = self._request("POST", "/api/v1/collections/reclassify-cached", json={"keyword_ids": ids})
         self.assertEqual(response.status_code, 200, response.text)
         result = response.json()
@@ -135,6 +153,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(outcomes["MediaWiki"]["classification_status"], "AMBIGUOUS")
         self.assertEqual(outcomes["MediaWiki"]["topic_category_ids"], [])
         self.assertEqual(outcomes["Istimewa:Pencarian"]["classification_reason"], "NON_TOPIC_SYSTEM_PAGE")
+        self.assertFalse(outcomes["Istimewa:Pencarian"]["eligible"])
         self.assertEqual(outcomes["Home"]["classification_status"], "AMBIGUOUS")
         self.assertEqual(outcomes["Thank You/en"]["classification_status"], "UNKNOWN")
         self.assertEqual(outcomes["YouTube"]["topic_category_ids"],
@@ -148,9 +167,13 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertIn("Thank You/en", unassigned_ids)
         self.assertNotIn("YouTube", unassigned_ids)
         self.assertNotIn("Katie Miller", unassigned_ids)
+        self.assertIn("Istimewa:Pencarian", {item["id"] for item in self.store.search_keywords(
+            state="non_topic", limit=None)["items"]})
+        self.assertNotIn("Istimewa:Pencarian", {item["id"] for item in self.store.search_keywords(
+            state="excluded", limit=None)["items"]})
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 0)
-            self.assertEqual(db.execute("SELECT count(*) FROM memberships WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT count(*) FROM memberships WHERE keyword_id IN (?,?,?,?,?,?)", ids).fetchone()[0], 4)
             self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE keyword_id IN (?,?)", ("YouTube", "MediaWiki")).fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT classification_reason FROM classification_results WHERE keyword_id='Istimewa:Pencarian'").fetchone()[0], "NON_TOPIC_SYSTEM_PAGE")
             video = db.execute("SELECT id,parent_id FROM collections WHERE category_id='technology.internet_services.video_platforms'").fetchone()
@@ -162,6 +185,8 @@ class KeywordWorkbenchTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT collection_id FROM memberships WHERE keyword_id='YouTube' AND collection_id=?", (video["id"],)).fetchone()[0], video["id"])
             self.assertEqual(db.execute("SELECT collection_id FROM memberships WHERE keyword_id='Katie Miller' AND collection_id=?", (advisers["id"],)).fetchone()[0], advisers["id"])
             self.assertIsNotNone(db.execute("SELECT 1 FROM memberships WHERE keyword_id='MediaWiki' AND collection_id=? AND origin='USER' AND pinned=1", (self.root,)).fetchone())
+            self.assertIsNotNone(db.execute("SELECT 1 FROM memberships WHERE keyword_id='Istimewa:Pencarian' AND collection_id=? AND origin='USER' AND pinned=1", (self.root,)).fetchone())
+            self.assertEqual(tuple(db.execute("SELECT eligible,rejection_reason FROM keywords WHERE id='Istimewa:Pencarian'").fetchone()), (0, "CLASSIFICATION_INELIGIBLE"))
 
     def test_cached_taxonomy_assignment_respects_explicit_removal_feedback(self):
         keyword_id = "feedback-protected-youtube"
