@@ -12,7 +12,10 @@ from app.collections.store import CollectionStore, keyword_record
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import PublicAdmission
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
-from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.orchestration.normal_google_live_composition import (
+    _GoogleLocalApproval,
+    normal_google_live_composition,
+)
 from app.sources.catalog import GOOGLE_SOURCE_ID
 from app.sources.google_trends.rss import parse_google_trends_rss
 from app.sources.google_trends.trending_now import (
@@ -299,6 +302,15 @@ class SerpApiAccountTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
+    def test_google_local_approval_is_stable_during_a_guarded_attempt(self):
+        approval = _GoogleLocalApproval(
+            GOOGLE_SOURCE_ID, enabled=True, clock=lambda: NOW
+        )
+        first = approval.current(GOOGLE_SOURCE_ID)
+        self.assertIsNotNone(first)
+        self.assertIs(approval.current(GOOGLE_SOURCE_ID), first)
+        self.assertIsNone(approval.current("bing_web_serp"))
+
     async def test_google_runtime_constructs_without_provider_requests_by_default(self):
         directory = tempfile.TemporaryDirectory()
         root = Path(directory.name)
@@ -313,7 +325,14 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             def resolve(self, _reference):
                 raise AssertionError("credential lookup is forbidden without paid-path approval")
 
-        config = GoogleLiveSettings(local_runtime_approved=True)
+        config = GoogleLiveSettings(
+            local_runtime_approved=True,
+            serpapi_daily_budget=3,
+            serpapi_monthly_budget=3,
+            rss_daily_budget=1,
+            rss_monthly_budget=1,
+            batches_per_hour=2,
+        )
         try:
             async with normal_google_live_composition(
                 user_agent="TrendScoutTest/1.0 (https://example.invalid)",
@@ -333,6 +352,9 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                                  "NOT_CONFIGURED")
                 self.assertEqual(facade.google_account_quota_state["status"],
                                  "NOT_CONFIGURED")
+                self.assertEqual(facade.admission.policy.pools["serpapi"].daily_requests, 3)
+                self.assertEqual(facade.admission.policy.pools["google_rss"].daily_requests, 1)
+                self.assertEqual(facade.admission.policy.max_starts_per_window, 2)
         finally:
             directory.cleanup()
 

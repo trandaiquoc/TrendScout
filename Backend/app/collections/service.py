@@ -181,6 +181,30 @@ class CollectionService:
         self._update_job(fetch_id, stage="ANALYZING_SEMANTIC_MEANING", skipped=skipped)
         if sources and not fetch_id.startswith("organize-"):
             self._persist_dataset_snapshot(fetch_id, sources, records, available, skipped)
+        if sources and not records and not fetch_id.startswith("organize-"):
+            # A failed or empty source response is still an auditable snapshot,
+            # but it must not replay analysis and rewrite timestamps or results
+            # for the existing keyword ledger.
+            with self.store.connect() as db:
+                snapshot = db.execute(
+                    "SELECT eligible_keyword_count FROM dataset_snapshots WHERE dataset_id=?",
+                    (fetch_id,),
+                ).fetchone()
+                db.execute(
+                    "UPDATE dataset_snapshots SET processing_status='COMPLETED' WHERE dataset_id=?",
+                    (fetch_id,),
+                )
+            self._update_job(
+                fetch_id, stage="COMPLETED", status="COMPLETED", available=available,
+                eligible=snapshot["eligible_keyword_count"] if snapshot else 0,
+                processed=0, assigned=0, unassigned=0, created_collections=0,
+                suggestions=0, skipped=skipped, cached_embeddings=0, inferred_embeddings=0,
+            )
+            return {
+                "fetch_id": fetch_id, "status": "COMPLETED", "available": available,
+                "processed": 0, "assigned": 0, "unassigned": 0,
+                "created_collections": 0, "suggestions": 0, "skipped": skipped,
+            }
         analysis = self._analyze_persisted_keywords(records)
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.

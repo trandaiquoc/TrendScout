@@ -176,6 +176,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                     if source["source_id"] == WIKIMEDIA_SOURCE_ID)
         self.assertEqual(wiki["transport_diagnostic"], diagnostic)
         self.assertNotIn("body", wiki["transport_diagnostic"])
+        self.assertIsNone(wiki["delivery_state"])
 
         unsafe = dict(diagnostic, raw_body="private-marker")
         with self.assertRaisesRegex(ValueError, "diagnostic shape"):

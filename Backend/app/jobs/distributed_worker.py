@@ -207,9 +207,19 @@ class DistributedFetchWorker:
                    "transport_diagnostic"}
         if set(value) - allowed:
             raise ValueError("source result contains an unsupported field")
+        value = dict(value)
+        if value["status"] in {"FAILED", "UNAVAILABLE"}:
+            # Delivery freshness describes returned observations. A failed or
+            # unavailable source has no fresh delivery, even if an adapter's
+            # generic default filled that field in.
+            value["delivery_state"] = None
+        elif value.get("delivery_state") is None:
+            value["delivery_state"] = "FRESH"
         if value.get("data_mode") != expected_mode:
             raise ValueError("source result provenance mismatch")
-        if value.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}:
+        if (value.get("delivery_state") not in {"FRESH", "CACHED", None}
+                or value["status"] not in {"FAILED", "UNAVAILABLE"}
+                and value.get("delivery_state") is None):
             raise ValueError("invalid result delivery state")
         records = value.get("records")
         if not isinstance(records, list) or len(records) > 5000 or any(

@@ -148,6 +148,7 @@ class GoogleTrendsRSSHandler:
                         "provider_record_count": page.provider_record_count,
                         "accepted_record_count": len(page.records),
                         "rejected_record_count": page.rejected_record_count,
+                        "http_status": page.http_status,
                         "provider_data_at": page.provider_data_at.isoformat()
                             if page.provider_data_at else None,
                         "fetched_at": fetched_at.astimezone(timezone.utc).isoformat(),

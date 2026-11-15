@@ -194,6 +194,7 @@ class GoogleTrendsDiscoveryHandler:
                         "accepted_record_count": len(page.records),
                         "rejected_record_count": page.rejected_record_count,
                         "provider_status": page.provider_status,
+                        "http_status": page.http_status,
                         "provider_created_at": page.provider_created_at.isoformat()
                             if page.provider_created_at else None,
                         "provider_data_at": page.provider_data_at.isoformat()

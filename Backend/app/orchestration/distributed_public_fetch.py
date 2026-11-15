@@ -162,11 +162,16 @@ class DistributedPublicFetch:
                     continue
                 if result["status"] != "UNAVAILABLE":
                     modes.add(result["data_mode"])
+                delivery_state = result.get("delivery_state")
+                if result["status"] in {"FAILED", "UNAVAILABLE"}:
+                    delivery_state = None
+                elif delivery_state not in {"FRESH", "CACHED"}:
+                    delivery_state = "FRESH"
                 source_results.append({
                     "source_id": source_id,
                     "status": result["status"],
                     **({"data_mode": result["data_mode"]} if result["status"] != "UNAVAILABLE" else {}),
-                    "delivery_state": result.get("delivery_state", "FRESH"),
+                    "delivery_state": delivery_state,
                     "record_count": result["record_count"],
                     "records": result["records"],
                     "coverage": result.get("coverage"),

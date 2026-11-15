@@ -233,6 +233,58 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(snapshot["snapshot_retained_keyword_count"], 1)
         self.assertEqual(snapshot["retained_keyword_count"], 2)
 
+    def test_empty_failed_fetch_keeps_existing_analysis_and_memberships_unchanged(self):
+        collection_id = self.store.create({
+            "name": "Sustainable fashion",
+            "description": "Recycled denim and eco clothing",
+        })
+        row = {
+            "article_display": "Upcycled Denim Jacket",
+            "article_original": "Upcycled_Denim_Jacket",
+            "project": "en.wikipedia",
+            "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z",
+        }
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            seeded = self.service._process_fetch("existing-google-safe-baseline", live_source([row]))
+        self.assertEqual(seeded["processed"], 1)
+        self.assertEqual(len(self.store.keywords_for(collection_id)), 1)
+
+        table_rows = (
+            "classification_results", "memberships", "algorithm_results",
+            "algorithm_observations", "membership_reconciliation_runs",
+        )
+        before = {}
+        with self.store.connect() as db:
+            for table in table_rows:
+                before[table] = [tuple(item) for item in db.execute(f"SELECT * FROM {table} ORDER BY 1,2")]
+
+        failed_google = [{
+            "source_id": "google_web_serp", "data_mode": "LIVE", "status": "FAILED",
+            "record_count": 0, "records": [], "error_code": "UPSTREAM_ERROR",
+            "coverage": {"attempted_calls": 1, "discovery_mode": "SERPAPI_TRENDING_NOW"},
+        }]
+        with patch.object(embeddings, "embed", side_effect=AssertionError("empty fetch must skip reanalysis")):
+            result = self.service._process_fetch("failed-google-no-observations", failed_google)
+
+        self.assertEqual((result["status"], result["available"], result["processed"]),
+                         ("COMPLETED", 0, 0))
+        with self.store.connect() as db:
+            for table in table_rows:
+                after = [tuple(item) for item in db.execute(f"SELECT * FROM {table} ORDER BY 1,2")]
+                self.assertEqual(after, before[table], table)
+            snapshot = db.execute(
+                "SELECT status,data_mode,provider_record_count,received_record_count,"
+                "retained_keyword_count,processing_status FROM dataset_snapshots WHERE dataset_id=?",
+                ("failed-google-no-observations",),
+            ).fetchone()
+            job = db.execute(
+                "SELECT status,available,processed,assigned,unassigned FROM fetch_jobs WHERE fetch_id=?",
+                ("failed-google-no-observations",),
+            ).fetchone()
+        self.assertEqual(tuple(snapshot), ("FAILED", "LIVE", 0, 0, 0, "COMPLETED"))
+        self.assertEqual(tuple(job), ("COMPLETED", 0, 0, 0, 0))
+
     def test_crud_feedback_and_restart_persistence(self):
         collection_id = self.store.create({"name": "Sustainable fashion", "examples": ["circular clothing"]})
         row = keyword_record({"article_display": "Upcycled Denim", "article_original": "Upcycled_Denim",

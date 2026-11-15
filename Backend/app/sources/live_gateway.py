@@ -66,6 +66,21 @@ class GatewayError(Exception):
         super().__init__(code)
 
 
+def _matches_bounded_google_local_policy(policy, builder) -> bool:
+    """Accept only the reviewed Google policy shape with bounded quota values."""
+    try:
+        expected = builder(
+            serpapi_daily_budget=policy.pools["serpapi"].daily_requests,
+            serpapi_monthly_budget=policy.pools["serpapi"].monthly_requests,
+            rss_daily_budget=policy.pools["google_rss"].daily_requests,
+            rss_monthly_budget=policy.pools["google_rss"].monthly_requests,
+            batches_per_hour=policy.max_starts_per_window,
+        )
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return policy == expected
+
+
 def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, runner=None):
     """Validate a current server-owned source approval without leaking provider detail."""
     try:
@@ -131,7 +146,9 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                      and isinstance(runner, GuardedAttemptRunner)
                      and type(store) is LocalSQLiteAtomicStateStore
                      and store.data_mode == "LIVE"
-                     and runner.admission.policy == normal_google_live_policy()
+                     and _matches_bounded_google_local_policy(
+                         runner.admission.policy, normal_google_live_policy
+                     )
                      and source_id in runner.admission.policy.enabled_sources)
         else:
             valid = False

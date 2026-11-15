@@ -76,7 +76,8 @@ def _saved_source_activity(request):
                         value = coverage.get(key)
                         if isinstance(value, str) and len(value) <= 64:
                             summary[key] = value
-                    if source.get("delivery_state") in {"FRESH", "CACHED"}:
+                    if (status in {"SUCCESS", "PARTIAL"}
+                            and source.get("delivery_state") in {"FRESH", "CACHED"}):
                         summary["delivery_state"] = source["delivery_state"]
                     activity["google_coverage"] = summary
             latest[source_id] = activity

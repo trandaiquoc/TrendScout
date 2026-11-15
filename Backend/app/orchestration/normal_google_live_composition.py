@@ -45,12 +45,15 @@ _MAX_CANDIDATE_HISTORY = 5_000
 class _GoogleLocalApproval:
     def __init__(self, source_id, *, enabled, clock):
         self.source_id, self.enabled, self.clock = source_id, enabled, clock
+        self._current = None
 
     def current(self, source_id):
         if source_id != self.source_id or self.enabled is not True:
             return None
         now = self.clock()
-        return SourceApproval(
+        if self._current is not None and self._current.expires_at > now:
+            return self._current
+        self._current = SourceApproval(
             source_id=source_id,
             plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
             expires_at=now + timedelta(minutes=5),
@@ -68,6 +71,7 @@ class _GoogleLocalApproval:
             scope="LOCAL_NORMAL_GOOGLE",
             local_controls_verified=True,
         )
+        return self._current
 
 
 class _PinnedSerpApiCredential:

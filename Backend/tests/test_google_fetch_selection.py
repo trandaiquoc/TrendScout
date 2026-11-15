@@ -204,6 +204,7 @@ class GoogleFetchSourceSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(google["source_id"], GOOGLE_SOURCE_ID)
         self.assertEqual(google["data_mode"], "SYNTHETIC")
         self.assertEqual(google["coverage"]["discovery_mode"], "RSS_LIMITED_DISCOVERY")
+        self.assertEqual(google["coverage"]["http_status"], 200)
         self.assertEqual(google["records"][0]["canonical_keyword"], "Portable outdoor blanket")
 
     async def test_google_and_wikimedia_fetch_runs_both_selected_handlers(self):

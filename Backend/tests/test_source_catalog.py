@@ -43,6 +43,13 @@ class SourceCatalogTests(unittest.TestCase):
                     "record_count": 3,
                 }]), "2026-11-13T01:00:00Z", "2026-11-11", "2026-11-11", "1",
             ))
+            db.execute("""INSERT INTO dataset_snapshots VALUES(?,?,?,?,?,?,?)""", (
+                "FAILED", "LIVE", json.dumps([{
+                    "source_id": GOOGLE_SOURCE_ID, "status": "FAILED",
+                    "record_count": 0, "delivery_state": "FRESH",
+                    "coverage": {"discovery_mode": "SERPAPI_TRENDING_NOW"},
+                }]), None, None, None, "3",
+            ))
             db.commit()
             db.close()
 
@@ -59,7 +66,8 @@ class SourceCatalogTests(unittest.TestCase):
             request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
                 collection_service=SimpleNamespace(store=Store())
             )))
-            activity = _saved_source_activity(request)[WIKIMEDIA_SOURCE_ID]
+            activities = _saved_source_activity(request)
+            activity = activities[WIKIMEDIA_SOURCE_ID]
 
         self.assertEqual(activity, {
             "status": "PARTIAL", "data_mode": "SYNTHETIC", "record_count": 7,
@@ -67,6 +75,8 @@ class SourceCatalogTests(unittest.TestCase):
             "observation_end": "2026-11-13",
         })
         self.assertNotIn("PRIVATE_PROVIDER_DETAIL", json.dumps(activity))
+        self.assertEqual(activities[GOOGLE_SOURCE_ID]["status"], "FAILED")
+        self.assertNotIn("delivery_state", activities[GOOGLE_SOURCE_ID]["google_coverage"])
 
     def test_four_capabilities_have_central_endpoint_and_readiness_metadata(self):
         expected = {
