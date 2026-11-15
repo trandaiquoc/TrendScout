@@ -1,6 +1,7 @@
 import { getJson } from './api.js';
 import { getLocale, t } from './i18n.js';
 import { formatDate, formatNumber, formatTimestamp } from './format.js';
+import { extractRunSourceCoverage } from './run-history-coverage.js';
 
 const $ = (selector) => document.querySelector(selector);
 const number = (value) => formatNumber(value, getLocale());
@@ -89,11 +90,20 @@ function renderRunHistoryDetail(item, errorMessage = null) {
   root.append(heading);
   if(errorMessage){const message=element('p',errorMessage); message.setAttribute('role','alert'); root.append(message); return;}
   const list=element('dl','', 'detail-list detail-list--grid');
+  const coverage=extractRunSourceCoverage(item);
   const sourceSummary=(item.source_manifest || []).map(source=>{
     const status=localizedStatus('fetch.source-status.',source.status || 'UNKNOWN');
-    const count=source.record_count == null ? t('common.unavailable') : number(source.record_count);
-    return `${localizedSourceName(source.source_id)}: ${status} (${count})`;
+    return `${localizedSourceName(source.source_id)}: ${status}`;
   }).join(' · ') || t('common.unavailable');
+  const sourceCoverageSummary=coverage.sources.map(source=>{
+    const counts=[
+      source.providerReturnedRecords == null ? null : `${t('runs.provider-records')}: ${number(source.providerReturnedRecords)}`,
+      source.retainedRecords == null ? null : `${t('runs.source-retained')}: ${number(source.retainedRecords)}`,
+      source.rejectedRecords == null ? null : `${t('runs.source-rejected')}: ${number(source.rejectedRecords)}`,
+      source.omittedRecords == null ? null : `${t('runs.source-omitted')}: ${number(source.omittedRecords)}`,
+    ].filter(Boolean).join(' · ');
+    return `${localizedSourceName(source.sourceId)}: ${counts || t('common.unavailable')}`;
+  }).join(' | ') || t('common.unavailable');
   const quality=(item.quality_flags || []).length
     ? t('runs.outcome.quality-notes',{count:number(item.quality_flags.length)})
     : t('runs.outcome.no-notes');
@@ -103,14 +113,15 @@ function renderRunHistoryDetail(item, errorMessage = null) {
     ? `${observationStart} – ${observationEnd}` : observationStart || observationEnd || t('common.unavailable');
   const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
-    [t('runs.provider-records'),item.provider_record_count],
+    [t('runs.source-coverage'),sourceCoverageSummary,'wide'],
+    [t('runs.provider-records'),coverage.providerRecordCount],
     [t('runs.observation-window'),observationWindow],
     [t('runs.received'),item.received_record_count ?? item.available],
     [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
     [t('runs.outcome'),localizedRunOutcome(item)],[t('runs.quality'),quality],
     [t('runs.duration'),t('runs.duration-unavailable')],
     [t('runs.date'),item.fetched_at || item.updated_at ? timestamp(item.fetched_at || item.updated_at) : t('common.unavailable')]];
-  for(const [label,value] of values){const row=element('div');row.append(element('dt',label),element('dd',typeof value==='number'?number(value):value == null?t('common.unavailable'):value));list.append(row);}
+  for(const [label,value,width] of values){const row=element('div');if(width)row.className=width;row.append(element('dt',label),element('dd',typeof value==='number'?number(value):value == null?t('common.unavailable'):value));list.append(row);}
   root.append(list);
 }
 
