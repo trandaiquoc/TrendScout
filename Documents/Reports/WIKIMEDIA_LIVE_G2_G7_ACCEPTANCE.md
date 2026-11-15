@@ -32,7 +32,7 @@
 - **G3 Source Center:** Wikimedia is the only configured LIVE source. Google, Bing, and YouTube are disabled/not configured; provider approval and production readiness remain pending.
 - **G4 Dashboard and quality:** values come from saved LIVE SQLite evidence. The displayed top rows identify approximate pageview ranking. Cleaning rejects, dates, and censored top-list coverage remain visible.
 - **G5 Run History:** 14 persisted runs, `history_truncated=false`. The latest run has processing status `COMPLETED` and dataset status `PARTIAL`; saved history and research survived backend restart. Native Chrome details distinguish provider-returned, retained, source-rejected, and storage-omitted counts for the latest run and preserved pre-fix history.
-- **G6 Algorithms:** observed volume and percentile ranks each show 1,206 `COMPLETED` and 10 `SKIPPED` over 1,216 topic-eligible rows. Methods needing longer compatible history remain skipped with applicability reasons. Effectiveness is `NOT_YET_EVALUATED` because no labeled evaluation history exists.
+- **G6 Algorithms:** observed volume and percentile ranks each show 1,206 `COMPLETED` and 10 `SKIPPED` over 1,216 topic-eligible rows. Methods needing longer compatible history remain skipped with applicability reasons. Effectiveness is `NOT_YET_EVALUATED`: the Collections DB has 0 feedback rows and 0 keyword-decision rows; model classifications are not independent ground-truth labels.
 - **G7 Research and Settings:** Native Chrome edited and reopened a LIVE-linked research record; source, project, observation date, edit, and archived status persisted across restart. FastEmbed is local; LLM is `NOT_CONFIGURED`; scheduler remains disabled with `LOCAL_SYNTHETIC_ONLY` policy.
 
 ## Windows verification and open gates
@@ -53,7 +53,7 @@
 
 **A. Wikimedia Windows Feature Completion: 100% (PASS).**
 
-**B. Remaining external G2–G7 acceptance:** Firestore `BLOCKED_ENVIRONMENT`; algorithm effectiveness `NOT_YET_EVALUATED`; cross-provider overlap `NOT_VERIFIED` (no approved compatible second LIVE source); production integrations `NOT_APPROVED`; screen reader `NOT_VERIFIED` (NVDA not installed).
+**B. Remaining external G2–G7 acceptance:** Firestore `BLOCKED_ENVIRONMENT`; algorithm effectiveness `NOT_YET_EVALUATED` (0 feedback/decision labels); cross-provider overlap `NOT_VERIFIED` (only one configured LIVE source); production integrations `NOT_APPROVED`; screen reader `NOT_VERIFIED` (NVDA not installed).
 
 - Native Chrome 157.0.8103.51 loaded Dashboard, Collections, Source Center, Run History, Algorithms, Data Quality, Research, and Settings. In the real Windows backend, Run History showed latest source counts `1,999 / 1,999 / 0 / 0` and preserved earlier counts `1,000 / 212 / 0 / 788`. The `non_topic` filter returned exactly three rows; VI/EN and Light/Dark toggles worked.
 - Prior final offline regression: **243 passed**; focused keyword-workbench suite: **22 passed**. For the Run History fix, **3 focused Node tests passed**, Native Chrome verified both actual records, changed frontend modules passed `node --check`, and `git diff --check` passed.
