@@ -16,7 +16,7 @@ Progress is the sum of passed gate weights. A blocked LIVE gate does not pass be
 | G3 LIVE discovery | 10% | Authorized, real RSS and/or SerpApi Trending Now response with dated, bounded evidence; provider mode reported accurately | BLOCKED_EXTERNAL pending use approval |
 | G4 Google SERP LIVE | 10% | Authorized real Google SERP response with persisted run and quota/freshness evidence | BLOCKED_EXTERNAL pending credential and approval |
 | G5 SQLite and application flow | 16% | Genuine source evidence persisted/read back and exercised through API, keyword, dashboard, collections and research workflow without data loss or hidden truncation | BLOCKED_EXTERNAL pending authorized Google evidence |
-| G6 Regression and UI | 12% | Focused Google tests including selected-source worker paths; regressions/browser checks; Wikimedia acceptance preserved; states and locales/themes reviewed | PASS |
+| G6 Regression and UI | 12% | Focused Google tests, selected-source worker and Chrome UI paths; regressions/browser checks; Wikimedia acceptance preserved; states and locales/themes reviewed | PASS |
 | G7 Report and local commits | 8% | This report contains evidence, blockers and D6-BING handoff; focused commits exist locally and are not pushed | PASS |
 | **Total** | **100%** |  |  |
 
@@ -26,8 +26,9 @@ Progress is the sum of passed gate weights. A blocked LIVE gate does not pass be
 
 - Local branch: `main`.
 - `git fetch origin` completed on 2026-11-15.
-- Local `HEAD` and fetched `origin/main`: `46a0590e07c09f57a481aa4cfb952db6d9fd6fd0`.
-- Worktree and index were clean before implementation; no missing remote commits or user changes were present.
+- Fetched `origin/main`: `46a0590e07c09f57a481aa4cfb952db6d9fd6fd0`.
+- Local `HEAD` at the start of the final acceptance pass was `dd4e0bbdeda287dfc8f9ee5b86fa42f99873896e`, four local commits ahead of `origin/main`; no remote commits were missing. The worktree and index were clean at that point.
+- Final implementation `HEAD` is `377d45a`, five local commits ahead of `origin/main`. The acceptance report is being committed separately.
 - The existing Windows Wikimedia G2-G7 acceptance was PASS on the baseline. Its evidence remains the authoritative prior acceptance; this goal does not repeat or overwrite that run.
 
 ## Provider documentation review
@@ -45,21 +46,85 @@ Documentation review does not prove credential access, provider approval, reacha
 
 ### Implemented offline
 
+- **Source strategy:** SerpApi Trending Now is the preferred broad discovery path when approved because its documented request returns US-targeted trend candidates and provider trend context in one bounded request. The official RSS feed is a separately labeled fallback because it uses no SerpApi search credits, while its sample and fields are more limited. Google SERP remains a separate verification step, capped at two server-selected candidates and one page each. No automatic extra time windows, BigQuery adapter, or Wikimedia re-fetch was added; Wikimedia stays an independent source with its existing provenance.
 - Added strict SerpApi Google Trends Trending Now and Google Trends RSS adapters. Their normalized records retain provider and transport identity, US targeting, language, applicable window, query groups, related queries, approximate traffic buckets, provider timestamps, fetch time, source URL, delivery state and quality flags. Missing provider fields stay missing; approximate buckets are not converted to exact search counts.
 - Added deterministic canonical keyword identity across the two discovery transports, bounded candidate selection and a server-controlled Google SERP verification plan capped at two selected candidates per fresh batch. RSS discovery does not count as SERP verification.
 - Added an account-aware SerpApi budget gate using the documented account endpoint, numeric-only quota snapshots, a pinned server-side credential, separate RSS and paid request pools, bounded retries and idempotent reservations. Approval settings default off. No credential is read by the frontend.
 - Added a separately opted-in local Google runtime. The default `start.ps1` route remains the prior Wikimedia local runtime. The Google profile binds to loopback, uses one worker and does not start a provider Fetch automatically. Source approvals and the runtime approval must be supplied separately by an operator.
 - Persisted Google source evidence and provider/fetch timestamps through the existing SQLite-backed result flow, with explicit source delivery state, bounded result/checkpoint sizes and visible storage limits. Added Google summaries to Source Center, Fetch results, Run History and keyword detail. The UI identifies cached results and shows verified-result counts independently from discovery candidates.
+- Fixed the public synthetic discovery summary to show its actual data mode instead of the hard-coded `LIVE` label.
 - Added local setup and operator-boundary notes in [Backend/README.md](../../Backend/README.md). No provider setting or credential was enabled as part of this change.
+
+### Exact changed files
+
+The local D6 change set relative to the fetched `origin/main` baseline is:
+
+```text
+Backend/README.md
+Backend/app/api/capabilities.py
+Backend/app/api/fetches.py
+Backend/app/collections/service.py
+Backend/app/collections/store.py
+Backend/app/discovery/contracts.py
+Backend/app/discovery/extraction.py
+Backend/app/discovery/source_results.py
+Backend/app/google_live_settings.py
+Backend/app/jobs/distributed_worker.py
+Backend/app/jobs/public_admission.py
+Backend/app/jobs/shared_cache.py
+Backend/app/jobs/source_checkpoints.py
+Backend/app/main.py
+Backend/app/normal_wikimedia_live_policy.py
+Backend/app/orchestration/distributed_public_fetch.py
+Backend/app/orchestration/normal_google_live_composition.py
+Backend/app/sources/google_trends/__init__.py
+Backend/app/sources/google_trends/budget.py
+Backend/app/sources/google_trends/handler.py
+Backend/app/sources/google_trends/rss.py
+Backend/app/sources/google_trends/rss_gateway.py
+Backend/app/sources/google_trends/rss_handler.py
+Backend/app/sources/google_trends/trending_now.py
+Backend/app/sources/google_trends/verification_plan.py
+Backend/app/sources/google_trends/workflow.py
+Backend/app/sources/live_gateway.py
+Backend/app/sources/serpapi/account.py
+Backend/app/sources/serpapi/pagination.py
+Backend/app/storage/local_sqlite_snapshot_blobs.py
+Backend/app/workers/d5_source_handlers.py
+Backend/app/workers/guarded_attempt.py
+Backend/scripts/run_google_live_local.py
+Backend/tests/browser_g5_run_history_accessibility_offline.py
+Backend/tests/browser_google_fetch_selection_offline.py
+Backend/tests/test_d5_live_gateway.py
+Backend/tests/test_d6_wikimedia_synthetic_e2e.py
+Backend/tests/test_google_fetch_selection.py
+Backend/tests/test_google_trends.py
+Backend/tests/test_keyword_workbench_ui.py
+Documents/Reports/D6_GOOGLE_LIVE_ACCEPTANCE.md
+Frontend/public/app.js
+Frontend/public/index.html
+Frontend/public/modules/capabilities.js
+Frontend/public/modules/fetch.js
+Frontend/public/modules/i18n/en.js
+Frontend/public/modules/i18n/vi.js
+Frontend/public/modules/keyword-workbench.js
+Frontend/public/modules/run-history-coverage.js
+Frontend/public/modules/run-history.js
+Frontend/public/styles.css
+Frontend/tests/fetch-source-selection.test.mjs
+Frontend/tests/run-history-coverage.test.mjs
+start.ps1
+```
 
 ### Verification evidence (offline only)
 
-- `Backend\.venv\Scripts\python.exe -m unittest discover -s tests`: **828 tests passed** on 2026-11-15 (104.511 seconds). This includes Google parser, persistence identity, guarded gateway, quota, local composition, selected-source Google Fetch, existing Wikimedia, public admission, and end-to-end regression tests. All test transports are fixtures or mocks; this is not provider verification.
-- Offline source-selection integration: **2 tests passed** through `D5SourceHandlers`, the guarded worker, and `DistributedPublicFetch`. Google-only Fetch issued one mocked RSS request and no Wikimedia request; combined Google/Wikimedia Fetch issued one mocked request to each source. Both results remained `SYNTHETIC`.
-- `Backend\.venv\Scripts\ruff.exe check` over changed Python implementation and test files: passed.
-- `Backend\.venv\Scripts\python.exe -m compileall -q app scripts`: passed.
+- `Backend\.venv\Scripts\python.exe -m unittest discover -s tests`: **829 tests passed** on 2026-11-15 (129.214 seconds). This includes Google parser, persistence identity, guarded gateway, quota, local composition, selected-source Google Fetch, Windows launcher default, existing Wikimedia, public admission, and end-to-end regression tests. All test transports are fixtures or mocks; this is not provider verification.
+- New focused source-selection and startup tests: **3 passed**. Two exercise `D5SourceHandlers`, the guarded worker, and `DistributedPublicFetch`: Google-only Fetch issued one mocked RSS request and no Wikimedia request; combined Google/Wikimedia Fetch issued one mocked request to each source. The third confirms the Windows default launcher still starts the Wikimedia profile and Google requires `-GoogleLive`. Fixture results remained `SYNTHETIC`.
+- `Backend\.venv\Scripts\python.exe tests\browser_google_fetch_selection_offline.py`: Chrome PASS for the real source selector, ALL (Google plus Wikimedia), Google-only Fetch, the RSS-limited and zero-SERP summary, and localized synthetic provenance. The browser and backend use mock responses; no provider endpoint is contacted.
+- `Backend\.venv\Scripts\ruff.exe check` on `Backend/tests/test_google_fetch_selection.py` and `Backend/tests/browser_google_fetch_selection_offline.py`: passed.
+- `Backend\.venv\Scripts\python.exe -m py_compile` on those two focused Python test files: passed.
 - `node --test Frontend/tests/*.test.mjs`: **7 passed**, including three `PublicFetchController` source-selection cases for Google-only, Google plus Wikimedia, and the default all-sources request.
-- `node --check` over `Frontend/public/**/*.js`: passed.
+- `node --check Frontend/public/app.js`: passed.
 - `Backend\.venv\Scripts\python.exe tests\browser_g5_run_history_accessibility_offline.py`: Chrome PASS for English/Vietnamese detail labels, accessibility region name, focus, Escape handling, and Google RSS provenance, cached delivery, timestamps and zero SERP verifications.
 - `Backend\.venv\Scripts\python.exe tests\browser_workspace_offline.py`: Chrome PASS at 320, 390, 768, 1024, 1440 and 1920 px; mocked UI flows confirmed no provider Fetch.
 - `git diff --check`: passed. Git reports expected LF-to-CRLF normalization warnings for this Windows workspace.
@@ -98,5 +163,8 @@ These checks verify offline contracts and rendering. They do not establish that 
 ## Local commits
 
 - Implementation and offline verification: `6f6e836` (`feat(google): add guarded Trends discovery workflow`).
+- Initial offline acceptance and LIVE blocker report: `8cbaaa2` (`docs(google): record offline acceptance and LIVE blockers`).
 - Selected-source offline integration checks: `b6a99cc` (`test(google): cover selected Fetch workflows offline`).
+- Prior acceptance evidence update: `dd4e0bb` (`docs(google): update offline Fetch acceptance evidence`).
+- Synthetic provenance fix and Chrome source-selection coverage: `377d45a` (`fix(google): verify Fetch UI provenance offline`).
 - This acceptance report is committed separately. Commits remain local; no push or deployment was performed.
