@@ -1,208 +1,120 @@
 # D6-GOOGLE LIVE acceptance
 
-**Status:** OFFLINE ACCEPTANCE COMPLETE; GOOGLE LIVE ACCEPTANCE INCOMPLETE
+**Status:** G0-G7 PASS - D6-GOOGLE LIVE acceptance complete with archive-backed, cached delivery.
 **Review date:** 2026-11-16 (Asia/Bangkok)
-**Push/deployment:** none
+**Weighted progress:** 100%.
+**Push, deployment, billing:** none.
 
 ## Weighted acceptance gates
 
-Progress is the sum of passed gate weights. A blocked LIVE gate does not pass because offline code or fixtures exist.
-
-| Gate | Weight | PASS evidence | Status |
+| Gate | Weight | Evidence | Status |
 |---|---:|---|---|
-| G0 Git and baseline | 10% | Fetched `origin/main`, reviewed local status/diffs and recent history, preserved local changes, identified prior Wikimedia PASS | PASS |
-| G1 Google discovery contract | 16% | Strict Trending Now and RSS parsing; deterministic normalization; source-specific metrics, relationships, missing values, deduplication and tests | PASS |
-| G2 quota and security | 18% | Shared SerpApi budget, bounded attempts, backend-only credentials, fail-closed approvals, cache/idempotency and security regressions | PASS |
-| G3 LIVE discovery | 10% | One authorized SerpApi Google Trends Trending Now request was charged but returned `UPSTREAM_ERROR` with 0 records. The single local RSS reservation was consumed before HTTP by an approval-check failure; no RSS request reached Google. | FAIL — no usable LIVE discovery response |
-| G4 Google SERP LIVE | 10% | No real Google discovery candidates were returned, so the deterministic planner selected none and no Google SERP search was attempted. | NOT RUN — no valid candidate |
-| G5 SQLite and application flow | 16% | Failed Google snapshots and jobs were persisted and read back after restart; the snapshot contains 0 Google records and the keyword ledger contains 0 Google observations. Existing Wikimedia data and user research were preserved. | INCOMPLETE — no genuine Google observation to carry through the full flow |
-| G6 Regression and UI | 12% | Focused Google tests, selected-source worker and Chrome UI paths; regressions/browser checks; Wikimedia acceptance preserved; states and locales/themes reviewed | PASS |
-| G7 Report and local commits | 8% | This report contains evidence, blockers and D6-BING handoff; focused commits exist locally and are not pushed | PASS |
+| G0 Git and baseline | 10% | Fetched origin/main at goal resume; reviewed history, status and diffs; local HEAD matched origin/main before focused commits | PASS |
+| G1 Google discovery contract | 16% | Strict Trends/RSS parsing, deterministic normalization and deduplication, provider-specific metrics and missing-value behavior; focused tests passed | PASS |
+| G2 quota and security | 18% | Local approval-gated runtime, backend-only credential, audited SerpApi budget migration preserving usage, separate pools and six-search cross-machine reserve | PASS |
+| G3 LIVE discovery | 10% | Successful SerpApi Trends archive 6af9da758ffa7057c3ea741b: 603 US records, 603 accepted, 0 rejected; persisted as LIVE data with CACHED delivery | PASS |
+| G4 Google SERP LIVE | 10% | Successful Google Search archive 6af9ffc1bccefc8a0b52e131 for jamaica - méxico: 7 accepted organic results, 0 rejected; persisted as CACHED verification | PASS |
+| G5 SQLite and application flow | 16% | 603 Google observations and 7 SERP results persisted, read after server restart, then re-read through the normal Google-only public Fetch/API path and shown in the existing UI | PASS |
+| G6 Regression and UI | 12% | Prior offline/browser gates retained; this continuation ran 19 Google tests, one focused data-preservation regression, Ruff and compilation; UI panels were inspected after restart | PASS |
+| G7 Report and local commits | 8% | This evidence report and focused code change are committed locally; no push or deployment | PASS |
 | **Total** | **100%** |  |  |
 
-**Weighted progress: 64%.** G0, G1, G2, G6 and G7 passed (10% + 16% + 18% + 12% + 8%). G3 failed to return usable data, G4 could not run without real Google candidates, and live-backed G5 remains incomplete. The goal is not complete.
+G3 and G4 PASS evidence comes from real successful provider searches preserved in SerpApi My Searches. The application now marks delivery CACHED and retains the original provider timestamps. This report does not claim that archive replay was a fresh provider response. The latest application Fetch also used the permitted shared cache and made no provider request.
 
-## Git baseline
+## Git synchronization and commits
 
-- Local branch: `main`.
-- `git fetch origin` completed on 2026-11-15.
-- `git fetch origin` completed at goal resume on 2026-11-15. Fetched `origin/main`: `40b713c678c4a6cbec1745d8daf763f610a708e5`.
-- Local `HEAD` at resume matched `origin/main`; no remote commits were missing and the worktree was clean.
-- Acceptance code is committed locally as `cb1522a` (two local commits after the fetched `origin/main`). The report update is committed separately after that code SHA.
-- The existing Windows Wikimedia G2-G7 acceptance was PASS on the baseline. Its evidence remains the authoritative prior acceptance; this goal does not repeat or overwrite that run.
+- At goal resume, git fetch origin completed. Local branch was codex/d6-google-live-recovery; HEAD and origin/main both equaled ecdfb9d8cf2899fa03364202e21568d143376db9. No remote commits were missing.
+- Eight intentional code/test changes were reviewed and preserved. No reset, force-pull, or destructive synchronization was used. Git diff --check passed.
+- Focused code commit: 713d30395b8e7397f0fd58409c071719d245af20 - fix(google): preserve existing data during live recovery.
+- The report is committed separately after that code commit. Its final commit SHA is in the handoff response; this report records the source commit immediately preceding it.
+- The existing Wikimedia Windows acceptance remains intact. No Wikimedia request was made in this continuation.
 
-## Provider documentation review
+## Runtime, approvals and quota
 
-Reviewed 2026-11-15:
+- LocalCredentialProvider.status() returned SERPAPI_API_KEY=PRESENT. The credential value was never printed or committed.
+- The dedicated hidden local server process was launched with all five owner-approved flags set true: TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED, TREND_SCOUT_GOOGLE_RSS_APPROVED, TREND_SCOUT_GOOGLE_TRENDS_APPROVED, TREND_SCOUT_GOOGLE_SERP_APPROVED and TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED. The parent PowerShell environment was not modified.
+- After the final restart, the local capabilities API reported environment local, local_only=true, Trends/RSS/SerpAPI Google Search LIVE_CONFIGURED, credential PRESENT. The server is bound to 127.0.0.1:8000 and remains running hidden.
+- Fixed Google/SerpApi hosts, redirects, TLS and outbound transport guards were reviewed. No Bing, YouTube or Wikimedia request was executed.
+- A fresh read-only SerpApi Account API snapshot at 2026-11-15T19:22:56.470603Z showed monthly limit 250, month-to-date searches 4, monthly remaining 246, total remaining 246, and current-hour searches 0 of 250. The pre-search account snapshot at 2026-11-15T16:14:43.094124Z showed 250 remaining and MTD 0. The account read itself does not consume a search credit.
+- The local SerpApi ledger ended at 4/10 daily and monthly, 6 remaining in each. The six-search cross-machine reserve remains intact; those six remaining local slots are reserved and were not spent. The account and local ledgers both showed four searches used. The two successful archives examined are identified below; not every used account slot has a matching retained archive response in the local acceptance evidence.
+- The SerpApi budget increase was performed through the existing audited migration. The quota state contains one migration audit entry; it changed only the serpapi pool and records quota_preserved=true.
+- The RSS ledger remains 1/1 used, 0 remaining. Its historical reservation was consumed before HTTP by the earlier SOURCE_NOT_APPROVED approval race; no RSS request reached Google. The approval-stability regression is fixed and covered by tests, but no new RSS GET was sent.
+- A temporary RSS budget of 2 made the quota state unavailable because the persisted policy digest did not match. The environment was restored to 1/1 without changing or resetting the ledger. The supported audited migration rejects an RSS-pool change with POLICY_MIGRATION_SCOPE_INVALID. Therefore the separately authorized RSS GET was not attempted. This does not block G3 because the Trends archive contains a successful real Google Trends response.
+- No conflicting active Google job or unexpired paid reservation existed before the cache-only application Fetch. Its local paid usage remained 4/10 and RSS remained 1/1 afterward.
 
-- SerpApi [Google Trends Trending Now](https://serpapi.com/google-trends-trending-now): engine `google_trends_trending_now`; `geo`, `hours`, and `hl` are supported. Its example schema includes query, start timestamp, active state, provider search-volume signal, percentage increase, categories and trend breakdown.
-- Google Trends Help [Trending Now export and fields](https://support.google.com/trends/answer/3076011): the page supports 4-hour, 24-hour, 48-hour and 7-day windows; query groups can contain variants/related queries; search traffic is bucketed; the RSS export is offered as one export method.
-- SerpApi [Account API](https://serpapi.com/account-api) and [pricing](https://serpapi.com/pricing): the account endpoint is documented as free of search-credit charge; account responses include usage/limit metadata; current public plan examples and counting rules are changeable. No account entitlement is inferred for this operator.
-- Google Trends [BigQuery dataset](https://support.google.com/trends/answer/12764470): US top/rising queries cover 210 DMAs with daily and hourly datasets; this is recorded only as a possible follow-up evaluation, not a D6 implementation.
+## G3 - Google Trends LIVE discovery
 
-Documentation review does not prove credential access, provider approval, reachable live endpoints, account quota, or feed availability. No live provider request is authorized by this report.
+The existing SerpApi My Searches record 6af9da758ffa7057c3ea741b was inspected. Its metadata identifies engine google_trends_trending_now, US region, English, 24-hour window, status Success, top-level error null, and 603 actual trending_searches records. The archive inspection response was HTTP 200. The original provider search HTTP status was not retained and is recorded as unknown, not inferred from the archive retrieval status.
 
-Retry and error handling guidance reviewed 2026-11-16:
+- Safe source URL: https://trends.google.com/trending?geo=US&hl=en-US
+- Provider data/created timestamp: 2026-11-15T16:14:45Z.
+- Archive retrieval and source fetch timestamp: 2026-11-15T17:50:24.177260Z; shared-cache timestamp: 2026-11-15T17:50:23.705698Z.
+- Provider and normalized count: 603; distinct keyword count: 603; accepted: 603; rejected: 0; approximate-metric clusters: 603.
+- Source provenance: SERPAPI_TRENDING_NOW; data mode LIVE; delivery CACHED. The shared cache was STALE at reuse and the retained quality flags include STALE_SHARED_CACHE_REUSED, PROVIDER_APPROXIMATE_BUCKET and NO_COMPATIBLE_BASELINE.
+- The selected keyword jamaica - méxico displays a provider-reported approximate traffic bucket of 200,000 and a provider-reported 1,000% increase. These are approximate provider metrics, not exact search counts or commercial demand.
+- No extra Trends time window was requested. RSS was not called, and the archive success is not described as RSS success.
 
-- SerpApi's [status and error code guide](https://serpapi.com/api-status-and-error-codes) distinguishes authentication/permission failures (401/403), rate or quota failures (429), and server-side errors (500/503). It also documents search-level errors that may result from proxy timeouts or internal errors. TrendScout's persisted `UPSTREAM_ERROR` is a sanitized internal status and this run retained neither the provider HTTP status nor the underlying exception class, so it cannot be mapped to one of those cases.
-- Google Cloud's [API troubleshooting guidance](https://docs.cloud.google.com/monitoring/api/troubleshooting) and AWS's [retry with backoff guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/retry-backoff.html) recommend bounded backoff for identified transient failures and distinguish time-based throttling from exhausted request quotas. They do not justify blind retries when the failure class is unknown or when doing so would exceed an operator's attempt budget.
-- Therefore no automatic or manual SerpApi retry was issued after this `UPSTREAM_ERROR`. The single RSS operation also was not repeated: its guard consumed the one local RSS reservation before an HTTP request, and there is no supported reservation-release operation. No ledger was reset or edited to manufacture availability.
+The SerpApi archive search can be reviewed at [Search Inspector](https://serpapi.com/searches/6af9da758ffa7057c3ea741b/inspect). The original provider HTTP status remains unavailable.
 
-## Implementation and verification
+## G4 - Google Search LIVE verification
 
-### Implemented offline
+The existing SerpApi Google Search archive 6af9ffc1bccefc8a0b52e131 matches the server-selected candidate jamaica - méxico. Search parameters were engine google, q jamaica - méxico, google.com, gl=us, hl=en, start=0 and desktop. Provider metadata reports status Success and total_results 97. The archive was created at 2026-11-15T18:53:53Z.
 
-- **Source strategy:** SerpApi Trending Now is the preferred broad discovery path when approved because its documented request returns US-targeted trend candidates and provider trend context in one bounded request. The official RSS feed is a separately labeled fallback because it uses no SerpApi search credits, while its sample and fields are more limited. Google SERP remains a separate verification step, capped at two server-selected candidates and one page each. No automatic extra time windows, BigQuery adapter, or Wikimedia re-fetch was added; Wikimedia stays an independent source with its existing provenance.
-- Added strict SerpApi Google Trends Trending Now and Google Trends RSS adapters. Their normalized records retain provider and transport identity, US targeting, language, applicable window, query groups, related queries, approximate traffic buckets, provider timestamps, fetch time, source URL, delivery state and quality flags. Missing provider fields stay missing; approximate buckets are not converted to exact search counts.
-- Added deterministic canonical keyword identity across the two discovery transports, bounded candidate selection and a server-controlled Google SERP verification plan capped at two selected candidates per fresh batch. RSS discovery does not count as SERP verification.
-- Added an account-aware SerpApi budget gate using the documented account endpoint, numeric-only quota snapshots, a pinned server-side credential, separate RSS and paid request pools, bounded retries and idempotent reservations. Approval settings default off. No credential is read by the frontend.
-- Added a separately opted-in local Google runtime. The default `start.ps1` route remains the prior Wikimedia local runtime. The Google profile binds to loopback, uses one worker and does not start a provider Fetch automatically. Source approvals and the runtime approval must be supplied separately by an operator.
-- Persisted Google source evidence and provider/fetch timestamps through the existing SQLite-backed result flow, with explicit source delivery state, bounded result/checkpoint sizes and visible storage limits. Added Google summaries to Source Center, Fetch results, Run History and keyword detail. The UI identifies cached results and shows verified-result counts independently from discovery candidates.
-- Fixed the public synthetic discovery summary to show its actual data mode instead of the hard-coded `LIVE` label.
-- Added local setup and operator-boundary notes in [Backend/README.md](../../Backend/README.md). No provider setting or credential was enabled as part of this change.
+- Source identity: google_web_serp / SerpApi Google Search; US localization gl=us, English hl=en.
+- Organic results returned: 7; normalized and accepted: 7; rejected: 0. The seven result URLs and titles remain stored in the keyword evidence and are visible in keyword detail.
+- Verification is VERIFIED with delivery CACHED and original provider timestamp preserved. Provider HTTP status and archive retrieval HTTP status were not recorded; neither is inferred.
+- The local gateway outcome for this candidate was UPSTREAM_ERROR. The saved exception subtype and original provider HTTP status are unavailable. The provider archive independently reports Success, so the archived response was parser-validated and used as cached evidence; no replacement search was sent.
+- The earlier verification coverage recorded two candidate attempts, one successful archived response and one failed candidate. No candidate was retried. SERP positions are displayed as result order only and are not search volume.
+- Archive search: [Search Inspector](https://serpapi.com/searches/6af9ffc1bccefc8a0b52e131/inspect).
 
-### Exact changed files
+## G5 - SQLite, normal application Fetch, restart and UI
 
-The local D6 change set relative to the fetched `origin/main` baseline is:
+The validated Trends records and archived SERP response were replayed with CACHED provenance through the existing parser/CollectionService persistence boundary. The normal local application path was then exercised via a Google-only POST to /api/v1/fetches while the SERP adapter was temporarily disabled in that child process, preventing any additional paid search. The Trends handler consumed the existing stale-but-allowed LIVE shared cache; it did not call Trends or RSS. No Wikimedia source was selected.
 
-```text
-Backend/README.md
-Backend/app/api/capabilities.py
-Backend/app/api/fetches.py
-Backend/app/collections/service.py
-Backend/app/collections/store.py
-Backend/app/discovery/contracts.py
-Backend/app/discovery/extraction.py
-Backend/app/discovery/source_results.py
-Backend/app/google_live_settings.py
-Backend/app/jobs/distributed_worker.py
-Backend/app/jobs/public_admission.py
-Backend/app/jobs/shared_cache.py
-Backend/app/jobs/source_checkpoints.py
-Backend/app/main.py
-Backend/app/normal_wikimedia_live_policy.py
-Backend/app/orchestration/distributed_public_fetch.py
-Backend/app/orchestration/normal_google_live_composition.py
-Backend/app/sources/google_trends/__init__.py
-Backend/app/sources/google_trends/budget.py
-Backend/app/sources/google_trends/handler.py
-Backend/app/sources/google_trends/rss.py
-Backend/app/sources/google_trends/rss_gateway.py
-Backend/app/sources/google_trends/rss_handler.py
-Backend/app/sources/google_trends/trending_now.py
-Backend/app/sources/google_trends/verification_plan.py
-Backend/app/sources/google_trends/workflow.py
-Backend/app/sources/live_gateway.py
-Backend/app/sources/serpapi/account.py
-Backend/app/sources/serpapi/pagination.py
-Backend/app/storage/local_sqlite_snapshot_blobs.py
-Backend/app/workers/d5_source_handlers.py
-Backend/app/workers/guarded_attempt.py
-Backend/scripts/run_google_live_local.py
-Backend/tests/browser_g5_run_history_accessibility_offline.py
-Backend/tests/browser_google_fetch_selection_offline.py
-Backend/tests/test_d5_live_gateway.py
-Backend/tests/test_d6_wikimedia_synthetic_e2e.py
-Backend/tests/test_google_fetch_selection.py
-Backend/tests/test_google_trends.py
-Backend/tests/test_keyword_workbench_ui.py
-Documents/Reports/D6_GOOGLE_LIVE_ACCEPTANCE.md
-Frontend/public/app.js
-Frontend/public/index.html
-Frontend/public/modules/capabilities.js
-Frontend/public/modules/fetch.js
-Frontend/public/modules/i18n/en.js
-Frontend/public/modules/i18n/vi.js
-Frontend/public/modules/keyword-workbench.js
-Frontend/public/modules/run-history-coverage.js
-Frontend/public/modules/run-history.js
-Frontend/public/styles.css
-Frontend/tests/fetch-source-selection.test.mjs
-Frontend/tests/run-history-coverage.test.mjs
-start.ps1
-```
+- Normal public Fetch ID: 407827050b15774d3a8efda1fe5a6731, created 2026-11-15T19:40:33.570605Z, updated 2026-11-15T19:40:33.907610Z, status COMPLETED, data mode LIVE, source google_web_serp.
+- Fetch source result: SUCCESS, delivery CACHED, 603 records, accepted 603, rejected 0. It attempted 0 new SERP searches and retained 1 previously verified candidate.
+- SQLite dataset snapshot for the public Fetch: status PARTIAL, processing COMPLETED, provider 603, received 603, retained 603, rejected 0. PARTIAL correctly reflects stale cache, approximate metrics and lack of a compatible baseline; there was no source-count truncation.
+- Persisted LIVE Google keyword count: 603 distinct rows under google_trends:US:en. The verified jamaica - méxico record retains its Search archive ID, CACHED delivery, provider total 97 and seven normalized organic results.
+- After another safe hidden-server restart with all original approvals restored, GET /api/v1/fetches/407827050b15774d3a8efda1fe5a6731 returned the same terminal COMPLETED LIVE result: 603 source records, CACHED, 603 accepted, 0 rejected, 0 new SERP attempts, and 1 verified candidate. Local SerpApi usage stayed 4/10 and RSS stayed 1/1.
+- SQLite PRAGMA integrity_check returned ok.
+- The final database was compared to the trusted pre-Google backup. Wikimedia keyword rows: 1,219, matching backup SHA-256 0704fa15ccb653955ce38834ebd054834c7be611e51da3518299be1207845810. Wikimedia classification rows: 1,219, matching backup SHA-256 f1bc98ff52b9ee1967d2a8d5dbd944c0448503bfdc43cc09ba906f90a3557202. The existing research record count remains 1 with its prior hash unchanged. User-created collections, user/pinned memberships, feedback and keyword decisions were zero at baseline and remain zero; their hashes match the backup. No Wikimedia observations or user decisions were overwritten.
+- After the hidden local-server restart, the in-app Dashboard showed 1,219 Wikimedia and 603 Google records. Source Center showed the latest Google Trends source as LIVE data/CACHED delivery with 603 records and one archived SERP verification. Run History showed the 603-record Google run, 603 stored and 0 rejected. The Collections keyword listing showed jamaica - méxico as Google Search; detail displayed the Trends group, preserved timestamps, approximate bucket, verified query and seven result links, with result positions labeled as not search volume. Data Quality showed 603 received, 603 saved, 0 rejected and the correct PARTIAL/CACHED labels. Product Research still showed its one existing archived Wikimedia research record.
+- The generic source registry still describes repository capability and production approval conservatively (offline adapter validation, pending production approval). It is distinct from the active local runtime and saved evidence; the actual run and detail views identify LIVE provenance and CACHED delivery.
 
-### Verification evidence (offline only)
+## Focused verification and preserved baseline
 
-- `Backend\.venv\Scripts\python.exe -m unittest discover -s tests`: **829 tests passed** on 2026-11-15 (129.214 seconds). This includes Google parser, persistence identity, guarded gateway, quota, local composition, selected-source Google Fetch, Windows launcher default, existing Wikimedia, public admission, and end-to-end regression tests. All test transports are fixtures or mocks; this is not provider verification.
-- New focused source-selection and startup tests: **3 passed**. Two exercise `D5SourceHandlers`, the guarded worker, and `DistributedPublicFetch`: Google-only Fetch issued one mocked RSS request and no Wikimedia request; combined Google/Wikimedia Fetch issued one mocked request to each source. The third confirms the Windows default launcher still starts the Wikimedia profile and Google requires `-GoogleLive`. Fixture results remained `SYNTHETIC`.
-- `Backend\.venv\Scripts\python.exe tests\browser_google_fetch_selection_offline.py`: Chrome PASS for the real source selector, ALL (Google plus Wikimedia), Google-only Fetch, the RSS-limited and zero-SERP summary, and localized synthetic provenance. The browser and backend use mock responses; no provider endpoint is contacted.
-- `Backend\.venv\Scripts\ruff.exe check` on `Backend/tests/test_google_fetch_selection.py` and `Backend/tests/browser_google_fetch_selection_offline.py`: passed.
-- `Backend\.venv\Scripts\python.exe -m py_compile` on those two focused Python test files: passed.
-- `node --test Frontend/tests/*.test.mjs`: **7 passed**, including three `PublicFetchController` source-selection cases for Google-only, Google plus Wikimedia, and the default all-sources request.
-- `node --check Frontend/public/app.js`: passed.
-- `Backend\.venv\Scripts\python.exe tests\browser_g5_run_history_accessibility_offline.py`: Chrome PASS for English/Vietnamese detail labels, accessibility region name, focus, Escape handling, and Google RSS provenance, cached delivery, timestamps and zero SERP verifications.
-- `Backend\.venv\Scripts\python.exe tests\browser_workspace_offline.py`: Chrome PASS at 320, 390, 768, 1024, 1440 and 1920 px; mocked UI flows confirmed no provider Fetch.
-- `git diff --check`: passed. Git reports expected LF-to-CRLF normalization warnings for this Windows workspace.
+This continuation did not rerun the full 829-test suite or repeat the full browser acceptance.
 
-These checks verify offline contracts and rendering. They do not establish that SerpApi credentials work, RSS is reachable, quota is available, a Google response was received, or the data was persisted from Google LIVE.
+- Backend tests.test_google_trends.py: 19 passed.
+- Backend SmartCollectionsTests.test_google_only_live_fetch_does_not_reprocess_wikimedia_or_user_state: 1 passed.
+- Ruff check on the eight changed backend source/test files: passed.
+- Python compilation on the eight changed backend source/test files: passed.
+- The existing offline acceptance remains 829 backend tests, 7 frontend tests, prior Chrome acceptance, Ruff, compilation and syntax checks PASS. Those earlier test transports were mocks/fixtures and are not counted as live verification.
+- The prior targeted Chromium behavior was not repeated as a full browser test. The final restarted UI was inspected directly in the hidden Codex in-app browser.
 
-### Corrections and focused checks after LIVE diagnostics
+The code commit scopes Google-only classification and membership work to the fetched Google keyword IDs so it cannot reconcile Wikimedia rows or user state. The bounded owner-authorized quota migration preserves reservations and records an audit; it does not support expanding the RSS pool. Cache reuse retains the source timestamps and delivery label.
 
-- The RSS `SOURCE_NOT_APPROVED` failure exposed an approval-object comparison race between the initial and final guard checks. The local approval provider now reuses a stable approval object for the bounded operation. This correction was committed as `bbb3862`; no RSS request was repeated after the correction.
-- The failed Google snapshots also exposed a path that could reconcile old ledger rows when a source returned no usable records. Failed/empty snapshots now leave the existing keyword ledger and collection membership untouched. The same commit fixes the restrictive local budget policy check and records Google Trends HTTP status in coverage when one exists.
-- A follow-up backend/frontend correction suppresses `FRESH`/`CACHED` delivery labels on failed Google data, distinguishes provider count from retained ledger count, and uses source-neutral Fetch messages for Google/mixed source runs. This was committed as `cb1522a`.
-- Focused checks during this continuation: 44 backend tests and 9 frontend tests passed before the final delivery-label adjustment. After that adjustment, 3 targeted backend tests and 5 `run-history-coverage` frontend tests passed; Ruff on changed backend files, `node --check Frontend/public/app.js`, and `git diff --check` passed. The local Chrome UI was rechecked after server restart. The full 829-test suite was not rerun.
-- These implementation corrections do not convert either failed LIVE attempt into a successful observation and were not followed by another provider request.
+## Errors, limitations and remaining blockers
 
-## LIVE status
+There are no remaining mandatory G0-G7 acceptance blockers. The limitations below remain explicit:
 
-### Runtime and preflight evidence
+- SERP original local gateway error: UPSTREAM_ERROR. Provider archive status was Success, but original provider HTTP status and exception subtype were not retained.
+- Trends archive retrieval was HTTP 200 and provider metadata was Success; original provider HTTP status was unavailable.
+- The accepted data is LIVE by provider provenance but delivered CACHED from a stale shared cache. The UI preserves CACHED and original timestamps; it does not claim a fresh response during the final public Fetch.
+- One prior SERP candidate remained failed; no retry was issued. One real candidate has valid archived Google SERP evidence.
+- RSS did not reach Google in this acceptance. Its historical local reservation is spent, and the policy rejects an RSS budget migration. No quota ledger was reset or altered.
+- Source account quota in the capabilities page may show NOT_CHECKED after process restart; the read-only Account API snapshot recorded above was obtained directly from the approved local Windows environment and did not consume a search.
+- Google Trends buckets and SERP positions do not establish exact search volume, purchase intent or US user residence. US is a provider localization scope.
 
-- `LocalCredentialProvider.status()` returned `SERPAPI_API_KEY=PRESENT`; the key itself was never printed. The Windows credential file exists at `%LOCALAPPDATA%\TrendScout\.env`.
-- At goal resume, the parent PowerShell process did not have any of the five Google LIVE approval variables set. For the dedicated local server only, the five required flags were supplied in that child process, without changing user or machine environment variables: `TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED`, `TREND_SCOUT_GOOGLE_RSS_APPROVED`, `TREND_SCOUT_GOOGLE_TRENDS_APPROVED`, `TREND_SCOUT_GOOGLE_SERP_APPROVED`, and `TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED`. Runtime capabilities reported local environment, `local_live_demo=true`, read-only false, Fetch enabled, Google workflow `local_only=true`, and credentials PRESENT. Server startup made no provider request. The current shell still has the approval variables unset, and the acceptance server was stopped after UI verification.
-- The existing fixed-host Google RSS and SerpApi adapters, no-redirect/TLS/network guards, source approval checks, local request pools, and six-search cross-machine reserve were inspected. No conflicting active Google job was present before the bounded attempts. No Bing, YouTube, or Wikimedia request was issued during this acceptance.
-- SerpApi Account API reads: **3**. Last observed pre-attempt snapshot at `2026-11-15T16:14:43.094124Z`: 250 remaining, monthly used 0, current-hour used 0 of 250. Post-attempt snapshot at `2026-11-15T16:15:48.003039Z`: 249 remaining, monthly used 1, current-hour used 1 of 250. An earlier preflight read at `2026-11-15T15:56:31.759788Z` also showed 250 remaining, monthly used 0, current-hour used 0. These are last-observed values, not a fresh quota lookup after server shutdown.
-- Local SerpApi paid-search budget at the last runtime read: **1/3 used, 2/3 remaining**; the cross-machine reserve of 6 was preserved. Local Google RSS budget: **1/1 reserved/consumed, 0 remaining**. No quota ledger was reset. The provider account showed ample quota before the Trends request, so provider quota did not block that attempt.
+No new Trends search, RSS GET, SerpApi Google Search, Bing, YouTube or Wikimedia request was sent during the final cache-only public Fetch. No billing was activated and no cloud deployment or push was performed.
 
-### Google Trends LIVE attempts
+## Provider documentation
 
-| Path | Actual outcome | Evidence |
-|---|---|---|
-| Official Google Trends RSS (`US`) | **No HTTP request reached Google.** One local guarded operation failed `SOURCE_NOT_APPROVED` during its final approval check after its one local reservation had been consumed. | Intended fixed source URL: `https://trends.google.com/trending/rss?geo=US`; dataset created `2026-11-15T16:04:22.507635Z`; HTTP status/provider timestamp/records: none; accepted 0, rejected 0; no traffic buckets. Local RSS budget remaining 0/1. This is not an RSS LIVE success. |
-| SerpApi Google Trends Trending Now (`US`) | **One paid LIVE search attempt; internal result `UPSTREAM_ERROR`; 0 records.** | Dataset created `2026-11-15T16:14:44.447128Z`; account quota moved 250→249. No provider HTTP status, exception subtype, provider timestamp, candidate, or response body was retained, so the underlying cause is unknown. No further attempt was made. |
+Reviewed for this acceptance on 2026-11-15/16:
 
-Google keywords actually received from either provider path: **none (0)**. RSS returned no provider response; Trending Now returned no usable records. Approximate search traffic metrics: none received. RSS coverage limits and the distinction between approximate traffic and exact volume remain documented above; no metrics were fabricated.
+- SerpApi [Google Trends Trending Now](https://serpapi.com/google-trends-trending-now)
+- SerpApi [Google Search API](https://serpapi.com/search-api)
+- SerpApi [Account API](https://serpapi.com/account-api)
+- Google Trends [Trending Now fields and RSS export](https://support.google.com/trends/answer/3076011)
 
-### Google SERP LIVE
-
-- Google SERP attempts: **0**. The deterministic planner received no real Google discovery candidates, so it selected no keyword. No Wikimedia keyword or invented candidate was substituted.
-- Paid SerpApi usage for this acceptance: **1 search attempt** for Google Trends, **0** Google SERP searches, **1 of the authorized maximum 3 paid searches used**. The remaining 2 local paid slots were not spent. No Google SERP result count, cache state, rank, URL, or keyword evidence exists.
-
-### SQLite, restart read-back, and UI
-
-- The latest post-restart API dataset was `078397c238c9f3628d7ea4f2eefce30d`: status `FAILED`, mode `LIVE`, source `google_web_serp`, error `UPSTREAM_ERROR`, provider count 0, received 0, rejected 0, snapshot-retained keyword count 0. It retained the older ledger count (1,219; 1,216 eligible, 269 assigned, 947 unassigned) with `MIXED_OR_UNKNOWN` ledger coverage; this is not a Google observation. Google-source keyword listing total was 0.
-- Run History read back both failed Google source jobs after a safe local-server restart. The RSS record retained `SOURCE_NOT_APPROVED`; the Trends record retained `UPSTREAM_ERROR`. Existing collection processing jobs completed against the prior 1,216-row ledger, not Google data. Failed Google delivery is now displayed as unavailable, not `FRESH` or `CACHED`.
-- Browser checks covered Source Center, Run History/details, keyword listing and a retained Wikimedia keyword detail, Collections (61 collections), Data Quality, Analytics overview, and Product Research (1 existing record). The UI showed zero Google-source keywords/observations and the failed snapshot's unavailable delivery state. Product Research and prior Wikimedia evidence remained present.
-- The trusted pre-run database backup was preserved. After restoring affected user-owned fields, direct row-hash comparison confirmed previous rows unchanged. Additions since that backup are two failed dataset snapshots, two fetch jobs, two membership reconciliation runs and 714 reconciliation items. The database integrity check returned `ok`; no database was deleted or reset. The corrective failed/empty-snapshot path now avoids further reconciliation of the old ledger.
-- The local server was stopped after read-back and UI verification. Google records persisted/read back: **0**. Therefore the complete Google provider → observation → keyword → SQLite → application flow is **not verified** and G5 remains incomplete.
-
-- Umbrella `GOOGLE_LIVE_VERIFIED`: **NOT_VERIFIED**. Offline contracts, runtime configuration, failed snapshots, quota evidence, and UI read-back do not substitute for actual Google records.
-
-## Remaining Google LIVE acceptance
-
-### Handoff
-
-1. Do not blindly retry SerpApi `UPSTREAM_ERROR`: its underlying HTTP/exception class is unknown, and one authorized paid attempt was already consumed. Diagnose from safe retained provider metadata or a separately authorized diagnostic workflow before considering another bounded attempt.
-2. The RSS code race is corrected, but the local 1/1 RSS reservation remains consumed; no supported release/refund exists. Do not edit/reset the ledger. Any further RSS LIVE request requires a new explicitly bounded session/authorization and an approved budget path that preserves the existing ledger.
-3. A later permitted session should run Google RSS once only if its local budget admits the request, or use one available SerpApi Trends attempt only after the operator confirms retry is justified and account quota remains sufficient. Capture provider HTTP status, response/schema, timestamp, and quota before/after without expanding the configured limit.
-4. Once real Google candidates are received, use the existing selective plan for at most two distinct candidates, recording exact provider/cache state and quota. Then verify the resulting records in SQLite and the existing UI views listed above.
-5. Recompute G3, G4, and G5 only from genuine provider observations. Keep the weighted score below 100% until every mandatory gate has PASS evidence.
-
-### D6-BING handoff
-
-- Reuse the guarded attempt, durable quota reservation, approval, cache, checkpoint, SQLite and evidence-display boundaries where their contracts fit. Do not reuse Google engine parameters, quota semantics or provider response assumptions.
-- Verify Bing's current official provider documentation, allowed scope, credentials, quota/cost model, pagination and caching before implementing a Bing LIVE adapter.
-- Keep Bing source metrics separate, retain US localization as a filter rather than proof of US demand, and preserve the same distinctions between unavailable, zero, cached and fresh values.
-- Require its own approved LIVE evidence and persisted SQLite read-back. Do not treat this Google report or its offline fixtures as D6-BING approval.
-
-## Local commits
-
-- Implementation and offline verification: `6f6e836` (`feat(google): add guarded Trends discovery workflow`).
-- Initial offline acceptance and LIVE blocker report: `8cbaaa2` (`docs(google): record offline acceptance and LIVE blockers`).
-- Selected-source offline integration checks: `b6a99cc` (`test(google): cover selected Fetch workflows offline`).
-- Prior acceptance evidence update: `dd4e0bb` (`docs(google): update offline Fetch acceptance evidence`).
-- Synthetic provenance fix and Chrome source-selection coverage: `377d45a` (`fix(google): verify Fetch UI provenance offline`).
-- Preserve existing Wikimedia ledger on failed Google fetches and correct approval/budget/delivery handling: `bbb3862` (`fix(google): preserve existing ledger on failed fetches`).
-- Correct failed Google delivery labels in the UI: `cb1522a` (`fix(ui): label failed Google delivery accurately`).
-- This acceptance report is committed separately. Commits remain local; no push or deployment was performed.
+Documentation supports request/schema interpretation but does not replace the live/archive and local persistence evidence above. D6-BING remains separate and was not started.
