@@ -16,7 +16,7 @@ Progress is the sum of passed gate weights. A blocked LIVE gate does not pass be
 | G3 LIVE discovery | 10% | Authorized, real RSS and/or SerpApi Trending Now response with dated, bounded evidence; provider mode reported accurately | BLOCKED_EXTERNAL pending use approval |
 | G4 Google SERP LIVE | 10% | Authorized real Google SERP response with persisted run and quota/freshness evidence | BLOCKED_EXTERNAL pending credential and approval |
 | G5 SQLite and application flow | 16% | Genuine source evidence persisted/read back and exercised through API, keyword, dashboard, collections and research workflow without data loss or hidden truncation | BLOCKED_EXTERNAL pending authorized Google evidence |
-| G6 Regression and UI | 12% | Focused Google and relevant regression/browser checks; Wikimedia acceptance preserved; states and locales/themes reviewed | PASS |
+| G6 Regression and UI | 12% | Focused Google tests including selected-source worker paths; regressions/browser checks; Wikimedia acceptance preserved; states and locales/themes reviewed | PASS |
 | G7 Report and local commits | 8% | This report contains evidence, blockers and D6-BING handoff; focused commits exist locally and are not pushed | PASS |
 | **Total** | **100%** |  |  |
 
@@ -54,10 +54,11 @@ Documentation review does not prove credential access, provider approval, reacha
 
 ### Verification evidence (offline only)
 
-- `Backend\.venv\Scripts\python.exe -m unittest discover -s tests`: **826 tests passed** on 2026-11-15 (116.689 seconds). This includes Google parser, persistence identity, guarded gateway, quota, local composition, existing Wikimedia, public admission, and end-to-end regression tests. All test transports are fixtures or mocks; this is not provider verification.
+- `Backend\.venv\Scripts\python.exe -m unittest discover -s tests`: **828 tests passed** on 2026-11-15 (104.511 seconds). This includes Google parser, persistence identity, guarded gateway, quota, local composition, selected-source Google Fetch, existing Wikimedia, public admission, and end-to-end regression tests. All test transports are fixtures or mocks; this is not provider verification.
+- Offline source-selection integration: **2 tests passed** through `D5SourceHandlers`, the guarded worker, and `DistributedPublicFetch`. Google-only Fetch issued one mocked RSS request and no Wikimedia request; combined Google/Wikimedia Fetch issued one mocked request to each source. Both results remained `SYNTHETIC`.
 - `Backend\.venv\Scripts\ruff.exe check` over changed Python implementation and test files: passed.
 - `Backend\.venv\Scripts\python.exe -m compileall -q app scripts`: passed.
-- `node --test Frontend/tests/run-history-coverage.test.mjs`: **4 passed**.
+- `node --test Frontend/tests/*.test.mjs`: **7 passed**, including three `PublicFetchController` source-selection cases for Google-only, Google plus Wikimedia, and the default all-sources request.
 - `node --check` over `Frontend/public/**/*.js`: passed.
 - `Backend\.venv\Scripts\python.exe tests\browser_g5_run_history_accessibility_offline.py`: Chrome PASS for English/Vietnamese detail labels, accessibility region name, focus, Escape handling, and Google RSS provenance, cached delivery, timestamps and zero SERP verifications.
 - `Backend\.venv\Scripts\python.exe tests\browser_workspace_offline.py`: Chrome PASS at 320, 390, 768, 1024, 1440 and 1920 px; mocked UI flows confirmed no provider Fetch.
@@ -73,6 +74,7 @@ These checks verify offline contracts and rendering. They do not establish that 
 - Google SERP live: BLOCKED_EXTERNAL pending an approved SerpApi credential, account budget, and Google SERP use approval.
 - LIVE Google request count: **0**.
 - SerpApi account/quota request count: **0**; no account snapshot or available-credit evidence exists in this run.
+- Local coordination boundary: SQLite reservations coordinate processes sharing the same local state file. The account quota check refreshes before each paid attempt and its default six-search cross-machine reserve reduces races, but independent local SQLite files do not provide a globally atomic multi-host ledger.
 - Google records received from provider: **0**; Google LIVE SQLite read-back: **not performed**.
 - Umbrella `GOOGLE_LIVE_VERIFIED`: NOT_VERIFIED. This must remain false until authorized provider requests, actual source evidence, quota evidence and persisted read-back are reviewed.
 
@@ -96,4 +98,5 @@ These checks verify offline contracts and rendering. They do not establish that 
 ## Local commits
 
 - Implementation and offline verification: `6f6e836` (`feat(google): add guarded Trends discovery workflow`).
+- Selected-source offline integration checks: `b6a99cc` (`test(google): cover selected Fetch workflows offline`).
 - This acceptance report is committed separately. Commits remain local; no push or deployment was performed.
