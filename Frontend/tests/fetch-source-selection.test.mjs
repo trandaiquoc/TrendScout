@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { PublicFetchController } from '../public/modules/fetch.js';
+import { liveFetchMessageKey, PublicFetchController } from '../public/modules/fetch.js';
 
 const COMPLETED_ID = 'a'.repeat(32);
 
@@ -58,4 +58,20 @@ test('omits source selection when the UI leaves the default all-sources choice',
   const requests = await activateWithSources(null);
 
   assert.deepEqual(JSON.parse(requests[0].body), {});
+});
+
+test('uses source-neutral LIVE messages for Google and mixed-source fetches', () => {
+  assert.equal(liveFetchMessageKey('failed', 'latest', ['google_web_serp']),
+    'fetch.failed-local-live');
+  assert.equal(liveFetchMessageKey('partial', 'latest', [
+    'google_web_serp', 'wikimedia_pageviews_top_per_country',
+  ]), 'fetch.partial-local-live');
+});
+
+test('preserves Wikimedia-only and Wikimedia-history LIVE messages', () => {
+  assert.equal(liveFetchMessageKey('completed', 'latest', [
+    'wikimedia_pageviews_top_per_country',
+  ]), 'fetch.completed-live');
+  assert.equal(liveFetchMessageKey('failed', 'history', ['google_web_serp']),
+    'fetch.history-failed-live');
 });

@@ -163,8 +163,10 @@ export function renderSourceCapabilities(capabilities, translate) {
             `${translate(modeKey)} · ${translate('fetch.google-counts', { candidates: count, verified })}`);
           capabilityRow(list, translate('source.google-source-time'),
             saved.provider_data_at || saved.provider_created_at || translate('common.unavailable'));
+          const delivered = ['SUCCESS', 'PARTIAL'].includes(descriptor.last_saved_fetch?.status)
+            ? saved.delivery_state : null;
           capabilityRow(list, translate('source.google-delivery'),
-            saved.delivery_state ? translate(`fetch.delivery.${saved.delivery_state}`) : translate('common.unavailable'));
+            delivered ? translate(`fetch.delivery.${delivered}`) : translate('common.unavailable'));
         }
       }
       const categoryLabel=translate(`sources.category.${descriptor.category}`);

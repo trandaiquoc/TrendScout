@@ -3,6 +3,42 @@ import { ApiError, getJson, requestJson } from './api.js';
 const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED']);
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS_PER_ATTEMPT = 90;
+const WIKIMEDIA_SOURCE_ID = 'wikimedia_pageviews_top_per_country';
+
+const WIKIMEDIA_LIVE_MESSAGE_KEYS = {
+  submitting: 'fetch.submitting-live',
+  queued: 'fetch.queued-live',
+  running: 'fetch.running-live',
+  partial: 'fetch.partial-live',
+  completed: 'fetch.completed-live',
+  failed: 'fetch.failed-live',
+};
+const LOCAL_LIVE_MESSAGE_KEYS = {
+  submitting: 'fetch.submitting-local-live',
+  queued: 'fetch.queued-local-live',
+  running: 'fetch.running-local-live',
+  partial: 'fetch.partial-local-live',
+  completed: 'fetch.completed-local-live',
+  failed: 'fetch.failed-local-live',
+};
+const WIKIMEDIA_HISTORY_MESSAGE_KEYS = {
+  submitting: 'fetch.history-submitting-live',
+  queued: 'fetch.history-queued-live',
+  running: 'fetch.history-running-live',
+  partial: 'fetch.history-partial-live',
+  completed: 'fetch.history-completed-live',
+  failed: 'fetch.history-failed-live',
+};
+
+export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = []) {
+  if (requestKind === 'history') {
+    return WIKIMEDIA_HISTORY_MESSAGE_KEYS[kind] || null;
+  }
+  const wikimediaOnly = Array.isArray(sourceIds)
+    && sourceIds.length === 1 && sourceIds[0] === WIKIMEDIA_SOURCE_ID;
+  const messages = wikimediaOnly ? WIKIMEDIA_LIVE_MESSAGE_KEYS : LOCAL_LIVE_MESSAGE_KEYS;
+  return messages[kind] || null;
+}
 
 function newIdempotencyKey() {
   if (globalThis.crypto?.randomUUID) {

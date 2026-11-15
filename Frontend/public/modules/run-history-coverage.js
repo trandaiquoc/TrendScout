@@ -48,7 +48,8 @@ export function extractRunSourceCoverage(item) {
         && typeof coverage.provider_data_at === 'string' ? coverage.provider_data_at : null,
       googleFetchedAt: sourceId === 'google_web_serp'
         && typeof coverage.fetched_at === 'string' ? coverage.fetched_at : null,
-      deliveryState: ['FRESH', 'CACHED'].includes(source?.delivery_state)
+      deliveryState: ['SUCCESS', 'PARTIAL'].includes(source?.status)
+        && ['FRESH', 'CACHED'].includes(source?.delivery_state)
         ? source.delivery_state : null,
     };
   });

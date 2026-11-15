@@ -114,3 +114,15 @@ test('extracts Google discovery provenance without treating RSS records as verif
     deliveryState: 'CACHED',
   });
 });
+
+test('does not label a failed source as fresh or cached delivery', () => {
+  const result = extractRunSourceCoverage({source_manifest: [{
+    source_id: 'google_web_serp',
+    status: 'FAILED',
+    record_count: 0,
+    delivery_state: 'FRESH',
+    coverage: {discovery_mode: 'SERPAPI_TRENDING_NOW'},
+  }]});
+
+  assert.equal(result.sources[0].deliveryState, null);
+});

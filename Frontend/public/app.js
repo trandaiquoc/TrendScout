@@ -1,6 +1,6 @@
 import { getJson, requestJson } from './modules/api.js';
 import { acceptsDiscovery, canStartFetch, isLocalLiveDemo, loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
-import { PublicFetchController } from './modules/fetch.js';
+import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
 import { initializeTheme } from './modules/theme.js';
@@ -101,7 +101,8 @@ function googleFetchSummary(source) {
     keywords: count(coverage.distinct_keyword_count),
     source_time: sourceTime ? timestamp(sourceTime) : t('common.unavailable'),
     fetched_at: coverage.fetched_at ? timestamp(coverage.fetched_at) : t('common.unavailable'),
-    delivery: t(`fetch.delivery.${source.delivery_state || 'UNKNOWN'}`),
+    delivery: t(`fetch.delivery.${['SUCCESS', 'PARTIAL'].includes(source.status)
+      ? source.delivery_state || 'UNKNOWN' : 'UNKNOWN'}`),
   });
 }
 
@@ -858,7 +859,9 @@ function renderFetchPresentation() {
         const statusKey = `fetch.source-status.${visibleStatus}`;
         const sourceStatus = source.status && t(statusKey) !== statusKey
           ? t(statusKey) : source.status;
-        return [sourceLabel, sourceStatus, source.data_mode, source.delivery_state,
+        const delivery = ['SUCCESS', 'PARTIAL'].includes(source.status)
+          ? source.delivery_state : null;
+        return [sourceLabel, sourceStatus, source.data_mode, delivery,
           googleFetchSummary(source),
           Number.isInteger(source.retry_after_seconds)
             ? t('fetch.retry-after', { seconds: source.retry_after_seconds }) : '']
@@ -912,18 +915,14 @@ function refreshCollectionJob(fetchId) {
 }
 
 function liveFetchMessage(kind, requestKind = 'latest') {
-  if (requestKind === 'history') {
-    return ({
-      submitting: 'fetch.history-submitting-live', queued: 'fetch.history-queued-live',
-      running: 'fetch.history-running-live', partial: 'fetch.history-partial-live',
-      completed: 'fetch.history-completed-live', failed: 'fetch.history-failed-live',
-    })[kind] || null;
-  }
-  return ({
-    submitting: 'fetch.submitting-live', queued: 'fetch.queued-live',
-    running: 'fetch.running-live', partial: 'fetch.partial-live',
-    completed: 'fetch.completed-live', failed: 'fetch.failed-live',
-  })[kind] || null;
+  const selectedSource = $('#fetch-source-select')?.value;
+  const enabledSources = (Array.isArray(state.capabilities?.sources)
+    ? state.capabilities.sources : [])
+    .filter((source) => source?.enabled_for_current_operation === true)
+    .map((source) => source.source_id)
+    .filter((sourceId) => typeof sourceId === 'string');
+  const sourceIds = selectedSource ? [selectedSource] : enabledSources;
+  return liveFetchMessageKey(kind, requestKind, sourceIds);
 }
 
 function scheduleCapabilityRefresh(delayMs) {
@@ -1244,7 +1243,9 @@ function renderDiscoveryBundle(bundle) {
       youtube_video_search: 'YouTube' })[source.source_id] || source.source_id || '—';
     const sourceStatus = source.error_code === 'RATE_LIMITED'
       ? t('fetch.source-status.RATE_LIMITED') : source.status;
-    sourceList.append(element('li', `${name} · ${source.data_mode || '—'} · ${sourceStatus} · ${source.record_count ?? 0} · ${source.delivery_state || source.stop_reason || '—'}`));
+    const delivery = ['SUCCESS', 'PARTIAL'].includes(source.status)
+      ? source.delivery_state : null;
+    sourceList.append(element('li', `${name} · ${source.data_mode || '—'} · ${sourceStatus} · ${source.record_count ?? 0} · ${delivery || source.stop_reason || '—'}`));
   }
   const category = state.category === 'home_goods' ? 'home_living' : state.category;
   const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -1506,9 +1507,13 @@ function renderPersistedDataset(item) {
     observationWindow,
     googleSummary,
     fetchedAt].filter(Boolean).join(' · ');
-  $('#metric-records-returned').textContent = item.provider_record_count == null ? t('common.unavailable') : number(item.provider_record_count);
+  const providerCountAvailable = item.status !== 'FAILED'
+    && Number.isInteger(item.provider_record_count);
+  $('#metric-records-returned').textContent = providerCountAvailable
+    ? number(item.provider_record_count) : t('common.unavailable');
   $('#metric-records-returned-note').textContent = item.status === 'LEGACY_CACHED'
-    ? t('metric.legacy-fetch-count') : t('metric.provider-snapshot');
+    ? t('metric.legacy-fetch-count') : providerCountAvailable
+      ? t('metric.provider-snapshot') : t('metric.not-reported');
   $('#metric-records-stored').textContent = item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count);
   $('#metric-records-stored-note').textContent = t('metric.ledger-stored');
   // Classification totals belong to analytics; eligible/assigned Collection
@@ -1525,6 +1530,10 @@ function renderAnalysisSourceVolume(dataset) {
   const root = $('#analysis-source-volume');
   if (!dataset) {
     root.replaceChildren(element('p', t('analysis.no-snapshot')));
+    return;
+  }
+  if (dataset.status === 'FAILED') {
+    root.replaceChildren(element('p', t('analysis.source-volume-unavailable')));
     return;
   }
   const sources = Array.isArray(dataset.sources) ? dataset.sources : [];
