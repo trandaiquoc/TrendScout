@@ -88,6 +88,8 @@ function renderResearchRecords(items) {
 }
 
 function beginResearchEdit(item) {
+  clearTimeout(keywordTimer);
+  keywordSequence++;
   state.researchEditId=item.id;
   const fields={
     '#research-subject':item.subject,
@@ -107,6 +109,11 @@ function beginResearchEdit(item) {
     linkedKeyword.add(new Option([item.keyword || item.keyword_id, localizedSourceName(item.source), item.observed_at || '—'].join(' · '), item.keyword_id));
   }
   linkedKeyword.value=item.keyword_id||'';
+  linkedKeyword.disabled=true;
+  linkedKeyword.setAttribute('aria-describedby','research-keyword-lock-note');
+  $('#research-keyword-search').disabled=true;
+  $('#research-keyword-lock-note').hidden=false;
+  $('#research-editor-heading').textContent=t('research.edit-title');
   $('#research-form').querySelector('[type="submit"]').textContent=t('research.update');
   $('#research-cancel-edit').hidden=false;
   $('#research-form-status').textContent='';
@@ -118,6 +125,11 @@ function cancelResearchEdit() {
   state.researchEditId=null;
   $('#research-form').reset();
   $('#research-keyword').value='';
+  $('#research-keyword').disabled=false;
+  $('#research-keyword').removeAttribute('aria-describedby');
+  $('#research-keyword-search').disabled=false;
+  $('#research-keyword-lock-note').hidden=true;
+  $('#research-editor-heading').textContent=t('research.create-title');
   $('#research-form').querySelector('[type="submit"]').textContent=t('research.save');
   $('#research-cancel-edit').hidden=true;
   $('#research-form-status').textContent='';

@@ -285,10 +285,14 @@ def main():
               check(await until(()=>document.querySelectorAll('#research-records .research-record').length===1&&document.querySelector('#research-records').textContent.includes('Browser workflow hypothesis')),'Research create is shown after API save');
               let card=document.querySelector('#research-records .research-record');
               card.querySelector('button').click();await delay(50);
-              check(document.querySelector('#research-competitors').value==='Competitor notes before edit','saved Research edit form loads existing competitor notes');
+              check(document.querySelector('#research-competitors').value==='Competitor notes before edit'&&document.querySelector('#research-editor-heading').textContent==='Chỉnh sửa bản nghiên cứu sản phẩm','saved Research edit form loads its data and identifies edit mode');
+              const linkedKeyword=document.querySelector('#research-keyword');
+              check(linkedKeyword.value==='g7-browser-keyword'&&linkedKeyword.disabled&&document.querySelector('#research-keyword-search').disabled&&!document.querySelector('#research-keyword-lock-note').hidden,'Research edit clearly shows its immutable linked keyword');
               document.querySelector('#research-competitors').value='Competitor notes edited in Chrome';
               document.querySelector('#research-form').requestSubmit();
               check(await until(()=>document.querySelector('#research-records').textContent.includes('Competitor notes edited in Chrome')),'Research edit persists and refreshes the saved record');
+              const editedResearch=(await (await fetch('/api/v1/research?limit=10')).json()).items[0];
+              check(editedResearch.keyword_id==='g7-browser-keyword'&&!document.querySelector('#research-keyword').disabled&&!document.querySelector('#research-keyword-search').disabled&&document.querySelector('#research-keyword-lock-note').hidden&&!document.querySelector('#research-keyword').hasAttribute('aria-describedby'),'Research edit preserves the original linked keyword and restores creation controls');
               card=document.querySelector('#research-records .research-record');
               const researchStatus=card.querySelector('select');researchStatus.value='RESEARCHING';researchStatus.dispatchEvent(new Event('change',{bubbles:true}));
               await delay(180);
