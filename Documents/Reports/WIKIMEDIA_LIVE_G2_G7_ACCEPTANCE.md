@@ -5,6 +5,10 @@
 **Overall Master Goal:** open external gates remain; not 100%.
 **Deployment:** none. No push performed.
 
+**Git baseline:** `origin/main` `151eed29922c1af947c399067e111744390b5e1c`.
+
+**Implementation commit:** `8aa9f7ecfaff3a62ce567eb54b391f113e476ab9` (local code commit).
+
 ## Runtime and data integrity
 
 - Started the current workspace with `D:\TrendScout\start.ps1 -Port 8123`. After a verified restart, listener PID `744` started at 15:58:31 on 2026-11-15. `/api/health` returned `ok`; runtime reports local `LIVE`, one configured source, SQLite integrity `OK`, and 1,219 keyword records.
@@ -15,6 +19,7 @@
 
 - The one authorized LIVE fetch is run `e98b004b05fc1242cf6d84b2b8fba539`, fetched at `2026-11-15T07:39:32Z` from the official Wikimedia Analytics API, using the US `all-access` daily top-per-country endpoint. It returned 1,999 records across Nov 12 (1,000) and Nov 13 (999). Source accounting: 1,999 accepted, 0 source rejects, 0 explicitly omitted.
 - Normalization retained 1,840 observations and marked 159 cleaning rejects. Stable ledger identity deduplication produced 1,219 keyword records. Processing is `COMPLETED`; the dataset remains `PARTIAL` to expose cleaning rejects. This final acceptance used cached evidence and made no additional Wikimedia request.
+- Persisted observation dates span Nov 11–13, 2026 (154, 918, and 922 observations in the analytics timeline). The latest explicit history job requested Nov 12–13 only.
 - The source is a censored top list, not all pages or search queries. `views_ceil` is approximate; absence is not zero, and US query scope does not establish reader nationality, search interest, or commercial demand.
 - Official Wikimedia docs reviewed 2026-11-15: [Page view API reference](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/reference/page-views.html), [country data privacy rules](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/concepts/country-data.html), [availability, missing values, and throttling](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/troubleshooting.html), and [access policy](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/access-policy.html). They describe country privacy thresholds, delayed publication, omitted zero values, the required identifying User-Agent, and rate limits that depend on access level. No fixed quota was assumed.
 
@@ -30,6 +35,24 @@
 - **G7 Research and Settings:** Native Chrome edited and reopened a LIVE-linked research record; source, project, observation date, edit, and archived status persisted across restart. FastEmbed is local; LLM is `NOT_CONFIGURED`; scheduler remains disabled with `LOCAL_SYNTHETIC_ONLY` policy.
 
 ## Windows verification and open gates
+
+### Local completion gate matrix
+
+| Gate | Result | Evidence |
+|---|---|---|
+| WIKI.1 Official LIVE source | PASS | Current runtime is LIVE; one configured Wikimedia source; saved real run above. |
+| WIKI.2 No synthetic normal path | PASS | `start.ps1` defaults to Wikimedia LIVE; synthetic demo requires explicit test-fixture opt-in. |
+| WIKI.3 No silent source truncation | PASS | Both regular and history handlers disable the 100 KB generic cap for Wikimedia; 1,999 returned, 0 source rejected/omitted. The 200-record admission ledger limit is not a payload cap. |
+| WIKI.4 Provenance and timestamps | PASS | Saved LIVE mode, observation dates, fetched timestamp, project, source rank, approximate views, and source scope. |
+| WIKI.5 Fetch/cache/retry/limits | PASS | Bounded, idempotent history route; cached/resumed source handling and admission policy covered by tests; real saved Fetch verified. |
+| WIKI.6 Safe history | PASS | User-initiated two-day window; source-day cache, durable checkpoint/resume, no fabricated dates or zeros. |
+| G2 Collections/classification | PASS | Exact six-record regression; 0 classified-topic membership gaps; non-topic and user exclusion are separate. |
+| G3–G7, UI, WIN, DATA | PASS | Source Center, Dashboard, Run History, Algorithms/Data Quality, Research/Settings, Native Chrome, SQLite, and restart evidence above. |
+| REG Regression | PASS | 22 focused keyword-workbench tests and final 243-test offline integration run passed. |
+
+**A. Wikimedia Windows Feature Completion: 100% (PASS).**
+
+**B. Remaining external G2–G7 acceptance:** Firestore `BLOCKED_ENVIRONMENT`; algorithm effectiveness `NOT_YET_EVALUATED`; cross-provider overlap `NOT_VERIFIED` (no approved compatible second LIVE source); production integrations `NOT_APPROVED`; screen reader `NOT_VERIFIED` (NVDA not installed).
 
 - Native Chrome 157.0.8103.51 at 1365×960 loaded Dashboard, Collections, Source Center, Run History, Algorithms, Data Quality, Research, and Settings without horizontal overflow or browser errors. The `non_topic` filter returned exactly three rows. VI/EN and Light/Dark toggles worked.
 - Final offline regression: **243 passed**. Focused keyword-workbench suite: **22 passed**. Changed-file Ruff and Python compilation, frontend `node --check`, and `git diff --check` passed.
