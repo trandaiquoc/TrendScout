@@ -272,16 +272,18 @@ def main():
             if evaluate("document.querySelector('#detail-dialog').open || document.activeElement.id!=='collection-create'"):
                 raise RuntimeError("Escape did not close keyword detail and return focus")
 
-            evaluate("document.querySelector('#workbench-rows button').click()")
+            evaluate("window.__workbenchDetailTrigger=document.querySelector('#workbench-rows button');window.__workbenchDetailTrigger.click()")
             for _ in range(60):
-                if evaluate("document.querySelector('#workbench-detail')?.open && document.querySelector('#workbench-detail').getAttribute('aria-labelledby')===document.querySelector('#workbench-detail [id$=title]')?.id"):
+                if evaluate("document.querySelector('#workbench-detail')?.getAttribute('role')==='region' && document.querySelector('#workbench-detail details') && document.querySelector('#workbench-detail').getAttribute('aria-labelledby')===document.querySelector('#workbench-detail [id$=title]')?.id"):
                     break
                 time.sleep(0.02)
             else:
                 raise RuntimeError("keyword details dialog did not expose its accessible title")
             press("Escape", "Escape", 27)
-            if evaluate("document.querySelector('#workbench-detail').open"):
-                raise RuntimeError("Escape did not close keyword details")
+            time.sleep(0.06)
+            inspector_escape = evaluate("(()=>{const inspector=document.querySelector('#workbench-detail');return JSON.stringify({details:!!inspector.querySelector('details'),active:document.activeElement?.outerHTML?.slice(0,180),trigger:window.__workbenchDetailTrigger?.outerHTML?.slice(0,180),triggerConnected:window.__workbenchDetailTrigger?.isConnected,viewHidden:document.querySelector('[data-view=collections]')?.hidden})})()")
+            if evaluate("document.querySelector('#workbench-detail').querySelector('details') || document.activeElement!==window.__workbenchDetailTrigger"):
+                raise RuntimeError(f"Escape did not clear the keyword inspector and return focus: {inspector_escape}")
 
             evaluate("location.hash='#runs';window.dispatchEvent(new Event('hashchange'))")
             for _ in range(60):

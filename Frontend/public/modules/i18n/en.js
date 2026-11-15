@@ -1177,6 +1177,8 @@ export const en = {
   'workbench.choose-source': 'Choose the source Collection',
   'workbench.select': 'Select',
   'workbench.details': 'Details',
+  'workbench.inspector-title': 'Keyword evidence',
+  'workbench.inspector-help': 'Select a keyword to inspect its saved source, classification, Collection membership and analysis evidence.',
   'workbench.reason': 'Why this result',
   'workbench.decision': 'User decision',
   'workbench.no-decision': 'No recorded decision',

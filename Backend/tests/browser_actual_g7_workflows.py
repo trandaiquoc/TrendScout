@@ -313,19 +313,19 @@ def main():
               let row=null;for(let n=0;n<100&&!row;n++){row=[...document.querySelectorAll('#workbench-rows tr')].find(item=>item.textContent.includes('Unknown context topic'));if(!row)await delay(30)}
               await delay(250);row=[...document.querySelectorAll('#workbench-rows tr')].find(item=>item.textContent.includes('Unknown context topic'));
               window.__unknownDetailTrigger=row?.querySelector('button');window.__unknownDetailTrigger?.click();
-              const dialog=document.querySelector('#workbench-detail');
-              for(let n=0;n<150&&(!dialog.open||!dialog.querySelector('details'));n++)await delay(30);
-              const labelledBy=dialog.getAttribute('aria-labelledby');
+              const inspector=document.querySelector('#workbench-detail');
+              for(let n=0;n<150&&!inspector.querySelector('details');n++)await delay(30);
+              const labelledBy=inspector.getAttribute('aria-labelledby');
               const label=labelledBy?document.getElementById(labelledBy)?.textContent.trim():'';
-              const closeName=dialog.querySelector('button')?.getAttribute('aria-label');
-              return {open:dialog.open,focusInside:dialog.contains(document.activeElement),labelled:!!label,label,closeName};
+              const closeName=inspector.querySelector('button')?.getAttribute('aria-label');
+              return {region:inspector.getAttribute('role')==='region',focusInside:inspector.contains(document.activeElement),labelled:!!label,label,closeName};
             })()""")
-            if (not keyboard_open or not keyboard_open.get("open") or not keyboard_open.get("focusInside")
+            if (not keyboard_open or not keyboard_open.get("region") or not keyboard_open.get("focusInside")
                     or not keyboard_open.get("labelled") or not keyboard_open.get("closeName")):
                 raise AssertionError("Native Chrome keyword detail lacks focus or accessible naming: " + json.dumps(keyboard_open))
             focus_loop = evaluate(r"""(()=>{
-              const dialog=document.querySelector('#workbench-detail');
-              const focusable=[...dialog.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex]:not([tabindex="-1"])')]
+              const inspector=document.querySelector('#workbench-detail');
+              const focusable=[...inspector.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex]:not([tabindex="-1"])')]
                 .filter(node=>!node.disabled&&node.getClientRects().length>0);
               if(!focusable.length)return {count:0,focusedLast:false};
               focusable.at(-1).focus();
@@ -335,26 +335,20 @@ def main():
                 raise AssertionError("Native Chrome could not focus the last keyword-detail control: " + json.dumps(focus_loop))
             browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
             browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
-            focus_stayed_in_dialog = evaluate("(()=>{const d=document.querySelector('#workbench-detail');const f=[...d.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex]:not([tabindex=\"-1\"])')].filter(n=>!n.disabled&&n.getClientRects().length>0);return JSON.stringify({stayed:d===document.activeElement||d.contains(document.activeElement),activeIndex:f.indexOf(document.activeElement),focusableCount:f.length})})()")
-            focus_stayed_in_dialog = json.loads(focus_stayed_in_dialog or "{}")
-            if not focus_stayed_in_dialog.get("stayed") or focus_stayed_in_dialog.get("activeIndex") != 0:
-                raise AssertionError("Tab escaped keyword-detail modal instead of staying within its controls: " + json.dumps(focus_stayed_in_dialog))
+            focus_left_inspector = evaluate("(()=>{const inspector=document.querySelector('#workbench-detail');return !inspector.contains(document.activeElement)})()")
+            if not focus_left_inspector:
+                raise AssertionError("Tab did not continue from the nonmodal keyword inspector to the next page control")
             browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9, "modifiers": 8}, session)
             browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9, "modifiers": 8}, session)
-            reverse_wrapped = evaluate("(()=>{const d=document.querySelector('#workbench-detail');const f=[...d.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex]:not([tabindex=\"-1\"])')].filter(n=>!n.disabled&&n.getClientRects().length>0);return f.length>1&&document.activeElement===f.at(-1)})()")
-            if not reverse_wrapped:
-                raise AssertionError("Shift+Tab did not wrap to the last keyword-detail control")
-            browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
-            browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9, "nativeVirtualKeyCode": 9}, session)
-            forward_wrapped = evaluate("(()=>{const d=document.querySelector('#workbench-detail');const f=[...d.querySelectorAll('button,a[href],input,select,textarea,summary,[tabindex]:not([tabindex=\"-1\"])')].filter(n=>!n.disabled&&n.getClientRects().length>0);return f.length>1&&document.activeElement===f[0]})()")
-            if not forward_wrapped:
-                raise AssertionError("Tab did not wrap to the first keyword-detail control")
+            reverse_entered_inspector = evaluate("(()=>{const inspector=document.querySelector('#workbench-detail');return inspector.contains(document.activeElement)})()")
+            if not reverse_entered_inspector:
+                raise AssertionError("Shift+Tab did not return from the next page control into the keyword inspector")
             browser.call("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
             browser.call("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27}, session)
-            keyboard_closed = evaluate("(async()=>{await new Promise(resolve=>setTimeout(resolve,50));return JSON.stringify({open:document.querySelector('#workbench-detail').open,focusReturned:document.activeElement===window.__unknownDetailTrigger})})()")
+            keyboard_closed = evaluate("(async()=>{await new Promise(resolve=>setTimeout(resolve,50));const inspector=document.querySelector('#workbench-detail');return JSON.stringify({region:inspector.getAttribute('role')==='region',cleared:!inspector.querySelector('details'),focusReturned:document.activeElement===window.__unknownDetailTrigger})})()")
             keyboard_closed = json.loads(keyboard_closed or "{}")
-            if keyboard_closed.get("open") or not keyboard_closed.get("focusReturned"):
-                raise AssertionError("Escape did not close keyword detail and return focus: " + json.dumps(keyboard_closed))
+            if not keyboard_closed.get("region") or not keyboard_closed.get("cleared") or not keyboard_closed.get("focusReturned"):
+                raise AssertionError("Escape did not clear keyword context and return focus: " + json.dumps(keyboard_closed))
             with collection_store.connect() as db:
                 expected_history_total = db.execute("SELECT count(*) FROM fetch_jobs").fetchone()[0]
                 expected_partial_history = db.execute("SELECT count(*) FROM fetch_jobs WHERE status='PARTIAL'").fetchone()[0]

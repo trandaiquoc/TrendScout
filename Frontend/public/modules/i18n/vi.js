@@ -1178,6 +1178,8 @@ export const vi = {
   'workbench.choose-source': 'Hãy chọn bộ sưu tập nguồn',
   'workbench.select': 'Chọn',
   'workbench.details': 'Chi tiết',
+  'workbench.inspector-title': 'Bằng chứng từ khóa',
+  'workbench.inspector-help': 'Chọn một từ khóa để xem nguồn đã lưu, kết quả phân loại, Bộ sưu tập và bằng chứng phân tích.',
   'workbench.reason': 'Vì sao có kết quả này',
   'workbench.decision': 'Quyết định của người dùng',
   'workbench.no-decision': 'Chưa có quyết định được ghi nhận',
