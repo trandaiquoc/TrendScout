@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, fingerprint, keyword_record
 from app.main import create_app
 from app.settings import Settings
+from app.sources.google_trends.trending_now import normalize_keyword
 from app.sources.wikimedia.cleaning_rules import collection_technical_reason
 
 
@@ -284,6 +286,94 @@ class SmartCollectionsTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(tuple(snapshot), ("FAILED", "LIVE", 0, 0, 0, "COMPLETED"))
         self.assertEqual(tuple(job), ("COMPLETED", 0, 0, 0, 0))
+
+    def test_google_only_live_fetch_does_not_reprocess_wikimedia_or_user_state(self):
+        live_store = CollectionStore(Path(self.temp.name) / "live-collections.sqlite",
+                                     data_mode_scope="LIVE")
+        service = CollectionService(live_store)
+        wiki_row = {
+            "article_display": "Portable Solar Generator",
+            "article_original": "Portable_Solar_Generator",
+            "project": "en.wikipedia", "observation_date": "2026-11-14",
+            "fetched_at": "2026-11-15T12:00:00Z", "provider_rank": 1,
+            "views_ceil": 8400, "country_scope": "US",
+            "source_url": "https://wikimedia.org/",
+        }
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            service._process_fetch("wiki-before-google", live_source([wiki_row]))
+        wiki_keyword = keyword_record(
+            wiki_row, "wikimedia_pageviews_top_per_country", "LIVE"
+        )
+        collection_id = live_store.create({"name": "User research topics"})
+        stamp = "2026-11-15T12:30:00+00:00"
+        with live_store.connect() as db:
+            db.execute("INSERT INTO keyword_decisions VALUES(?,?,?,?)",
+                       (wiki_keyword["id"], "RESTORED", "Kept by user", stamp))
+            db.execute("INSERT INTO memberships(collection_id,keyword_id,origin,pinned,score,reason,created_at) "
+                       "VALUES(?,?,'USER',1,NULL,'User kept this keyword',?)",
+                       (collection_id, wiki_keyword["id"], stamp))
+            db.execute("INSERT INTO feedback VALUES(?,?, 'ADD',?)",
+                       (collection_id, wiki_keyword["id"], stamp))
+            db.execute("""INSERT INTO research_records(
+                id,keyword_id,subject,hypothesis,status,created_at,updated_at
+                ) VALUES('wiki-research',?,'Solar generators','Retain existing research',
+                         'DRAFT',?,?)""", (wiki_keyword["id"], stamp, stamp))
+
+        integrity_queries = {
+            "wikimedia_keywords": "SELECT * FROM keywords WHERE source='wikimedia_pageviews_top_per_country' ORDER BY id",
+            "wikimedia_classifications": "SELECT cr.* FROM classification_results cr JOIN keywords k "
+                "ON k.id=cr.keyword_id WHERE k.source='wikimedia_pageviews_top_per_country' ORDER BY cr.keyword_id",
+            "wikimedia_algorithm_observations": "SELECT ao.* FROM algorithm_observations ao JOIN keywords k "
+                "ON k.id=ao.keyword_id WHERE k.source='wikimedia_pageviews_top_per_country' ORDER BY 1,2,3,8",
+            "wikimedia_algorithm_results": "SELECT ar.* FROM algorithm_results ar JOIN keywords k "
+                "ON k.id=ar.keyword_id WHERE k.source='wikimedia_pageviews_top_per_country' ORDER BY 1,2",
+            "wikimedia_memberships": "SELECT m.* FROM memberships m JOIN keywords k ON k.id=m.keyword_id "
+                "WHERE k.source='wikimedia_pageviews_top_per_country' ORDER BY 1,2",
+            "keyword_decisions": "SELECT * FROM keyword_decisions ORDER BY keyword_id",
+            "feedback": "SELECT * FROM feedback ORDER BY collection_id,keyword_id",
+            "research_records": "SELECT * FROM research_records ORDER BY id",
+            "reconciliation_runs": "SELECT * FROM membership_reconciliation_runs ORDER BY id",
+        }
+
+        def read_integrity():
+            with live_store.connect() as db:
+                return {
+                    name: [tuple(row) for row in db.execute(query).fetchall()]
+                    for name, query in integrity_queries.items()
+                }
+
+        before = read_integrity()
+        title, identity = normalize_keyword("Portable Outdoor Blanket")
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        google_record = {
+            "data_source": "GOOGLE_TRENDS", "provider_id": "google_trends_rss",
+            "transport_id": "google_trends_rss_http", "discovery_mode": "RSS_LIMITED_DISCOVERY",
+            "canonical_keyword": title, "canonical_keyword_identity": digest,
+            "region": "US", "language": "en", "time_window_hours": None,
+            "provider_data_at": "2026-11-15T11:55:00+00:00", "provider_created_at": None,
+            "fetched_at": "2026-11-15T12:01:00+00:00",
+            "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
+            "delivery_state": "FRESH", "quality_flags": ["RSS_LIMITED_COVERAGE"],
+            "trend_clusters": [{"trend_cluster_id": "cluster-1", "started_at": None,
+                "ended_at": None, "active": None, "search_volume": None,
+                "search_volume_display": "20K+", "increase_percentage": None,
+                "categories": None, "related_queries": None}],
+        }
+        google_source = [{"source_id": "google_web_serp", "data_mode": "LIVE",
+            "status": "SUCCESS", "record_count": 1, "records": [google_record]}]
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            outcome = service._process_fetch("google-only-live", google_source)
+
+        self.assertEqual(outcome["status"], "COMPLETED")
+        self.assertEqual(outcome["available"], 1)
+        self.assertEqual(read_integrity(), before)
+        with live_store.connect() as db:
+            self.assertEqual(db.execute(
+                "SELECT count(*) FROM keywords WHERE source='google_web_serp' AND data_mode='LIVE'"
+            ).fetchone()[0], 1)
+            self.assertEqual(db.execute(
+                "SELECT decision FROM keyword_decisions WHERE keyword_id=?", (wiki_keyword["id"],)
+            ).fetchone()[0], "RESTORED")
 
     def test_crud_feedback_and_restart_persistence(self):
         collection_id = self.store.create({"name": "Sustainable fashion", "examples": ["circular clothing"]})

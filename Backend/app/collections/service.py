@@ -21,6 +21,7 @@ from app.collections.store import (
     keyword_record,
     now,
 )
+from app.sources.catalog import GOOGLE_SOURCE_ID
 from app.taxonomy.registry import resolve as resolve_category
 
 # Calibrated against the real local-model Smart Home positive (0.538 with its
@@ -74,6 +75,11 @@ class CollectionService:
         if self.store.data_mode_scope:
             sources = [source for source in sources
                        if source.get("data_mode") == self.store.data_mode_scope]
+        google_only_live_fetch = (
+            self.store.data_mode_scope == "LIVE"
+            and bool(sources)
+            and all(source.get("source_id") == GOOGLE_SOURCE_ID for source in sources)
+        )
         with self.store.connect() as db:
             prior = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
             retry_missing_snapshot = False
@@ -152,6 +158,7 @@ class CollectionService:
                         record["id"] = hashlib.sha256(
                             f"{self.store.data_mode_scope}:{record['id']}".encode("utf-8")
                         ).hexdigest()
+        source_keyword_ids = tuple(record["id"] for record in records)
         if rejected:
             with self.store.connect() as db:
                 db.executemany("UPDATE keywords SET eligible=0,rejection_reason=? WHERE id=? "
@@ -211,8 +218,15 @@ class CollectionService:
         with self.store.connect() as db:
             keyword_scope = " AND k.data_mode=?" if self.store.data_mode_scope else ""
             mode_parameters = (self.store.data_mode_scope,) if self.store.data_mode_scope else ()
+            source_scope = ""
+            source_parameters = ()
+            if google_only_live_fetch:
+                placeholders = ",".join("?" for _ in source_keyword_ids)
+                source_scope = f" AND k.id IN ({placeholders})"
+                source_parameters = source_keyword_ids
             persisted = db.execute("""SELECT k.* FROM keywords k WHERE k.eligible=1""" + keyword_scope + """
-                ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""", mode_parameters).fetchall()
+                """ + source_scope + " ORDER BY k.observed_at DESC,k.keyword COLLATE NOCASE""",
+                (*mode_parameters, *source_parameters)).fetchall()
             records = [dict(row) for row in persisted]
             eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
                 + ("AND data_mode=?" if self.store.data_mode_scope else ""), mode_parameters).fetchone()[0]
@@ -238,10 +252,15 @@ class CollectionService:
                     record["redirected_from"] = context.redirected_from
                     record["page_language"] = context.page_language
         with self.store.connect() as db:
+            excluded_scope = ""
+            if google_only_live_fetch:
+                placeholders = ",".join("?" for _ in source_keyword_ids)
+                excluded_scope = f" AND id IN ({placeholders})"
             excluded_records = [dict(row) for row in db.execute(
                 "SELECT * FROM keywords WHERE eligible=0 "
                 + ("AND data_mode=? " if self.store.data_mode_scope else "")
-                + "ORDER BY observed_at DESC,keyword COLLATE NOCASE", mode_parameters).fetchall()]
+                + excluded_scope + " ORDER BY observed_at DESC,keyword COLLATE NOCASE",
+                (*mode_parameters, *source_parameters)).fetchall()]
         classification_records = [*records, *excluded_records]
         if self.entity_context_resolver is not None and excluded_records:
             excluded_contexts = self.entity_context_resolver.cached(row["id"] for row in excluded_records)
@@ -385,21 +404,31 @@ class CollectionService:
 
         assigned = 0
         unassigned_rows = []
-        reconciliation_id = f"reconcile-{uuid.uuid4()}"
+        reconciliation_id = None if google_only_live_fetch else f"reconcile-{uuid.uuid4()}"
         self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
             processed=len(records), cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
             inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
         self._update_job(fetch_id, stage="ASSIGNING_KEYWORDS")
-        self.store.archive_unpinned_ai_memberships(
-            reconciliation_id, f"Contextual full-ledger replay for {fetch_id}"
-        )
-        self._update_job(fetch_id, membership_reconciliation_id=reconciliation_id)
+        if reconciliation_id is not None:
+            self.store.archive_unpinned_ai_memberships(
+                reconciliation_id, f"Contextual full-ledger replay for {fetch_id}"
+            )
+            self._update_job(fetch_id, membership_reconciliation_id=reconciliation_id)
         with self.store.connect() as db:
             # Recompute automatic memberships from the complete eligible ledger after
-            # inference succeeds. Pinned USER memberships and explicit REMOVE feedback stay intact.
+            # inference succeeds. A Google-only Fetch processes its own keyword IDs and must not
+            # disturb Wikimedia observations or their saved assignments.
+            membership_scope = ""
+            membership_parameters = []
+            if self.store.data_mode_scope:
+                membership_scope += " AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)"
+                membership_parameters.append(self.store.data_mode_scope)
+            if google_only_live_fetch:
+                placeholders = ",".join("?" for _ in source_keyword_ids)
+                membership_scope += f" AND keyword_id IN ({placeholders})"
+                membership_parameters.extend(source_keyword_ids)
             db.execute("DELETE FROM memberships WHERE origin='LOCAL_AI' AND pinned=0 "
-                + ("AND keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)" if self.store.data_mode_scope else ""),
-                (self.store.data_mode_scope,) if self.store.data_mode_scope else ())
+                + membership_scope, tuple(membership_parameters))
             for record, vector, topic_vector in zip(records, vectors, topic_vectors):
                 if record.get("classification_result", {}).get("classification_status") == "INELIGIBLE":
                     continue
@@ -480,7 +509,9 @@ class CollectionService:
                     if not rejected and not fits_existing_collection and not unresolved_person:
                         unassigned_rows.append((record, topic_vector))
         self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
-        created, suggestions = self._propose(reconciliation_id, unassigned_rows, collections)
+        created, suggestions = self._propose(
+            reconciliation_id or fetch_id, unassigned_rows, collections
+        )
         with self.store.connect() as db:
             assigned = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
                 "JOIN keywords k ON k.id=m.keyword_id WHERE m.origin='LOCAL_AI' "

@@ -124,12 +124,116 @@ class PublicAdmission:
             raise ValueError("validated server policy and state key required")
         self.store, self.policy, self.state_key = store, policy, state_key
         self._pools = MappingProxyType(dict(policy.pools))
+        self.policy_digest = self._policy_digest(policy)
+
+    @staticmethod
+    def _policy_digest(policy: AdmissionPolicy) -> str:
         config = asdict(policy)
         config["enabled_sources"] = sorted(policy.enabled_sources)
         config.pop("enabled")
-        self.policy_digest = hashlib.sha256(json.dumps(
+        return hashlib.sha256(json.dumps(
             config, sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")).hexdigest()
+
+    def migrate_bounded_quota_policy(self, previous_policy: AdmissionPolicy, *,
+                                     authorization_note: str, now: datetime) -> dict:
+        """Increase only SerpApi quota ceilings while preserving and auditing state.
+
+        This owner-invoked migration is deliberately narrow: all workflow,
+        concurrency, timing, and non-SerpApi policy fields must stay identical.
+        Existing usage, jobs, reservations, and start history are not reset.
+        """
+        now = _utc(now)
+        if (not isinstance(previous_policy, AdmissionPolicy)
+                or not isinstance(authorization_note, str)
+                or not 12 <= len(authorization_note) <= 256
+                or "\x00" in authorization_note):
+            raise ValueError("previous policy and auditable owner authorization are required")
+        previous_digest = self._policy_digest(previous_policy)
+        previous_base, current_base = asdict(previous_policy), asdict(self.policy)
+        previous_base["enabled_sources"] = sorted(previous_policy.enabled_sources)
+        current_base["enabled_sources"] = sorted(self.policy.enabled_sources)
+        previous_base.pop("enabled")
+        current_base.pop("enabled")
+        previous_pools, current_pools = previous_base.pop("pools"), current_base.pop("pools")
+        if previous_base != current_base or set(previous_pools) != set(current_pools):
+            raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+
+        changed_pools = []
+        budget_fields = {
+            "daily_requests", "monthly_requests", "daily_cost_units", "monthly_cost_units",
+        }
+        for name, old_values in previous_pools.items():
+            new_values = current_pools[name]
+            if name != "serpapi":
+                if old_values != new_values:
+                    raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+                continue
+            if set(old_values) != set(new_values):
+                raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+            for field, old_value in old_values.items():
+                new_value = new_values[field]
+                if field in budget_fields:
+                    if new_value < old_value:
+                        raise AdmissionDenied("POLICY_MIGRATION_NOT_MONOTONIC")
+                elif new_value != old_value:
+                    raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+            if any(old_values[field] < new_values[field] for field in budget_fields):
+                changed_pools.append(name)
+        if not changed_pools:
+            raise AdmissionDenied("POLICY_MIGRATION_NO_CHANGE")
+
+        def operation(state):
+            if (not state or state.get("schema") != 1
+                    or state.get("policy_digest") != previous_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+            jobs, inflight = state.get("jobs"), state.get("inflight")
+            quota = state.get("quota")
+            if not isinstance(jobs, dict) or not isinstance(inflight, dict) or not isinstance(quota, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            for job in jobs.values():
+                if (isinstance(job, dict) and job.get("state") in {"QUEUED", "RUNNING"}
+                        and _parse(job.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
+                    raise AdmissionDenied("POLICY_MIGRATION_BUSY")
+            for slot in inflight.values():
+                if (isinstance(slot, dict)
+                        and _parse(slot.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
+                    raise AdmissionDenied("POLICY_MIGRATION_BUSY")
+            for key, usage in quota.items():
+                if not isinstance(key, str) or not isinstance(usage, dict):
+                    raise AdmissionDenied("STATE_INVALID")
+                parts = key.split(":")
+                if len(parts) != 3 or parts[0] not in self._pools or parts[1] not in {"day", "month"}:
+                    raise AdmissionDenied("STATE_INVALID")
+                requests, cost = usage.get("requests"), usage.get("cost")
+                if (type(requests) is not int or type(cost) is not int
+                        or requests < 0 or cost < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                limit = self._pools[parts[0]]
+                request_limit = limit.daily_requests if parts[1] == "day" else limit.monthly_requests
+                cost_limit = limit.daily_cost_units if parts[1] == "day" else limit.monthly_cost_units
+                if requests > request_limit or cost > cost_limit:
+                    raise AdmissionDenied("POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+            audit = state.get("policy_migration_audit", [])
+            if not isinstance(audit, list) or len(audit) >= 32:
+                raise AdmissionDenied("POLICY_MIGRATION_AUDIT_UNAVAILABLE")
+            record = {
+                "schema": 1,
+                "at": now.isoformat(),
+                "from_policy_digest": previous_digest,
+                "to_policy_digest": self.policy_digest,
+                "changed_pools": changed_pools,
+                "authorization_note": authorization_note,
+                "quota_preserved": True,
+                "jobs_preserved": True,
+                "reservations_preserved": True,
+            }
+            audit = [*audit, record]
+            state["policy_digest"] = self.policy_digest
+            state["policy_migration_audit"] = audit
+            return state, record
+
+        return self.store.transact(self.state_key, operation)
 
     def _transaction(self, fn):
         def mutate(state):

@@ -277,6 +277,11 @@ async def normal_google_live_composition(*, user_agent,
 
         def previous_verification():
             return _candidate_history(collection_store, now=utcnow())[2]
+
+        def remaining_paid_attempts():
+            snapshot = admission.quota_snapshot("serpapi", now=utcnow())
+            return min(snapshot["daily"]["remaining"], snapshot["monthly"]["remaining"])
+
         trends_handler = (GoogleTrendsDiscoveryHandler(
             trends_gateway=trends_gateway,
             policy_fingerprint=policy.plan_fingerprint,
@@ -285,6 +290,7 @@ async def normal_google_live_composition(*, user_agent,
             resolve_cache_grant=resolve_cache_grant,
             serp_gateway=serp_gateway,
             ensure_paid_budget=budget.ensure_attempt_allowed if budget else None,
+            remaining_paid_attempts=remaining_paid_attempts,
             previously_observed=previously_observed,
             recently_verified=recently_verified,
             previous_verification=previous_verification,

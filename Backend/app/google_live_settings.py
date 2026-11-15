@@ -51,7 +51,7 @@ class GoogleLiveSettings:
             serp_approved=_flag(environment, "TREND_SCOUT_GOOGLE_SERP_APPROVED"),
             account_api_approved=_flag(environment, "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED"),
             serpapi_daily_budget=_bounded_int(
-                environment, "TREND_SCOUT_SERPAPI_DAILY_BUDGET", 6, 1, 6
+                environment, "TREND_SCOUT_SERPAPI_DAILY_BUDGET", 6, 1, 10
             ),
             serpapi_monthly_budget=_bounded_int(
                 environment, "TREND_SCOUT_SERPAPI_MONTHLY_BUDGET", 180, 1, 180

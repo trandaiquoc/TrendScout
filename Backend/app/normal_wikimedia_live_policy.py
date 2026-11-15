@@ -36,13 +36,13 @@ def normal_google_live_policy(*, serpapi_daily_budget: int = 6,
                               batches_per_hour: int = 1) -> AdmissionPolicy:
     """Local, owner-only Google policy with explicit SerpApi and RSS ledgers.
 
-    SerpApi has a conservative 6-attempt daily / 180-attempt monthly ceiling;
+    SerpApi has a bounded 10-attempt daily / 180-attempt monthly ceiling;
     the Google RSS feed uses a distinct no-credit pool. A single Fetch can make
     one Trends call and at most two SERP calls. One batch per hour bounds the
     combined SerpApi ceiling to three attempts per hour.
     """
     for value, low, high, name in (
-        (serpapi_daily_budget, 1, 6, "SerpApi daily budget"),
+        (serpapi_daily_budget, 1, 10, "SerpApi daily budget"),
         (serpapi_monthly_budget, 1, 180, "SerpApi monthly budget"),
         (rss_daily_budget, 1, 30, "RSS daily budget"),
         (rss_monthly_budget, 1, 900, "RSS monthly budget"),

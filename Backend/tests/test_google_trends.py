@@ -3,20 +3,23 @@
 import hashlib
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 
 from app.collections.store import CollectionStore, keyword_record
 from app.google_live_settings import GoogleLiveSettings
-from app.jobs.public_admission import PublicAdmission
+from app.jobs.distributed_worker import SourceWorkContext
+from app.jobs.public_admission import AdmissionDenied, PublicAdmission
+from app.jobs.shared_cache import CacheGrant
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import (
     _GoogleLocalApproval,
     normal_google_live_composition,
 )
 from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
 from app.sources.google_trends.rss import parse_google_trends_rss
 from app.sources.google_trends.trending_now import (
     TRENDING_NOW_ENGINE,
@@ -32,11 +35,13 @@ from app.sources.google_trends.verification_plan import (
     select_verification_candidates,
     validate_dynamic_context,
 )
+from app.sources.live_gateway import GatewayPage
 from app.sources.serpapi.account import (
     SerpApiAccountClient,
     parse_account_response,
 )
 from app.sources.serpapi.errors import SerpApiError
+from app.sources.serpapi.models import ProviderPage
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
@@ -302,6 +307,155 @@ class SerpApiAccountTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_trends_candidates_can_be_serp_verified_without_refreshing_trends(self):
+        candidate = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
+        candidate.update({
+            "source_id": GOOGLE_SOURCE_ID,
+            "provider_id": "serpapi_google_trends_trending_now",
+            "transport_id": "serpapi",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "fetched_at": "2026-11-15T11:55:02+00:00",
+        })
+        cached_payload = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+            "records": [candidate], "record_count": 1,
+            "coverage": {"provider_record_count": 1, "archive_search_id": "archived-search"},
+            "quality_flags": [],
+        }
+
+        class Cache:
+            def get(self, _scope, *, grant, now):
+                self.grant, self.now = grant, now
+                return {
+                    "status": "STALE",
+                    "fetched_at": "2026-11-15T09:55:02+00:00",
+                    "payload": cached_payload,
+                }
+
+            def put(self, *_args, **_kwargs):
+                raise AssertionError("cached data age must not be refreshed")
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                raise AssertionError("cached discovery must not repeat Trending Now")
+
+        class SerpGateway:
+            data_mode = "LIVE"
+
+            def __init__(self):
+                self.queries = []
+
+            async def fetch_page(self, *, context, **_kwargs):
+                self.queries.append(context.canonical_query)
+                page = ProviderPage(
+                    items=({"link": "https://example.com/item", "title": "Example",
+                            "snippet": "Result snippet", "position": 1},),
+                    next_offset=None, http_status=200, cache_state="FRESH",
+                    provider_created_at=NOW,
+                )
+                return GatewayPage(GOOGLE_SOURCE_ID, "LIVE", page)
+
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", NOW + timedelta(hours=1),
+            3600, 7200, 7200, allowed=True,
+        )
+        cache, serp = Cache(), SerpGateway()
+        paid_budget_checks = []
+
+        async def check_paid_budget():
+            paid_budget_checks.append("checked")
+            return {"monthly_remaining": 200}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=TrendsGateway(), policy_fingerprint="a" * 64,
+            utcnow=lambda: NOW, cache=cache,
+            resolve_cache_grant=lambda _source, _now: grant,
+            serp_gateway=serp,
+            ensure_paid_budget=check_paid_budget,
+        )
+        context = SourceWorkContext(
+            "job-1", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+        )
+
+        result = await handler(context)
+
+        self.assertEqual(serp.queries, ["portable outdoor blanket"])
+        self.assertEqual(len(paid_budget_checks), 1)
+        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(result["records"][0]["fetched_at"], "2026-11-15T11:55:02+00:00")
+        self.assertEqual(result["records"][0]["delivery_state"], "CACHED")
+        self.assertEqual(result["coverage"]["shared_cache_state"], "STALE")
+        self.assertIn("STALE_SHARED_CACHE_REUSED", result["quality_flags"])
+        self.assertEqual(result["records"][0]["serp_verification"]["status"], "VERIFIED")
+        self.assertEqual(result["coverage"]["archive_search_id"], "archived-search")
+
+    async def test_resumed_trends_receipt_skips_already_attempted_serp_candidate(self):
+        failed = _candidate("iran attacks bahrain", ["News"], increase=1000)
+        failed["serp_verification"] = {
+            "status": "FAILED", "verification_mode": "GOOGLE_SERP",
+            "query": "iran attacks bahrain", "error_code": "UPSTREAM_ERROR", "results": [],
+        }
+        pending = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
+        pending["serp_verification"] = {"status": "NOT_CONFIGURED", "results": []}
+        second_pending = _candidate("folding solar lantern", ["Outdoors"], increase=800)
+        second_pending["serp_verification"] = {"status": "NOT_CONFIGURED", "results": []}
+        saved_result = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "CACHED",
+            "records": [failed, pending, second_pending], "record_count": 3,
+            "coverage": {"archive_search_id": "archived-search"},
+            "quality_flags": [],
+        }
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                raise AssertionError("resuming a receipt must not repeat discovery")
+
+        class SerpGateway:
+            data_mode = "LIVE"
+
+            def __init__(self):
+                self.queries = []
+
+            async def fetch_page(self, *, context, **_kwargs):
+                self.queries.append(context.canonical_query)
+                page = ProviderPage(
+                    items=({"link": "https://example.com/item", "title": "Example",
+                            "snippet": "Result snippet", "position": 1},),
+                    next_offset=None, http_status=200, cache_state="FRESH",
+                    provider_created_at=NOW,
+                )
+                return GatewayPage(GOOGLE_SOURCE_ID, "LIVE", page)
+
+        serp = SerpGateway()
+        context = SourceWorkContext(
+            "job-resume", "worker", 2, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5),
+            {"progress": {"google_trends_receipt": {"result": saved_result}}},
+            lambda _value: 1, lambda: "ACTIVE",
+        )
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=TrendsGateway(), policy_fingerprint="a" * 64,
+            utcnow=lambda: NOW, serp_gateway=serp,
+            remaining_paid_attempts=lambda: 1,
+        )
+
+        result = await handler(context)
+
+        self.assertEqual(serp.queries, ["portable outdoor blanket"])
+        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(result["coverage"]["serp_verification_attempted"], 2)
+        self.assertEqual(result["coverage"]["serp_verification_failed_count"], 1)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["records"][0]["serp_verification"]["error_code"],
+                         "UPSTREAM_ERROR")
+        self.assertEqual(result["records"][1]["serp_verification"]["status"], "VERIFIED")
+
     def test_google_local_approval_is_stable_during_a_guarded_attempt(self):
         approval = _GoogleLocalApproval(
             GOOGLE_SOURCE_ID, enabled=True, clock=lambda: NOW
@@ -394,7 +548,67 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(policy.pools["serpapi"].monthly_requests, 90)
         self.assertEqual(policy.pools["google_rss"].daily_requests, 10)
         with self.assertRaises(ValueError):
-            normal_google_live_policy(serpapi_daily_budget=7)
+            normal_google_live_policy(serpapi_daily_budget=11)
+
+    def test_owner_authorized_serpapi_policy_migration_preserves_quota_and_audits(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        store = LocalSQLiteAtomicStateStore.for_local_live(root / "quota.sqlite")
+        previous = normal_google_live_policy(
+            serpapi_daily_budget=3, serpapi_monthly_budget=3,
+            rss_daily_budget=1, rss_monthly_budget=1, batches_per_hour=2,
+        )
+        updated = normal_google_live_policy(
+            serpapi_daily_budget=10, serpapi_monthly_budget=10,
+            rss_daily_budget=1, rss_monthly_budget=1, batches_per_hour=2,
+        )
+        old_admission = PublicAdmission(store, previous, state_key=GOOGLE_STATE_KEY)
+        new_admission = PublicAdmission(store, updated, state_key=GOOGLE_STATE_KEY)
+        original_state = {
+            "schema": 1, "policy_digest": old_admission.policy_digest,
+            "operational_enabled": True, "jobs": {"keep": {"state": "FAILED"}},
+            "keys": {"receipt": {"job_id": "keep"}}, "starts": [NOW.isoformat()],
+            "quota": {
+                "serpapi:day:2026-11-15": {"requests": 2, "cost": 2},
+                "serpapi:month:2026-11": {"requests": 2, "cost": 2},
+                "google_rss:day:2026-11-15": {"requests": 1, "cost": 1},
+                "google_rss:month:2026-11": {"requests": 1, "cost": 1},
+            },
+            "inflight": {},
+        }
+        store.transact(GOOGLE_STATE_KEY, lambda _state: (original_state, None))
+        try:
+            audit = new_admission.migrate_bounded_quota_policy(
+                previous,
+                authorization_note="OWNER_AUTHORIZED_MAX_10_PAID_SEARCH_ATTEMPTS",
+                now=NOW,
+            )
+            self.assertTrue(audit["quota_preserved"])
+            self.assertEqual(audit["changed_pools"], ["serpapi"])
+            self.assertEqual(new_admission.quota_snapshot("serpapi", now=NOW)["daily"], {
+                "limit": 10, "used": 2, "remaining": 8,
+            })
+            state = store.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
+            self.assertEqual(state["quota"], original_state["quota"])
+            self.assertEqual(state["jobs"], original_state["jobs"])
+            self.assertEqual(state["keys"], original_state["keys"])
+            self.assertEqual(state["starts"], original_state["starts"])
+            self.assertEqual(state["policy_migration_audit"], [audit])
+
+            rss_change = normal_google_live_policy(
+                serpapi_daily_budget=10, serpapi_monthly_budget=10,
+                rss_daily_budget=2, rss_monthly_budget=2, batches_per_hour=2,
+            )
+            rss_admission = PublicAdmission(store, rss_change, state_key=GOOGLE_STATE_KEY)
+            with self.assertRaises(AdmissionDenied) as error:
+                rss_admission.migrate_bounded_quota_policy(
+                    updated,
+                    authorization_note="SERPAPI_ONLY_MIGRATION_TEST",
+                    now=NOW,
+                )
+            self.assertEqual(error.exception.code, "POLICY_MIGRATION_SCOPE_INVALID")
+        finally:
+            directory.cleanup()
 
     def test_rss_and_paid_serp_reservations_use_separate_pools_and_replay_once(self):
         directory = tempfile.TemporaryDirectory()

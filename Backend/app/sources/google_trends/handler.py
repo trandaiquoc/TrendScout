@@ -8,6 +8,7 @@ import math
 import re
 from datetime import datetime, timezone
 
+from app.jobs.public_admission import AdmissionDenied
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import GOOGLE_SOURCE_ID, source_capability
 from app.sources.google_trends.trending_now import (
@@ -95,6 +96,7 @@ class GoogleTrendsDiscoveryHandler:
                  utcnow=lambda: datetime.now(timezone.utc), cache: SharedCache | None = None,
                  resolve_cache_grant=None, serp_gateway=None, force_refresh: bool = False,
                  ensure_paid_budget=None,
+                 remaining_paid_attempts=None,
                  previously_observed=lambda: frozenset(),
                  recently_verified=lambda: frozenset(),
                  previous_verification=lambda: {}):
@@ -106,6 +108,8 @@ class GoogleTrendsDiscoveryHandler:
                 or serp_gateway is not None and not callable(getattr(serp_gateway, "fetch_page", None))
                 or type(force_refresh) is not bool
                 or (ensure_paid_budget is not None and not callable(ensure_paid_budget))
+                or (remaining_paid_attempts is not None
+                    and not callable(remaining_paid_attempts))
                 or not callable(previously_observed) or not callable(recently_verified)
                 or not callable(previous_verification)):
             raise ValueError("validated Trends gateways and bounded server policy required")
@@ -117,6 +121,7 @@ class GoogleTrendsDiscoveryHandler:
         self.resolve_cache_grant = resolve_cache_grant
         self.force_refresh = force_refresh
         self.ensure_paid_budget = ensure_paid_budget
+        self.remaining_paid_attempts = remaining_paid_attempts
         self.previously_observed = previously_observed
         self.recently_verified = recently_verified
         self.previous_verification = previous_verification
@@ -138,32 +143,52 @@ class GoogleTrendsDiscoveryHandler:
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:
             raise ValueError("Google Trends handler received a different source")
+        progress = ((context.resume_snapshot or {}).get("progress")
+                    if isinstance(context.resume_snapshot, dict) else None)
+        saved = progress.get("google_trends_receipt") if isinstance(progress, dict) else None
+        has_saved_result = isinstance(saved, dict) and isinstance(saved.get("result"), dict)
         cache_scope, cache_grant = (None, None)
-        if self.cache is not None:
+        cached_result = None
+        if self.cache is not None and not has_saved_result:
             try:
                 cache_scope, cache_grant = self._cache_scope(context)
                 if cache_scope is not None:
                     cached = self.cache.get(cache_scope, grant=cache_grant, now=self.utcnow())
-                    if cached.get("status") == "CACHED":
+                    if cached.get("status") in {"CACHED", "STALE"}:
                         payload = cached.get("payload")
                         if (isinstance(payload, dict)
                                 and payload.get("data_mode") == self.trends_gateway.data_mode):
-                            return {**payload, "delivery_state": "CACHED"}
+                            # A cached discovery batch can still supply validated
+                            # candidates to the separately approved SERP planner.
+                            # Preserve its original timestamps and never refresh
+                            # cache age merely because verification was requested.
+                            cached_result = {
+                                **payload,
+                                "delivery_state": "CACHED",
+                                "shared_cache_state": cached.get("status"),
+                                "shared_cache_fetched_at": cached.get("fetched_at"),
+                                "records": [
+                                    ({**record, "delivery_state": "CACHED"}
+                                     if isinstance(record, dict) else record)
+                                    for record in payload.get("records", [])
+                                ],
+                            }
             except Exception:
                 # Cache failure does not authorize data substitution or a stale
                 # result. Proceed with the one explicitly admitted source request.
-                cache_scope, cache_grant = None, None
+                cache_scope, cache_grant, cached_result = None, None, None
 
-        progress = ((context.resume_snapshot or {}).get("progress")
-                    if isinstance(context.resume_snapshot, dict) else None)
-        saved = progress.get("google_trends_receipt") if isinstance(progress, dict) else None
         result = None
         account_quota = None
-        if isinstance(saved, dict) and isinstance(saved.get("result"), dict):
+        resumed_receipt = False
+        if has_saved_result:
             result = saved["result"]
             if (result.get("data_mode") != self.trends_gateway.data_mode
                     or not isinstance(result.get("records"), list)):
                 raise ValueError("saved Google Trends result is invalid")
+            resumed_receipt = True
+        elif cached_result is not None:
+            result = cached_result
         else:
             request = GoogleTrendsRequest(
                 source_id=GOOGLE_SOURCE_ID,
@@ -237,6 +262,15 @@ class GoogleTrendsDiscoveryHandler:
         records = [dict(item) for item in result["records"]]
         coverage = dict(result.get("coverage", {}))
         quality_flags = list(result.get("quality_flags", []))
+        if cached_result is not None:
+            coverage["shared_cache_state"] = cached_result.get("shared_cache_state")
+            coverage["shared_cache_fetched_at"] = cached_result.get("shared_cache_fetched_at")
+            if cached_result.get("shared_cache_state") == "STALE":
+                quality_flags.append("STALE_SHARED_CACHE_REUSED")
+                for record in records:
+                    record["quality_flags"] = sorted(set(
+                        [*record.get("quality_flags", []), "STALE_SHARED_CACHE_REUSED"]
+                    ))
         try:
             saved_verification = self.previous_verification()
         except Exception:
@@ -256,15 +290,46 @@ class GoogleTrendsDiscoveryHandler:
                 record["serp_verification"] = {"status": "NOT_CONFIGURED", "results": []}
         verification_attempted = 0
         verification_failed = 0
+        admission_blocked = 0
+        if resumed_receipt:
+            # A worker may resume after an uncertain provider response. Keep the
+            # completed candidate attempts and do not select them again.
+            verification_attempted = sum(
+                1 for item in records
+                if isinstance(item.get("serp_verification"), dict)
+                and item["serp_verification"].get("status") in {"VERIFIED", "FAILED"}
+            )
+            verification_failed = sum(
+                1 for item in records
+                if isinstance(item.get("serp_verification"), dict)
+                and item["serp_verification"].get("status") == "FAILED"
+            )
         if self.serp_gateway is not None:
             try:
                 old = self.previously_observed()
                 recent = self.recently_verified()
+                attempted = frozenset(
+                    item.get("canonical_keyword_identity") for item in records
+                    if isinstance(item.get("serp_verification"), dict)
+                    and item["serp_verification"].get("status") in {"VERIFIED", "FAILED"}
+                    and isinstance(item.get("canonical_keyword_identity"), str)
+                )
+                recent = recent if isinstance(recent, frozenset) else frozenset()
+                query_limit = max(0, MAX_VERIFICATION_QUERIES - verification_attempted)
+                if self.remaining_paid_attempts is not None:
+                    try:
+                        remaining = self.remaining_paid_attempts()
+                        if type(remaining) is not int or remaining < 0:
+                            raise ValueError("invalid local quota remainder")
+                        query_limit = min(query_limit, remaining)
+                    except Exception:
+                        query_limit = 0
+                        quality_flags.append("SERP_LOCAL_QUOTA_UNAVAILABLE")
                 selected = select_verification_candidates(
                     tuple(records),
                     previously_observed=old if isinstance(old, frozenset) else frozenset(),
-                    recently_verified=recent if isinstance(recent, frozenset) else frozenset(),
-                    limit=MAX_VERIFICATION_QUERIES,
+                    recently_verified=recent | attempted,
+                    limit=query_limit,
                 )
             except Exception:
                 selected = ()
@@ -278,10 +343,10 @@ class GoogleTrendsDiscoveryHandler:
                 attempt_id = hashlib.sha256(
                     f"{context.job_id}:serp:{serp_context.query_fingerprint}".encode()
                 ).hexdigest()
-                verification_attempted += 1
                 try:
                     account_quota = (await self.ensure_paid_budget()
                                      if self.ensure_paid_budget is not None else account_quota)
+                    verification_attempted += 1
                     gateway_page = await self.serp_gateway.fetch_page(
                         context=serp_context, cursor=initial_offset(serp_context),
                         job_id=context.job_id, owner=context.owner, fence=context.fence,
@@ -292,6 +357,14 @@ class GoogleTrendsDiscoveryHandler:
                         data_mode=gateway_page.data_mode,
                     )
                 except (GatewayError, SerpApiError) as error:
+                    verification_failed += 1
+                    verification = {"status": "FAILED", "verification_mode": "GOOGLE_SERP",
+                                    "plan_id": single.plan_id, "plan_version": single.version,
+                                    "query": serp_context.canonical_query,
+                                    "error_code": _safe_error_code(error), "results": [],
+                                    "limits": ["MAX_TWO_QUERIES_PER_BATCH", "ONE_PAGE_PER_QUERY"]}
+                except AdmissionDenied as error:
+                    admission_blocked += 1
                     verification_failed += 1
                     verification = {"status": "FAILED", "verification_mode": "GOOGLE_SERP",
                                     "plan_id": single.plan_id, "plan_version": single.version,
@@ -319,6 +392,7 @@ class GoogleTrendsDiscoveryHandler:
             "serp_verification_attempted": verification_attempted,
             "serp_verified_candidate_count": verified_count,
             "serp_verification_failed_count": verification_failed,
+            "serp_admission_blocked_count": admission_blocked,
             "serp_max_queries_per_batch": MAX_VERIFICATION_QUERIES,
             "serp_pages_per_query": 1,
         })
@@ -344,7 +418,8 @@ class GoogleTrendsDiscoveryHandler:
             "records": accepted, "record_count": len(accepted),
             "coverage": coverage, "quality_flags": sorted(set(quality_flags)),
         }
-        if cache_scope is not None and cache_grant is not None and cache_grant.allowed:
+        if (cached_result is None and cache_scope is not None and cache_grant is not None
+                and cache_grant.allowed):
             try:
                 self.cache.put(cache_scope, grant=cache_grant, origin=output["data_mode"], payload=output,
                                fetched_at=self.utcnow(), now=self.utcnow())
