@@ -15,8 +15,9 @@ export function extractRunSourceCoverage(item) {
   const sources = manifests.map(source => {
     const coverage = source?.coverage && typeof source.coverage === 'object'
       ? source.coverage : {};
+    const sourceId = typeof source?.source_id === 'string' ? source.source_id : '';
     return {
-      sourceId: typeof source?.source_id === 'string' ? source.source_id : '',
+      sourceId,
       status: typeof source?.status === 'string' ? source.status : 'UNKNOWN',
       providerReturnedRecords: firstCount(
         coverage.provider_returned_records,
@@ -34,6 +35,21 @@ export function extractRunSourceCoverage(item) {
         coverage.explicitly_omitted_records,
         coverage.records_omitted_storage_limit,
       ),
+      googleDiscoveryMode: sourceId === 'google_web_serp'
+        && ['SERPAPI_TRENDING_NOW', 'RSS_LIMITED_DISCOVERY'].includes(coverage.discovery_mode)
+        ? coverage.discovery_mode : null,
+      googleCandidateCount: sourceId === 'google_web_serp'
+        ? count(coverage.trending_candidate_count) : null,
+      googleDistinctKeywordCount: sourceId === 'google_web_serp'
+        ? count(coverage.distinct_keyword_count) : null,
+      googleVerifiedCount: sourceId === 'google_web_serp'
+        ? count(coverage.serp_verified_candidate_count) : null,
+      googleProviderDataAt: sourceId === 'google_web_serp'
+        && typeof coverage.provider_data_at === 'string' ? coverage.provider_data_at : null,
+      googleFetchedAt: sourceId === 'google_web_serp'
+        && typeof coverage.fetched_at === 'string' ? coverage.fetched_at : null,
+      deliveryState: ['FRESH', 'CACHED'].includes(source?.delivery_state)
+        ? source.delivery_state : null,
     };
   });
 

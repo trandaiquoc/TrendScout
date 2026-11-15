@@ -13,6 +13,11 @@ import httpx
 from test_d5_public_admission import NOW, coordinator, policy
 
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.sources.google_trends.trending_now import (
+    TRENDING_NOW_ENGINE,
+    GoogleTrendsRequest,
+    build_trending_now_params,
+)
 from app.sources.live_gateway import (
     GatewayError,
     LivePageGateway,
@@ -120,7 +125,67 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
             # No fetch is made. This checks construction only, not live verification.
             self.assertEqual(gateway.data_mode, "LIVE")
             context, cursor = self.context(GOOGLE_SOURCE_ID)
-            self.assertEqual(gateway._params(context, cursor, 50)["no_cache"], "true")
+            params = gateway._params(context, cursor, 50)
+            self.assertNotIn("no_cache", params)
+            trend_request = GoogleTrendsRequest(
+                GOOGLE_SOURCE_ID, self.control.policy.plan_fingerprint
+            )
+            self.assertNotIn("no_cache", gateway._params(trend_request, None, 50))
+            forced = replace(trend_request, force_refresh=True)
+            self.assertEqual(gateway._params(forced, None, 50)["no_cache"], "true")
+        finally:
+            await gateway.aclose()
+
+    async def test_trending_now_uses_dedicated_parser_and_fixed_request(self):
+        seen = []
+        payload = {
+            "search_metadata": {"status": "Success", "created_at": "2026-11-15T11:55:00Z",
+                                "processed_at": "2026-11-15T11:55:02Z"},
+            "search_parameters": {"engine": TRENDING_NOW_ENGINE, "geo": "US",
+                                  "hl": "en", "hours": 24},
+            "trending_searches": [{
+                "query": "Portable picnic blanket", "start_timestamp": 1_794_739_200,
+                "end_timestamp": None, "active": True, "search_volume": 200000,
+                "search_volume_display": "200K+", "increase_percentage": 1100,
+                "categories": [{"id": 185, "name": "Home & Garden"}],
+                "trend_breakdown": ["portable picnic blanket", "folding picnic mat"],
+            }],
+        }
+
+        def handle(request):
+            seen.append(request)
+            return httpx.Response(200, json=payload)
+
+        gateway = self.gateway(GOOGLE_SOURCE_ID, handle)
+        request = GoogleTrendsRequest(
+            GOOGLE_SOURCE_ID, self.control.policy.plan_fingerprint
+        )
+        result = await gateway.fetch_page(
+            context=request, cursor=None, job_id=self.job, owner="worker", fence=self.fence,
+            attempt_id="trending-now-attempt-0001", timeout_seconds=1,
+        )
+        self.assertEqual(result.data_mode, "SYNTHETIC")
+        self.assertEqual(result.page.records[0]["query"], "Portable picnic blanket")
+        self.assertEqual(result.page.records[0]["search_volume_semantics"],
+                         "PROVIDER_REPORTED_APPROXIMATE_BUCKET")
+        self.assertEqual(seen[0].url.params["engine"], TRENDING_NOW_ENGINE)
+        self.assertEqual({name: seen[0].url.params[name] for name in ("geo", "hl", "hours")},
+                         {"geo": "US", "hl": "en", "hours": "24"})
+        self.assertNotIn("no_cache", seen[0].url.params)
+
+    async def test_trending_now_force_refresh_is_the_only_no_cache_path(self):
+        request = GoogleTrendsRequest(
+            GOOGLE_SOURCE_ID, self.control.policy.plan_fingerprint, force_refresh=True
+        )
+        self.assertEqual(build_trending_now_params(request), {
+            "engine": TRENDING_NOW_ENGINE, "geo": "US", "hl": "en",
+            "hours": 24, "output": "json",
+        })
+        gateway = await LivePageGateway.controlled_network(
+            GOOGLE_SOURCE_ID, Credentials(), Approvals(GOOGLE_SOURCE_ID), self.runner,
+            clock=lambda: NOW)
+        try:
+            self.assertEqual(gateway._params(request, None, 50)["no_cache"], "true")
         finally:
             await gateway.aclose()
 

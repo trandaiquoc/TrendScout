@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
-_MAX_BLOB_BYTES = 4_000_000
+_MAX_BLOB_BYTES = 3_500_000
 _MAX_STORED_BYTES = 128 * 1024 * 1024
 _MAX_BLOBS = 256
 
@@ -50,7 +50,7 @@ class LocalSQLiteSnapshotBlobs:
 
     def put(self, records, *, now, retain_until):
         now, retain_until = _utc(now), _utc(retain_until)
-        if not isinstance(records, list) or len(records) > 2000 or retain_until <= now:
+        if not isinstance(records, list) or len(records) > 5000 or retain_until <= now:
             raise ValueError("bounded records and a future retention deadline are required")
         try:
             raw = json.dumps(records, ensure_ascii=False, allow_nan=False,
@@ -107,7 +107,7 @@ class LocalSQLiteSnapshotBlobs:
                 or type(reference.get("raw_bytes")) is not int
                 or not 0 <= reference["raw_bytes"] <= _MAX_BLOB_BYTES
                 or type(reference.get("item_count")) is not int
-                or not 0 <= reference["item_count"] <= 2000):
+                or not 0 <= reference["item_count"] <= 5000):
             raise ValueError("invalid snapshot blob reference")
         connection = sqlite3.connect(
             self.store.path, timeout=self.store.timeout_seconds, isolation_level=None

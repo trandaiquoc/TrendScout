@@ -132,9 +132,14 @@ class CollectionService:
                     skipped += 1
                     identifier = keyword_identity(raw, source_id)
                     if identifier:
-                        from app.sources.wikimedia.cleaning_rules import collection_technical_reason
-                        title = raw.get("article_display") or raw.get("canonical_keyword") or raw.get("article_original")
-                        reason = collection_technical_reason(raw.get("project", ""), title) or "INVALID_WIKIMEDIA_RECORD"
+                        if source_id == "google_web_serp":
+                            reason = "INVALID_GOOGLE_TRENDS_RECORD"
+                        else:
+                            from app.sources.wikimedia.cleaning_rules import (
+                                collection_technical_reason,
+                            )
+                            title = raw.get("article_display") or raw.get("canonical_keyword") or raw.get("article_original")
+                            reason = collection_technical_reason(raw.get("project", ""), title) or "INVALID_WIKIMEDIA_RECORD"
                         rejected.append((identifier, reason))
                 else:
                     records.append(record)
@@ -525,7 +530,8 @@ class CollectionService:
             elif source_flags:
                 flags.append(str(source_flags))
             manifests.append({key: source.get(key) for key in (
-                "source_id", "status", "data_mode", "record_count", "coverage", "quality_flags",
+                  "source_id", "status", "data_mode", "delivery_state", "record_count",
+                  "coverage", "quality_flags",
                 "error_code", "retry_after_seconds") if source.get(key) is not None})
         if skipped:
             flags.append("CLEANING_REJECTIONS")

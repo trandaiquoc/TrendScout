@@ -85,6 +85,7 @@ class D5SourceHandlers:
     def __init__(self, *, query_collectors: Mapping[str, GuardedQueryCollector],
                  wikimedia: WikimediaTopPageGateway, plan: QueryPlan,
                  limits: CollectionLimits,
+                 google_trends_handler: Callable | None = None,
                  observation_date: Callable[[], date] | None = None,
                  shared_cache: SharedCache | None = None,
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
@@ -100,6 +101,10 @@ class D5SourceHandlers:
                        for source, value in query_collectors.items())
                 or (wikimedia is None and unavailable_mode is None)
                 or (wikimedia is not None and not isinstance(wikimedia, WikimediaTopPageGateway))
+                or (google_trends_handler is not None and (
+                    not callable(google_trends_handler)
+                    or not callable(getattr(google_trends_handler, "__call_mode__", None))
+                ))
                 or not isinstance(plan, QueryPlan) or not isinstance(limits, CollectionLimits)
                 or (observation_date is not None and not callable(observation_date))
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
@@ -112,6 +117,7 @@ class D5SourceHandlers:
             raise ValueError("fixed four-source collectors, plan and limits required")
         self.query_collectors = dict(query_collectors)
         self.wikimedia = wikimedia
+        self.google_trends_handler = google_trends_handler
         self.plan = plan
         self.limits = limits
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
@@ -123,8 +129,17 @@ class D5SourceHandlers:
         self.utcnow = utcnow
 
     def build(self) -> dict[str, Callable[[SourceWorkContext], object]]:
-        handlers = {source: (self._query_handler(source) if self.query_collectors[source] is not None
-                             else self._unavailable_handler()) for source in sorted(_QUERY_SOURCES)}
+        handlers = {}
+        for source in sorted(_QUERY_SOURCES):
+            if source == GOOGLE_SOURCE_ID and self.google_trends_handler is not None:
+                async def collect_google(context, handler=self.google_trends_handler):
+                    return await handler(context)
+                mode = self.google_trends_handler.__call_mode__()
+                setattr(collect_google, "__trendscout_data_mode__", mode)
+                handlers[source] = collect_google
+            else:
+                handlers[source] = (self._query_handler(source)
+                    if self.query_collectors[source] is not None else self._unavailable_handler())
         async def collect_wikimedia(context):
             observation_date = self.observation_date()
             history_days = context.request_metadata.get("history_days")

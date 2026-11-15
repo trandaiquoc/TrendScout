@@ -76,10 +76,17 @@ class AdmissionPolicy:
     enabled: bool = False
 
     def __post_init__(self):
+        required_pools = ({SOURCE_POOLS[source] for source in self.enabled_sources
+                           if source in SOURCE_POOLS}
+                          if isinstance(self.enabled_sources, frozenset) else set())
+        extra_pools = set(self.pools) - required_pools
         if (type(self.enabled) is not bool or not isinstance(self.enabled_sources, frozenset)
                 or not self.enabled_sources or not self.enabled_sources <= SOURCE_POOLS.keys()
                 or not re.fullmatch(r"[a-f0-9]{64}", self.plan_fingerprint)
-                or set(self.pools) != {SOURCE_POOLS[source] for source in self.enabled_sources}
+                or not required_pools <= set(self.pools)
+                or extra_pools and not (
+                    extra_pools == {"google_rss"} and GOOGLE_SOURCE_ID in self.enabled_sources
+                )
                 or any(not isinstance(value, PoolLimit) for value in self.pools.values())):
             raise ValueError("invalid server-controlled admission policy")
         for value, lower, upper in ((self.max_starts_per_window, 1, 1000),
@@ -139,10 +146,18 @@ class PublicAdmission:
             return state, fn(state)
         return self.store.transact(self.state_key, mutate)
 
-    def max_attempt_seconds(self, source_id: str) -> int:
+    def _pool_name(self, source_id: str, pool_name: str | None = None) -> str:
         if source_id not in self.policy.enabled_sources:
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
-        return self._pools[SOURCE_POOLS[source_id]].attempt_timeout_seconds
+        selected = SOURCE_POOLS[source_id] if pool_name is None else pool_name
+        if (selected not in self._pools
+                or selected != SOURCE_POOLS[source_id]
+                and not (source_id == GOOGLE_SOURCE_ID and selected == "google_rss")):
+            raise AdmissionDenied("SOURCE_POOL_NOT_ENABLED")
+        return selected
+
+    def max_attempt_seconds(self, source_id: str, pool_name: str | None = None) -> int:
+        return self._pools[self._pool_name(source_id, pool_name)].attempt_timeout_seconds
 
     def operationally_enabled(self) -> bool:
         """Read the server-owned kill switch for public capability reporting."""
@@ -156,6 +171,52 @@ class PublicAdmission:
                 return state, False
             return state, state.get("operational_enabled") is True
         return self.store.transact(self.state_key, operation)
+
+    def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:
+        """Return bounded local reservation counts for one configured pool."""
+        now = _utc(now)
+        if not isinstance(pool_name, str) or pool_name not in self._pools:
+            raise ValueError("configured quota pool required")
+        limit = self._pools[pool_name]
+        day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
+
+        def result(daily, monthly):
+            return {
+                "daily": {
+                    "limit": limit.daily_requests,
+                    "used": daily["requests"],
+                    "remaining": max(0, limit.daily_requests - daily["requests"]),
+                },
+                "monthly": {
+                    "limit": limit.monthly_requests,
+                    "used": monthly["requests"],
+                    "remaining": max(0, limit.monthly_requests - monthly["requests"]),
+                },
+            }
+
+        def read(state):
+            if not state:
+                zero = {"requests": 0, "cost": 0}
+                return state, result(zero, zero)
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest
+                    or not isinstance(state.get("quota"), dict)):
+                raise AdmissionDenied("STATE_INVALID")
+
+            def usage(key):
+                value = state["quota"].get(key, {"requests": 0, "cost": 0})
+                if (not isinstance(value, dict)
+                        or type(value.get("requests")) is not int
+                        or type(value.get("cost")) is not int
+                        or value["requests"] < 0 or value["cost"] < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                return value
+
+            daily = usage(f"{pool_name}:day:{day}")
+            monthly = usage(f"{pool_name}:month:{month}")
+            return state, result(daily, monthly)
+
+        return self.store.transact(self.state_key, read)
 
     def transact_owned(self, job_id: str, owner: str, fence: int, *, now: datetime, operation):
         """Run an internal pure mutation only while the current job lease is held."""
@@ -285,16 +346,22 @@ class PublicAdmission:
 
         return self.store.transact(self.state_key, operation)
 
-    @staticmethod
-    def _request_metadata(value):
+    def _request_metadata(self, value):
         if value is None:
             return {}
-        if (not isinstance(value, dict) or set(value) != {"kind", "history_days"}
-                or value.get("kind") != "WIKIMEDIA_HISTORY"
-                or type(value.get("history_days")) is not int
-                or not 1 <= value["history_days"] <= 2):
+        if (isinstance(value, dict) and set(value) == {"kind", "history_days"}
+                and value.get("kind") == "WIKIMEDIA_HISTORY"
+                and type(value.get("history_days")) is int
+                and 1 <= value["history_days"] <= 2):
+            return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
+        if (not isinstance(value, dict) or set(value) != {"sources"}
+                or not isinstance(value.get("sources"), list)
+                or not 1 <= len(value["sources"]) <= len(SOURCE_POOLS)
+                or any(not isinstance(source, str) for source in value["sources"])
+                or len(value["sources"]) != len(set(value["sources"]))
+                or not set(value["sources"]) <= self.policy.enabled_sources):
             raise ValueError("invalid bounded Fetch request metadata")
-        return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
+        return {"sources": sorted(value["sources"])}
 
     def admit(self, idempotency_key: str, *, now: datetime, request_metadata=None) -> dict:
         now = _utc(now)
@@ -474,13 +541,13 @@ class PublicAdmission:
             raise AdmissionDenied("LEASE_LOST")
 
     def reserve_attempt(self, job_id: str, owner: str, fence: int, *, source_id: str,
-                        attempt_id: str, now: datetime) -> str:
+                        attempt_id: str, now: datetime, pool_name: str | None = None) -> str:
         """NEW permits exactly one outbound attempt. REPLAY never permits a resend."""
         now = _utc(now)
         if (source_id not in self.policy.enabled_sources or not isinstance(attempt_id, str)
                 or not _KEY.fullmatch(attempt_id)):
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
-        pool = SOURCE_POOLS[source_id]
+        pool = self._pool_name(source_id, pool_name)
         limit = self._pools[pool]
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
 
@@ -490,7 +557,7 @@ class PublicAdmission:
             self._require_lease(job, owner, fence, now)
             existing = job["receipts"].get(receipt_id)
             if existing:
-                if existing["source_id"] != source_id:
+                if existing["source_id"] != source_id or existing.get("pool") != pool:
                     raise AdmissionDenied("ATTEMPT_ID_CONFLICT")
                 return "REPLAY"
             if len(job["receipts"]) >= self.policy.max_records:
@@ -565,19 +632,21 @@ class PublicAdmission:
         return self._transaction(op)
 
     def check_attempt(self, job_id: str, owner: str, fence: int, *, attempt_id: str,
-                      source_id: str, now: datetime) -> datetime:
+                      source_id: str, now: datetime, pool_name: str | None = None) -> datetime:
         """Recheck the switch, lease and reservation immediately before outbound I/O."""
         now = _utc(now)
         if not isinstance(attempt_id, str) or not _KEY.fullmatch(attempt_id):
             raise ValueError("invalid attempt identity")
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
+        pool = self._pool_name(source_id, pool_name)
         def op(state):
             self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             receipt = job["receipts"].get(receipt_id)
             slot = state["inflight"].get(f"{job_id}:{receipt_id}")
-            if (not receipt or receipt["source_id"] != source_id or not slot
+            if (not receipt or receipt["source_id"] != source_id
+                    or receipt.get("pool") != pool or not slot or slot.get("pool") != pool
                     or _parse(slot["expires_at"]) <= now):
                 raise AdmissionDenied("ATTEMPT_NOT_ACTIVE")
             return min(_parse(slot["expires_at"]), _parse(job["lease_until"]),

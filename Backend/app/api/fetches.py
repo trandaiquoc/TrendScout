@@ -168,12 +168,23 @@ async def create_fetch(
         raise HTTPException(400, {"code": "IDEMPOTENCY_KEY_REQUIRED"})
     if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
         raise HTTPException(400, {"code": "INVALID_IDEMPOTENCY_KEY"})
-    await _read_small_json_object(request)
+    body = await _read_small_json_object(request, allowed_fields={"sources"})
+    selected_sources = body.get("sources")
+    if selected_sources is not None and (
+        not isinstance(selected_sources, list)
+        or not selected_sources
+        or any(not isinstance(source, str) for source in selected_sources)
+        or len(selected_sources) != len(set(selected_sources))
+    ):
+        raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
 
     distributed = request.app.state.distributed_public_fetch
     if distributed is not None:
+        if (selected_sources is not None
+                and not set(selected_sources) <= distributed.admission.policy.enabled_sources):
+            raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
         try:
-            accepted = distributed.submit(idempotency_key)
+            accepted = distributed.submit(idempotency_key, source_ids=selected_sources)
         except AdmissionDenied as exc:
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
@@ -191,10 +202,13 @@ async def create_fetch(
             "fetch_id": fetch_id,
             "status": accepted["status"],
             "data_mode": distributed.data_mode,
-            "sources": sorted(distributed.admission.policy.enabled_sources),
+            "sources": (sorted(selected_sources) if selected_sources is not None else
+                        sorted(distributed.admission.policy.enabled_sources)),
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",
         }
+    if selected_sources is not None:
+        raise HTTPException(409, {"code": "SOURCE_SELECTION_UNAVAILABLE"})
 
     run_service = request.app.state.run_service
     if run_service is None:

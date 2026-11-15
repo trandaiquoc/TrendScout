@@ -12,19 +12,21 @@ from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
 
 class DistributedPublicFetch:
     def __init__(self, admission: PublicAdmission, worker: DistributedFetchWorker, *,
                  resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
-                 local_live=False, normal_wikimedia_live=False,
+                 local_live=False, normal_wikimedia_live=False, normal_google_live=False,
                  resolve_processing_grants=None, provider_retry_after_seconds=None):
         if (not isinstance(admission, PublicAdmission)
                 or not isinstance(worker, DistributedFetchWorker)
                 or worker.admission.policy_digest != admission.policy_digest
                 or not callable(resolve_grant) or not callable(utcnow)
                 or type(local_live) is not bool or type(normal_wikimedia_live) is not bool
-                or local_live and normal_wikimedia_live
+                or type(normal_google_live) is not bool
+                or sum((local_live, normal_wikimedia_live, normal_google_live)) > 1
                 or (provider_retry_after_seconds is not None
                     and not callable(provider_retry_after_seconds))):
             raise ValueError("matching admission, worker and grant resolver required")
@@ -34,6 +36,7 @@ class DistributedPublicFetch:
         self.utcnow = utcnow
         self.local_live = local_live
         self.normal_wikimedia_live = normal_wikimedia_live
+        self.normal_google_live = normal_google_live
         # Results larger than the inline checkpoint budget are stored by the
         # worker's journal in its durable snapshot blob store. Reads must use
         # that same journal so terminal status can restore the full result.
@@ -51,6 +54,32 @@ class DistributedPublicFetch:
                     or admission.policy.enabled_sources != frozenset({WIKIMEDIA_SOURCE_ID})
                     or not callable(resolve_processing_grants)):
                 raise ValueError("normal Wikimedia LIVE requires its separate local policy and state")
+            self.data_mode = "LIVE"
+        elif normal_google_live:
+            from app.normal_wikimedia_live_policy import normal_google_live_policy
+            from app.sources.catalog import GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            pools = admission.policy.pools
+            try:
+                expected = normal_google_live_policy(
+                    serpapi_daily_budget=pools["serpapi"].daily_requests,
+                    serpapi_monthly_budget=pools["serpapi"].monthly_requests,
+                    rss_daily_budget=pools["google_rss"].daily_requests,
+                    rss_monthly_budget=pools["google_rss"].monthly_requests,
+                    batches_per_hour=admission.policy.max_starts_per_window,
+                )
+            except (KeyError, TypeError, ValueError):
+                expected = None
+            if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
+                    or worker.admission is not admission
+                    or type(admission.store) is not LocalSQLiteAtomicStateStore
+                    or admission.store.data_mode != "LIVE"
+                    or admission.policy != expected
+                    or admission.policy.enabled_sources != frozenset(
+                        {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+                    )
+                    or not callable(resolve_processing_grants)):
+                raise ValueError("normal Google LIVE requires its separate local policy and state")
             self.data_mode = "LIVE"
         elif local_live:
             from app.local_smoke_policy import local_smoke_policy
@@ -74,11 +103,15 @@ class DistributedPublicFetch:
         self.resolve_processing_grants = resolve_processing_grants
         self.provider_retry_after_seconds = provider_retry_after_seconds
 
-    def submit(self, idempotency_key: str, *, history_days: int | None = None) -> dict:
+    def submit(self, idempotency_key: str, *, history_days: int | None = None,
+               source_ids: list[str] | None = None) -> dict:
         if history_days is not None:
-            if not self.normal_wikimedia_live or type(history_days) is not int or not 1 <= history_days <= 2:
+            if (source_ids is not None or not self.normal_wikimedia_live
+                    or type(history_days) is not int or not 1 <= history_days <= 2):
                 raise AdmissionDenied("HISTORICAL_FETCH_UNAVAILABLE")
             request_metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": history_days}
+        elif source_ids is not None:
+            request_metadata = {"sources": source_ids}
         else:
             request_metadata = None
         if self.provider_retry_after_seconds is not None:
@@ -104,7 +137,11 @@ class DistributedPublicFetch:
         modes = set()
         terminal = job["state"] in {"COMPLETED", "PARTIAL"}
         if terminal:
-            for source_id in sorted(self.admission.policy.enabled_sources):
+            request_metadata = job.get("request_metadata", {})
+            selected_sources = ([WIKIMEDIA_SOURCE_ID]
+                if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
+                else request_metadata.get("sources", sorted(self.admission.policy.enabled_sources)))
+            for source_id in sorted(selected_sources):
                 try:
                     grant = self.resolve_grant(source_id, now)
                 except Exception:
@@ -164,12 +201,20 @@ class DistributedPublicFetch:
             "status": job["state"],
             "stage": job["state"],
             "request_kind": job.get("request_metadata", {}).get("kind", "LATEST"),
+            "selected_sources": ([WIKIMEDIA_SOURCE_ID]
+                if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY"
+                else job.get("request_metadata", {}).get(
+                    "sources", sorted(self.admission.policy.enabled_sources))),
             **({"history_days": job["request_metadata"]["history_days"]}
                if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY" else {}),
             "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else None,
             "sources": visible_sources if terminal else [
                 {"source_id": source_id, "status": job["state"]}
-                for source_id in sorted(self.admission.policy.enabled_sources)
+                for source_id in sorted(
+                    [WIKIMEDIA_SOURCE_ID]
+                    if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY"
+                    else job.get("request_metadata", {}).get(
+                        "sources", self.admission.policy.enabled_sources))
             ],
             "discovery": discovery,
             "created_at": job["created_at"],

@@ -941,6 +941,68 @@ class CollectionStore:
 
 
 def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status="SUCCESS") -> dict | None:
+    if source == "google_web_serp" and record.get("data_source") == "GOOGLE_TRENDS":
+        from app.sources.google_trends.trending_now import normalize_keyword
+
+        try:
+            title, identity = normalize_keyword(record.get("canonical_keyword"))
+            fetched = record.get("fetched_at")
+            fetched_dt = datetime.fromisoformat(fetched.replace("Z", "+00:00"))
+            if fetched_dt.tzinfo is None or fetched_dt.utcoffset() is None:
+                return None
+            identity_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            if record.get("canonical_keyword_identity") != identity_digest:
+                return None
+            provider = record.get("provider_id")
+            if provider not in {
+                "serpapi_google_trends_trending_now", "google_trends_rss",
+            }:
+                return None
+            if data_mode not in {"LIVE", "SYNTHETIC"}:
+                return None
+            clusters = record.get("trend_clusters")
+            if not isinstance(clusters, list) or not clusters:
+                return None
+            if any(not isinstance(cluster, dict) for cluster in clusters):
+                return None
+            evidence_fields = (
+                "data_source", "discovery_mode", "provider_id", "transport_id",
+                "canonical_keyword_identity", "region", "language", "time_window_hours",
+                "provider_data_at", "provider_created_at", "fetched_at", "source_url",
+                "delivery_state", "trend_clusters", "serp_verification", "quality_flags",
+            )
+            evidence = {key: record.get(key) for key in evidence_fields}
+            encoded_evidence = json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                          allow_nan=False, separators=(",", ":"))
+            # RSS and Trending Now are discovery paths within one Google source.
+            # A provider switch must update the same keyword row, not inflate counts.
+            project = "google_trends:US:en"
+            stable = keyword_identity({**record, "project": project}, source)
+            if stable is None:
+                return None
+            started = [cluster.get("started_at") for cluster in clusters
+                       if isinstance(cluster.get("started_at"), str)]
+            observed = min(started) if started else fetched_dt.astimezone(timezone.utc).isoformat()
+            source_url = record.get("source_url")
+            if (not isinstance(source_url, str) or len(source_url) > 2048
+                    or not source_url.startswith("https://trends.google.com/")):
+                return None
+            return {
+                "id": stable, "keyword": title,
+                "normalized": identity,
+                "source": source, "project": project, "observed_at": observed,
+                "data_mode": data_mode,
+                "evidence": json.dumps({**json.loads(encoded_evidence),
+                    "snapshot_status": snapshot_status,
+                    "metric_definition": "Provider-reported approximate traffic bucket; not an exact search count",
+                    "increase_percentage_definition": "Provider-reported increase; no application baseline"},
+                    ensure_ascii=False, sort_keys=True, allow_nan=False),
+                "context": f"Google Trends discovery, US scope; {record.get('discovery_mode', 'UNKNOWN')} "
+                           "with no compatible historical baseline",
+            }
+        except (AttributeError, TypeError, ValueError, UnicodeError, OverflowError):
+            return None
+
     from app.sources.wikimedia.cleaning_rules import (
         COLLECTION_FILTER_VERSION,
         RULE_VERSION,
@@ -977,7 +1039,14 @@ def keyword_identity(record: dict, source: str) -> str | None:
     project = record.get("project", "")
     if not isinstance(title, str) or not isinstance(project, str):
         return None
-    normalized = " ".join(title.strip().casefold().split())
+    if source == "google_web_serp" and record.get("data_source") == "GOOGLE_TRENDS":
+        try:
+            from app.sources.google_trends.trending_now import normalize_keyword
+            _, normalized = normalize_keyword(title)
+        except (TypeError, ValueError):
+            return None
+    else:
+        normalized = " ".join(title.strip().casefold().split())
     if not normalized:
         return None
     return hashlib.sha256(f"{source}:{project}:{normalized}".encode()).hexdigest()

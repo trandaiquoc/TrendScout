@@ -1,0 +1,79 @@
+"""Typed, fail-closed settings for the local Google LIVE composition."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Mapping
+
+
+def _flag(environment: Mapping[str, str], name: str) -> bool:
+    raw = environment.get(name, "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(f"Invalid boolean setting: {name}")
+
+
+def _bounded_int(environment: Mapping[str, str], name: str, default: int,
+                  low: int, high: int) -> int:
+    try:
+        value = int(environment.get(name, str(default)))
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid integer setting: {name}") from None
+    if not low <= value <= high:
+        raise ValueError(f"Out-of-range integer setting: {name}")
+    return value
+
+
+@dataclass(frozen=True)
+class GoogleLiveSettings:
+    local_runtime_approved: bool = False
+    trends_approved: bool = False
+    rss_approved: bool = False
+    serp_approved: bool = False
+    account_api_approved: bool = False
+    serpapi_daily_budget: int = 6
+    serpapi_monthly_budget: int = 180
+    rss_daily_budget: int = 30
+    rss_monthly_budget: int = 900
+    batches_per_hour: int = 1
+    cross_machine_reserve: int = 6
+
+    @classmethod
+    def from_environment(cls, environ: Mapping[str, str] | None = None):
+        environment = os.environ if environ is None else environ
+        return cls(
+            local_runtime_approved=_flag(environment, "TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED"),
+            trends_approved=_flag(environment, "TREND_SCOUT_GOOGLE_TRENDS_APPROVED"),
+            rss_approved=_flag(environment, "TREND_SCOUT_GOOGLE_RSS_APPROVED"),
+            serp_approved=_flag(environment, "TREND_SCOUT_GOOGLE_SERP_APPROVED"),
+            account_api_approved=_flag(environment, "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED"),
+            serpapi_daily_budget=_bounded_int(
+                environment, "TREND_SCOUT_SERPAPI_DAILY_BUDGET", 6, 1, 6
+            ),
+            serpapi_monthly_budget=_bounded_int(
+                environment, "TREND_SCOUT_SERPAPI_MONTHLY_BUDGET", 180, 1, 180
+            ),
+            rss_daily_budget=_bounded_int(
+                environment, "TREND_SCOUT_GOOGLE_RSS_DAILY_BUDGET", 30, 1, 30
+            ),
+            rss_monthly_budget=_bounded_int(
+                environment, "TREND_SCOUT_GOOGLE_RSS_MONTHLY_BUDGET", 900, 1, 900
+            ),
+            batches_per_hour=_bounded_int(
+                environment, "TREND_SCOUT_GOOGLE_BATCHES_PER_HOUR", 1, 1, 2
+            ),
+            cross_machine_reserve=_bounded_int(
+                environment, "TREND_SCOUT_SERPAPI_CROSS_MACHINE_RESERVE", 6, 0, 1000
+            ),
+        )
+
+    @property
+    def paid_discovery_approved(self) -> bool:
+        return self.trends_approved and self.account_api_approved
+
+    @property
+    def paid_serp_approved(self) -> bool:
+        return self.serp_approved and self.account_api_approved

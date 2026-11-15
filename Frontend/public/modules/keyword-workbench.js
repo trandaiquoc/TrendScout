@@ -1,5 +1,5 @@
 import { getJson, requestJson } from './api.js';
-import { formatDate, formatNumber } from './format.js';
+import { formatDate, formatNumber, formatTimestamp } from './format.js';
 import { getLocale, t } from './i18n.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -28,6 +28,117 @@ function option(select, value, key, fallback = key) {
 }
 function safeEvidenceUrl(value) { try { const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&/^(?:[a-z0-9-]+\.)*(?:wikipedia|wikimedia|wiktionary|wikiquote|wikibooks|wikinews|wikisource|wikiversity|wikivoyage|wikidata|mediawiki|wikifunctions)\.org$/i.test(url.hostname)?url.href:null; } catch { return null; } }
 function sourceName(value) { const keys={wikimedia_pageviews_top_per_country:'source.name.wikimedia',youtube_video_search:'source.name.youtube',google_web_serp:'source.name.google',bing_web_serp:'source.name.bing'};return keys[value]?labels(keys[value],value):value||labels('common.unavailable','—'); }
+function safeGoogleTrendsUrl(value) { try { const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password&&url.hostname==='trends.google.com'?url.href:null; } catch { return null; } }
+function safeSerpResultUrl(value) { try { const url=new URL(value);const host=url.hostname.toLowerCase();return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&host.includes('.')&&!host.endsWith('.localhost')&&host!=='localhost'&&!/^\d+(?:\.\d+){3}$/.test(host)?url.href:null; } catch { return null; } }
+function googleTimestamp(value) { return value ? formatTimestamp(value, getLocale()) : labels('common.unavailable', 'â€”'); }
+function appendGoogleTrendDetails(inspector, evidence, detail) {
+  if (evidence.data_source !== 'GOOGLE_TRENDS') return;
+  const clusters = Array.isArray(evidence.trend_clusters) ? evidence.trend_clusters : [];
+  const panel = make('details', '', 'google-trend-evidence');
+  panel.open = true;
+  panel.append(make('summary', labels('workbench.google-details', 'Google Trends evidence')));
+  const addRows = (target, rows) => {
+    const grid = make('dl', '', 'workbench-detail-grid');
+    for (const [key, value] of rows) {
+      const item = make('div');
+      item.append(make('dt', labels(key, key)), make('dd', value ?? labels('common.unavailable', 'Unavailable')));
+      grid.append(item);
+    }
+    target.append(grid);
+  };
+  const modeKey = evidence.discovery_mode === 'RSS_LIMITED_DISCOVERY'
+    ? 'fetch.discovery.rss-limited' : 'fetch.discovery.trending-now';
+  addRows(panel, [
+    ['workbench.google-discovery', labels(modeKey, evidence.discovery_mode || 'Unknown')],
+    ['workbench.google-scope', labels('fetch.google-scope', 'US target, English')],
+    ['workbench.google-data-mode', detail.data_mode || labels('common.unavailable', 'Unavailable')],
+    ['workbench.google-window', Number.isInteger(evidence.time_window_hours)
+      ? formatted('workbench.google-hours', { hours: evidence.time_window_hours }, '{hours} hours')
+      : labels('workbench.google-window-unavailable', 'Not reported by this source')],
+    ['workbench.google-delivery', labels(`fetch.delivery.${evidence.delivery_state || 'UNKNOWN'}`, evidence.delivery_state || 'Unknown')],
+    ['workbench.google-source-time', googleTimestamp(evidence.provider_data_at || evidence.provider_created_at)],
+    ['workbench.google-fetched-at', googleTimestamp(evidence.fetched_at)],
+    ['workbench.google-cluster-count', number(clusters.length)],
+  ]);
+  const clusterList = make('div', '', 'google-trend-clusters');
+  const visibleClusters = clusters.slice(0, 20);
+  visibleClusters.forEach((cluster, index) => {
+    const section = make('section', '', 'google-trend-cluster');
+    section.append(make('h3', formatted('workbench.google-cluster-title', { index: number(index + 1) }, `Trend group ${index + 1}`)));
+    const categories = Array.isArray(cluster.categories)
+      ? cluster.categories.map((item) => typeof item?.name === 'string'
+        ? `${item.name}${Number.isInteger(item.id) ? ` (${item.id})` : ''}`
+        : labels('workbench.google-unknown-category', 'Unknown')).join(', ')
+      : labels('workbench.google-unknown-category', 'Unknown');
+    const related = Array.isArray(cluster.related_queries)
+      ? (cluster.related_queries.map((item) => typeof item === 'string' ? item : item?.query)
+        .filter((item) => typeof item === 'string' && item).join(', ')
+        || labels('workbench.google-no-related', 'None reported'))
+      : labels('common.unavailable', 'Unavailable');
+    const bucket = typeof cluster.search_volume_display === 'string'
+      ? cluster.search_volume_display
+      : Number.isFinite(cluster.search_volume) ? number(cluster.search_volume) : labels('common.unavailable', 'Unavailable');
+    const increase = Number.isFinite(cluster.increase_percentage)
+      ? `${number(cluster.increase_percentage)}%` : labels('common.unavailable', 'Unavailable');
+    const active = cluster.active === true ? labels('workbench.google-active', 'Active')
+      : cluster.active === false ? labels('workbench.google-ended', 'Ended')
+        : labels('common.unavailable', 'Unavailable');
+    addRows(section, [
+      ['workbench.google-traffic-bucket', formatted('workbench.google-bucket', { bucket }, '{bucket} (approximate provider bucket)')],
+      ['workbench.google-increase', increase],
+      ['workbench.google-active-status', active],
+      ['workbench.google-categories', categories],
+      ['workbench.google-related-queries', related],
+      ['workbench.google-observed-from', googleTimestamp(cluster.started_at)],
+      ['workbench.google-observed-to', googleTimestamp(cluster.ended_at)],
+    ]);
+    clusterList.append(section);
+  });
+  if (clusters.length > visibleClusters.length) {
+    clusterList.append(make('p', formatted('workbench.google-cluster-limit', {
+      shown: number(visibleClusters.length), total: number(clusters.length),
+    }, 'Showing {shown} of {total} groups; all groups remain in source evidence.'), 'fine-print'));
+  }
+  panel.append(clusterList);
+  const verification = evidence.serp_verification;
+  if (verification && typeof verification === 'object') {
+    const results = Array.isArray(verification.results) ? verification.results : [];
+    const verificationPanel = make('section', '', 'google-serp-verification');
+    verificationPanel.append(make('h3', labels('workbench.google-serp-title', 'Google Search verification')));
+    addRows(verificationPanel, [
+      ['workbench.google-serp-status', labels(`workbench.google-serp-status.${verification.status || 'UNKNOWN'}`, verification.status || 'Unknown')],
+      ['workbench.google-serp-query', verification.query || labels('common.unavailable', 'Unavailable')],
+      ['workbench.google-serp-result-count', Number.isInteger(verification.result_count)
+        ? number(verification.result_count) : labels('common.unavailable', 'Unavailable')],
+      ['workbench.google-serp-fetched-at', googleTimestamp(verification.fetched_at)],
+    ]);
+    const resultList = make('ol', '', 'google-serp-results');
+    results.slice(0, 10).forEach((result) => {
+      const item = make('li');
+      const url = safeSerpResultUrl(result.canonical_url);
+      if (url) {
+        const link = make('a', result.title || result.canonical_url);
+        link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link);
+      } else {
+        item.append(make('span', result.title || labels('common.unavailable', 'Unavailable')));
+      }
+      if (Number.isInteger(result.provider_rank)) {
+        item.append(make('small', formatted('workbench.google-serp-rank', {
+          rank: number(result.provider_rank),
+        }, 'Provider result position {rank}; not search volume.')));
+      }
+      resultList.append(item);
+    });
+    if (results.length > 10) {
+      resultList.append(make('li', formatted('workbench.google-serp-limit', {
+        shown: number(10), total: number(results.length),
+      }, 'Showing {shown} of {total} results.'), 'fine-print'));
+    }
+    if (results.length) verificationPanel.append(resultList);
+    panel.append(verificationPanel);
+  }
+  inspector.append(panel);
+}
 function labelled(select, key, options, fallback = key) {
   const label = make('label', labels(key, fallback), 'workbench-filter'); label.append(select); return label;
 }
@@ -387,11 +498,16 @@ async function openDetail(id,trigger){const inspector=$('#workbench-detail');sta
   const index=state.rows.findIndex(item=>item.id===id);
   if(index>=0){const navigation=make('nav','','workbench-detail-navigation');navigation.setAttribute('aria-label',labels('workbench.details','Keyword details'));const previous=button(labels('phoenix.previous-keyword','Previous keyword'),'button button-secondary');const next=button(labels('phoenix.next-keyword','Next keyword'),'button button-secondary');previous.disabled=index===0;next.disabled=index===state.rows.length-1;previous.addEventListener('click',()=>openDetail(state.rows[index-1].id,state.detailTrigger));next.addEventListener('click',()=>openDetail(state.rows[index+1].id,state.detailTrigger));navigation.append(previous,make('span',formatted('phoenix.keyword-position',{current:number(index+1),total:number(state.rows.length)},'{current} / {total} on this page')),next);inspector.append(navigation);}
   const fields=make('dl','','workbench-detail-grid');const add=(label,value)=>{const wrap=make('div');wrap.append(make('dt',label),make('dd',value??labels('common.unavailable','Unavailable')));fields.append(wrap);};
-  const evidenceData=detail.evidence&&typeof detail.evidence==='object'?detail.evidence:{};const evidenceRows=Array.isArray(evidenceData.evidence)?evidenceData.evidence:[];const metricRecord=evidenceRows.find(item=>item.views_ceil!=null||item.approximate_views!=null)||evidenceData;const metricValue=metricRecord.views_ceil??metricRecord.approximate_views;const metricText=metricValue==null?labels('workbench.no-metric','No metric'):`${number(metricValue)} ${labels('workbench.views','approx. pageviews')}`;
+  const evidenceData=detail.evidence&&typeof detail.evidence==='object'?detail.evidence:{};const evidenceRows=Array.isArray(evidenceData.evidence)?evidenceData.evidence:[];const metricRecord=evidenceRows.find(item=>item.views_ceil!=null||item.approximate_views!=null)||evidenceData;const metricValue=metricRecord.views_ceil??metricRecord.approximate_views;
+  const firstTrendCluster=Array.isArray(evidenceData.trend_clusters)?evidenceData.trend_clusters[0]:null;const googleBucket=firstTrendCluster?.search_volume_display??(Number.isFinite(firstTrendCluster?.search_volume)?number(firstTrendCluster.search_volume):null);
+  const metricText=evidenceData.data_source==='GOOGLE_TRENDS'
+    ? googleBucket==null?labels('workbench.no-metric','No metric'):formatted('workbench.google-bucket',{bucket:googleBucket},'{bucket} (approximate provider bucket)')
+    : metricValue==null?labels('workbench.no-metric','No metric'):`${number(metricValue)} ${labels('workbench.views','approx. pageviews')}`;
   const decision=detail.user_decision;const decisionLabel=labels(`workbench.decision-${decision?.decision||'NONE'}`,decision?.decision||labels('workbench.no-decision','No decision recorded'));add(labels('workbench.source','Source'),sourceName(detail.source));add(labels('table.date','Observed'),date(detail.observed_at));add(labels('workbench.metric','Observed metric'),metricText);add(labels('workbench.classification','Classification'),labels(`classification.${detail.classification_status||'UNKNOWN'}`,detail.classification_status||'Unknown'));add(labels('workbench.assignment','Assignment'),(detail.memberships||[]).map(m=>`${nameOf(m)} · ${labels(m.origin==='LOCAL_AI'?'workbench.auto-assigned':'workbench.user-added',m.origin==='LOCAL_AI'?'Organized automatically':'Added by you')}${m.pinned?' · pinned':''}`).join(', ')||labels('dataset.unassigned','Not in a Collection'));add(labels('workbench.decision','User decision'),[decisionLabel,decision?.reason].filter(Boolean).join(' · '));if(detail.user_feedback?.length)add(labels('workbench.feedback','User feedback'),detail.user_feedback.map(f=>[labels(`workbench.feedback-${f.action}`,f.action),f.name||labels('workbench.removed-collection','Deleted Collection'),date(f.created_at)].filter(Boolean).join(' · ')).join(' / '));
   const classificationDetails=make('details');classificationDetails.append(make('summary',labels('workbench.classification-evidence','Why this result')));const explanation=make('dl','','workbench-detail-grid');const addExplanation=(label,value)=>{const wrap=make('div');wrap.append(make('dt',label),make('dd',value??labels('common.unavailable','Unavailable')));explanation.append(wrap);};const status=detail.classification_status||'UNKNOWN';const evidenceText=(detail.classification_rule_evidence||[]).map(entry=>entry.matched_text||entry.description).filter(Boolean).join(' · ');const fallbackKey={CLASSIFIED:'workbench.explanation-classified',AMBIGUOUS:'workbench.explanation-ambiguous',UNKNOWN:'workbench.explanation-unknown',INELIGIBLE:'workbench.explanation-ineligible'}[status]||'workbench.explanation-unknown';addExplanation(labels('workbench.reason','Why this result'),evidenceText||labels(fallbackKey,'Saved evidence does not identify a topic. This keyword remains unassigned.'));const entityDescription=detail.classified_entity_description||detail.entity_description;const entityType=detail.classified_entity_type||detail.entity_type;addExplanation(labels('workbench.entity','About this subject'),[entityDescription,entityType&&entityType!=='unknown'?entityType:null].filter(Boolean).join(' · ')||labels('workbench.entity-context-missing','No entity details are available in the saved evidence.'));classificationDetails.append(explanation);
   if(detail.classification_reason)add(labels('workbench.classification','Classification reason'),labels(`classification-reason.${detail.classification_reason}`,detail.classification_reason));
-  const sourceUrl=safeEvidenceUrl(detail.evidence?.source_url||detail.entity_source_url);if(sourceUrl){const link=make('a',labels('workbench.open-source','Open source evidence'));link.href=sourceUrl;link.target='_blank';link.rel='noopener noreferrer';inspector.append(link);}
+  const sourceUrl=detail.source==='google_web_serp'?safeGoogleTrendsUrl(detail.evidence?.source_url):safeEvidenceUrl(detail.evidence?.source_url||detail.entity_source_url);if(sourceUrl){const link=make('a',labels('workbench.open-source','Open source evidence'));link.href=sourceUrl;link.target='_blank';link.rel='noopener noreferrer';inspector.append(link);}
+  appendGoogleTrendDetails(inspector,evidenceData,detail);
   const evidence=make('details');evidence.append(make('summary',labels('workbench.raw-evidence','Source evidence')));const pre=make('pre');pre.textContent=JSON.stringify(detail.evidence||{},null,2);evidence.append(pre);inspector.append(fields,classificationDetails,evidence);
   const algorithm=make('details');algorithm.append(make('summary',labels('workbench.algorithm-evidence','Algorithm results')));const algorithmPre=make('pre');algorithmPre.textContent=JSON.stringify(detail.algorithm_results||[],null,2);algorithm.append(algorithmPre);inspector.append(algorithm);
   const note=make('p',labels('workbench.detail-limit','Classification and algorithm outputs describe stored evidence; they are not validated trend probabilities.'));note.className='detail-limit';const limits=make('details');limits.append(make('summary',labels('workbench.data-limitations','Data coverage limitations')));limits.append(make('p',labels('workbench.metric-limit','Approximate Wikimedia pageviews are not search volume, sales volume, or purchase intent. A single top-list observation does not prove growth. Missing observation days are unavailable, not zero.')));inspector.append(note,limits);titleHeading.focus({preventScroll:true});

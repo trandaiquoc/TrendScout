@@ -34,7 +34,12 @@ def main():
         "return Promise.resolve(new Response(JSON.stringify({item:{"
         "fetch_id:'e'.repeat(32),status:'PARTIAL',data_mode:'SYNTHETIC',"
         "source_manifest:[{source_id:'wikimedia_pageviews_top_per_country',"
-        "status:'PARTIAL',record_count:3}],provider_record_count:4,"
+        "status:'PARTIAL',record_count:3},{source_id:'google_web_serp',"
+        "status:'SUCCESS',record_count:2,delivery_state:'CACHED',coverage:{"
+        "discovery_mode:'RSS_LIMITED_DISCOVERY',trending_candidate_count:2,"
+        "distinct_keyword_count:2,serp_verified_candidate_count:0,"
+        "provider_data_at:'2026-11-15T02:00:00Z',fetched_at:'2026-11-15T02:03:00Z'}}],"
+        "provider_record_count:4,"
         "received_record_count:3,retained_record_count:2,rejected_record_count:1,"
         "observation_start:'2026-11-10',observation_end:'2026-11-10',"
         "fetched_at:'2026-11-11T03:00:00Z',quality_flags:['SYNTHETIC_FIXTURE']"
@@ -158,9 +163,20 @@ def main():
                 "document.querySelector('#run-history-detail h2').textContent==='Run details'"
             ):
                 raise RuntimeError("open Run History detail did not relocalize")
+            detail_text = evaluate("document.querySelector('#run-history-detail').textContent")
+            for expected in (
+                "Google Trends RSS, limited feed",
+                "Candidates: 2",
+                "SERP verified: 0",
+                "cached delivery",
+                "Nov 15, 2026",
+            ):
+                if expected not in detail_text:
+                    raise RuntimeError("Google run evidence is missing: " + expected)
             print(
                 "PASS: VI/EN detail names, Chrome AX region name, focus entry, "
-                "Escape close and focus return, aria-expanded reset, live relocalization."
+                "Escape close and focus return, aria-expanded reset, live relocalization, "
+                "Google RSS provenance, zero SERP verifications and cached delivery."
             )
         finally:
             browser.close()

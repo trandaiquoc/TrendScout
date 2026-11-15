@@ -1,11 +1,13 @@
 param(
     [int]$Port = 8000,
-    [switch]$Cloud
+    [switch]$Cloud,
+    [switch]$GoogleLive
 )
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
 $ErrorActionPreference = 'Continue'
 if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
+if ($Cloud -and $GoogleLive) { throw 'Choose either -Cloud or -GoogleLive.' }
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root 'Backend'
@@ -24,7 +26,11 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location $backend
 try {
-    if ($Cloud) {
+    if ($GoogleLive) {
+        Write-Output "Starting the separately approved Google LIVE profile at http://127.0.0.1:$Port/dashboard/"
+        Write-Output 'Local only, one worker. Google providers require separate approval flags; startup does not run a discovery Fetch.'
+        & $venvPython -m scripts.run_google_live_local --port $Port
+    } elseif ($Cloud) {
         if (-not $env:GOOGLE_CLOUD_PROJECT) { throw 'Set GOOGLE_CLOUD_PROJECT before selecting -Cloud.' }
         if (-not $env:TREND_SCOUT_OPERATOR_TOKEN -or $env:TREND_SCOUT_OPERATOR_TOKEN.Length -lt 24) {
             throw 'Set TREND_SCOUT_OPERATOR_TOKEN (at least 24 characters) before selecting -Cloud.'

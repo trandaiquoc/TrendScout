@@ -73,6 +73,18 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
         raise ValueError("Observation or fetch time is in the future")
     if observation.language not in {"en", "und"}:
         raise ValueError("Only English or unverified-language text is supported")
+    if observation.source_metrics is not None:
+        if (observation.source_id != "google_web_serp"
+                or not isinstance(observation.source_metrics, dict)
+                or observation.source_metrics.get("data_source") != "GOOGLE_TRENDS"):
+            raise ValueError("Source metrics are outside the Google Trends contract")
+        try:
+            metrics = json.dumps(observation.source_metrics, ensure_ascii=False,
+                                 allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            raise ValueError("Source metrics must be bounded finite JSON") from None
+        if len(metrics) > 3_000_000:
+            raise ValueError("Source metrics exceed the normalized result budget")
     if observation.source_url is not None:
         try:
             parsed = urlsplit(observation.source_url)
@@ -160,6 +172,7 @@ def extract_candidates(observations: tuple[Observation, ...], *,
             observation.project,
             observation.provider_rank,
             observation.approximate_views,
+            observation.source_metrics,
         )
         for phrase, original in _phrases(observation.text):
             forms[phrase].add(original)

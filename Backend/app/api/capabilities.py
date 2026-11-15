@@ -49,7 +49,7 @@ def _saved_source_activity(request):
             status = source.get("status")
             status = status if status in {"SUCCESS", "PARTIAL", "FAILED"} else "UNKNOWN"
             record_count = source.get("record_count")
-            latest[source_id] = {
+            activity = {
                 "status": status,
                 "data_mode": row["data_mode"],
                 "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
@@ -57,6 +57,29 @@ def _saved_source_activity(request):
                 "observation_start": row["observation_start"],
                 "observation_end": row["observation_end"],
             }
+            if source_id == "google_web_serp":
+                coverage = source.get("coverage")
+                if isinstance(coverage, dict):
+                    summary = {}
+                    for key in ("trending_candidate_count", "distinct_keyword_count",
+                                "serp_verified_candidate_count", "serp_verification_attempted",
+                                "serp_verification_failed_count", "provider_record_count",
+                                "accepted_record_count", "rejected_record_count",
+                                "records_omitted_storage_limit"):
+                        value = coverage.get(key)
+                        if type(value) is int and value >= 0:
+                            summary[key] = value
+                    mode = coverage.get("discovery_mode")
+                    if mode in {"SERPAPI_TRENDING_NOW", "RSS_LIMITED_DISCOVERY"}:
+                        summary["discovery_mode"] = mode
+                    for key in ("provider_data_at", "provider_created_at"):
+                        value = coverage.get(key)
+                        if isinstance(value, str) and len(value) <= 64:
+                            summary[key] = value
+                    if source.get("delivery_state") in {"FRESH", "CACHED"}:
+                        summary["delivery_state"] = source["delivery_state"]
+                    activity["google_coverage"] = summary
+            latest[source_id] = activity
     return latest
 
 
@@ -103,9 +126,10 @@ async def capabilities(request: Request, response: Response):
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
     saved_activity = _saved_source_activity(request)
     distributed = request.app.state.distributed_public_fetch
-    wikimedia_live_runtime = bool(
+    normal_local_live_runtime = bool(
         distributed is not None
-        and getattr(distributed, "normal_wikimedia_live", False)
+        and (getattr(distributed, "normal_wikimedia_live", False)
+             or getattr(distributed, "normal_google_live", False))
         and distributed.data_mode == "LIVE"
     )
     response.headers["Cache-Control"] = "no-store"
@@ -115,6 +139,18 @@ async def capabilities(request: Request, response: Response):
         "read_only": request.app.state.read_only,
         "authentication_required": False,
         "public_fetch_supported": True,
+        "source_selection_supported": distributed is not None,
+        "google_workflow": getattr(distributed, "google_capabilities", {
+            "trends_discovery": "NOT_CONFIGURED",
+            "rss_discovery": "NOT_CONFIGURED",
+            "serp_verification": "NOT_CONFIGURED",
+            "account_api": "NOT_CONFIGURED",
+            "live_verified": False,
+        }),
+        "google_quota": (distributed.google_quota_metadata()
+                         if distributed is not None
+                         and callable(getattr(distributed, "google_quota_metadata", None))
+                         else None),
         "public_fetch_enabled": enabled,
         "fetch_enabled": enabled,
         "fetch_block_reason": block_reason,
@@ -183,8 +219,10 @@ async def capabilities(request: Request, response: Response):
                 "live_verification_status": item.live_verification_status,
                 "local_live_verification_status": item.local_live_verification_status,
                 "production_readiness": item.production_readiness,
-                "supported_data_modes": (["LIVE"] if wikimedia_live_runtime
-                    and item.source_id == WIKIMEDIA_SOURCE_ID
+                "supported_data_modes": (["LIVE"] if normal_local_live_runtime
+                    and (item.source_id == WIKIMEDIA_SOURCE_ID
+                         or getattr(distributed, "normal_google_live", False)
+                         and item.source_id == "google_web_serp")
                     else list(item.supported_data_modes)),
                 "query_based": item.query_based,
                 "metric": {

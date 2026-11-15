@@ -104,6 +104,20 @@ function renderRunHistoryDetail(item, errorMessage = null) {
     ].filter(Boolean).join(' · ');
     return `${localizedSourceName(source.sourceId)}: ${counts || t('common.unavailable')}`;
   }).join(' | ') || t('common.unavailable');
+  const googleSummary=coverage.sources.filter(source=>source.sourceId==='google_web_serp').map(source=>{
+    const mode=source.googleDiscoveryMode==='RSS_LIMITED_DISCOVERY'
+      ? t('fetch.discovery.rss-limited') : source.googleDiscoveryMode==='SERPAPI_TRENDING_NOW'
+        ? t('fetch.discovery.trending-now') : null;
+    return [
+      mode,
+      source.googleCandidateCount==null?null:`${t('runs.google-candidates')}: ${number(source.googleCandidateCount)}`,
+      source.googleDistinctKeywordCount==null?null:`${t('runs.google-distinct')}: ${number(source.googleDistinctKeywordCount)}`,
+      source.googleVerifiedCount==null?null:`${t('runs.google-verified')}: ${number(source.googleVerifiedCount)}`,
+      source.googleProviderDataAt?`${t('runs.google-source-time')}: ${timestamp(source.googleProviderDataAt)}`:null,
+      source.googleFetchedAt?`${t('runs.google-fetched-at')}: ${timestamp(source.googleFetchedAt)}`:null,
+      source.deliveryState?`${t('runs.google-delivery')}: ${t(`fetch.delivery.${source.deliveryState}`)}`:null,
+    ].filter(Boolean).join(' Â· ');
+  }).filter(Boolean).join(' | ');
   const quality=(item.quality_flags || []).length
     ? t('runs.outcome.quality-notes',{count:number(item.quality_flags.length)})
     : t('runs.outcome.no-notes');
@@ -114,6 +128,7 @@ function renderRunHistoryDetail(item, errorMessage = null) {
   const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
     [t('runs.source-coverage'),sourceCoverageSummary,'wide'],
+    ...(googleSummary?[[t('runs.google-summary'),googleSummary,'wide']]:[]),
     [t('runs.provider-records'),coverage.providerRecordCount],
     [t('runs.observation-window'),observationWindow],
     [t('runs.received'),item.received_record_count ?? item.available],

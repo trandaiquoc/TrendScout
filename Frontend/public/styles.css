@@ -386,6 +386,8 @@ button:disabled { cursor: not-allowed; }
   box-shadow: var(--shadow);
 }
 .fetch-card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 13px; }
+.fetch-source-control { display: grid; gap: 5px; margin: 0 0 11px; color: var(--muted); font-size: 11px; }
+.fetch-source-control select { width: 100%; min-height: 36px; }
 .fetch-icon {
   display: grid;
   width: 33px;
@@ -1119,3 +1121,11 @@ button:disabled { filter:saturate(.65); }
   .dashboard-tab { flex:1; padding-inline:10px; }
 }
 .algorithm-result-examples{display:grid;gap:.75rem;margin-top:.75rem}.algorithm-result-example{border:1px solid var(--line);border-radius:.6rem;padding:.75rem;min-width:0}.algorithm-result-example h3{font-size:1rem;margin:0 0 .5rem;overflow-wrap:anywhere}.algorithm-result-example .detail-list{margin:0}
+.google-trend-evidence { margin-top: 12px; border-top: 1px solid var(--line); }
+.google-trend-evidence > summary { padding: 10px 2px; color: var(--accent-strong); cursor: pointer; font-size: 12px; font-weight: 700; }
+.google-trend-cluster, .google-serp-verification { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.google-trend-cluster h3, .google-serp-verification h3 { margin: 4px 2px; color: var(--ink-strong); font-size: 11px; }
+.google-trend-clusters .workbench-detail-grid, .google-serp-verification .workbench-detail-grid { margin: 6px 0; }
+.google-serp-results { display: grid; gap: 8px; margin: 8px 0; padding-left: 24px; }
+.google-serp-results li { padding-left: 2px; overflow-wrap: anywhere; }
+.google-serp-results small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }

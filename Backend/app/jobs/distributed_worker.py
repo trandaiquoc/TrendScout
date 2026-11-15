@@ -90,7 +90,15 @@ class DistributedFetchWorker:
         job_expires_at = datetime.fromisoformat(claim["expires_at"])
         outcomes = {}
         deferred_until = None
-        for source_id in sorted(self.handlers):
+        request_metadata = claim.get("request_metadata", {})
+        selected_sources = ([WIKIMEDIA_SOURCE_ID]
+            if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
+            else request_metadata.get("sources", sorted(self.handlers)))
+        if (not isinstance(selected_sources, list) or not selected_sources
+                or len(selected_sources) != len(set(selected_sources))
+                or not set(selected_sources) <= set(self.handlers)):
+            raise AdmissionDenied("REQUEST_SCOPE_INVALID")
+        for source_id in sorted(selected_sources):
             now = self.utcnow()
             try:
                 grant = self.resolve_grant(source_id, now)
@@ -204,7 +212,7 @@ class DistributedFetchWorker:
         if value.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}:
             raise ValueError("invalid result delivery state")
         records = value.get("records")
-        if not isinstance(records, list) or len(records) > 2000 or any(
+        if not isinstance(records, list) or len(records) > 5000 or any(
             not isinstance(record, dict) for record in records
         ):
             raise ValueError("source records must be a bounded normalized list")

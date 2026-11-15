@@ -80,6 +80,31 @@ function compactTimestamp(value) {
   return new Intl.DateTimeFormat(getLocale(), { dateStyle: 'short', timeStyle: 'short' }).format(instant);
 }
 
+function googleFetchSummary(source) {
+  if (source.source_id !== 'google_web_serp' || !source.coverage
+      || typeof source.coverage !== 'object') return '';
+  const coverage = source.coverage;
+  const count = (value) => Number.isInteger(value) && value >= 0
+    ? number(value) : t('common.unavailable');
+  const modeKeys = {
+    SERPAPI_TRENDING_NOW: 'fetch.discovery.trending-now',
+    RSS_LIMITED_DISCOVERY: 'fetch.discovery.rss-limited',
+  };
+  const modeKey = modeKeys[coverage.discovery_mode];
+  const mode = modeKey ? t(modeKey) : t('common.unavailable');
+  const sourceTime = coverage.provider_data_at || coverage.provider_created_at;
+  return t('fetch.google-summary', {
+    scope: t('fetch.google-scope'),
+    mode,
+    candidates: count(coverage.trending_candidate_count),
+    verified: count(coverage.serp_verified_candidate_count),
+    keywords: count(coverage.distinct_keyword_count),
+    source_time: sourceTime ? timestamp(sourceTime) : t('common.unavailable'),
+    fetched_at: coverage.fetched_at ? timestamp(coverage.fetched_at) : t('common.unavailable'),
+    delivery: t(`fetch.delivery.${source.delivery_state || 'UNKNOWN'}`),
+  });
+}
+
 function element(tagName, text = null, className = '') {
   const node = document.createElement(tagName);
   if (text !== null && text !== undefined) {
@@ -798,6 +823,8 @@ function renderFetchPresentation() {
   const busy = Boolean(presentation.busy);
 
   button.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited';
+  const sourceSelect = $('#fetch-source-select');
+  if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
   const buttonKey = presentation.kind === 'retryable'
     ? 'fetch.retry'
     : canRetry ? 'fetch.check-status' : 'fetch.cta';
@@ -832,6 +859,7 @@ function renderFetchPresentation() {
         const sourceStatus = source.status && t(statusKey) !== statusKey
           ? t(statusKey) : source.status;
         return [sourceLabel, sourceStatus, source.data_mode, source.delivery_state,
+          googleFetchSummary(source),
           Number.isInteger(source.retry_after_seconds)
             ? t('fetch.retry-after', { seconds: source.retry_after_seconds }) : '']
           .filter((value) => typeof value === 'string' && value).join(' · ');
@@ -910,6 +938,22 @@ async function loadPublicCapabilities() {
   try {
     const capabilities = await loadCapabilities(getLocale());
     state.capabilities = capabilities;
+    const sourceSelect = $('#fetch-source-select');
+    const sourceControl = $('#fetch-source-control');
+    const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
+      .filter((source) => source?.enabled_for_current_operation === true)
+      .map((source) => source.source_id).filter((source) => typeof source === 'string');
+    if (sourceSelect && sourceControl) {
+      const previous = sourceSelect.value;
+      sourceSelect.replaceChildren(new Option(t('fetch.source-all'), ''));
+      for (const sourceId of enabledSources) {
+        const key = FETCH_SOURCE_LABELS[sourceId];
+        sourceSelect.add(new Option(key ? t(key) : sourceId, sourceId));
+      }
+      sourceSelect.value = enabledSources.includes(previous) ? previous : '';
+      sourceControl.hidden = capabilities.source_selection_supported !== true
+        || enabledSources.length < 2;
+    }
     state.fetchBlockReason = capabilities.fetch_block_reason || null;
     state.fetchReady = canStartFetch(capabilities);
     if (!state.fetchReady && !state.fetchBlockReason) {
@@ -984,6 +1028,10 @@ function handleFetchTerminal(runId, fetchStatus) {
 
 const fetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale,
+  sourceIds: () => {
+    const selected = $('#fetch-source-select')?.value;
+    return selected ? [selected] : null;
+  },
 });
 const historyFetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale, historyDays: 2,
@@ -1425,7 +1473,7 @@ function renderPersistedDataset(item) {
   const sourceNames = {
     wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
     youtube_video_search: 'source.name.youtube',
-    google_web_serp: 'source.name.google',
+    google_web_serp: 'source.name.google-trends',
     bing_web_serp: 'source.name.bing',
   };
   const sources = (Array.isArray(item.sources) ? item.sources : [])
@@ -1442,6 +1490,9 @@ function renderPersistedDataset(item) {
   const eligible = item.eligible_keyword_count == null ? t('common.unavailable') : number(item.eligible_keyword_count);
   const unassigned = item.unassigned_keyword_count == null ? t('common.unavailable') : number(item.unassigned_keyword_count);
   const fetchedAt = item.fetched_at ? timestamp(item.fetched_at) : t('common.unavailable');
+  const googleSource = (Array.isArray(item.source_manifest) ? item.source_manifest : [])
+    .find((source) => source?.source_id === 'google_web_serp');
+  const googleSummary = googleSource ? googleFetchSummary(googleSource) : '';
   const observationWindow = item.observation_start || item.observation_end
     ? t('dataset.observation-window', {
       dates: [item.observation_start, item.observation_end].filter(Boolean).map(date).join(' – '),
@@ -1450,6 +1501,7 @@ function renderPersistedDataset(item) {
     t('dataset.eligible-count', { count: eligible }),
     t('dataset.unassigned-count', { count: unassigned }),
     observationWindow,
+    googleSummary,
     fetchedAt].filter(Boolean).join(' · ');
   $('#metric-records-returned').textContent = item.provider_record_count == null ? t('common.unavailable') : number(item.provider_record_count);
   $('#metric-records-returned-note').textContent = item.status === 'LEGACY_CACHED'
@@ -1481,7 +1533,7 @@ function renderAnalysisSourceVolume(dataset) {
   const sourceNames = {
     wikimedia_pageviews_top_per_country: 'source.name.wikimedia',
     youtube_video_search: 'source.name.youtube',
-    google_web_serp: 'source.name.google',
+    google_web_serp: 'source.name.google-trends',
     bing_web_serp: 'source.name.bing',
   };
   root.replaceChildren(

@@ -311,3 +311,17 @@ Theo thông tin đã xác minh, Vercel project đang bật Deployment Protection
 5. Sau deploy mới: trước hết kiểm tra Deployment Protection/domain riêng, rồi xác nhận `/` trả redirect, dashboard HTML/CSS/JS và capability tải được không cần app password, còn run GET bị chặn khi không có app password và POST `/api/runs` + POST `/api/v1/fetches` trả 405. Nếu private reads được cấu hình, kiểm tra bằng một run ID đã biết và xác nhận OIDC/IAM chỉ cho phép đọc. 503 cho thấy private read chưa cấu hình hoặc Firestore không truy cập được. Không coi local tests/build log là xác minh production; đọc logs mà không chia sẻ token. Đọc qua Vercel có thể tiêu tốn Firestore reads.
 
 [Vercel FastAPI](https://vercel.com/docs/frameworks/backend/fastapi) · [OIDC trên mọi plan](https://vercel.com/docs/oidc) · [Chia sẻ source ngoài root](https://vercel.com/docs/monorepos/monorepo-faq).
+
+## Google Trends local profile (D6, opt-in)
+
+The default `start.ps1` path remains the separate Wikimedia local runtime. To select the Google-capable local profile, set `TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED=true` in the current shell and run `..\start.ps1 -GoogleLive`. The profile binds to loopback, runs one worker, and does not fetch provider data at startup. This selection alone does not approve or enable a Google provider.
+
+All Google provider approvals default to false. Enable only the source the operator has explicitly approved:
+
+- `TREND_SCOUT_GOOGLE_RSS_APPROVED=true` enables the limited Google Trends RSS discovery path, with its separate bounded RSS request pool.
+- `TREND_SCOUT_GOOGLE_TRENDS_APPROVED=true` enables SerpApi Google Trends Trending Now only when `TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED=true` is also set.
+- `TREND_SCOUT_GOOGLE_SERP_APPROVED=true` enables the bounded SerpApi Google SERP verification path only when the same account API approval is set. The server-side credential provider must resolve `SERPAPI_API_KEY`; do not place the key in frontend files, logs, or repository files.
+
+Paid paths check the SerpApi account endpoint before reserving an attempt. Default maximum budgets are 6 paid requests per day and 180 per month, with a cross-machine reserve of 6; RSS has separate defaults of 30 per day and 900 per month. The verification plan is limited to two candidates per fresh batch. Budget settings cannot raise these caps. Cached responses retain their original provider timestamp and are identified as cached.
+
+The flags are operator controls, not evidence of provider entitlement or permission. Confirm access, quota, usage and retention authorization before enabling a LIVE source. No credential, approval flag, account request, or provider request is supplied by this repository documentation.

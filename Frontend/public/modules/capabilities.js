@@ -74,6 +74,21 @@ function localizedMetric(value, kind, translate) {
   return translated===key?value:translated;
 }
 
+function capabilityRow(list, label, value) {
+  const dt=document.createElement('dt');dt.textContent=label;
+  const dd=document.createElement('dd');dd.textContent=value;
+  const row=document.createElement('div');row.append(dt,dd);list.append(row);
+}
+
+function quotaUse(value, translate) {
+  if (!value || !Number.isInteger(value.used) || !Number.isInteger(value.limit)
+      || !Number.isInteger(value.remaining)) return translate('common.unavailable');
+  const format = (number) => new Intl.NumberFormat(document.documentElement.lang || 'vi').format(number);
+  return translate('source.quota-use', {
+    used: format(value.used), limit: format(value.limit), remaining: format(value.remaining),
+  });
+}
+
 function savedFetchSummary(activity, translate) {
   if (!activity) return translate('source.fetch-no-saved-data');
   const status = ['SUCCESS', 'PARTIAL', 'FAILED'].includes(activity.status)
@@ -117,6 +132,40 @@ export function renderSourceCapabilities(capabilities, translate) {
         const label=document.createElement('dt'); label.textContent=translate(labelKey);
         const value=document.createElement('dd'); value.textContent=field===null ? savedFetchSummary(descriptor.last_saved_fetch,translate) : localizedStatus(descriptor[field],translate);
         const row=document.createElement('div'); row.append(label,value); list.append(row);
+      }
+      if (descriptor.source_id === 'google_web_serp') {
+        const workflow = capabilities?.google_workflow || {};
+        const quota = capabilities?.google_quota || {};
+        capabilityRow(list, translate('source.google-trends-discovery'), localizedStatus(workflow.trends_discovery, translate));
+        capabilityRow(list, translate('source.google-rss-discovery'), localizedStatus(workflow.rss_discovery, translate));
+        capabilityRow(list, translate('source.google-serp-verification'), localizedStatus(workflow.serp_verification, translate));
+        capabilityRow(list, translate('source.google-account-api'), localizedStatus(workflow.account_api, translate));
+        capabilityRow(list, translate('source.google-serpapi-budget'),
+          `${translate('source.quota-daily')}: ${quotaUse(quota.serpapi?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.serpapi?.monthly, translate)}`);
+        capabilityRow(list, translate('source.google-rss-budget'),
+          `${translate('source.quota-daily')}: ${quotaUse(quota.google_rss?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.google_rss?.monthly, translate)}`);
+        const providerRemaining = quota.provider_account
+          && Number.isInteger(quota.provider_account.total_remaining)
+          ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(quota.provider_account.total_remaining)
+          : translate('common.unavailable');
+        capabilityRow(list, translate('source.google-provider-remaining'), providerRemaining);
+        const saved = descriptor.last_saved_fetch?.google_coverage;
+        if (saved && typeof saved === 'object') {
+          const modeKey = saved.discovery_mode === 'RSS_LIMITED_DISCOVERY'
+            ? 'fetch.discovery.rss-limited' : 'fetch.discovery.trending-now';
+          const count = Number.isInteger(saved.trending_candidate_count)
+            ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(saved.trending_candidate_count)
+            : translate('common.unavailable');
+          const verified = Number.isInteger(saved.serp_verified_candidate_count)
+            ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(saved.serp_verified_candidate_count)
+            : translate('common.unavailable');
+          capabilityRow(list, translate('source.google-latest-discovery'),
+            `${translate(modeKey)} · ${translate('fetch.google-counts', { candidates: count, verified })}`);
+          capabilityRow(list, translate('source.google-source-time'),
+            saved.provider_data_at || saved.provider_created_at || translate('common.unavailable'));
+          capabilityRow(list, translate('source.google-delivery'),
+            saved.delivery_state ? translate(`fetch.delivery.${saved.delivery_state}`) : translate('common.unavailable'));
+        }
       }
       const categoryLabel=translate(`sources.category.${descriptor.category}`);
       for (const [label,value] of [[translate('sources.category'),categoryLabel.startsWith('sources.category.')?descriptor.category:categoryLabel],[translate('sources.metric'),`${localizedMetric(descriptor.metric?.name,'metric',translate)} (${localizedMetric(descriptor.metric?.unit,'unit',translate)})`],[translate('sources.scope'),localizedSourceText(descriptor,'scope',descriptor.market_scope,translate)],[translate('sources.quota'),translate('sources.quota-unknown')]]) {

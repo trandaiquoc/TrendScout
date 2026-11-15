@@ -21,7 +21,7 @@ const wait = (milliseconds) => new Promise((resolve) => {
 });
 
 export class PublicFetchController {
-  constructor({ onState, onTerminal, locale, historyDays = null }) {
+  constructor({ onState, onTerminal, locale, historyDays = null, sourceIds = null }) {
     if (historyDays !== null && (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2)) {
       throw new RangeError('Historical Fetch is limited to one or two days.');
     }
@@ -29,6 +29,7 @@ export class PublicFetchController {
     this.onTerminal = onTerminal;
     this.locale = locale;
     this.historyDays = historyDays;
+    this.sourceIds = sourceIds;
     this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
@@ -49,10 +50,16 @@ export class PublicFetchController {
     this.key = this.key || newIdempotencyKey();
     this.emit({ kind: 'submitting', busy: true });
     try {
+      const selectedSources = this.historyDays === null && typeof this.sourceIds === 'function'
+        ? this.sourceIds() : null;
+      const body = this.historyDays !== null
+        ? { days: this.historyDays }
+        : Array.isArray(selectedSources) && selectedSources.length
+          ? { sources: selectedSources } : {};
       const accepted = await requestJson(this.historyDays === null
         ? '/api/v1/fetches' : '/api/v1/fetches/history', {
         method: 'POST',
-        body: this.historyDays === null ? {} : { days: this.historyDays },
+        body,
         headers: { 'Idempotency-Key': this.key },
         locale: this.locale(),
       });

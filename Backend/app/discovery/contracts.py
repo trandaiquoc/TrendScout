@@ -28,6 +28,7 @@ class Observation:
     project: str | None = None
     provider_rank: int | None = None
     approximate_views: int | None = None
+    source_metrics: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class Evidence:
     project: str | None = None
     provider_rank: int | None = None
     approximate_views: int | None = None
+    source_metrics: dict | None = None
 
 
 @dataclass(frozen=True)

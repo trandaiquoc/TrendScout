@@ -27,6 +27,13 @@ test('uses provider coverage and preserves explicit zero counts', () => {
     retainedRecords: 1999,
     rejectedRecords: 0,
     omittedRecords: 0,
+    googleDiscoveryMode: null,
+    googleCandidateCount: null,
+    googleDistinctKeywordCount: null,
+    googleVerifiedCount: null,
+    googleProviderDataAt: null,
+    googleFetchedAt: null,
+    deliveryState: null,
   });
 });
 
@@ -65,5 +72,45 @@ test('keeps unavailable source coverage unknown and uses stored aggregate only a
     retainedRecords: 40,
     rejectedRecords: null,
     omittedRecords: null,
+    googleDiscoveryMode: null,
+    googleCandidateCount: null,
+    googleDistinctKeywordCount: null,
+    googleVerifiedCount: null,
+    googleProviderDataAt: null,
+    googleFetchedAt: null,
+    deliveryState: null,
+  });
+});
+
+test('extracts Google discovery provenance without treating RSS records as verified', () => {
+  const result = extractRunSourceCoverage({ source_manifest: [{
+    source_id: 'google_web_serp',
+    status: 'SUCCESS',
+    record_count: 8,
+    delivery_state: 'CACHED',
+    coverage: {
+      discovery_mode: 'RSS_LIMITED_DISCOVERY',
+      trending_candidate_count: 8,
+      distinct_keyword_count: 7,
+      serp_verified_candidate_count: 0,
+      provider_data_at: '2026-11-15T02:00:00Z',
+      fetched_at: '2026-11-15T02:03:00Z',
+    },
+  }] });
+
+  assert.deepEqual(result.sources[0], {
+    sourceId: 'google_web_serp',
+    status: 'SUCCESS',
+    providerReturnedRecords: null,
+    retainedRecords: 8,
+    rejectedRecords: null,
+    omittedRecords: null,
+    googleDiscoveryMode: 'RSS_LIMITED_DISCOVERY',
+    googleCandidateCount: 8,
+    googleDistinctKeywordCount: 7,
+    googleVerifiedCount: 0,
+    googleProviderDataAt: '2026-11-15T02:00:00Z',
+    googleFetchedAt: '2026-11-15T02:03:00Z',
+    deliveryState: 'CACHED',
   });
 });

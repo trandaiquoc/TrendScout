@@ -8,6 +8,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
+from d6_wikimedia_synthetic_support import (
+    FETCHED_AT,
+    OBSERVATION_DATE,
+    RAW_BODY_MARKER,
+    SOURCE_IDS,
+    build_synthetic_app,
+    fixture_payload,
+)
 
 from app.discovery.source_results import discover_fetch_results
 from app.sources.catalog import (
@@ -17,15 +25,6 @@ from app.sources.catalog import (
     YOUTUBE_SOURCE_ID,
 )
 from app.sources.wikimedia.adapter import _parse
-from d6_wikimedia_synthetic_support import (
-    FETCHED_AT,
-    OBSERVATION_DATE,
-    RAW_BODY_MARKER,
-    SOURCE_IDS,
-    build_synthetic_app,
-    fixture_payload,
-    synthetic_settings,
-)
 
 
 class WikimediaSyntheticEndToEndTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +92,9 @@ class WikimediaSyntheticEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wiki["coverage"], {
             "observation_date": "2026-11-10", "rejected": 4,
             "records_omitted_storage_limit": 0, "item_count": 14,
+            "provider_returned_records": 14, "accepted_records": 10,
+            "rejected_records": 4, "explicitly_omitted_records": 0,
+            "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
         })
         records = wiki["records"]
         by_article = {record["article_original"]: record for record in records}

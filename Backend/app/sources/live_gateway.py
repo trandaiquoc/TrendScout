@@ -25,6 +25,11 @@ from app.sources.catalog import (
     YOUTUBE_SOURCE_ID,
     source_capability,
 )
+from app.sources.google_trends.trending_now import (
+    GoogleTrendsRequest,
+    build_trending_now_params,
+    parse_trending_now_response,
+)
 from app.sources.http_policy import HttpPolicy
 from app.sources.query_plan import get_query_plan
 from app.sources.serpapi.client import SerpApiClient, build_request_params
@@ -112,6 +117,22 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                      and type(store) is LocalSQLiteAtomicStateStore
                      and store.data_mode == "LIVE"
                      and runner.admission.policy == normal_wikimedia_live_policy())
+        elif valid and approval.scope == "LOCAL_NORMAL_GOOGLE":
+            from app.normal_wikimedia_live_policy import (
+                GOOGLE_POLICY_VERSION,
+                normal_google_live_policy,
+            )
+            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
+            valid = (not os.environ.get("VERCEL")
+                     and source_id in {GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID}
+                     and approval.policy_version == GOOGLE_POLICY_VERSION
+                     and approval.local_controls_verified is True
+                     and isinstance(runner, GuardedAttemptRunner)
+                     and type(store) is LocalSQLiteAtomicStateStore
+                     and store.data_mode == "LIVE"
+                     and runner.admission.policy == normal_google_live_policy()
+                     and source_id in runner.admission.policy.enabled_sources)
         else:
             valid = False
     except Exception:
@@ -252,15 +273,18 @@ class LivePageGateway:
 
     def _params(self, context, cursor, max_results):
         try:
-            if self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+            if isinstance(context, GoogleTrendsRequest):
+                if self.source_id != GOOGLE_SOURCE_ID:
+                    raise ValueError("Google Trends request on a different source")
+                if context.policy_fingerprint != self.runner.admission.policy.plan_fingerprint:
+                    raise ValueError("policy mismatch")
+                params = build_trending_now_params(context)
+                if context.force_refresh:
+                    params["no_cache"] = "true"
+            elif self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
                 if not isinstance(context, SerpContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
                 params = build_request_params(context, cursor)
-                if not self._offline:
-                    # Provider status "Success" does not prove a cache miss.
-                    # Force a new search for live verification and charge it in
-                    # the same guarded budget as every other physical attempt.
-                    params["no_cache"] = "true"
             else:
                 if not isinstance(context, YouTubeContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
@@ -268,7 +292,10 @@ class LivePageGateway:
                 if context not in build_execution_plan(plan, context.batch_started_at).queries:
                     raise ValueError("query is not in the server plan")
                 params = build_search_params(context, page_token=cursor, max_results=max_results)
-            if context.plan_fingerprint != self.runner.admission.policy.plan_fingerprint:
+            plan_fingerprint = (context.policy_fingerprint
+                                if isinstance(context, GoogleTrendsRequest)
+                                else context.plan_fingerprint)
+            if plan_fingerprint != self.runner.admission.policy.plan_fingerprint:
                 raise ValueError("plan mismatch")
             return params
         except Exception:
@@ -294,7 +321,11 @@ class LivePageGateway:
                 transport=httpx.MockTransport(lambda _request: httpx.Response(500))
             )
             try:
-                if self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+                if isinstance(context, GoogleTrendsRequest):
+                    page = parse_trending_now_response(
+                        response, request=context, sensitive_key=key
+                    )
+                elif self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
                     parser = SerpApiClient(dummy, None, SharedQuotaPool(1, 1),
                                            self.policy, utcnow=self.clock)
                     page = parser.parse_response(response, context=context, cursor=cursor,
@@ -346,18 +377,21 @@ class LivePageGateway:
                                 return ("RESPONSE_TOO_LARGE", None)
                             content.extend(chunk)
                         raw = bytes(content).decode("utf-8", errors="replace")
+                        # Scan the entire bounded response for accidental secret
+                        # reflection, including JSON-escaped text, before parsing.
+                        decoded = raw
                         try:
-                            decoded = json.loads(raw)
-                            if isinstance(decoded, dict):
-                                exposed = (decoded.get("organic_results", [])
-                                    if self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
-                                    else {"items": decoded.get("items"),
-                                          "nextPageToken": decoded.get("nextPageToken")})
-                                decoded = json.dumps(exposed, ensure_ascii=False)
-                            else:
-                                decoded = ""
-                        except (TypeError, ValueError, RecursionError):
-                            decoded = ""
+                            document = json.loads(raw)
+                            if (self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
+                                    and isinstance(document, dict)):
+                                # SerpApi legitimately echoes its API key inside its
+                                # pagination URL. The parser consumes only the numeric
+                                # offset from this field and never persists the URL.
+                                document = {name: value for name, value in document.items()
+                                            if name != "serpapi_pagination"}
+                            decoded = json.dumps(document, ensure_ascii=False)
+                        except (ValueError, RecursionError):
+                            pass
                         if _contains_secret(decoded, key):
                             return ("SENSITIVE_UPSTREAM_RESPONSE", None)
                         safe_response = httpx.Response(response.status_code, headers=response.headers,

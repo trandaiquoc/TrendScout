@@ -30,27 +30,34 @@ class GuardedAttemptRunner:
     async def run(self, *, job_id: str, owner: str, fence: int, source_id: str,
                   attempt_id: str, timeout_seconds: float,
                   request: Callable[[], Awaitable[Any]],
-                  before_settle: Callable[[Any], Any] | None = None) -> AttemptOutcome:
+                  before_settle: Callable[[Any], Any] | None = None,
+                  pool_name: str | None = None) -> AttemptOutcome:
         if source_id not in self.admission.policy.enabled_sources or not callable(request):
             raise ValueError("server-approved source and request factory required")
         if before_settle is not None and not callable(before_settle):
             raise ValueError("result receipt callback must be callable")
-        maximum = self.admission.max_attempt_seconds(source_id)
+        maximum = (self.admission.max_attempt_seconds(source_id)
+                   if pool_name is None else self.admission.max_attempt_seconds(source_id, pool_name))
         if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
                 or not 0 < timeout_seconds <= maximum):
             raise ValueError("request timeout must fit the reserved in-flight slot")
         # A reservation RPC that raises or is cancelled may have committed. Never
         # create the request coroutine unless a definite NEW acknowledgement arrives.
+        reserve_kwargs = {"source_id": source_id, "attempt_id": attempt_id, "now": self.clock()}
+        if pool_name is not None:
+            reserve_kwargs["pool_name"] = pool_name
         result = await asyncio.to_thread(
-            self.admission.reserve_attempt, job_id, owner, fence, source_id=source_id,
-            attempt_id=attempt_id, now=self.clock(),
+            self.admission.reserve_attempt, job_id, owner, fence, **reserve_kwargs,
         )
         if result != "NEW":
             return AttemptOutcome("ALREADY_RESERVED")
         try:
+            check_kwargs = {"source_id": source_id, "attempt_id": attempt_id,
+                            "now": self.clock()}
+            if pool_name is not None:
+                check_kwargs["pool_name"] = pool_name
             deadline = await asyncio.to_thread(
-                self.admission.check_attempt, job_id, owner, fence,
-                source_id=source_id, attempt_id=attempt_id, now=self.clock(),
+                self.admission.check_attempt, job_id, owner, fence, **check_kwargs,
             )
         except AdmissionDenied:
             # No request was created; reservation remains conservatively charged.

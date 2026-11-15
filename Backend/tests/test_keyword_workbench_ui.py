@@ -87,7 +87,7 @@ class KeywordWorkbenchUITests(unittest.TestCase):
         self.assertIn("root.classList.toggle('opens-above', openAbove)", module)
         self.assertIn(".collection-picker.opens-above .collection-picker-list", css)
         self.assertIn("Array.from({length:24}", browser_fixture)
-        self.assertIn("long merge destination list opens above", browser_fixture)
+        self.assertIn("long merge destination list stays inside the constrained dialog", browser_fixture)
         self.assertIn("keyboard can reach the last destination", browser_fixture)
 
 

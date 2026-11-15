@@ -14,6 +14,7 @@ _MAX_RESOLVED_CHECKPOINT_BYTES = 5_000_000
 _RECORD_PATHS = (
     ("progress", "wikimedia_receipt", "result", "records"),
     ("progress", "wikimedia_history_records"),
+    ("progress", "google_trends_receipt", "result", "records"),
     ("result", "records"),
 )
 

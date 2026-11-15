@@ -95,6 +95,15 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         ).hexdigest()
         scope = f"wikimedia:{country}:{access}:{project}"
         market = "US_COUNTRY_SCOPED" if country == "US" else "UNKNOWN"
+    elif source_id == GOOGLE_SOURCE_ID and record.get("data_source") == "GOOGLE_TRENDS":
+        phrase = _text(record.get("canonical_keyword"))
+        document = _text(record.get("canonical_keyword_identity"))
+        observed = fetched
+        window = record.get("time_window_hours")
+        scope = f"google-trends:US:en:{window}h" if window in {4, 24, 48, 168} else (
+            "google-trends:US:en:limited-feed"
+        )
+        market = "US_FILTER_ONLY"
     elif source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
         phrase = " ".join(part for part in (
             _text(record.get("title")), _text(record.get("snippet"))
@@ -145,6 +154,34 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
             return ()
         if not url.startswith("https://") or len(url) > 2048:
             return ()
+    source_metrics = None
+    if source_id == GOOGLE_SOURCE_ID and record.get("data_source") == "GOOGLE_TRENDS":
+        clusters = record.get("trend_clusters")
+        if not isinstance(clusters, list) or len(clusters) > 5000:
+            return ()
+        # Keep Trend metrics and SERP evidence attached to the parent keyword.
+        # Related phrases remain relationships, never separate observations.
+        source_metrics = {
+            "data_source": "GOOGLE_TRENDS",
+            "discovery_mode": record.get("discovery_mode"),
+            "provider_id": record.get("provider_id"),
+            "transport_id": record.get("transport_id"),
+            "region": record.get("region"),
+            "language_filter": record.get("language"),
+            "time_window_hours": record.get("time_window_hours"),
+            "provider_data_at": record.get("provider_data_at"),
+            "provider_created_at": record.get("provider_created_at"),
+            "source_url": record.get("source_url"),
+            "trend_clusters": clusters,
+            "serp_verification": record.get("serp_verification"),
+        }
+        if (not isinstance(source_metrics["discovery_mode"], str)
+                or not isinstance(source_metrics["provider_id"], str)
+                or not isinstance(source_metrics["transport_id"], str)
+                or source_metrics["region"] != "US"
+                or source_metrics["language_filter"] != "en"
+                or source_metrics["time_window_hours"] not in {24, None}):
+            return ()
     observation = Observation(
         source_id=source_id, provider_id=capability.provider_id,
         document_id=hashlib.sha256(
@@ -161,6 +198,7 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         provider_rank=(rank if source_id == WIKIMEDIA_SOURCE_ID and type(rank) is int else None),
         approximate_views=(approximate_views if source_id == WIKIMEDIA_SOURCE_ID
                            and type(approximate_views) is int else None),
+        source_metrics=source_metrics,
     )
     if not query_evidence:
         return (observation,)
@@ -221,7 +259,9 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_result.get("data_mode") == "LIVE" and not extraction_granted:
             processing_blocked = True
         records = source_result.get("records", [])
-        maximum_records = 2000 if source_id == WIKIMEDIA_SOURCE_ID else 512
+        maximum_records = 2000 if source_id == WIKIMEDIA_SOURCE_ID else (
+            5000 if source_id == GOOGLE_SOURCE_ID else 512
+        )
         if not isinstance(records, list) or len(records) > maximum_records:
             rejected_records += len(records) if isinstance(records, list) else 1
             continue
@@ -300,6 +340,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                 "project": item.project,
                 "provider_rank": item.provider_rank,
                 "approximate_views": item.approximate_views,
+                "source_metrics": item.source_metrics,
             } for item in candidate.evidence],
         })
     return {

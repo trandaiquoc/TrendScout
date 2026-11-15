@@ -63,6 +63,17 @@ def initial_offset(context: QueryContext) -> ScopedOffset:
 
 def validate_context(context: QueryContext) -> None:
     """Reject client-created queries and tampered plan or provider metadata."""
+    if context.plan_id == "google-trend-candidate-serp" and context.plan_version == 1:
+        try:
+            from app.sources.google_trends.verification_plan import validate_dynamic_context
+            valid = validate_dynamic_context(
+                context, policy_fingerprint=context.plan_fingerprint
+            )
+        except (AttributeError, TypeError, ValueError):
+            valid = False
+        if valid:
+            return
+        raise ValueError("Query is outside the registered dynamic plan")
     try:
         plan = get_query_plan(context.plan_id, context.plan_version)
         valid = context in build_contexts(plan, context.source_id, context.started_at)
