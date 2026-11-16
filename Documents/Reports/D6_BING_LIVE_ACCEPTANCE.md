@@ -17,7 +17,6 @@ Startup synchronization:
 
 - Fetched `origin`; `HEAD` equaled `origin/main` at the supplied reference revision before changes, so no sync merge was required.
 - Read root `AGENTS.md` and `Frontend/AGENTS.md`, inspected the source catalog, query plan, LIVE gateway, SerpApi client/adapter/pagination/account and Google budget/runtime paths, source capability API and frontend Source Center modules, tests, and `Documents/Reports/D6_GOOGLE_LIVE_ACCEPTANCE.md`.
-- Preserved an existing untracked user image at `Documents/Reports/evidence/data-exploration/native-chrome-cached-overview.png`; it was not staged or modified.
 
 Implementation files changed:
 
