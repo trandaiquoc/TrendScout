@@ -55,6 +55,59 @@ test('posts only Bing for a Bing-only Fetch', async () => {
   assert.equal(requests[1].path, '/api/v1/fetches/' + COMPLETED_ID);
 });
 
+test('sends the accepted YouTube policy version for submit and status polling', async () => {
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ status: 'COMPLETED', run_id: null }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => ['youtube_video_search'],
+      youtubePolicyVersion: () => 'd6-youtube-v1',
+    });
+    await controller.activate();
+
+    assert.equal(requests[0].headers['X-YouTube-Policy-Version'], 'd6-youtube-v1');
+    assert.equal(requests[1].headers['X-YouTube-Policy-Version'], 'd6-youtube-v1');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('does not submit a YouTube Fetch without an accepted policy version', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  const kinds = [];
+  globalThis.fetch = async (path) => {
+    requests.push(String(path));
+    throw new Error('A YouTube request must not be sent without consent.');
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => kinds.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => ['youtube_video_search'],
+    });
+    await controller.activate();
+
+    assert.deepEqual(requests, []);
+    assert.equal(kinds.at(-1), 'policy-consent-required');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('posts Google and Bing together when both search sources are selected', async () => {
   const sources = ['google_web_serp', 'bing_web_serp'];
   const requests = await activateWithSources(sources);

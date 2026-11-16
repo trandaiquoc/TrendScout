@@ -6,7 +6,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-from app.sources.catalog import DEFAULT_WIKIMEDIA_USER_AGENT, SOURCE_CAPABILITIES
+from app.sources.catalog import (
+    DEFAULT_WIKIMEDIA_USER_AGENT,
+    SOURCE_CAPABILITIES,
+    YOUTUBE_SOURCE_ID,
+)
 from app.sources.http_policy import HttpPolicy
 from app.sources.query_plan import DEFAULT_QUERY_PLAN, get_query_plan
 
@@ -193,6 +197,11 @@ class Settings:
         for capability in SOURCE_CAPABILITIES:
             env_name = _SOURCE_ENV_NAMES[capability.source_id]
             enabled = _boolean(environment, env_name, capability.default_enabled)
+            if (enabled and capability.source_id == YOUTUBE_SOURCE_ID
+                    and run_mode != "synthetic"):
+                raise ValueError(
+                    "YouTube selection must use the guarded local LIVE composition"
+                )
             if enabled and capability.readiness != "IMPLEMENTED":
                 raise ValueError(f"Source is not approved and implemented: {capability.source_id}")
             if enabled:

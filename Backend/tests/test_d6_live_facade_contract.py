@@ -1,12 +1,13 @@
 """Simulated LIVE contract test; no provider calls or live evidence."""
 
+import os
 import tempfile
 import unittest
-import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
+
+from local_security_helpers import private_test_directory
 
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PublicAdmission
@@ -16,7 +17,6 @@ from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
-from local_security_helpers import private_test_directory
 
 
 class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
@@ -30,7 +30,29 @@ class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
             admission = PublicAdmission(store, replace(local_smoke_policy(), enabled=True), state_key="demo")
             def grant(source, at):
                 return CheckpointGrant(source, "LIVE", "test-contract-only", at + timedelta(minutes=5), 120, True)
-            def handler(_context):
+            def handler(context):
+                if context.source_id == "youtube_video_search":
+                    valid_video = {
+                        "source_id": "youtube_video_search",
+                        "provider_id": "youtube_data_api_v3",
+                        "data_mode": "LIVE",
+                        "provider_video_id": "AbCdEf12345",
+                        "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                        "title": "Public video title",
+                        "description": "Public video description",
+                        "channel_title": "Public channel",
+                        "published_at": "2026-11-16T00:00:00+00:00",
+                        "result_rank": 1,
+                        "raw": "fixture-private-record",
+                    }
+                    return {"status": "SUCCESS", "data_mode": "LIVE", "record_count": 3,
+                            "records": [
+                                valid_video,
+                                {**valid_video,
+                                 "provider_video_id": "GhIjKl12345",
+                                 "canonical_video_url": "https://example.com/watch?v=GhIjKl12345"},
+                                {**valid_video, "data_mode": "SYNTHETIC"},
+                            ]}
                 return {"status": "SUCCESS", "data_mode": "LIVE", "record_count": 1,
                         "records": [{"raw": "fixture-private-record"}]}
             handler.__trendscout_data_mode__ = "LIVE"
@@ -57,7 +79,17 @@ class LiveFacadeContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["discovery"]["data_mode"], "LIVE")
             self.assertEqual(result["discovery"]["candidate_count"], 0)
             self.assertNotIn("fixture-private-record", repr(result))
-            self.assertTrue(all("records" not in source for source in result["sources"]))
+            visible_youtube = next(
+                source for source in result["sources"]
+                if source["source_id"] == "youtube_video_search"
+            )
+            self.assertEqual(len(visible_youtube["records"]), 1)
+            self.assertEqual(visible_youtube["records"][0]["provider_video_id"], "AbCdEf12345")
+            self.assertNotIn("raw", visible_youtube["records"][0])
+            self.assertTrue(all(
+                "records" not in source for source in result["sources"]
+                if source["source_id"] != "youtube_video_search"
+            ))
             for path in private.iterdir():
                 if path.is_file() and not path.name.endswith(".process-lock"):
                     self.assertNotIn(b"fixture-private-record", path.read_bytes())

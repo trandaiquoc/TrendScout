@@ -176,6 +176,10 @@ function renderYouTubeBudget(capabilities, translate) {
   capabilityRow(values, translate('sources.youtube-provider'), workflow.provider || 'YouTube Data API v3');
   capabilityRow(values, translate('sources.youtube-approval'),
     localizedStatus(workflow.approval_status || source.approval_status, translate));
+  capabilityRow(values, translate('sources.youtube-policy-status'),
+    localizedStatus(workflow.policy_status, translate));
+  capabilityRow(values, translate('sources.youtube-user-agreement'),
+    localizedStatus(workflow.policy_agreement_required ? 'REQUIRED' : 'NOT_REQUIRED', translate));
   capabilityRow(values, translate('sources.youtube-key'),
     localizedStatus(workflow.configuration_status || source.configuration_status, translate));
   capabilityRow(values, translate('sources.youtube-host'),

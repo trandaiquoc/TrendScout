@@ -286,12 +286,35 @@ def _saved_source_activity(request):
     return latest
 
 
-def _local_live_verification_status(source, activity, normal_local_live_runtime):
-    if (normal_local_live_runtime
-            and source.source_id in {"google_web_serp", "bing_web_serp"}
-            and isinstance(activity, dict)
-            and activity.get("status") in {"SUCCESS", "PARTIAL"}
-            and activity.get("data_mode") == "LIVE"):
+def _local_live_verification_status(
+    source, activity, normal_local_live_runtime, normal_youtube_live_runtime=False
+):
+    if not (normal_local_live_runtime and isinstance(activity, dict)):
+        return source.local_live_verification_status
+
+    successful_live_delivery = (
+        activity.get("status") in {"SUCCESS", "PARTIAL"}
+        and activity.get("data_mode") == "LIVE"
+    )
+    if (successful_live_delivery
+            and source.source_id in {"google_web_serp", "bing_web_serp"}):
+        return "LOCAL_LIVE_VERIFIED"
+
+    youtube_coverage = activity.get("youtube_coverage")
+    youtube_request_count = (
+        youtube_coverage.get("provider_request_count")
+        if isinstance(youtube_coverage, dict) else None
+    )
+    record_count = activity.get("record_count")
+    if (successful_live_delivery
+            and source.source_id == "youtube_video_search"
+            and normal_youtube_live_runtime
+            and activity.get("delivery_state") == "FRESH"
+            and type(record_count) is int
+            and record_count > 0
+            and type(youtube_request_count) is int
+            and youtube_request_count > 0
+            and youtube_coverage.get("provider_method") in {"search.list", "videos.list"}):
         return "LOCAL_LIVE_VERIFIED"
     return source.local_live_verification_status
 
@@ -539,7 +562,10 @@ async def capabilities(request: Request, response: Response):
                 ),
                 "live_verification_status": item.live_verification_status,
                 "local_live_verification_status": _local_live_verification_status(
-                    item, saved_activity.get(item.source_id), normal_local_live_runtime
+                    item,
+                    saved_activity.get(item.source_id),
+                    normal_local_live_runtime,
+                    getattr(distributed, "normal_youtube_live", False),
                 ),
                 "production_readiness": item.production_readiness,
                 "supported_data_modes": (["LIVE"] if normal_local_live_runtime

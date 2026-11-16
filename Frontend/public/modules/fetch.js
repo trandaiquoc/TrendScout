@@ -4,6 +4,8 @@ const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED'
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS_PER_ATTEMPT = 90;
 const WIKIMEDIA_SOURCE_ID = 'wikimedia_pageviews_top_per_country';
+const YOUTUBE_SOURCE_ID = 'youtube_video_search';
+const YOUTUBE_POLICY_VERSION_HEADER = 'X-YouTube-Policy-Version';
 
 const WIKIMEDIA_LIVE_MESSAGE_KEYS = {
   submitting: 'fetch.submitting-live',
@@ -57,7 +59,8 @@ const wait = (milliseconds) => new Promise((resolve) => {
 });
 
 export class PublicFetchController {
-  constructor({ onState, onTerminal, locale, historyDays = null, sourceIds = null }) {
+  constructor({ onState, onTerminal, locale, historyDays = null, sourceIds = null,
+    youtubeSelected = () => false, youtubePolicyVersion = () => null }) {
     if (historyDays !== null && (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2)) {
       throw new RangeError('Historical Fetch is limited to one or two days.');
     }
@@ -66,9 +69,12 @@ export class PublicFetchController {
     this.locale = locale;
     this.historyDays = historyDays;
     this.sourceIds = sourceIds;
+    this.youtubeSelected = youtubeSelected;
+    this.youtubePolicyVersion = youtubePolicyVersion;
     this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
+    this.activeYoutubePolicyVersion = null;
     this.busy = false;
     this.stopped = false;
     this.retryTimer = null;
@@ -83,20 +89,34 @@ export class PublicFetchController {
       return;
     }
     this.busy = true;
-    this.key = this.key || newIdempotencyKey();
     this.emit({ kind: 'submitting', busy: true });
     try {
       const selectedSources = this.historyDays === null && typeof this.sourceIds === 'function'
         ? this.sourceIds() : null;
+      const includesYouTube = Array.isArray(selectedSources)
+        ? selectedSources.includes(YOUTUBE_SOURCE_ID) : this.youtubeSelected();
+      const policyVersion = includesYouTube
+        ? this.activeYoutubePolicyVersion || this.youtubePolicyVersion() : null;
+      if (includesYouTube && !policyVersion) {
+        const error = new Error('YouTube policy agreement is required before Fetch.');
+        error.code = 'YOUTUBE_POLICY_CONSENT_REQUIRED';
+        throw error;
+      }
+      this.key = this.key || newIdempotencyKey();
+      this.activeYoutubePolicyVersion = includesYouTube ? policyVersion : null;
       const body = this.historyDays !== null
         ? { days: this.historyDays }
         : Array.isArray(selectedSources) && selectedSources.length
           ? { sources: selectedSources } : {};
+      const headers = { 'Idempotency-Key': this.key };
+      if (this.activeYoutubePolicyVersion) {
+        headers[YOUTUBE_POLICY_VERSION_HEADER] = this.activeYoutubePolicyVersion;
+      }
       const accepted = await requestJson(this.historyDays === null
         ? '/api/v1/fetches' : '/api/v1/fetches/history', {
         method: 'POST',
         body,
-        headers: { 'Idempotency-Key': this.key },
+        headers,
         locale: this.locale(),
       });
       this.fetchId = accepted.fetch_id;
@@ -114,6 +134,8 @@ export class PublicFetchController {
     try {
       for (let attempt = 0; attempt < MAX_POLLS_PER_ATTEMPT && !this.stopped; attempt += 1) {
         status = await getJson('/api/v1/fetches/' + encodeURIComponent(this.fetchId), {
+          headers: this.activeYoutubePolicyVersion
+            ? { [YOUTUBE_POLICY_VERSION_HEADER]: this.activeYoutubePolicyVersion } : {},
           locale: this.locale(),
         });
         this.emit({ kind: 'running', busy: true, fetch: status });
@@ -121,6 +143,7 @@ export class PublicFetchController {
           this.busy = false;
           this.key = null;
           this.fetchId = null;
+          this.activeYoutubePolicyVersion = null;
           this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
           return;
@@ -140,6 +163,19 @@ export class PublicFetchController {
   }
 
   kindForError(error) {
+    const code = error?.code || error?.body?.detail?.code || error?.body?.code;
+    if (code === 'YOUTUBE_POLICY_NOT_APPROVED') {
+      this.fetchId = null;
+      this.key = null;
+      this.activeYoutubePolicyVersion = null;
+      return 'policy-not-approved';
+    }
+    if (code === 'YOUTUBE_POLICY_CONSENT_REQUIRED') {
+      this.fetchId = null;
+      this.key = null;
+      this.activeYoutubePolicyVersion = null;
+      return 'policy-consent-required';
+    }
     if (error instanceof ApiError && error.status === 429) {
       if (error.body?.detail?.code === 'STATUS_POLL_LIMIT'
           || error.body?.code === 'STATUS_POLL_LIMIT') {

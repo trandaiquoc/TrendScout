@@ -5,14 +5,62 @@ are usable only when explicitly injected by backend composition.
 """
 
 import os
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
+
+
+def _public_youtube_record(record):
+    """Project a validated video into the fields the Fetch UI displays."""
+    if not isinstance(record, dict):
+        return None
+    video_id = record.get("provider_video_id")
+    if (record.get("source_id") != YOUTUBE_SOURCE_ID
+            or record.get("provider_id") != "youtube_data_api_v3"
+            or record.get("data_mode") != "LIVE"
+            or not isinstance(video_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id)):
+        return None
+
+    video_url = record.get("canonical_video_url")
+    if video_url != f"https://www.youtube.com/watch?v={video_id}":
+        return None
+    parsed_url = urlsplit(video_url)
+    if (parsed_url.scheme != "https" or parsed_url.netloc != "www.youtube.com"
+            or parsed_url.path != "/watch" or parsed_url.fragment):
+        return None
+
+    title = record.get("title")
+    description = record.get("description")
+    channel_title = record.get("channel_title")
+    published_at = record.get("published_at")
+    result_rank = record.get("result_rank")
+    if (title is not None and (not isinstance(title, str) or len(title) > 500)
+            or description is not None
+            and (not isinstance(description, str) or len(description) > 5000)
+            or channel_title is not None
+            and (not isinstance(channel_title, str) or len(channel_title) > 500)
+            or published_at is not None
+            and (not isinstance(published_at, str) or len(published_at) > 64)
+            or type(result_rank) is not int or result_rank < 1):
+        return None
+
+    return {
+        "provider_video_id": video_id,
+        "canonical_video_url": video_url,
+        "title": title,
+        "description": description,
+        "channel_title": channel_title,
+        "published_at": published_at,
+        "result_rank": result_rank,
+    }
 
 
 class DistributedPublicFetch:
@@ -211,11 +259,24 @@ class DistributedPublicFetch:
                     "candidates": [],
                     "limitations": ["DISCOVERY_PROCESSING_FAILED"],
                 }
-        visible_sources = source_results if include_records or self.data_mode != "LIVE" else [
-            (item if item.get("source_id") == YOUTUBE_SOURCE_ID else
-             {key: value for key, value in item.items() if key != "records"})
-            for item in source_results
-        ]
+        if include_records or self.data_mode != "LIVE":
+            visible_sources = source_results
+        else:
+            visible_sources = []
+            for item in source_results:
+                if item.get("source_id") == YOUTUBE_SOURCE_ID:
+                    public_records = [
+                        projected for record in item.get("records", [])
+                        if (projected := _public_youtube_record(record)) is not None
+                    ] if isinstance(item.get("records"), list) else []
+                    visible = {key: value for key, value in item.items() if key != "records"}
+                    if public_records:
+                        visible["records"] = public_records
+                    visible_sources.append(visible)
+                else:
+                    visible_sources.append({
+                        key: value for key, value in item.items() if key != "records"
+                    })
         return {
             "fetch_id": job["job_id"],
             "status": job["state"],

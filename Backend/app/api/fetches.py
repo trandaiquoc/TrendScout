@@ -20,11 +20,25 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.ports.storage import StorageError
-from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION_HEADER
 
 router = APIRouter()
 MAX_BODY_BYTES = 1024
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
+
+
+def _require_youtube_policy_consent(request: Request, distributed) -> None:
+    """Require reviewed policy and explicit browser acceptance for API Client use."""
+    workflow = getattr(distributed, "youtube_capabilities", None)
+    if not isinstance(workflow, dict):
+        return
+    if workflow.get("policy_status") != "APPROVED":
+        raise HTTPException(409, {"code": "YOUTUBE_POLICY_NOT_APPROVED"})
+    version = workflow.get("policy_version")
+    if (not isinstance(version, str) or not version
+            or request.headers.get(YOUTUBE_POLICY_VERSION_HEADER.lower()) != version):
+        raise HTTPException(428, {"code": "YOUTUBE_POLICY_CONSENT_REQUIRED"})
 
 
 def _origin_tuple(value: str):
@@ -183,6 +197,10 @@ async def create_fetch(
         if (selected_sources is not None
                 and not set(selected_sources) <= distributed.admission.policy.enabled_sources):
             raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
+        effective_sources = (set(selected_sources) if selected_sources is not None
+                             else distributed.admission.policy.enabled_sources)
+        if YOUTUBE_SOURCE_ID in effective_sources:
+            _require_youtube_policy_consent(request, distributed)
         try:
             accepted = distributed.submit(idempotency_key, source_ids=selected_sources)
         except AdmissionDenied as exc:
@@ -329,6 +347,8 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
             _raise_distributed_admission_error(exc.code, distributed)
         if result is None:
             raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
+        if YOUTUBE_SOURCE_ID in result.get("selected_sources", []):
+            _require_youtube_policy_consent(request, distributed)
         return result
     try:
         record = await request.app.state.fetch_registry.get(fetch_id)

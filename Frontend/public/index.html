@@ -251,6 +251,17 @@
     </main>
   </div>
 
+  <dialog id="youtube-policy-dialog" class="youtube-policy-dialog" aria-labelledby="youtube-policy-title" aria-describedby="youtube-policy-description">
+    <div class="dialog-head"><div><p class="section-kicker" data-i18n="youtube-policy.kicker"></p><h2 id="youtube-policy-title" data-i18n="youtube-policy.title"></h2><p id="youtube-policy-description" data-i18n="youtube-policy.description"></p></div><button id="youtube-policy-cancel-top" class="icon-button dialog-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button></div>
+    <nav class="youtube-policy-links" aria-label="YouTube policy documents">
+      <a href="/dashboard/privacy.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.privacy-link"></a>
+      <a href="/dashboard/terms.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.terms-link"></a>
+      <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.youtube-terms-link"></a>
+    </nav>
+    <label class="youtube-policy-consent"><input id="youtube-policy-consent" type="checkbox"><span data-i18n="youtube-policy.agreement"></span></label>
+    <p id="youtube-policy-error" class="youtube-policy-error" role="status" aria-live="polite" hidden></p>
+    <div class="youtube-policy-actions"><button id="youtube-policy-cancel" class="button button-secondary" type="button" data-i18n="youtube-policy.cancel"></button><button id="youtube-policy-accept" class="button button-primary" type="button" disabled data-i18n="youtube-policy.accept"></button></div>
+  </dialog>
   <dialog id="detail-dialog" aria-labelledby="detail-title">
     <div class="dialog-head"><div><p class="section-kicker" data-i18n="detail.kicker"></p><h2 id="detail-title" data-i18n="detail.loading"></h2><p id="detail-subtitle"></p></div><button class="icon-button dialog-close" type="button" data-close="detail-dialog" data-i18n-aria="common.close" aria-label="Close">×</button></div>
     <div id="detail-content" class="detail-content"></div>

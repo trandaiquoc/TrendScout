@@ -41,6 +41,43 @@ class LocalLiveVerificationStatusTests(unittest.TestCase):
                     "NOT_VERIFIED",
                 )
 
+    def test_youtube_requires_fresh_live_provider_evidence_on_its_enabled_runtime(self):
+        source = SimpleNamespace(
+            source_id="youtube_video_search",
+            local_live_verification_status="NOT_VERIFIED",
+        )
+        fresh_live = {
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "record_count": 3,
+            "youtube_coverage": {
+                "provider_method": "search.list",
+                "provider_request_count": 1,
+            },
+        }
+        self.assertEqual(
+            _local_live_verification_status(source, fresh_live, True, True),
+            "LOCAL_LIVE_VERIFIED",
+        )
+
+        for activity, youtube_runtime in (
+            ({**fresh_live, "delivery_state": "CACHED"}, True),
+            ({**fresh_live, "data_mode": "SYNTHETIC"}, True),
+            ({**fresh_live, "youtube_coverage": {
+                "provider_method": "search.list", "provider_request_count": 0,
+            }}, True),
+            ({**fresh_live, "record_count": 0}, True),
+            (fresh_live, False),
+        ):
+            with self.subTest(activity=activity, youtube_runtime=youtube_runtime):
+                self.assertEqual(
+                    _local_live_verification_status(
+                        source, activity, True, youtube_runtime
+                    ),
+                    "NOT_VERIFIED",
+                )
+
     def test_saved_bing_activity_exposes_query_delivery_and_result_coverage(self):
         db = sqlite3.connect(":memory:")
         db.row_factory = sqlite3.Row

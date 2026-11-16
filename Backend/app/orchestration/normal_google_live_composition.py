@@ -52,6 +52,7 @@ from app.sources.refresh_eligibility import (
 from app.sources.serpapi.account import SerpApiAccountClient
 from app.sources.serpapi.errors import SerpApiError
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
+from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION
 from app.sources.youtube.query_planner import select_youtube_query_scopes
 from app.sources.youtube.retention import purge_expired_youtube_cache
 from app.storage.local_file_security import secure_private_directory
@@ -672,8 +673,11 @@ async def normal_google_live_composition(*, user_agent,
         facade.youtube_capabilities = {
             "provider": "YouTube Data API v3",
             "approval_status": ("APPROVED_FOR_LOCAL_RUNTIME"
-                                if config.youtube_approval_configured
+                                if config.youtube_live_approved
                                 else "PENDING_LIVE_APPROVAL"),
+            "policy_status": "APPROVED" if config.youtube_policy_approved else "DRAFT",
+            "policy_version": YOUTUBE_POLICY_VERSION,
+            "policy_agreement_required": True,
             "live_host_status": youtube_host_status,
             "configuration_status": youtube_credential_status,
             "live_status": "LIVE_CONFIGURED" if youtube_gateway else "CACHE_ONLY",

@@ -43,6 +43,7 @@ class GoogleLiveSettings:
     cross_machine_reserve: int = 6
     bing_daily_budget: int = 3
     youtube_live_approved: bool = False
+    youtube_policy_approved: bool = False
     youtube_live_host: str | None = None
 
     @classmethod
@@ -81,6 +82,9 @@ class GoogleLiveSettings:
             youtube_live_approved=_flag(
                 environment, "TREND_SCOUT_YOUTUBE_LIVE_APPROVED"
             ),
+            youtube_policy_approved=_flag(
+                environment, "TREND_SCOUT_YOUTUBE_POLICY_APPROVED"
+            ),
             youtube_live_host=(environment.get("TREND_SCOUT_YOUTUBE_LIVE_HOST", "")
                                .strip() or None),
         )
@@ -99,4 +103,4 @@ class GoogleLiveSettings:
 
     @property
     def youtube_approval_configured(self) -> bool:
-        return self.youtube_live_approved
+        return self.youtube_live_approved and self.youtube_policy_approved

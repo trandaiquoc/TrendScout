@@ -81,17 +81,27 @@ def _live_facade(directory):
 
     attempts = {"count": 0}
 
-    def handler(_context):
+    def handler(context):
         attempts["count"] += 1
+        records = ([{
+            "source_id": YOUTUBE_SOURCE_ID,
+            "provider_id": "youtube_data_api_v3",
+            "data_mode": "LIVE",
+            "provider_video_id": "AbCdEf12345",
+            "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+            "title": "Offline fixture video",
+            "description": None,
+            "channel_title": "Offline fixture channel",
+            "published_at": "2026-11-12T00:00:00+00:00",
+            "result_rank": 1,
+        }] if context.source_id == YOUTUBE_SOURCE_ID else [{
+            "raw": "fixture-private-content",
+        }])
         return {
             "status": "SUCCESS",
             "data_mode": "LIVE",
             "record_count": 1,
-            "records": [{
-                "provider_video_id": "AbCdEf12345",
-                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
-                "title": "Offline fixture video",
-            }],
+            "records": records,
         }
 
     handler.__trendscout_data_mode__ = "LIVE"
