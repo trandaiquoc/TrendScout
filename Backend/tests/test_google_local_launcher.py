@@ -24,14 +24,14 @@ class LocalWebLauncherTests(unittest.TestCase):
         self.assertTrue(settings.bing_approved)
         self.assertTrue(settings.policy_migration_approved)
 
-    def test_owner_acceptance_uses_one_initial_query_and_preserves_expired_data(self):
+    def test_owner_acceptance_uses_one_query_but_preserves_schedule_checks(self):
         with patch.object(local_launcher, "create_normal_google_live_app", return_value=object()) as create_app, \
              patch.object(local_launcher, "run_normal_google_live") as run_app:
             local_launcher.main(["--port", "8123", "--youtube-owner-acceptance"])
 
         composition = create_app.call_args.kwargs["composition_factory"]
         self.assertIsInstance(composition, partial)
-        self.assertTrue(composition.keywords["allow_initial_youtube_acceptance"])
+        self.assertNotIn("allow_initial_youtube_acceptance", composition.keywords)
         self.assertTrue(composition.keywords["preserve_expired_data"])
         self.assertEqual(composition.keywords["youtube_max_queries"], 1)
         run_app.assert_called_once_with(create_app.return_value, port=8123)
@@ -43,7 +43,7 @@ class LocalWebLauncherTests(unittest.TestCase):
 
         composition = create_app.call_args.kwargs["composition_factory"]
         self.assertIsInstance(composition, partial)
-        self.assertFalse(composition.keywords["allow_initial_youtube_acceptance"])
+        self.assertNotIn("allow_initial_youtube_acceptance", composition.keywords)
         self.assertFalse(composition.keywords["preserve_expired_data"])
         self.assertEqual(composition.keywords["youtube_max_queries"], 2)
 

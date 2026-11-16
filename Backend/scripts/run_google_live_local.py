@@ -34,8 +34,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--youtube-owner-acceptance", action="store_true",
-        help=("Use the owner-authorized initial YouTube acceptance outside a scheduled slot; "
-              "record the actual time, preserve expired SQLite blobs, and allow one search call."),
+        help=("Preserve expired SQLite blobs and limit YouTube to one search query; "
+              "the regular YouTube schedule and approval checks still apply."),
     )
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65535:
@@ -63,7 +63,6 @@ def main(argv=None):
             force_refresh_trends=True,
             allow_initial_google_acceptance=True,
             allow_initial_bing_acceptance=True,
-            allow_initial_youtube_acceptance=arguments.youtube_owner_acceptance,
             preserve_expired_data=arguments.youtube_owner_acceptance,
             youtube_max_queries=1 if arguments.youtube_owner_acceptance else 2,
         ),

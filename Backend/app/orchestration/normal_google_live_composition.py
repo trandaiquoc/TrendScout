@@ -174,7 +174,6 @@ async def normal_google_live_composition(*, user_agent,
                                          force_refresh_trends: bool = False,
                                          allow_initial_google_acceptance: bool = False,
                                          allow_initial_bing_acceptance: bool = False,
-                                         allow_initial_youtube_acceptance: bool = False,
                                          preserve_expired_data: bool = False,
                                          youtube_max_queries: int = 2):
     """Compose one local worker; no Google call is made without its own approval."""
@@ -184,7 +183,6 @@ async def normal_google_live_composition(*, user_agent,
             or not callable(utcnow) or type(force_refresh_trends) is not bool
             or type(allow_initial_google_acceptance) is not bool
             or type(allow_initial_bing_acceptance) is not bool
-            or type(allow_initial_youtube_acceptance) is not bool
             or type(preserve_expired_data) is not bool
             or type(youtube_max_queries) is not int
             or not 1 <= youtube_max_queries <= 2):
@@ -604,14 +602,12 @@ async def normal_google_live_composition(*, user_agent,
                 slot = candidate_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
-                    allow_initial_acceptance=allow_initial_youtube_acceptance,
                 )
                 if slot is None:
                     return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
                 reserved = reserve_source_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
-                    allow_initial_acceptance=allow_initial_youtube_acceptance,
                 )
                 if reserved is None:
                     return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
@@ -633,7 +629,6 @@ async def normal_google_live_composition(*, user_agent,
             return select_youtube_query_scopes(
                 now=reserved_slot, plan=DEFAULT_QUERY_PLAN,
                 max_queries=youtube_max_queries,
-                initial_acceptance=schedule.get("last_slot") == "INITIAL_ACCEPTANCE",
             )
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
@@ -709,8 +704,7 @@ async def normal_google_live_composition(*, user_agent,
                 (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
                  allow_initial_google_acceptance),
                 (BING_SOURCE_ID, BING_REFRESH_STATE_KEY, allow_initial_bing_acceptance),
-                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY,
-                 allow_initial_youtube_acceptance),
+                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY, False),
             ):
                 try:
                     sources[source_id] = schedule_metadata(

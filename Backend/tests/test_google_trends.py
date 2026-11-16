@@ -712,7 +712,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             _youtube_scope_anchor({"last_slot": "INITIAL_ACCEPTANCE"})
 
-    async def test_owner_acceptance_preserves_expired_blobs_and_exposes_initial_slot(self):
+    async def test_owner_acceptance_preserves_expired_blobs_without_bypassing_schedule(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             state_dir = root / "google-state"
@@ -739,12 +739,12 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                 credential_provider=NeverReadCredentials(),
                 collection_store=collection_store,
                 utcnow=lambda: NOW,
-                allow_initial_youtube_acceptance=True,
                 preserve_expired_data=True,
                 youtube_max_queries=1,
             ) as facade:
                 schedule = facade.refresh_schedule_metadata()["sources"][YOUTUBE_SOURCE_ID]
-                self.assertTrue(schedule["initial_acceptance_available"])
+                self.assertFalse(schedule["initial_acceptance_available"])
+                self.assertIsNotNone(schedule["next_eligible_at"])
                 self.assertIsNone(facade.youtube_retention_cleanup)
 
             with closing(atomic._connect()) as connection:
