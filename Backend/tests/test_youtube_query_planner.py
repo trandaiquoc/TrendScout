@@ -32,6 +32,19 @@ class YouTubeQueryPlannerTests(unittest.TestCase):
                 now=datetime(2026, 11, 16, 7, 10, tzinfo=LOCAL)
             )
 
+    def test_owner_initial_acceptance_uses_next_real_slot_without_changing_time(self):
+        outside = datetime(2026, 11, 17, 0, 41, tzinfo=LOCAL)
+        next_scheduled_slot = datetime(2026, 11, 17, 7, 0, tzinfo=LOCAL)
+        accepted = select_youtube_query_scopes(now=outside, initial_acceptance=True)
+        self.assertEqual(accepted, select_youtube_query_scopes(now=next_scheduled_slot))
+        self.assertEqual(len(accepted), 2)
+
+    def test_owner_initial_acceptance_after_last_slot_rotates_from_next_day(self):
+        outside = datetime(2026, 11, 17, 23, 11, tzinfo=LOCAL)
+        next_scheduled_slot = datetime(2026, 11, 18, 7, 0, tzinfo=LOCAL)
+        accepted = select_youtube_query_scopes(now=outside, initial_acceptance=True)
+        self.assertEqual(accepted, select_youtube_query_scopes(now=next_scheduled_slot))
+
     def test_query_count_cannot_exceed_reviewed_cap(self):
         with self.assertRaisesRegex(ValueError, "1..2 query cap"):
             select_youtube_query_scopes(

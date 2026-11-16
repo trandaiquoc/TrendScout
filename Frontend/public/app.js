@@ -1093,6 +1093,8 @@ function activateFetchWithPolicyConsent(controller) {
   $('#youtube-policy-consent').checked = false;
   $('#youtube-policy-accept').disabled = true;
   $('#youtube-policy-error').hidden = true;
+  const policyVersion = $('#youtube-policy-version');
+  if (policyVersion) policyVersion.textContent = workflow.policy_version;
   pendingYoutubeFetchController = controller;
   pendingYoutubePolicyVersion = workflow.policy_version;
   dialog.showModal();

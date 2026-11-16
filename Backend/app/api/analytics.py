@@ -344,9 +344,32 @@ def _history_cursor_encode(filters, local, manual):
 
 def _history_matches(item, q, status, mode):
     haystack = " ".join(str(item.get(key) or "") for key in (
-        "fetch_id", "run_type", "status", "error_code", "mode", "source_manifest"
+        "fetch_id", "run_type", "status", "outcome_status", "error_code", "mode", "source_manifest"
     )).casefold()
-    return q.casefold() in haystack and (not status or item.get("status") == status) and (not mode or item.get("mode") == mode)
+    actual_status = item.get("outcome_status") or item.get("status")
+    return q.casefold() in haystack and (not status or actual_status == status) and (not mode or item.get("mode") == mode)
+
+
+def _attach_run_outcome(item, manifest):
+    """Expose Fetch outcome separately from the job's processing completion."""
+    dataset_status = item.get("dataset_status")
+    if dataset_status == "SUCCESS":
+        item["outcome_status"] = "COMPLETED"
+    elif dataset_status in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED"}:
+        item["outcome_status"] = dataset_status
+    else:
+        item["outcome_status"] = item.get("status")
+    if not item.get("error_code") and isinstance(manifest, list):
+        for source in manifest:
+            if not isinstance(source, dict):
+                continue
+            code = source.get("error_code")
+            if (isinstance(code, str) and 1 <= len(code) <= 64
+                    and code[0].isupper()
+                    and all(character.isupper() or character.isdigit() or character == "_"
+                            for character in code)):
+                item["error_code"] = code
+                break
 
 
 def _history_item_from_job(row):
@@ -357,6 +380,7 @@ def _history_item_from_job(row):
     except (TypeError, ValueError):
         manifest = []
         item["sources"] = []
+    _attach_run_outcome(item, manifest)
     item["run_type"] = "FETCH" if item.get("dataset_id") else (
         "COLLECTION_RECONCILIATION" if item.get("membership_reconciliation_id") else "COLLECTION_PROCESSING"
     )
@@ -414,7 +438,7 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
             if cursor:
                 after_sql = "WHERE (COALESCE(d.fetched_at,j.updated_at)<? OR (COALESCE(d.fetched_at,j.updated_at)=? AND j.fetch_id<?))"
                 parameters.extend((cursor[0], cursor[0], cursor[1]))
-            local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.data_mode,d.source_manifest,d.provider_record_count,
+            local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
                 d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
                 d.quality_flags,d.processing_status,COALESCE(d.fetched_at,j.updated_at) AS history_sort_at
                 FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
@@ -523,7 +547,7 @@ async def run_history(
     service = getattr(request.app.state, "collection_service", None)
     if service:
         with service.store.connect() as db:
-            rows = db.execute("""SELECT j.*,d.dataset_id,d.data_mode,d.source_manifest,d.provider_record_count,
+            rows = db.execute("""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
                 d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
                 d.quality_flags,d.processing_status
                 FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
@@ -535,13 +559,15 @@ async def run_history(
         item = dict(row)
         if item.get("source_manifest"):
             try:
-                item["sources"] = [
-                    source.get("source_id") for source in json.loads(item["source_manifest"])
-                ]
+                manifest = json.loads(item["source_manifest"])
+                item["sources"] = [source.get("source_id") for source in manifest]
             except (TypeError, ValueError):
+                manifest = []
                 item["sources"] = []
         else:
+            manifest = []
             item["sources"] = []
+        _attach_run_outcome(item, manifest)
         item["run_type"] = (
             "FETCH"
             if item.get("dataset_id")
@@ -560,7 +586,7 @@ async def run_history(
         ).casefold()
         if (
             q.casefold() not in haystack
-            or (status and item.get("status") != status)
+            or (status and (item.get("outcome_status") or item.get("status")) != status)
             or (mode and item.get("mode") != mode)
         ):
             continue
@@ -679,5 +705,6 @@ async def run_history_detail(fetch_id: str, request: Request):
             item[key] = json.loads(item[key]) if item.get(key) else []
         except (TypeError, ValueError):
             item[key] = []
+    _attach_run_outcome(item, item.get("source_manifest"))
     item["duration_seconds"] = None
     return {"item": item, "duration_available": False}

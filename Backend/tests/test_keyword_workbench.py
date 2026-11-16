@@ -241,6 +241,41 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(response.json()["items"], [])
         self.assertFalse(response.json()["duration_available"])
 
+    def test_run_history_distinguishes_fetch_outcome_from_completed_processing(self):
+        fetch_id = "e" * 32
+        manifest = [{"source_id": "youtube_video_search", "status": "FAILED",
+                     "error_code": "SOURCE_EXECUTION_FAILED", "record_count": 0}]
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
+                       (fetch_id, "COMPLETED", "2026-11-17T17:41:25Z"))
+            db.execute("""INSERT INTO dataset_snapshots
+                (dataset_id,status,data_mode,source_manifest,provider_record_count,received_record_count,
+                retained_keyword_count,rejected_record_count,quality_flags,processing_status,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (
+                    fetch_id, "FAILED", "LIVE", json.dumps(manifest), 0, 0, 0, 0,
+                    "[]", "COMPLETED", "2026-11-17T17:41:25Z"))
+
+        cursor_page = self._request("GET", "/api/v1/runs/history",
+                                    params={"limit": 20, "cursor": ""}).json()
+        item = next(row for row in cursor_page["items"] if row["fetch_id"] == fetch_id)
+        self.assertEqual(item["status"], "COMPLETED")
+        self.assertEqual(item["outcome_status"], "FAILED")
+        self.assertEqual(item["error_code"], "SOURCE_EXECUTION_FAILED")
+
+        offset_page = self._request("GET", "/api/v1/runs/history", params={"limit": 20}).json()
+        offset_item = next(row for row in offset_page["items"] if row["fetch_id"] == fetch_id)
+        self.assertEqual(offset_item["outcome_status"], "FAILED")
+        self.assertEqual(offset_item["error_code"], "SOURCE_EXECUTION_FAILED")
+
+        filtered = self._request("GET", "/api/v1/runs/history",
+                                 params={"limit": 20, "cursor": "", "status": "FAILED"}).json()
+        self.assertEqual([row["fetch_id"] for row in filtered["items"]], [fetch_id])
+
+        detail = self._request("GET", "/api/v1/runs/history/" + fetch_id).json()["item"]
+        self.assertEqual(detail["outcome_status"], "FAILED")
+        self.assertEqual(detail["error_code"], "SOURCE_EXECUTION_FAILED")
+        self.assertEqual(detail["dataset_status"], "FAILED")
+
     def test_run_history_detail_preserves_saved_source_count_and_observation_window(self):
         fetch_id = "d" * 32
         with self.store.connect() as db:

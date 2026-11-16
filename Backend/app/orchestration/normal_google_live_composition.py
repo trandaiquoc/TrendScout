@@ -244,56 +244,76 @@ async def normal_google_live_composition(*, user_agent,
                 allow_fetch_capacity_increase=allow_capacity,
             )
 
-        previous_without_youtube = make_policy(
-            bing_enabled=config.paid_bing_approved, youtube_enabled=False
+        legacy_google_policy = normal_google_live_policy(
+            serpapi_daily_budget=10,
+            serpapi_monthly_budget=10,
+            rss_daily_budget=1,
+            rss_monthly_budget=1,
+            fetch_starts_per_hour=2,
+            bing_enabled=False,
+            youtube_enabled=False,
         )
-        if existing_state.get("policy_digest") == PublicAdmission(
-                store, previous_without_youtube, state_key=GOOGLE_STATE_KEY
-        ).policy_digest:
-            migration_target(
-                previous_without_youtube, policy,
-                "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+        legacy_google_digest = PublicAdmission(
+            store, legacy_google_policy, state_key=GOOGLE_STATE_KEY
+        ).policy_digest
+        if existing_state.get("policy_digest") == legacy_google_digest:
+            admission.migrate_legacy_google_live_policy(
+                legacy_google_policy,
+                authorization_note="OWNER_AUTHORIZED_D6_YOUTUBE_WINDOWS_ACCEPTANCE",
+                now=utcnow(),
             )
-        elif config.paid_bing_approved:
-            previous_without_bing = make_policy(bing_enabled=False, youtube_enabled=False)
-            previous_without_bing_digest = PublicAdmission(
-                store, previous_without_bing, state_key=GOOGLE_STATE_KEY
-            ).policy_digest
-            if existing_state.get("policy_digest") == previous_without_bing_digest:
-                with_bing = make_policy(bing_enabled=True, youtube_enabled=False)
-                migration_target(
-                    previous_without_bing, with_bing,
-                    "OWNER_APPROVED_GOOGLE_BING_SHARED_ALLOCATION",
-                )
-                migration_target(
-                    with_bing, policy,
-                    "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
-                )
-            else:
-                raise ValueError("stored Google LIVE policy does not match a supported local migration")
-        elif config.fetch_starts_per_hour > 1:
-            old_capacity_policy = make_policy(
-                bing_enabled=False, youtube_enabled=False, fetch_starts_per_hour=1
-            )
-            old_capacity_digest = PublicAdmission(
-                store, old_capacity_policy, state_key=GOOGLE_STATE_KEY
-            ).policy_digest
-            if existing_state.get("policy_digest") == old_capacity_digest:
-                current_without_youtube = make_policy(
-                    bing_enabled=False, youtube_enabled=False
-                )
-                migration_target(
-                    old_capacity_policy, current_without_youtube,
-                    "LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1", allow_capacity=True,
-                )
-                migration_target(
-                    current_without_youtube, policy,
-                    "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
-                )
-            else:
-                raise ValueError("stored Google LIVE policy does not match a supported local migration")
         else:
-            raise ValueError("stored Google LIVE policy does not match a supported local migration")
+            previous_without_youtube = make_policy(
+                bing_enabled=config.paid_bing_approved, youtube_enabled=False
+            )
+            previous_without_youtube_digest = PublicAdmission(
+                store, previous_without_youtube, state_key=GOOGLE_STATE_KEY
+            ).policy_digest
+            if existing_state.get("policy_digest") == previous_without_youtube_digest:
+                migration_target(
+                    previous_without_youtube, policy,
+                    "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+                )
+            elif config.paid_bing_approved:
+                previous_without_bing = make_policy(bing_enabled=False, youtube_enabled=False)
+                previous_without_bing_digest = PublicAdmission(
+                    store, previous_without_bing, state_key=GOOGLE_STATE_KEY
+                ).policy_digest
+                if existing_state.get("policy_digest") == previous_without_bing_digest:
+                    with_bing = make_policy(bing_enabled=True, youtube_enabled=False)
+                    migration_target(
+                        previous_without_bing, with_bing,
+                        "OWNER_APPROVED_GOOGLE_BING_SHARED_ALLOCATION",
+                    )
+                    migration_target(
+                        with_bing, policy,
+                        "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+                    )
+                else:
+                    raise ValueError("stored Google LIVE policy does not match a supported local migration")
+            elif config.fetch_starts_per_hour > 1:
+                old_capacity_policy = make_policy(
+                    bing_enabled=False, youtube_enabled=False, fetch_starts_per_hour=1
+                )
+                old_capacity_digest = PublicAdmission(
+                    store, old_capacity_policy, state_key=GOOGLE_STATE_KEY
+                ).policy_digest
+                if existing_state.get("policy_digest") == old_capacity_digest:
+                    current_without_youtube = make_policy(
+                        bing_enabled=False, youtube_enabled=False
+                    )
+                    migration_target(
+                        old_capacity_policy, current_without_youtube,
+                        "LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1", allow_capacity=True,
+                    )
+                    migration_target(
+                        current_without_youtube, policy,
+                        "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+                    )
+                else:
+                    raise ValueError("stored Google LIVE policy does not match a supported local migration")
+            else:
+                raise ValueError("stored Google LIVE policy does not match a supported local migration")
     runner = GuardedAttemptRunner(admission, clock=utcnow)
     cache = SharedCache(store)
     youtube_cache_scope = CacheScope(
@@ -613,6 +633,7 @@ async def normal_google_live_composition(*, user_agent,
             return select_youtube_query_scopes(
                 now=reserved_slot, plan=DEFAULT_QUERY_PLAN,
                 max_queries=youtube_max_queries,
+                initial_acceptance=schedule.get("last_slot") == "INITIAL_ACCEPTANCE",
             )
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)

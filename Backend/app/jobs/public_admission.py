@@ -349,6 +349,187 @@ class PublicAdmission:
 
         return self.store.transact(self.state_key, operation)
 
+    def migrate_legacy_google_live_policy(self, previous_policy: AdmissionPolicy, *,
+                                          authorization_note: str,
+                                          now: datetime) -> dict:
+        """Upgrade the known pre-Bing Google ledger without discarding usage.
+
+        This path is limited to the legacy Google/Wikimedia policy and an
+        additive local policy that includes YouTube. It permits changed
+        ceilings only when every persisted counter fits the destination pool.
+        Existing provider-level SerpApi counters remain intact and are copied
+        into Google's new source allocation before the policy digest changes.
+        """
+        now = _utc(now)
+        if (not isinstance(previous_policy, AdmissionPolicy)
+                or not isinstance(authorization_note, str)
+                or not 12 <= len(authorization_note) <= 256
+                or "\x00" in authorization_note):
+            raise ValueError("previous policy and auditable owner authorization are required")
+
+        previous_digest = self._policy_digest(previous_policy)
+        previous_base, current_base = asdict(previous_policy), asdict(self.policy)
+        previous_base["enabled_sources"] = sorted(previous_policy.enabled_sources)
+        current_base["enabled_sources"] = sorted(self.policy.enabled_sources)
+        previous_base.pop("enabled")
+        current_base.pop("enabled")
+        previous_pools = previous_base.pop("pools")
+        current_pools = current_base.pop("pools")
+        previous_fetch_cap = previous_base.pop("max_starts_per_window")
+        current_fetch_cap = current_base.pop("max_starts_per_window")
+        previous_allocations = previous_base.pop("source_allocations", {})
+        current_allocations = current_base.pop("source_allocations", {})
+        previous_sources = set(previous_base.pop("enabled_sources"))
+        current_sources = set(current_base.pop("enabled_sources"))
+
+        legacy_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+        expected_allocations = (
+            {GOOGLE_SOURCE_ID: "serpapi_google", BING_SOURCE_ID: "serpapi_bing"}
+            if BING_SOURCE_ID in current_sources else {}
+        )
+        added_pools = set(current_pools) - set(previous_pools)
+        expected_added_pools = (
+            ({"serpapi_google", "serpapi_bing"} if expected_allocations else set())
+            | ({SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}
+               if YOUTUBE_SOURCE_ID in current_sources else set())
+        )
+        if (previous_sources != legacy_sources
+                or previous_allocations
+                or not legacy_sources <= current_sources
+                or YOUTUBE_SOURCE_ID not in current_sources
+                or current_sources - legacy_sources - {BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
+                or current_allocations != expected_allocations
+                or set(previous_pools) != {"wikimedia", "serpapi", "google_rss"}
+                or added_pools != expected_added_pools
+                or current_fetch_cap < previous_fetch_cap
+                or previous_base != current_base):
+            raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+
+        budget_fields = {
+            "daily_requests", "monthly_requests", "daily_cost_units", "monthly_cost_units",
+        }
+        for name, old_values in previous_pools.items():
+            new_values = current_pools[name]
+            if set(old_values) != set(new_values):
+                raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+            for field_name, old_value in old_values.items():
+                if field_name not in budget_fields and new_values[field_name] != old_value:
+                    raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
+
+        def operation(state):
+            if (not state or state.get("schema") != 1
+                    or state.get("policy_digest") != previous_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+            jobs, inflight, quota = (
+                state.get("jobs"), state.get("inflight"), state.get("quota")
+            )
+            if not isinstance(jobs, dict) or not isinstance(inflight, dict) or not isinstance(quota, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            for job in jobs.values():
+                if (isinstance(job, dict) and job.get("state") in {"QUEUED", "RUNNING"}
+                        and _parse(job.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
+                    raise AdmissionDenied("POLICY_MIGRATION_BUSY")
+            for slot in inflight.values():
+                if (isinstance(slot, dict)
+                        and _parse(slot.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
+                    raise AdmissionDenied("POLICY_MIGRATION_BUSY")
+
+            migrated_quota = deepcopy(quota)
+            google_pool = current_allocations.get(GOOGLE_SOURCE_ID)
+            for key, usage in tuple(migrated_quota.items()):
+                if not isinstance(key, str) or not isinstance(usage, dict):
+                    raise AdmissionDenied("STATE_INVALID")
+                parts = key.split(":")
+                if (len(parts) != 3 or parts[0] not in self._pools
+                        or parts[1] not in {"day", "month", "cycle"}):
+                    raise AdmissionDenied("STATE_INVALID")
+                if parts[1] == "cycle":
+                    try:
+                        cycle_date = date.fromisoformat(parts[2])
+                    except ValueError:
+                        raise AdmissionDenied("STATE_INVALID") from None
+                    if cycle_date.isoformat() != parts[2]:
+                        raise AdmissionDenied("STATE_INVALID")
+                elif parts[1] == "month":
+                    try:
+                        month_date = date.fromisoformat(f"{parts[2]}-01")
+                    except ValueError:
+                        raise AdmissionDenied("STATE_INVALID") from None
+                    if month_date.strftime("%Y-%m") != parts[2]:
+                        raise AdmissionDenied("STATE_INVALID")
+                elif parts[1] == "day":
+                    try:
+                        day = date.fromisoformat(parts[2])
+                    except ValueError:
+                        raise AdmissionDenied("STATE_INVALID") from None
+                    if day.isoformat() != parts[2]:
+                        raise AdmissionDenied("STATE_INVALID")
+                requests, cost = usage.get("requests"), usage.get("cost")
+                if (type(requests) is not int or type(cost) is not int
+                        or requests < 0 or cost < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                limit = self._pools[parts[0]]
+                request_limit = limit.daily_requests if parts[1] == "day" else limit.monthly_requests
+                cost_limit = limit.daily_cost_units if parts[1] == "day" else limit.monthly_cost_units
+                if requests > request_limit or cost > cost_limit:
+                    raise AdmissionDenied("POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+
+                if parts[0] == "serpapi" and google_pool:
+                    allocation_key = ":".join((google_pool, parts[1], parts[2]))
+                    existing_allocation = migrated_quota.get(allocation_key)
+                    if existing_allocation is not None and (
+                            existing_allocation.get("requests") != requests
+                            or existing_allocation.get("cost") != cost):
+                        raise AdmissionDenied("POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+                    allocation_limit = self._pools[google_pool]
+                    allocation_requests = (
+                        allocation_limit.daily_requests if parts[1] == "day"
+                        else allocation_limit.monthly_requests
+                    )
+                    allocation_cost = (
+                        allocation_limit.daily_cost_units if parts[1] == "day"
+                        else allocation_limit.monthly_cost_units
+                    )
+                    if requests > allocation_requests or cost > allocation_cost:
+                        raise AdmissionDenied("POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+                    if existing_allocation is None:
+                        migrated_quota[allocation_key] = deepcopy(usage)
+
+            audit = state.get("policy_migration_audit", [])
+            if not isinstance(audit, list) or len(audit) >= 32:
+                raise AdmissionDenied("POLICY_MIGRATION_AUDIT_UNAVAILABLE")
+            changed_pools = sorted(
+                name for name, old_values in previous_pools.items()
+                if old_values != asdict(self._pools[name])
+            )
+            changed_pools.extend(sorted(added_pools))
+            if previous_allocations != current_allocations:
+                changed_pools.append("source_allocations")
+            changed_limits = []
+            if previous_fetch_cap != current_fetch_cap:
+                changed_limits.append("max_starts_per_window")
+            if previous_sources != current_sources:
+                changed_limits.append("enabled_sources")
+            record = {
+                "schema": 1,
+                "at": now.isoformat(),
+                "from_policy_digest": previous_digest,
+                "to_policy_digest": self.policy_digest,
+                "changed_pools": changed_pools,
+                "changed_admission_limits": changed_limits,
+                "migration_kind": "LEGACY_GOOGLE_TO_D6_YOUTUBE_V1",
+                "authorization_note": authorization_note,
+                "quota_preserved": True,
+                "jobs_preserved": True,
+                "reservations_preserved": True,
+            }
+            state["policy_digest"] = self.policy_digest
+            state["quota"] = migrated_quota
+            state["policy_migration_audit"] = [*audit, record]
+            return state, record
+
+        return self.store.transact(self.state_key, operation)
+
     def _transaction(self, fn):
         def mutate(state):
             if not state:

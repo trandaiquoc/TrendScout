@@ -26,7 +26,8 @@ _PRIORITY_SCOPES = (
 
 
 def select_youtube_query_scopes(
-    *, now: datetime, plan: QueryPlan = DEFAULT_QUERY_PLAN, max_queries: int = 2
+    *, now: datetime, plan: QueryPlan = DEFAULT_QUERY_PLAN, max_queries: int = 2,
+    initial_acceptance: bool = False,
 ) -> tuple[str, ...]:
     """Select up to two curated scopes for the current Vietnam refresh slot.
 
@@ -36,7 +37,8 @@ def select_youtube_query_scopes(
     """
     if (plan != DEFAULT_QUERY_PLAN or not isinstance(now, datetime)
             or now.tzinfo is None or now.utcoffset() is None
-            or type(max_queries) is not int or not 1 <= max_queries <= 2):
+            or type(max_queries) is not int or not 1 <= max_queries <= 2
+            or type(initial_acceptance) is not bool):
         raise ValueError("registered plan, timezone-aware time and a 1..2 query cap required")
     local = now.astimezone(SCHEDULE_TIMEZONE)
     slot_index = next((index for index, slot in enumerate(SCHEDULE_SLOTS)
@@ -44,9 +46,15 @@ def select_youtube_query_scopes(
                        <= local
                        < datetime.combine(local.date(), slot, tzinfo=SCHEDULE_TIMEZONE)
                        + SLOT_GRACE), None)
-    if slot_index is None:
-        raise ValueError("YouTube query selection is available only inside a scheduled slot")
     day_offset = (local.date() - _ANCHOR_DATE).days
+    if slot_index is None:
+        if not initial_acceptance:
+            raise ValueError("YouTube query selection is available only inside a scheduled slot")
+        slot_index = next((index for index, slot in enumerate(SCHEDULE_SLOTS)
+                           if slot > local.timetz().replace(tzinfo=None)), None)
+        if slot_index is None:
+            slot_index = 0
+            day_offset += 1
     ordinal = day_offset * len(SCHEDULE_SLOTS) + slot_index
     start = (ordinal * max_queries) % len(_PRIORITY_SCOPES)
     ordered = tuple(_PRIORITY_SCOPES[(start + offset) % len(_PRIORITY_SCOPES)]

@@ -15,6 +15,18 @@ NOW = datetime(2026, 11, 16, 8, tzinfo=timezone.utc)
 
 
 class SharedSerpApiAllocationTests(unittest.TestCase):
+    @staticmethod
+    def _legacy_google_policy():
+        return normal_google_live_policy(
+            serpapi_daily_budget=10,
+            serpapi_monthly_budget=10,
+            rss_daily_budget=1,
+            rss_monthly_budget=1,
+            fetch_starts_per_hour=2,
+            bing_enabled=False,
+            youtube_enabled=False,
+        )
+
     def test_combined_policy_has_one_provider_ceiling_and_two_source_allocations(self):
         policy = normal_google_live_policy(bing_enabled=True)
         self.assertEqual(policy.enabled_sources, frozenset({
@@ -78,6 +90,87 @@ class SharedSerpApiAllocationTests(unittest.TestCase):
             )
             self.assertEqual(new.quota_snapshot("serpapi", now=NOW)["billing_cycle_ends_at"],
                              "2026-12-11")
+
+    def test_legacy_google_policy_migrates_without_resetting_existing_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
+            previous = self._legacy_google_policy()
+            updated = normal_google_live_policy(bing_enabled=True, youtube_enabled=True)
+            old = PublicAdmission(store, previous, state_key=GOOGLE_STATE_KEY)
+            new = PublicAdmission(store, updated, state_key=GOOGLE_STATE_KEY)
+            self.assertEqual(old.policy_digest,
+                             "b311f66e81311b13bc0bb586d817513fb6ea33ee7bbe1fbd2f8da8efc599b796")
+            original = {
+                "schema": 1, "policy_digest": old.policy_digest, "operational_enabled": True,
+                "jobs": {"a" * 32: {"job_id": "a" * 32, "state": "COMPLETED"}},
+                "keys": {"accepted-fetch-key": {"job_id": "a" * 32}},
+                "starts": ["2026-11-15T18:00:00+00:00"],
+                "quota": {
+                    "serpapi:day:2026-11-15": {"requests": 4, "cost": 4},
+                    "serpapi:month:2026-11": {"requests": 4, "cost": 4},
+                    "google_rss:day:2026-11-15": {"requests": 1, "cost": 1},
+                    "google_rss:month:2026-11": {"requests": 1, "cost": 1},
+                },
+                "inflight": {},
+                "policy_migration_audit": [{
+                    "authorization_note": "OWNER_AUTHORIZED_MAX_10_PAID_SEARCH_ATTEMPTS",
+                    "quota_preserved": True,
+                }],
+            }
+            store.transact(GOOGLE_STATE_KEY, lambda _state: (original, None))
+
+            audit = new.migrate_legacy_google_live_policy(
+                previous,
+                authorization_note="OWNER_AUTHORIZED_D6_YOUTUBE_WINDOWS_ACCEPTANCE",
+                now=NOW,
+            )
+
+            state = store.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
+            self.assertEqual(state["policy_digest"], new.policy_digest)
+            self.assertEqual(state["jobs"], original["jobs"])
+            self.assertEqual(state["keys"], original["keys"])
+            self.assertEqual(state["starts"], original["starts"])
+            self.assertEqual(state["quota"]["serpapi:month:2026-11"], {
+                "requests": 4, "cost": 4,
+            })
+            self.assertEqual(state["quota"]["serpapi_google:month:2026-11"], {
+                "requests": 4, "cost": 4,
+            })
+            self.assertEqual(state["quota"]["google_rss:month:2026-11"], {
+                "requests": 1, "cost": 1,
+            })
+            self.assertEqual(len(state["policy_migration_audit"]), 2)
+            self.assertEqual(audit["migration_kind"], "LEGACY_GOOGLE_TO_D6_YOUTUBE_V1")
+            self.assertTrue(audit["quota_preserved"])
+            self.assertTrue(audit["jobs_preserved"])
+            self.assertTrue(audit["reservations_preserved"])
+
+    def test_legacy_google_migration_rejects_usage_above_destination_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
+            previous = self._legacy_google_policy()
+            updated = normal_google_live_policy(bing_enabled=True, youtube_enabled=True)
+            old = PublicAdmission(store, previous, state_key=GOOGLE_STATE_KEY)
+            new = PublicAdmission(store, updated, state_key=GOOGLE_STATE_KEY)
+            original = {
+                "schema": 1, "policy_digest": old.policy_digest, "operational_enabled": True,
+                "jobs": {}, "keys": {}, "starts": [], "inflight": {},
+                "quota": {"serpapi:day:2026-11-15": {"requests": 10, "cost": 10}},
+            }
+            store.transact(GOOGLE_STATE_KEY, lambda _state: (original, None))
+
+            with self.assertRaises(AdmissionDenied) as error:
+                new.migrate_legacy_google_live_policy(
+                    previous,
+                    authorization_note="OWNER_AUTHORIZED_D6_YOUTUBE_WINDOWS_ACCEPTANCE",
+                    now=NOW,
+                )
+
+            self.assertEqual(error.exception.code, "POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+            state = store.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
+            self.assertEqual(state["policy_digest"], old.policy_digest)
+            self.assertEqual(state["quota"], original["quota"])
+            self.assertNotIn("policy_migration_audit", state)
 
     def test_google_and_bing_attempts_share_provider_pool_and_track_allocations(self):
         with tempfile.TemporaryDirectory() as directory:

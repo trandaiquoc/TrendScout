@@ -55,9 +55,10 @@ async function loadRunHistory({ append = false } = {}) {
         run.rejected_record_count == null ? null : `${t('runs.rejected')}: ${number(run.rejected_record_count)}`].filter(Boolean).join(' · ') || '—';
       const duration=Number.isFinite(run.duration_seconds) && run.duration_seconds >= 0
         ? `${number(run.duration_seconds)} ${t('runs.duration-seconds')}` : t('runs.duration-unavailable');
-      const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',run.status),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
+      const outcomeStatus=run.outcome_status || run.status;
+      const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',outcomeStatus),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
       tr.className='run-history-entry';
-      values.forEach((value,index)=>{const cell=element('td',index===3?'':value);cell.dataset.label=headers[index];if(index===3){const badge=element('span',value,'run-history-status');badge.dataset.status=run.status || 'UNKNOWN';cell.append(badge);}tr.append(cell);});
+      values.forEach((value,index)=>{const cell=element('td',index===3?'':value);cell.dataset.label=headers[index];if(index===3){const badge=element('span',value,'run-history-status');badge.dataset.status=outcomeStatus || 'UNKNOWN';cell.append(badge);}tr.append(cell);});
       const actions=element('td');
       if (run.fetch_id) {
         const button=element('button',t('runs.details'),'button button-secondary');
@@ -125,7 +126,7 @@ function renderRunHistoryDetail(item, errorMessage = null) {
   const observationEnd=item.observation_end ? date(item.observation_end) : null;
   const observationWindow=observationStart&&observationEnd
     ? `${observationStart} – ${observationEnd}` : observationStart || observationEnd || t('common.unavailable');
-  const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.status)],
+  const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.outcome_status || item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
     [t('runs.source-coverage'),sourceCoverageSummary,'wide'],
     ...(googleSummary?[[t('runs.google-summary'),googleSummary,'wide']]:[]),

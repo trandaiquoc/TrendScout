@@ -178,6 +178,9 @@ function renderYouTubeBudget(capabilities, translate) {
     localizedStatus(workflow.approval_status || source.approval_status, translate));
   capabilityRow(values, translate('sources.youtube-policy-status'),
     localizedStatus(workflow.policy_status, translate));
+  capabilityRow(values, translate('sources.youtube-policy-version'),
+    typeof workflow.policy_version === 'string' && workflow.policy_version
+      ? workflow.policy_version : translate('common.unavailable'));
   capabilityRow(values, translate('sources.youtube-user-agreement'),
     localizedStatus(workflow.policy_agreement_required ? 'REQUIRED' : 'NOT_REQUIRED', translate));
   capabilityRow(values, translate('sources.youtube-key'),
