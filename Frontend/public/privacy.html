@@ -3,82 +3,82 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Draft privacy policy for the TrendScout local demonstration.">
-  <title>Privacy Policy — TrendScout</title>
+  <meta name="description" content="Privacy Policy for the TrendScout demonstration and its source integrations.">
+  <link rel="canonical" href="https://trend-scout-mu.vercel.app/dashboard/privacy.html">
+  <title>Privacy Policy ? TrendScout</title>
   <link rel="stylesheet" href="policy.css">
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="https://github.com/trandaiquoc/TrendScout">TrendScout</a>
-    <nav aria-label="Policy documents"><a href="terms.html">Terms of Service</a></nav>
+    <a class="brand" href="https://trend-scout-mu.vercel.app/dashboard/">TrendScout</a>
+    <nav aria-label="Policy documents"><a href="https://trend-scout-mu.vercel.app/dashboard/terms.html">Terms of Service</a></nav>
   </header>
   <main>
-    <p class="draft" role="status">DRAFT — OWNER REVIEW REQUIRED · NOT PUBLISHED · NOT EFFECTIVE</p>
     <h1>Privacy Policy</h1>
-    <p class="intro">This draft describes the current local TrendScout demonstration and the safeguards prepared for a possible YouTube integration. It is not the final policy and does not authorize YouTube API access.</p>
+    <p class="intro">This Privacy Policy explains how the TrendScout demonstration handles browser information and source data. It applies to the public dashboard at <a href="https://trend-scout-mu.vercel.app/dashboard/">https://trend-scout-mu.vercel.app/dashboard/</a> and to the operator-run standalone demonstration described below.</p>
 
     <dl class="policy-facts">
-      <div><dt>Operator</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: confirm the public operator name.]</dd></div>
-      <div><dt>Contact</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: provide a public privacy and deletion contact.]</dd></div>
-      <div><dt>Effective date</dt><dd>To be set after approval and publication.</dd></div>
-      <div><dt>Draft reviewed</dt><dd>16 November 2026</dd></div>
+      <div><dt>Operator</dt><dd>Trần Đại Quốc</dd></div>
+      <div><dt>Privacy contact</dt><dd><a href="mailto:tdquoc02@gmail.com">tdquoc02@gmail.com</a></dd></div>
+      <div><dt>Effective date</dt><dd>2026-11-12</dd></div>
+      <div><dt>Policy version</dt><dd>d6-youtube-v2</dd></div>
     </dl>
 
     <section>
-      <h2>1. About this demonstration</h2>
-      <p>TrendScout is a local demonstration for reviewing keyword candidates alongside source evidence. It does not require an account, Google sign-in, or Google OAuth. The application is designed to run on the operator's computer; these policy pages alone do not host or operate the application.</p>
-      <p>Features and providers are selected by the operator. A Fetch sends only the bounded, server-curated queries required by the selected source. The current YouTube feature is disabled until the owner approves and publishes this policy and explicitly enables the feature. This acceptance run has made no live YouTube API request.</p>
+      <h2>1. Service and current status</h2>
+      <p>TrendScout helps users review keyword candidates and their source evidence. It does not require a TrendScout account, Google sign-in, or Google OAuth. The hosted dashboard is served through Vercel. On the effective date, its public API reports a read-only deployment with Fetch disabled; source requests are not made from that hosted runtime. A source can be fetched only in a runtime where the operator has enabled it and the user explicitly selects it.</p>
+      <p>Publishing this policy does not enable a provider integration. YouTube remains separately gated by server configuration, applicable source approvals, and the user's acceptance of the current policy version.</p>
     </section>
 
     <section>
       <h2>2. YouTube API Services</h2>
-      <p>If the owner later enables YouTube, a user-triggered Fetch may request public video search results from YouTube Data API Services. The application can receive video IDs and watch URLs, titles, descriptions, channel IDs and names, publication times, thumbnails, broadcast status, result position, query scope, and collection timestamps. It does not request view counts or other video statistics for this feature.</p>
-      <p>TrendScout uses this information to show attributed source evidence and Fetch status. It does not currently use YouTube records for keyword extraction, trend scoring, or product recommendations. A US region filter describes video availability or relevance; it does not prove that creators or viewers are in the United States.</p>
-      <p>The API key is resolved by the local server and is not sent to the browser. TrendScout does not access a user's Google account or private YouTube data. Before a YouTube Fetch can proceed, the application must be configured as approved and the user must accept the exact current TrendScout policy version. Until the documents are approved and published, the server blocks that feature.</p>
-      <p>Use of YouTube API Services is subject to the <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a>, the <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>, and the <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>
+      <p>If YouTube is enabled in a supported runtime and selected for Fetch, TrendScout may receive public video IDs and canonical watch URLs, titles, descriptions, channel IDs and names, publication times, thumbnails, broadcast status, result position, query scope, and collection timestamps. This feature does not request view counts or other video statistics.</p>
+      <p>The purpose is to display attributed YouTube evidence and Fetch status. YouTube records are excluded from keyword extraction, trend scoring, and product recommendations. A US region filter describes video availability or relevance; it does not establish where a creator or viewer resides or prove US demand.</p>
+      <p>Current owner-stated YouTube purpose and approval status: TrendScout is a personal US-market keyword discovery demonstration. Proposed YouTube features include public video metadata search, keyword extraction, topic categorization and source-specific trend analysis. Additional YouTube-derived analytics permission has not been granted; the restricted features remain disabled.</p>
+      <p>The API key is resolved by the server and is not sent to the browser. TrendScout does not access a user's Google account or private YouTube data. When the feature is enabled, the server requires acceptance of the exact current TrendScout policy version before a YouTube Fetch proceeds.</p>
+      <p>YouTube use is subject to the <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a>, <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>, and <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>
     </section>
 
     <section>
-      <h2>3. Other sources and third parties</h2>
-      <p>When configured and selected, the local demonstration can contact the relevant source provider. Current integrations include Wikimedia's public API, Google Trends RSS, and Google or Bing web search through SerpApi; YouTube is separately gated. Providers receive the source query and request parameters needed to answer it. The current query plans are curated by the server and do not include a free-text search box for personal information.</p>
-      <p>The operator's local installation may also retrieve model files for its local CPU-based text processing when those files are not already available. TrendScout's configured processing does not send collection text to a hosted generative-AI service. Hosting, model-download, DNS, network, and provider telemetry outside TrendScout have not been independently audited for this draft.</p>
-      <p>TrendScout does not sell source records or use them for advertising. The local application does not synchronize its SQLite databases to a TrendScout cloud service. Provider processing remains subject to each provider's terms and privacy notice.</p>
+      <h2>3. Other sources and data sharing</h2>
+      <p>Depending on the runtime and the sources enabled by the operator, TrendScout can retrieve Wikimedia pageviews, Google Trends RSS, Google Search results, or Bing Search results through SerpApi. Providers receive the bounded query and request parameters needed to answer a selected Fetch. TrendScout's current source plans are server-curated and do not provide a free-text field for personal information.</p>
+      <p>TrendScout does not sell source records or use them for advertising. The application does not send collection text to a hosted generative-AI service. Provider processing is governed by the relevant provider's terms and privacy notice. The hosted dashboard currently makes no provider Fetch requests because its API is read-only and Fetch is disabled.</p>
     </section>
 
     <section>
-      <h2>4. Browser and user data</h2>
-      <p>The application has no user account or user profile. In the browser it stores display preferences (theme, language, selected Fetch defaults, and sidebar state) and, after the policy is published, the accepted policy version. It does not store YouTube API keys in browser storage. These values use browser local storage; clearing site data removes them. The current interface does not configure analytics cookies.</p>
-      <p>While the application is open, selected source results are held in memory for display. The local browser makes requests to the local TrendScout backend. A person's identity, browser history, or location is not collected by the YouTube source adapter.</p>
+      <h2>4. Browser and user information</h2>
+      <p>The browser stores display preferences (theme, language, selected Fetch defaults, and sidebar state) and, when required by the runtime, the accepted policy version. These values use browser local storage; clearing site data removes them. TrendScout does not store API keys in browser storage and does not configure analytics cookies.</p>
+      <p>The application has no user account or profile. A provider does not receive a user's identity, browser history, or location from the YouTube adapter. The hosting platform may process request metadata as described in Section 6.</p>
     </section>
 
     <section>
-      <h2>5. Storage and Fetch history</h2>
-      <p>On the Windows demonstration setup, the local SQLite files are stored under the current Windows user's profile: Collections and Fetch summaries under <code>%LOCALAPPDATA%\TrendScout\collections-v1</code>; source cache, Fetch checkpoints, quota reservations, and source refresh state under <code>%USERPROFILE%\.local\state\trendscout\normal-google-live-v1</code>. Exact paths can differ when the operator configures another local directory.</p>
-      <p>YouTube video records are kept in the YouTube-scoped source cache and Fetch checkpoint while needed to serve a result. The application is configured for an eight-hour cache freshness window, at most seven days of cache retention, and up to one hour for a completed Fetch receipt/checkpoint. An hourly local cleanup and cleanup at startup remove expired YouTube cache and checkpoint data. A request-time expiry check also prevents expired checkpoints from being returned.</p>
-      <p>The Collections database does not store YouTube videos as keywords or scoring observations. It can store a source manifest and counts for a Fetch. A targeted deletion removes YouTube manifest entries and adjusts mixed-source counts while preserving other source entries. Fetch IDs, status, quota reservations, refresh eligibility, and non-content operational records may remain as needed to prevent repeat requests and preserve operational history.</p>
+      <h2>5. Storage, cache, and Fetch history</h2>
+      <p>The public hosted runtime is read-only and has Fetch disabled as of the effective date; it does not create new source Fetch results. In the current standalone implementation, Collections and Fetch summaries are stored in SQLite under <code>%LOCALAPPDATA%\TrendScout\collections-v1</code>. Source cache, checkpoints, quota reservations, and refresh state are stored under <code>%USERPROFILE%\.local\state\trendscout\normal-google-live-v1</code>. An operator-configured path can differ. These local files are not synchronized to a TrendScout cloud service.</p>
+      <p>If YouTube is enabled in that standalone implementation, video records remain in the YouTube-scoped cache and Fetch checkpoint only as needed to serve a result. Cache freshness is eight hours, the cache retention ceiling is seven days, and a completed Fetch receipt/checkpoint is retained for up to one hour. Startup and hourly cleanup remove expired YouTube cache and checkpoint data; request-time checks prevent expired checkpoints from being returned.</p>
+      <p>The Collections database does not store YouTube videos as keywords or scoring observations. It may store a source manifest and counts for a Fetch. Targeted YouTube deletion removes YouTube manifest entries and adjusts mixed-source counts. Fetch identifiers, quota reservations, refresh eligibility, and other non-content operational records may remain to prevent repeated requests and preserve operational history.</p>
     </section>
 
     <section>
-      <h2>6. Logs, backups, and diagnostics</h2>
-      <p>The application does not configure a file log for YouTube records. Standard server access and error output may be written to the console by the local process launcher; an operator or hosting environment may separately retain redirected output. The gateway is designed to keep API keys, request URLs, and provider response bodies out of its sanitized diagnostics. Console capture and retention are not controlled by TrendScout.</p>
-      <p>No automatic backup job for these local databases was found in the repository. Operators may make their own backups or copies; locations outside the known TrendScout data directories are not discoverable by the application. Backups must be checked and handled separately after a deletion request. No YouTube API records were found in the 19 SQLite backups inspected for this local acceptance review.</p>
+      <h2>6. Hosting logs, diagnostics, and backups</h2>
+      <p>Operator-provided hosting and access-log practice: The public dashboard is hosted on Vercel. The local demonstration uses synthetic data and temporary local storage. Browser localStorage keeps theme and language preferences. Exact hosting access-log retention has not yet been verified.</p>
+      <p>The Vercel-hosted dashboard may produce platform runtime and access logs. Vercel documents that runtime-log retention depends on the account plan; the plan's current retention and any external log drain are controlled by the account owner and are not verified by TrendScout. See <a href="https://vercel.com/docs/logs/runtime">Vercel Runtime Logs documentation</a>. TrendScout's gateway is designed to keep API keys, full provider request URLs, and provider response bodies out of its sanitized diagnostics.</p>
+      <p>No automatic backup job for the standalone SQLite databases was found in the repository. Operators may make their own copies; the application cannot discover copies outside its known data directories. Backups and externally retained console output require separate review after a deletion request. TrendScout cannot remove a provider's copy of data.</p>
     </section>
 
     <section>
-      <h2>7. Deletion requests</h2>
-      <p>There is no account-based self-service deletion feature. A request can be sent to the operator using the contact address that will be published after owner review. The operator must verify the requester through an independently known contact channel, stop the local application, preview the affected YouTube-only records, and run the documented local deletion command.</p>
-      <p>The implemented workflow removes YouTube cache entries, YouTube Fetch checkpoints and unshared checkpoint blobs, and YouTube-only Fetch summaries. It preserves Google, Bing, and Wikimedia records, shared quota ledgers, and source refresh schedules. The local deletion receipt retains an opaque request hash, timestamps, and counts, but contains no video IDs or requester contact details. The retention period for those receipts remains an owner decision in this draft.</p>
-      <p>The operator must separately review manual backups and any redirected console output. A user must clear browser site data on their own device to remove the saved policy version and display preferences. TrendScout's local deletion cannot remove information held by YouTube or another provider.</p>
+      <h2>7. Requests and deletion</h2>
+      <p>To ask about information held by the operator or request deletion, use this channel: tdquoc02@gmail.com. The operator's identity-verification process is: For deletion requests, verify control of the contact email and request only the minimum information necessary to locate relevant data. The demo does not provide user accounts or Google OAuth.. The response and completion target is: Proposed: acknowledge requests within 2 business days; complete verified, applicable YouTube-related deletion requests as soon as possible and within 7 calendar days. Implementation and verification are pending; do not publish this as an active guarantee.</p>
+      <p>There is no account-based self-service deletion. For supported standalone SQLite stores, the operator verifies the request, stops the application, previews the targeted YouTube records, and runs the documented operator-only deletion workflow. It removes YouTube cache entries, YouTube Fetch checkpoints and unshared checkpoint blobs, and YouTube-only Fetch summaries while preserving Google, Bing, and Wikimedia records, shared quota ledgers, and source refresh schedules.</p>
+      <p>The deletion receipt stores an opaque request hash, timestamps, and record counts without video IDs or requester contact details. Receipt retention is: The current default idempotency receipt TTL is 3600 seconds. Expired records are eligible for cleanup; immediate or scheduled deletion is not guaranteed. Other quota state and provider data have separate retention rules.. The operator must separately review manual backups and redirected console output. TrendScout deletion does not remove records held by YouTube or another provider. Users can clear browser site data on their own device to remove policy-version and display preferences.</p>
     </section>
 
     <section>
-      <h2>8. Policy changes and approval</h2>
-      <p>Before publishing a change, the operator will update this page and its effective date, review the matching <a href="terms.html">Terms of Service</a>, and change the in-app policy version so users must accept the new version. The owner must confirm the operator identity and contact, storage and log practices, backup procedure, deletion-receipt retention, and any provider-specific terms before publication.</p>
+      <h2>8. Policy updates</h2>
+      <p>The operator will update this page and the matching <a href="https://trend-scout-mu.vercel.app/dashboard/terms.html">Terms of Service</a> when data practices or enabled features materially change. A change affecting YouTube use also requires a new in-app policy version so users must review and accept the updated documents before using that feature.</p>
     </section>
 
     <footer>
-      <p class="placeholder">Owner action required: replace every bracketed placeholder, review the operational facts, approve both documents, and publish them before enabling YouTube.</p>
-      <nav aria-label="Related documents"><a href="terms.html">Terms of Service</a> · <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a></nav>
+      <nav aria-label="Related documents"><a href="https://trend-scout-mu.vercel.app/dashboard/terms.html">Terms of Service</a> ? <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a> ? <a href="https://policies.google.com/privacy">Google Privacy Policy</a></nav>
     </footer>
   </main>
 </body>

@@ -3,69 +3,70 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Draft terms of service for the TrendScout local demonstration.">
-  <title>Terms of Service — TrendScout</title>
+  <meta name="description" content="Terms of Service for the TrendScout demonstration.">
+  <link rel="canonical" href="https://trend-scout-mu.vercel.app/dashboard/terms.html">
+  <title>Terms of Service ? TrendScout</title>
   <link rel="stylesheet" href="policy.css">
 </head>
 <body>
   <header class="site-header">
-    <a class="brand" href="https://github.com/trandaiquoc/TrendScout">TrendScout</a>
-    <nav aria-label="Policy documents"><a href="privacy.html">Privacy Policy</a></nav>
+    <a class="brand" href="https://trend-scout-mu.vercel.app/dashboard/">TrendScout</a>
+    <nav aria-label="Policy documents"><a href="https://trend-scout-mu.vercel.app/dashboard/privacy.html">Privacy Policy</a></nav>
   </header>
   <main>
-    <p class="draft" role="status">DRAFT — OWNER REVIEW REQUIRED · NOT PUBLISHED · NOT EFFECTIVE</p>
     <h1>Terms of Service</h1>
-    <p class="intro">These draft terms describe the current local TrendScout demonstration. They are not an offer of a hosted or production service and are not effective until the owner approves and publishes them.</p>
+    <p class="intro">These Terms govern use of the TrendScout demonstration at <a href="https://trend-scout-mu.vercel.app/dashboard/">https://trend-scout-mu.vercel.app/dashboard/</a>. The service is an exploratory demo, not a production analytics or recommendation service.</p>
 
     <dl class="policy-facts">
-      <div><dt>Operator</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: confirm the public operator name.]</dd></div>
-      <div><dt>Contact</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: provide a public contact address.]</dd></div>
-      <div><dt>Effective date</dt><dd>To be set after approval and publication.</dd></div>
+      <div><dt>Operator</dt><dd>Trần Đại Quốc</dd></div>
+      <div><dt>Contact</dt><dd><a href="mailto:tdquoc02@gmail.com">tdquoc02@gmail.com</a></dd></div>
+      <div><dt>Effective date</dt><dd>2026-11-12</dd></div>
     </dl>
 
     <section>
       <h2>1. Demonstration service</h2>
-      <p>TrendScout is a local demonstration for exploring candidate keywords and reviewing their source evidence. It may use synthetic fixtures in offline mode and may contact selected data providers only when an operator configures and enables the corresponding source. Features and data coverage can change as the demonstration is developed.</p>
-      <p>These pages may be published as static policy documents. Their publication does not publish or operate the local backend.</p>
+      <p>TrendScout helps users inspect candidate keywords and their source evidence. The hosted Vercel dashboard is currently read-only, and public Fetch is disabled. Other operator-run deployments may expose only the data sources explicitly configured and enabled for that runtime. Publishing these static policy pages does not itself enable a data provider or Fetch feature.</p>
+      <p>The demonstration may be unavailable, incomplete, changed, or discontinued. It has no user accounts and may use synthetic fixtures in offline mode.</p>
     </section>
 
     <section>
       <h2>2. Permitted use</h2>
-      <p>Use the demonstration lawfully and for evaluation. Do not attempt to bypass its source approvals, consent checks, rate limits, retention controls, or other access protections. Do not use it to disrupt a provider or service, or to collect personal information through source queries.</p>
-      <p>The current demonstration has no user accounts and no self-service account controls. You are responsible for keeping access to your local computer and browser storage appropriate for your use.</p>
+      <p>Use TrendScout lawfully and for evaluation. Do not bypass source approvals, consent checks, rate limits, retention controls, or other access protections. Do not disrupt a provider or service, or use source queries to collect personal information.</p>
+      <p>When a source is enabled, select only the sources you intend to fetch. Use the resulting data in accordance with applicable provider terms and do not treat provider content as unrestricted or as a standalone dataset.</p>
     </section>
 
     <section>
       <h2>3. Source evidence and limitations</h2>
-      <p>TrendScout presents provider-reported records, collection times, query scope, and application-generated summaries. Search position is not search volume, view count, popularity, purchase intent, or proof of a trend. A US region filter does not prove that creators or viewers are located in the United States.</p>
-      <p>Keyword candidates and any future indicators depend on the selected provider, its coverage, the sample, the observation window, and the application's methods. They are exploratory evidence, not a guarantee of accuracy, future demand, availability, or commercial outcome. TrendScout currently excludes YouTube records from keyword extraction and scoring.</p>
+      <p>TrendScout displays provider-reported records, collection times, query scope, and application-generated summaries. Search-result position is not search volume, popularity, purchase intent, or proof of a trend. A US region or language filter does not prove that creators, authors, viewers, or readers are located in the United States.</p>
+      <p>Keyword candidates and any future indicators depend on the selected provider, its coverage, the sample, observation window, and the application's methods. They are exploratory evidence only. TrendScout does not guarantee accuracy, availability, future demand, or US market demand; do not rely on it as the sole basis for business, purchasing, or investment decisions.</p>
+      <p>YouTube records are currently excluded from keyword extraction, trend scoring, and product recommendations.</p>
     </section>
 
     <section>
-      <h2>4. YouTube API Services and user agreement</h2>
-      <p>YouTube access is disabled unless the owner approves and publishes the Privacy Policy and Terms, and separately enables the feature. Before an enabled YouTube Fetch, the application requires the user to accept the exact current TrendScout policy version. If approval or publication is missing, the server blocks the Fetch.</p>
-      <p>When using a TrendScout feature that accesses YouTube API Services, you agree to be bound by the <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> and the applicable <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a>. You must also review the <a href="https://policies.google.com/privacy">Google Privacy Policy</a> and the TrendScout <a href="privacy.html">Privacy Policy</a>.</p>
+      <h2>4. YouTube API Services</h2>
+      <p>YouTube access remains separately disabled unless the operator enables a supported runtime and satisfies its source approval and consent requirements. Before using a TrendScout feature that accesses YouTube API Services, you must accept the exact current TrendScout Privacy Policy and these Terms in the application.</p>
+      <p>When you use a TrendScout YouTube feature, you agree to the applicable <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> and <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a>. Review the <a href="https://policies.google.com/privacy">Google Privacy Policy</a> and TrendScout <a href="https://trend-scout-mu.vercel.app/dashboard/privacy.html">Privacy Policy</a>.</p>
     </section>
 
     <section>
       <h2>5. Data and deletion</h2>
-      <p>Provider data is handled as described in the <a href="privacy.html">Privacy Policy</a>. The local deletion workflow can remove YouTube data held in supported TrendScout SQLite stores after an operator verifies the request. It does not remove data held by YouTube, browser local storage on your device, or copies in backups or console output outside the application.</p>
+      <p>Provider information and browser storage are described in the <a href="https://trend-scout-mu.vercel.app/dashboard/privacy.html">Privacy Policy</a>. The operator-only deletion workflow applies only to supported TrendScout SQLite stores and verified requests. It does not delete information held by YouTube or another provider, browser local storage on your device, copies in backups, or external console logs.</p>
     </section>
 
     <section>
       <h2>6. Availability and changes</h2>
-      <p>This is a demonstration that may be unavailable, incomplete, or changed without advance notice. No uptime, particular source coverage, or long-term availability is promised. Do not rely on it as the sole basis for a business or purchasing decision.</p>
-      <p>When these terms or the Privacy Policy change, the operator will update the published pages and the application policy version before enabling affected features. Users will be asked to accept the updated version where the application requires it.</p>
+      <p>No uptime, particular source coverage, trend accuracy, or long-term availability is promised. Do not treat a score, result rank, or sample as a guarantee of performance or commercial outcome.</p>
+      <p>When these Terms or the Privacy Policy materially change, the operator will update the published pages. A change affecting YouTube use requires an updated in-app policy version and renewed user acceptance before that feature is used.</p>
     </section>
 
     <section>
-      <h2>7. Owner review still required</h2>
-      <p class="placeholder">Before publication, the owner must confirm the operator and contact details and obtain appropriate review of governing law, dispute handling, liability language, age eligibility, and any other legal terms. This draft intentionally does not choose those legal positions.</p>
+      <h2>7. Governing law and disputes</h2>
+      <p>These Terms do not designate a governing-law jurisdiction or a separate dispute-resolution forum.</p>
+      <p>These Terms do not add a warranty, service-level, indemnity, or dispute-resolution commitment beyond the demonstration described here.</p>
     </section>
 
     <footer>
-      <p class="placeholder">Owner action required: replace every bracketed placeholder, review this document with the Privacy Policy, approve both documents, and publish them before enabling YouTube.</p>
-      <nav aria-label="Related documents"><a href="privacy.html">Privacy Policy</a> · <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a></nav>
+      <nav aria-label="Related documents"><a href="https://trend-scout-mu.vercel.app/dashboard/privacy.html">Privacy Policy</a> ? <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> ? <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a></nav>
     </footer>
   </main>
 </body>
