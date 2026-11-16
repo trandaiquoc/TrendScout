@@ -10,18 +10,19 @@ import struct
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timezone
 from threading import local
 
 from app.collections import embeddings
 from app.collections.store import (
     CollectionStore,
+    bing_verification_update,
     fingerprint,
     keyword_identity,
     keyword_record,
     now,
 )
-from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.taxonomy.registry import resolve as resolve_category
 
 # Calibrated against the real local-model Smart Home positive (0.538 with its
@@ -121,7 +122,7 @@ class CollectionService:
                 return dict(prior)
             db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at)
                 VALUES(?,'PROCESSING','CLEANING',?)""", (fetch_id, now()))
-        records, rejected = [], []
+        records, rejected, bing_updates = [], [], []
         skipped = replay_skipped if retry_existing_snapshot and not sources else 0
         available = (sum(len(source.get("records", [])) for source in sources
                           if isinstance(source.get("records"), list))
@@ -133,6 +134,13 @@ class CollectionService:
             if snapshot_status not in {"SUCCESS", "PARTIAL"}:
                 continue
             for raw in source.get("records", []):
+                if source_id == BING_SOURCE_ID:
+                    update = bing_verification_update(raw, mode)
+                    if update is None:
+                        skipped += 1
+                    else:
+                        bing_updates.append(update)
+                    continue
                 record = keyword_record(raw, source_id, mode, snapshot_status=snapshot_status)
                 if record is None:
                     skipped += 1
@@ -177,6 +185,50 @@ class CollectionService:
                     WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
+            for update in bing_updates:
+                existing = db.execute(
+                    "SELECT observed_at,evidence FROM keywords WHERE id=? AND source=? "
+                    "AND project LIKE 'google_trends:%' AND data_mode='LIVE' AND eligible=1",
+                    (update["candidate_id"], GOOGLE_SOURCE_ID),
+                ).fetchone()
+                if existing is None:
+                    skipped += 1
+                    continue
+                try:
+                    observed = datetime.fromisoformat(
+                        existing["observed_at"].replace("Z", "+00:00")
+                    )
+                    evidence = json.loads(existing["evidence"])
+                except (TypeError, ValueError, AttributeError):
+                    skipped += 1
+                    continue
+                if (observed.tzinfo is None or observed.utcoffset() is None
+                        or observed.astimezone(timezone.utc).isoformat() != update["observed_at"]
+                        or not isinstance(evidence, dict)
+                        or evidence.get("canonical_keyword_identity") != update["identity"]):
+                    skipped += 1
+                    continue
+                history = evidence.get("bing_verification_history", [])
+                if not isinstance(history, list) or len(history) > 20:
+                    skipped += 1
+                    continue
+                verification = update["verification"]
+                fetched_at = verification["fetched_at"]
+                query_fingerprint = verification.get("query_fingerprint")
+                duplicate = any(
+                    isinstance(item, dict)
+                    and item.get("fetched_at") == fetched_at
+                    and item.get("query_fingerprint") == query_fingerprint
+                    for item in history
+                )
+                if not duplicate:
+                    history = [*history, verification][-20:]
+                evidence["bing_verification_history"] = history
+                evidence["bing_verification"] = verification
+                db.execute("UPDATE keywords SET evidence=? WHERE id=? AND source=? AND data_mode='LIVE'",
+                           (json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                       allow_nan=False, separators=(",", ":")),
+                            update["candidate_id"], GOOGLE_SOURCE_ID))
         # Entity context is enriched only on a successful provider update. Organize/replay
         # operations consume persisted context and never trigger a new provider request.
         if sources and self.entity_context_resolver is not None and not cached_context_only:
@@ -600,6 +652,23 @@ class CollectionService:
                     fetched.append(evidence["fetched_at"])
             except (TypeError, ValueError):
                 continue
+        for source in sources:
+            if not isinstance(source, dict) or source.get("status") not in {"SUCCESS", "PARTIAL"}:
+                continue
+            coverage = source.get("coverage")
+            if not isinstance(coverage, dict):
+                continue
+            source_fetched_at = coverage.get("fetched_at")
+            if not isinstance(source_fetched_at, str):
+                source_fetched_at = coverage.get("cache_fetched_at")
+            if not isinstance(source_fetched_at, str) or len(source_fetched_at) > 64:
+                continue
+            try:
+                timestamp = datetime.fromisoformat(source_fetched_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if timestamp.tzinfo is not None and timestamp.utcoffset() is not None:
+                fetched.append(timestamp.astimezone(timezone.utc).isoformat())
         with self.store.connect() as db:
             mode_parameters = (self.store.data_mode_scope,) if self.store.data_mode_scope else ()
             eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "

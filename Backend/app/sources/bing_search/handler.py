@@ -1,0 +1,365 @@
+"""Selective, cache-first Bing verification over persisted Google candidates."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
+
+from app.jobs.public_admission import AdmissionDenied
+from app.sources.bing_search.verification_plan import (
+    build_verification_plan,
+)
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, source_capability
+from app.sources.live_gateway import GatewayError
+from app.sources.refresh_eligibility import (
+    BING_REFRESH_STATE_KEY,
+    candidate_slot,
+    reserve_source_slot,
+)
+from app.sources.serpapi.errors import SerpApiError
+from app.sources.serpapi.normalization import normalize_items
+from app.sources.serpapi.pagination import initial_offset
+
+_CACHE_RETENTION = timedelta(days=7)
+_MAX_CANDIDATES = 5_000
+
+
+def _parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _read_saved_candidates(collection_store, *, now):
+    with collection_store.connect() as db:
+        rows = db.execute(
+            "SELECT id,keyword,source,project,observed_at,data_mode,evidence "
+            "FROM keywords WHERE source=? AND project LIKE 'google_trends:%' "
+            "AND data_mode='LIVE' AND eligible=1 ORDER BY observed_at DESC LIMIT ?",
+            (GOOGLE_SOURCE_ID, _MAX_CANDIDATES),
+        ).fetchall()
+    candidates, recent, cached = [], set(), []
+    cutoff = now - _CACHE_RETENTION
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(evidence, dict):
+            continue
+        fetched_at = _parse_timestamp(evidence.get("fetched_at"))
+        candidate = {
+            "record_id": row["id"],
+            "canonical_keyword": row["keyword"],
+            "source_id": row["source"],
+            "project": row["project"],
+            "data_mode": row["data_mode"],
+            "observed_at": row["observed_at"],
+            "fetched_at": fetched_at,
+            "evidence": evidence,
+        }
+        candidates.append(candidate)
+        try:
+            from app.sources.google_trends.trending_now import normalize_keyword
+
+            _, normalized = normalize_keyword(row["keyword"])
+            identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        except (TypeError, ValueError):
+            continue
+        verification = evidence.get("bing_verification")
+        if not isinstance(verification, dict):
+            continue
+        verified_at = _parse_timestamp(verification.get("fetched_at"))
+        if verification.get("status") in {"VERIFIED", "FAILED"} and verified_at:
+            within_retention = cutoff <= verified_at <= now
+            if within_retention:
+                recent.add(identity)
+            if verification.get("status") == "VERIFIED" and within_retention:
+                cached.append((candidate, verification, verified_at))
+    return tuple(candidates), frozenset(recent), tuple(cached)
+
+
+def _result_record(candidate, verification):
+    if isinstance(candidate, dict):
+        from app.sources.google_trends.trending_now import normalize_keyword
+
+        _, normalized = normalize_keyword(candidate.get("canonical_keyword"))
+        return {
+            "record_type": "BING_SAVED_CANDIDATE_VERIFICATION",
+            "candidate_keyword_id": candidate["record_id"],
+            "candidate_identity": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+            "candidate_keyword": candidate["canonical_keyword"],
+            "candidate_source_id": candidate["source_id"],
+            "candidate_observed_at": candidate["observed_at"],
+            "bing_verification": verification,
+        }
+    return {
+        "record_type": "BING_SAVED_CANDIDATE_VERIFICATION",
+        "candidate_keyword_id": candidate.record_id,
+        "candidate_identity": candidate.identity,
+        "candidate_keyword": candidate.keyword,
+        "candidate_source_id": candidate.source_id,
+        "candidate_observed_at": candidate.observed_at.isoformat(),
+        "bing_verification": verification,
+    }
+
+
+def _current_cached(cached, now):
+    if not cached:
+        return None
+    candidate, verification, fetched_at = sorted(
+        cached, key=lambda item: (-item[2].timestamp(), item[0]["record_id"])
+    )[0]
+    stale = now - fetched_at > timedelta(hours=1)
+    copied = dict(verification)
+    copied["delivery_state"] = "CACHED"
+    flags = list(copied.get("quality_flags", []))
+    if stale:
+        flags.append("STALE_LOCAL_CACHE_REUSED")
+    copied["quality_flags"] = sorted(set(flags))
+    results = verification.get("results")
+    first_result = results[0] if isinstance(results, list) and results else {}
+    if not isinstance(first_result, dict):
+        first_result = {}
+    return {
+        "status": "SUCCESS",
+        "data_mode": "LIVE",
+        "delivery_state": "CACHED",
+        "records": [_result_record(candidate, copied)],
+        "record_count": 1,
+        "coverage": {
+            "discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+            "cache_state": "STALE" if stale else "FRESH",
+            "cache_fetched_at": verification.get("fetched_at"),
+            "provider_request_count": 0,
+            "pages": 1,
+            "query": verification.get("query"),
+            "market": verification.get("market"),
+            "language": verification.get("language"),
+            "provider_cache_state": first_result.get("cache_state", "UNKNOWN"),
+            "provider_created_at": verification.get("provider_created_at"),
+            "fetched_at": verification.get("fetched_at"),
+            "provider_result_count": verification.get("provider_result_count", 0),
+            "accepted_result_count": verification.get("result_count", 0),
+            "rejected_result_count": verification.get("rejected_result_count", 0),
+            "candidate_source_id": candidate.get("source_id"),
+            "candidate_selection_reason": verification.get("candidate_selection_reason"),
+        },
+        "quality_flags": copied["quality_flags"],
+    }
+
+
+class BingSavedCandidateHandler:
+    """At most one saved candidate, one page and one paid attempt per invocation."""
+
+    def __init__(self, *, gateway, collection_store, atomic_store, policy_fingerprint,
+                 ensure_paid_budget, utcnow=lambda: datetime.now(timezone.utc),
+                 allow_initial_acceptance: bool = False):
+        if (not callable(getattr(gateway, "fetch_page", None))
+                or not callable(getattr(collection_store, "connect", None))
+                or not callable(getattr(atomic_store, "transact", None))
+                or not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
+                or not callable(ensure_paid_budget) or not callable(utcnow)
+                or type(allow_initial_acceptance) is not bool):
+            raise ValueError("approved Bing gateway, persisted stores and account preflight required")
+        self.gateway = gateway
+        self.collection_store = collection_store
+        self.atomic_store = atomic_store
+        self.policy_fingerprint = policy_fingerprint
+        self.ensure_paid_budget = ensure_paid_budget
+        self.utcnow = utcnow
+        self.allow_initial_acceptance = allow_initial_acceptance
+
+    @staticmethod
+    def __call_mode__():
+        return "LIVE"
+
+    async def __call__(self, context):
+        if context.source_id != BING_SOURCE_ID:
+            raise ValueError("Bing handler received a different source")
+        progress = ((context.resume_snapshot or {}).get("progress")
+                    if isinstance(context.resume_snapshot, dict) else None)
+        saved = progress.get("bing_receipt") if isinstance(progress, dict) else None
+        if isinstance(saved, dict) and isinstance(saved.get("result"), dict):
+            result = saved["result"]
+            if result.get("data_mode") != self.gateway.data_mode:
+                raise ValueError("saved Bing receipt has an invalid data mode")
+            return result
+
+        raw_now = self.utcnow()
+        if raw_now.tzinfo is None or raw_now.utcoffset() is None:
+            raise ValueError("timezone-aware Bing handler clock required")
+        now = raw_now.astimezone(timezone.utc)
+        rows, recently_verified, cached = _read_saved_candidates(
+            self.collection_store, now=now
+        )
+        cached_result = _current_cached(cached, now)
+        plan = build_verification_plan(
+            rows, policy_fingerprint=self.policy_fingerprint, started_at=now,
+            recently_verified=recently_verified,
+        )
+        if not plan.candidates:
+            if cached_result is not None:
+                context.checkpoint({"bing_receipt": {"result": cached_result}})
+                return cached_result
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": "NO_SAVED_CANDIDATE",
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "provider_request_count": 0},
+            }
+
+        candidate, serp_context = plan.candidates[0], plan.contexts[0]
+        slot = candidate_slot(
+            self.atomic_store, BING_REFRESH_STATE_KEY, now,
+            error_code="BING_SCHEDULE_STATE_INVALID",
+            allow_initial_acceptance=self.allow_initial_acceptance,
+        )
+        if slot is None:
+            if cached_result is not None:
+                context.checkpoint({"bing_receipt": {"result": cached_result}})
+                return cached_result
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "provider_request_count": 0,
+                             "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+            }
+
+        try:
+            account_snapshot = await self.ensure_paid_budget()
+        except SerpApiError as error:
+            return {
+                "status": "FAILED", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": error.code,
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "provider_request_count": 0,
+                             "query": serp_context.canonical_query,
+                             "eligible_slot": slot},
+            }
+        try:
+            slot = reserve_source_slot(
+                self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
+                error_code="BING_SCHEDULE_STATE_INVALID",
+                allow_initial_acceptance=self.allow_initial_acceptance,
+            )
+        except AdmissionDenied:
+            slot = None
+        if slot is None:
+            if cached_result is not None:
+                context.checkpoint({"bing_receipt": {"result": cached_result}})
+                return cached_result
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "provider_request_count": 0,
+                             "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+            }
+        attempt_id = hashlib.sha256(
+            f"{context.job_id}:bing:{serp_context.query_fingerprint}".encode("utf-8")
+        ).hexdigest()
+        receipt_box = []
+
+        def save_receipt(gateway_page):
+            fetched_at = self.utcnow().astimezone(timezone.utc)
+            page = gateway_page.page
+            normalized, rejected = normalize_items(
+                serp_context, page.items, fetched_at=fetched_at, page=1,
+                offset=initial_offset(serp_context).value, http_status=page.http_status,
+                cache_state=page.cache_state, provider_created_at=page.provider_created_at,
+                data_mode=gateway_page.data_mode,
+            )
+            verification = {
+                "status": "VERIFIED",
+                "provider_id": source_capability(BING_SOURCE_ID).provider_id,
+                "verification_mode": "BING_SERP",
+                "plan_id": serp_context.plan_id,
+                "plan_version": serp_context.plan_version,
+                "query_fingerprint": serp_context.query_fingerprint,
+                "query": serp_context.canonical_query,
+                "market": "US",
+                "language": "en-US",
+                "candidate_selection_reason": candidate.reason,
+                "fetched_at": fetched_at.isoformat(),
+                "provider_created_at": (page.provider_created_at.isoformat()
+                                         if page.provider_created_at else None),
+                "delivery_state": "CACHED" if page.cache_state == "CACHED" else "FRESH",
+                "provider_result_count": len(page.items),
+                "result_count": len(normalized),
+                "rejected_result_count": len(rejected),
+                "results": [{
+                    "canonical_url": record.canonical_url,
+                    "title": record.title,
+                    "snippet": record.snippet,
+                    "provider_rank": record.evidence[0].position,
+                    "fetched_at": record.fetched_at.isoformat(),
+                    "provider_created_at": (
+                        record.evidence[0].provider_created_at.isoformat()
+                        if record.evidence[0].provider_created_at else None
+                    ),
+                    "cache_state": record.evidence[0].cache_state,
+                    "quality_flags": list(record.quality_flags),
+                } for record in normalized],
+                "quality_flags": ["QUERY_SCOPED_POSITION_IS_NOT_SEARCH_VOLUME"],
+                "limitations": ["SERP_POSITION_IS_NOT_SEARCH_VOLUME",
+                                "SERP_IS_NOT_COMMERCIAL_DEMAND",
+                                "MKT_US_IS_NOT_PROOF_OF_US_CUSTOMER_INTEREST"],
+            }
+            result = {
+                "status": "PARTIAL" if rejected else "SUCCESS",
+                "data_mode": gateway_page.data_mode,
+                "delivery_state": verification["delivery_state"],
+                "records": [_result_record(candidate, verification)],
+                "record_count": 1,
+                "coverage": {
+                    "discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                    "candidate_source_id": candidate.source_id,
+                    "candidate_selection_reason": candidate.reason,
+                    "candidate_observed_at": candidate.observed_at.isoformat(),
+                    "candidate_fetched_at": candidate.fetched_at.isoformat(),
+                    "query": serp_context.canonical_query,
+                    "market": "US", "language": "en-US",
+                    "provider_request_count": 1, "pages": 1,
+                    "provider_result_count": len(page.items),
+                    "accepted_result_count": len(normalized),
+                    "rejected_result_count": len(rejected),
+                    "fetched_at": verification["fetched_at"],
+                    "provider_created_at": verification["provider_created_at"],
+                    "provider_cache_state": page.cache_state,
+                    "eligible_slot": slot,
+                    "account_quota": account_snapshot,
+                },
+            }
+            context.checkpoint({"bing_receipt": {"result": result}})
+            receipt_box.append(result)
+
+        try:
+            await self.gateway.fetch_page(
+                context=serp_context, cursor=initial_offset(serp_context),
+                job_id=context.job_id, owner=context.owner, fence=context.fence,
+                attempt_id=attempt_id, timeout_seconds=15,
+                on_page_receipt=save_receipt,
+            )
+        except (GatewayError, SerpApiError, AdmissionDenied) as error:
+            code = getattr(error, "code", "SOURCE_EXECUTION_FAILED")
+            return {
+                "status": "FAILED", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0,
+                "error_code": code if isinstance(code, str) else "SOURCE_EXECUTION_FAILED",
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "provider_request_count": 1,
+                             "query": serp_context.canonical_query,
+                             "eligible_slot": slot},
+            }
+        if not receipt_box:
+            raise ValueError("Bing provider receipt was not persisted")
+        return receipt_box[0]

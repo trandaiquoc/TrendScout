@@ -859,9 +859,12 @@ function renderFetchPresentation() {
         const statusKey = `fetch.source-status.${visibleStatus}`;
         const sourceStatus = source.status && t(statusKey) !== statusKey
           ? t(statusKey) : source.status;
+        const errorKey = `fetch.source-error.${source.error_code}`;
+        const sourceError = source.error_code && t(errorKey) !== errorKey
+          ? t(errorKey) : '';
         const delivery = ['SUCCESS', 'PARTIAL'].includes(source.status)
           ? source.delivery_state : null;
-        return [sourceLabel, sourceStatus, source.data_mode, delivery,
+        return [sourceLabel, sourceStatus, source.data_mode, delivery, sourceError,
           googleFetchSummary(source),
           Number.isInteger(source.retry_after_seconds)
             ? t('fetch.retry-after', { seconds: source.retry_after_seconds }) : '']

@@ -137,6 +137,67 @@ function appendGoogleTrendDetails(inspector, evidence, detail) {
     if (results.length) verificationPanel.append(resultList);
     panel.append(verificationPanel);
   }
+  const bingVerification = evidence.bing_verification;
+  if (bingVerification && typeof bingVerification === 'object') {
+    const results = Array.isArray(bingVerification.results) ? bingVerification.results : [];
+    const verificationPanel = make('section', '', 'bing-serp-verification');
+    verificationPanel.append(make('h3', labels('workbench.bing-serp-title', 'Bing Search verification')));
+    addRows(verificationPanel, [
+      ['workbench.bing-serp-status', labels(
+        `workbench.bing-serp-status.${bingVerification.status || 'UNKNOWN'}`,
+        bingVerification.status || 'Unknown',
+      )],
+      ['workbench.bing-serp-query', bingVerification.query || labels('common.unavailable', 'Unavailable')],
+      ['workbench.bing-serp-delivery', labels(
+        `fetch.delivery.${bingVerification.delivery_state || 'UNKNOWN'}`,
+        bingVerification.delivery_state || 'Unknown',
+      )],
+      ['workbench.bing-serp-result-count', Number.isInteger(bingVerification.result_count)
+        ? number(bingVerification.result_count) : labels('common.unavailable', 'Unavailable')],
+      ['workbench.bing-serp-provider-count', Number.isInteger(bingVerification.provider_result_count)
+        ? number(bingVerification.provider_result_count) : labels('common.unavailable', 'Unavailable')],
+      ['workbench.bing-serp-market', bingVerification.market || labels('common.unavailable', 'Unavailable')],
+      ['workbench.bing-serp-language', bingVerification.language || labels('common.unavailable', 'Unavailable')],
+      ['workbench.bing-serp-provider-time', googleTimestamp(bingVerification.provider_created_at)],
+      ['workbench.bing-serp-fetched-at', googleTimestamp(bingVerification.fetched_at)],
+      ['workbench.bing-serp-cache-state', results.find((result) => result?.cache_state)?.cache_state
+        || labels('common.unavailable', 'Unavailable')],
+    ]);
+    const resultList = make('ol', '', 'bing-serp-results');
+    results.slice(0, 10).forEach((result) => {
+      const item = make('li');
+      const url = safeSerpResultUrl(result.canonical_url);
+      if (url) {
+        const link = make('a', result.title || result.canonical_url);
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        item.append(link);
+      } else {
+        item.append(make('span', result.title || labels('common.unavailable', 'Unavailable')));
+      }
+      if (typeof result.snippet === 'string' && result.snippet) {
+        item.append(make('p', result.snippet, 'fine-print'));
+      }
+      if (Number.isInteger(result.provider_rank)) {
+        item.append(make('small', formatted('workbench.bing-serp-rank', {
+          rank: number(result.provider_rank),
+        }, 'Bing result position {rank}; not search volume.')));
+      }
+      resultList.append(item);
+    });
+    if (results.length > 10) {
+      resultList.append(make('li', formatted('workbench.bing-serp-limit', {
+        shown: number(10), total: number(results.length),
+      }, 'Showing {shown} of {total} results.'), 'fine-print'));
+    }
+    if (results.length) verificationPanel.append(resultList);
+    if (Array.isArray(bingVerification.limitations) && bingVerification.limitations.length) {
+      verificationPanel.append(make('p', labels('workbench.bing-serp-limitations',
+        'Bing SERP rank is a localized result position, not search volume or customer demand.'), 'fine-print'));
+    }
+    panel.append(verificationPanel);
+  }
   inspector.append(panel);
 }
 function labelled(select, key, options, fallback = key) {

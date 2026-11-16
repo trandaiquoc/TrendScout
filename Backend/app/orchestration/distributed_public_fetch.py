@@ -57,27 +57,34 @@ class DistributedPublicFetch:
             self.data_mode = "LIVE"
         elif normal_google_live:
             from app.normal_wikimedia_live_policy import normal_google_live_policy
-            from app.sources.catalog import GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+            from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
             pools = admission.policy.pools
+            bing_enabled = BING_SOURCE_ID in admission.policy.enabled_sources
+            google_pool = (pools.get("serpapi_google") if bing_enabled
+                           else pools.get("serpapi"))
+            bing_pool = pools.get("serpapi_bing") if bing_enabled else None
             try:
                 expected = normal_google_live_policy(
-                    serpapi_daily_budget=pools["serpapi"].daily_requests,
-                    serpapi_monthly_budget=pools["serpapi"].monthly_requests,
+                    serpapi_daily_budget=google_pool.daily_requests,
+                    serpapi_monthly_budget=google_pool.monthly_requests,
                     rss_daily_budget=pools["google_rss"].daily_requests,
                     rss_monthly_budget=pools["google_rss"].monthly_requests,
-                    batches_per_hour=admission.policy.max_starts_per_window,
+                    fetch_starts_per_hour=admission.policy.max_starts_per_window,
+                    bing_enabled=bing_enabled,
+                    bing_daily_budget=(bing_pool.daily_requests if bing_pool else 3),
                 )
             except (KeyError, TypeError, ValueError):
                 expected = None
+            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+            if bing_enabled:
+                expected_sources.add(BING_SOURCE_ID)
             if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
                     or worker.admission is not admission
                     or type(admission.store) is not LocalSQLiteAtomicStateStore
                     or admission.store.data_mode != "LIVE"
                     or admission.policy != expected
-                    or admission.policy.enabled_sources != frozenset(
-                        {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
-                    )
+                    or admission.policy.enabled_sources != frozenset(expected_sources)
                     or not callable(resolve_processing_grants)):
                 raise ValueError("normal Google LIVE requires its separate local policy and state")
             self.data_mode = "LIVE"

@@ -9,13 +9,13 @@ Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root ch�
 ..\start.ps1 -Synthetic
 ```
 
-Demo synthetic nghe loopback, dùng fixture, không gọi provider, và dừng bằng Ctrl+C. Chế độ cloud tiêu chuẩn `..\start.ps1` cần environment `GOOGLE_CLOUD_PROJECT`, `TREND_SCOUT_OPERATOR_TOKEN` do chủ máy cấu hình và ADC; startup không fetch provider. Setup không tạo file `.env` hoặc API keys. Trên Windows, mặc định credential file cho `LocalCredentialProvider` là `%LOCALAPPDATA%\TrendScout\.env`; thư mục này được setup chuẩn bị với DACL giới hạn, nhưng setup không tạo credential file.
+Demo synthetic nghe loopback, dùng fixture, không gọi provider, và dừng bằng Ctrl+C. Chế độ cloud tiêu chuẩn `..\start.ps1` cần environment `GOOGLE_CLOUD_PROJECT`, `TREND_SCOUT_OPERATOR_TOKEN` do chủ máy cấu hình và ADC; startup không fetch provider. Setup không tạo file `.env` hoặc API keys. `LocalCredentialProvider` đọc `.env` ở repository root trên cả Linux và Windows; Windows vẫn hỗ trợ `%LOCALAPPDATA%\TrendScout\.env` cũ nếu file root chưa tồn tại.
 
 Chạy `..\verify_offline_readiness.ps1` để thực hiện D6.1B focused tests, toàn bộ unittest, cả hai golden hash seed, `pip check`, JavaScript syntax, Chrome browser E2E và storage benchmark. File lock dùng byte-range lock Windows qua `msvcrt`, tự nhả khi process kết thúc. Kiểm tra ACL xác minh owner SID và DACL bằng Windows security APIs; cho phép user hiện tại, SYSTEM, Administrators và owner-rights ACE. Reparse point, ACL không đọc được hoặc ACE cấp quyền cho principal khác bị từ chối. SQLite quota ledger nằm dưới `%LOCALAPPDATA%\TrendScout\local\d6-smoke`; database, WAL/SHM và process lock thừa hưởng ACL riêng của thư mục đó.
 
 ## Linux: guarded normal Wikimedia LIVE local runtime
 
-From the repository root, run `bash setup.sh` once, then `bash start.sh`. It binds only to `127.0.0.1`, uses one worker and the normal Wikimedia LIVE composition, and defaults to port 8000. Startup does not call Wikimedia; click Fetch in the dashboard to make a bounded provider request. No Firebase/Firestore, ADC, Google Cloud project, operator token, or Wikimedia API key is required for this local composition. `bash setup.sh` installs FastEmbed in `Backend/.venv`; first local inference may download the multilingual MiniLM model into `~/.cache/trendscout/fastembed`. Persistent user Collections and retained keyword evidence use the separate `~/.local/state/trendscout/collections-v1/collections.sqlite` namespace, outside the D6 quota ledger. `bash start.sh --synthetic` runs the fixture demo. Set `TREND_SCOUT_DEMO_PORT` to use another port. A busy port exits with an actionable message; the foreground process exits cleanly on Ctrl+C.
+From the repository root, run `bash setup.sh` once, then `bash start.sh`. It binds only to `127.0.0.1`, uses one worker and the local multi-source LIVE composition, and defaults to port 8000. Startup does not call a provider; choose configured sources in Source Center and click Fetch. No Firebase/Firestore, ADC, Google Cloud project, operator token, or Wikimedia API key is required for the local composition. `bash setup.sh` installs FastEmbed in `Backend/.venv`; first local inference may download the multilingual MiniLM model into `~/.cache/trendscout/fastembed`. Persistent user Collections and retained keyword evidence use the separate `~/.local/state/trendscout/collections-v1/collections.sqlite` namespace, outside the D6 quota ledger. `bash start.sh --synthetic` runs the fixture demo. Set `TREND_SCOUT_DEMO_PORT` to use another port. A busy port exits with an actionable message; the foreground process exits cleanly on Ctrl+C.
 
 This runtime is an explicitly guarded local demo, not a cloud deployment or multi-host service. Its local state may be lost when the process stops. The legacy Firestore and operator-token paths documented below remain separate from this entrypoint.
 
@@ -312,16 +312,24 @@ Theo thông tin đã xác minh, Vercel project đang bật Deployment Protection
 
 [Vercel FastAPI](https://vercel.com/docs/frameworks/backend/fastapi) · [OIDC trên mọi plan](https://vercel.com/docs/oidc) · [Chia sẻ source ngoài root](https://vercel.com/docs/monorepos/monorepo-faq).
 
-## Google Trends local profile (D6, opt-in)
+## Local Google Trends Fetch (D6)
 
-The default `start.ps1` path remains the separate Wikimedia local runtime. To select the Google-capable local profile, set `TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED=true` in the current shell and run `..\start.ps1 -GoogleLive`. The profile binds to loopback, runs one worker, and does not fetch provider data at startup. This selection alone does not approve or enable a Google provider.
+The local defaults in `start.sh` and `start.ps1` launch the same web application on loopback port 8000. The launchers only start the server; they do not approve a source or submit a Fetch. The web Fetch control is the only action that starts collection.
 
-All Google provider approvals default to false. Enable only the source the operator has explicitly approved:
+This local profile enables Google Trends Trending Now, its free SerpApi Account API preflight, and selective Bing Search verification from one saved Google Trends candidate. Google SERP and Google RSS remain disabled in this profile. Bing and Google share the same SerpApi account ledger; Bing is capped at one candidate and one page per eligible user Fetch. Both `start.sh` and `start.ps1` launch the same Python runtime; Python reads `SERPAPI_API_KEY` directly from `.env` at the repository root. The launch scripts do not source `.env`, so the same file works with either launcher. `Backend/.env` is not read.
 
-- `TREND_SCOUT_GOOGLE_RSS_APPROVED=true` enables the limited Google Trends RSS discovery path, with its separate bounded RSS request pool.
-- `TREND_SCOUT_GOOGLE_TRENDS_APPROVED=true` enables SerpApi Google Trends Trending Now only when `TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED=true` is also set.
-- `TREND_SCOUT_GOOGLE_SERP_APPROVED=true` enables the bounded SerpApi Google SERP verification path only when the same account API approval is set. The server-side credential provider must resolve `SERPAPI_API_KEY`; do not place the key in frontend files, logs, or repository files.
+Create the local file from the non-secret template and enter the recipient's own SerpApi key:
 
-Paid paths check the SerpApi account endpoint before reserving an attempt. Default maximum budgets are 6 paid requests per day and 180 per month, with a cross-machine reserve of 6; RSS has separate defaults of 30 per day and 900 per month. The verification plan is limited to two candidates per fresh batch. Budget settings cannot raise these caps. Cached responses retain their original provider timestamp and are identified as cached.
+```text
+SERPAPI_API_KEY=your_serpapi_key
+```
 
-The flags are operator controls, not evidence of provider entitlement or permission. Confirm access, quota, usage and retention authorization before enabling a LIVE source. No credential, approval flag, account request, or provider request is supplied by this repository documentation.
+Quoted values and a UTF-8 BOM are accepted; shell syntax such as `export`, variable expansion and inline comments is not used. On Linux, keep the file private with `chmod 600 .env`. On Windows, the `.env` file DACL must allow only the current owner, SYSTEM and local Administrators; a typical command from PowerShell is `icacls .env /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):F" "*S-1-5-18:F" "*S-1-5-32-544:F"`. The old `%LOCALAPPDATA%\TrendScout\.env` location remains a fallback for existing Windows installs. `.env` is ignored by Git; share it only through the credential handoff channel you use for that recipient, never commit or paste the key into frontend configuration.
+
+Paid Google and Bing refreshes use the server-persisted, user-triggered schedule **07:00, 15:00 and 23:00 Asia/Ho_Chi_Minh**. Each source attempt must be at least eight hours apart, and a missed slot is not replayed. A fresh local cache is delivered without a provider request. A stale or missing cache can refresh only after a manual Fetch in an eligible slot. On a host with no history for a source, one explicit first-run acceptance exception allows that source to be verified by a manual Fetch; subsequent attempts follow the regular slots. Newly admitted Google Trends and Bing Search requests use SerpApi `no_cache=true` so provider-side cached results are not mistaken for newly fetched data. Startup and background processing do not fetch provider data.
+
+The Google LIVE run uses one bounded HTTPS request with `Accept-Encoding: identity`, strict response-size and timeout limits, and no provider retry. It checks the SerpApi Account API before an admitted paid request. HTTP transport failures retain only sanitized phase, status, exception class and byte-count diagnostics; request URLs, headers, response bodies and credentials are excluded.
+
+The current local quota policy is shown by the live Account API and Source Center; do not infer provider remaining quota from a local `.env` file. Local SQLite reservations do not coordinate separate computers, so the local schedule and reserve cannot prevent a simultaneous request from another host.
+
+The lower-level `GoogleLiveSettings` environment switches still apply to directly composed runtimes and tests; they are not launcher arguments. They do not prove provider entitlement or permission. Do not enable Google SERP, RSS or Bing by changing browser state.

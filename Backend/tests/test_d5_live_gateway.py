@@ -100,6 +100,7 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.page.items[0]["title"], "fixture")
             self.assertEqual(seen[0].url.host, "serpapi.com")
             self.assertEqual(seen[0].url.params["api_key"], FAKE_SECRET)
+            self.assertEqual(seen[0].headers["accept-encoding"], "identity")
             self.assertNotIn(FAKE_SECRET, " ".join(logs.output))
             self.assertNotIn("linen", " ".join(logs.output).lower())
             self.assertNotIn(FAKE_SECRET, repr(result))
@@ -127,6 +128,16 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
             context, cursor = self.context(GOOGLE_SOURCE_ID)
             params = gateway._params(context, cursor, 50)
             self.assertNotIn("no_cache", params)
+            bing_gateway = await LivePageGateway.controlled_network(
+                BING_SOURCE_ID, Credentials(), Approvals(BING_SOURCE_ID), self.runner,
+                clock=lambda: NOW)
+            try:
+                bing_context, bing_cursor = self.context(BING_SOURCE_ID)
+                self.assertEqual(
+                    bing_gateway._params(bing_context, bing_cursor, 50)["no_cache"], "true"
+                )
+            finally:
+                await bing_gateway.aclose()
             trend_request = GoogleTrendsRequest(
                 GOOGLE_SOURCE_ID, self.control.policy.plan_fingerprint
             )
@@ -281,6 +292,42 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
             await gateway.fetch_page(**self.args(GOOGLE_SOURCE_ID))
         self.assertEqual(caught.exception.code, "UPSTREAM_ERROR")
         self.assertNotIn(FAKE_SECRET, str(caught.exception))
+
+    async def test_http_transport_failure_has_safe_phase_diagnostic(self):
+        def handler(request):
+            raise httpx.ConnectError("private connection detail " + FAKE_SECRET,
+                                     request=request)
+        gateway = self.gateway(GOOGLE_SOURCE_ID, handler)
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as caught:
+            await gateway.fetch_page(**self.args(GOOGLE_SOURCE_ID))
+        diagnostic = caught.exception.diagnostic
+        self.assertEqual(diagnostic.source_id, GOOGLE_SOURCE_ID)
+        self.assertEqual(diagnostic.failure_phase, "REQUEST_DISPATCH")
+        self.assertIsNone(diagnostic.http_status)
+        self.assertEqual(diagnostic.exception_class, "ConnectError")
+        self.assertEqual(diagnostic.bytes_received, 0)
+        self.assertEqual(diagnostic.error_code, "UPSTREAM_ERROR")
+        self.assertNotIn(FAKE_SECRET, repr(diagnostic))
+
+    async def test_body_stream_failure_is_distinguished_from_dispatch_failure(self):
+        class FailingBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"partial-private-content"
+                raise httpx.ReadError("private body failure " + FAKE_SECRET)
+
+            async def aclose(self):
+                return None
+
+        gateway = self.gateway(GOOGLE_SOURCE_ID, lambda request: httpx.Response(
+            200, stream=FailingBody(), request=request))
+        with self.assertRaisesRegex(GatewayError, "UPSTREAM_ERROR") as caught:
+            await gateway.fetch_page(**self.args(GOOGLE_SOURCE_ID))
+        diagnostic = caught.exception.diagnostic
+        self.assertEqual(diagnostic.failure_phase, "BODY_STREAM")
+        self.assertEqual(diagnostic.http_status, 200)
+        self.assertEqual(diagnostic.exception_class, "ReadError")
+        self.assertEqual(diagnostic.bytes_received, len(b"partial-private-content"))
+        self.assertNotIn(FAKE_SECRET, repr(diagnostic))
 
     async def test_uncertain_settlement_fails_closed_and_never_retries(self):
         seen = []

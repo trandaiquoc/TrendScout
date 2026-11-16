@@ -20,6 +20,7 @@ MAX_BING_VERIFICATIONS = 1
 class BingCandidate:
     keyword: str
     identity: str
+    record_id: str
     source_id: str
     observed_at: datetime
     fetched_at: datetime
@@ -61,6 +62,10 @@ def select_saved_candidates(rows: tuple[dict, ...], *, now: datetime,
             fetched = _timestamp(row.get("fetched_at"))
         except (TypeError, ValueError):
             continue
+        record_id = row.get("record_id")
+        if not isinstance(record_id, str) or len(record_id) != 64 or any(
+                char not in "0123456789abcdef" for char in record_id):
+            continue
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         if digest in recently_verified or fetched > now or observed > now:
             continue
@@ -81,7 +86,8 @@ def select_saved_candidates(rows: tuple[dict, ...], *, now: datetime,
         increase = cluster.get("increase_percentage")
         increase = increase if type(increase) in {int, float} and 0 <= increase <= 1_000_000_000 else 0
         reason = "PREFERRED_INDUSTRY_SIGNAL" if preferred else "SAVED_TREND_CANDIDATE"
-        row_value = BingCandidate(keyword, digest, GOOGLE_SOURCE_ID, observed, fetched, reason)
+        row_value = BingCandidate(keyword, digest, record_id, GOOGLE_SOURCE_ID,
+                                  observed, fetched, reason)
         rank = (not preferred, not active, -increase, -observed.timestamp(), digest)
         if digest not in prepared or rank < prepared[digest][0]:
             prepared[digest] = (rank, row_value)
@@ -141,7 +147,7 @@ def validate_dynamic_context(context: QueryContext, *, policy_fingerprint: str) 
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         allowed_scopes = {f"saved:{GOOGLE_SOURCE_ID}:PREFERRED_INDUSTRY_SIGNAL",
                           f"saved:{GOOGLE_SOURCE_ID}:SAVED_TREND_CANDIDATE"}
-        expected = _context(BingCandidate(normalized, digest, GOOGLE_SOURCE_ID,
+        expected = _context(BingCandidate(normalized, digest, "0" * 64, GOOGLE_SOURCE_ID,
                                           context.started_at, context.started_at,
                                           context.taxonomy_scope.split(":", 2)[-1]),
                             policy_fingerprint, context.started_at)

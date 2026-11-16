@@ -9,7 +9,7 @@ import json
 import re
 import secrets
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
@@ -27,6 +27,10 @@ SOURCE_POOLS = {
     GOOGLE_SOURCE_ID: "serpapi",
     BING_SOURCE_ID: "serpapi",
     YOUTUBE_SOURCE_ID: "youtube",
+}
+SOURCE_ALLOCATION_POOLS = {
+    GOOGLE_SOURCE_ID: "serpapi_google",
+    BING_SOURCE_ID: "serpapi_bing",
 }
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
@@ -64,6 +68,7 @@ class AdmissionPolicy:
     enabled_sources: frozenset[str]
     pools: Mapping[str, PoolLimit]
     plan_fingerprint: str
+    source_allocations: Mapping[str, str] = field(default_factory=dict)
     max_starts_per_window: int = 3
     window_seconds: int = 3600
     cooldown_seconds: int = 60
@@ -79,7 +84,11 @@ class AdmissionPolicy:
         required_pools = ({SOURCE_POOLS[source] for source in self.enabled_sources
                            if source in SOURCE_POOLS}
                           if isinstance(self.enabled_sources, frozenset) else set())
-        extra_pools = set(self.pools) - required_pools
+        allocations = self.source_allocations
+        if not isinstance(allocations, Mapping):
+            raise ValueError("source quota allocations must be a mapping")
+        allocation_pools = set(allocations.values())
+        extra_pools = set(self.pools) - required_pools - allocation_pools
         if (type(self.enabled) is not bool or not isinstance(self.enabled_sources, frozenset)
                 or not self.enabled_sources or not self.enabled_sources <= SOURCE_POOLS.keys()
                 or not re.fullmatch(r"[a-f0-9]{64}", self.plan_fingerprint)
@@ -87,6 +96,11 @@ class AdmissionPolicy:
                 or extra_pools and not (
                     extra_pools == {"google_rss"} and GOOGLE_SOURCE_ID in self.enabled_sources
                 )
+                or any(source not in self.enabled_sources
+                       or SOURCE_ALLOCATION_POOLS.get(source) != pool
+                       or pool not in self.pools or pool == SOURCE_POOLS[source]
+                       for source, pool in allocations.items())
+                or len(allocation_pools) != len(allocations)
                 or any(not isinstance(value, PoolLimit) for value in self.pools.values())):
             raise ValueError("invalid server-controlled admission policy")
         for value, lower, upper in ((self.max_starts_per_window, 1, 1000),
@@ -131,23 +145,29 @@ class PublicAdmission:
         config = asdict(policy)
         config["enabled_sources"] = sorted(policy.enabled_sources)
         config.pop("enabled")
+        # Keep the established Google-only digest stable. Empty allocation
+        # metadata did not exist in the persisted V1 policy document.
+        if not config.get("source_allocations"):
+            config.pop("source_allocations", None)
         return hashlib.sha256(json.dumps(
             config, sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")).hexdigest()
 
     def migrate_bounded_quota_policy(self, previous_policy: AdmissionPolicy, *,
-                                     authorization_note: str, now: datetime) -> dict:
-        """Increase only SerpApi quota ceilings while preserving and auditing state.
+                                     authorization_note: str, now: datetime,
+                                     allow_fetch_capacity_increase: bool = False) -> dict:
+        """Apply a narrow quota or Fetch-capacity increase without resetting state.
 
         This owner-invoked migration is deliberately narrow: all workflow,
-        concurrency, timing, and non-SerpApi policy fields must stay identical.
+        timing, concurrency, and non-SerpApi policy fields must stay identical.
         Existing usage, jobs, reservations, and start history are not reset.
         """
         now = _utc(now)
         if (not isinstance(previous_policy, AdmissionPolicy)
                 or not isinstance(authorization_note, str)
                 or not 12 <= len(authorization_note) <= 256
-                or "\x00" in authorization_note):
+                or "\x00" in authorization_note
+                or type(allow_fetch_capacity_increase) is not bool):
             raise ValueError("previous policy and auditable owner authorization are required")
         previous_digest = self._policy_digest(previous_policy)
         previous_base, current_base = asdict(previous_policy), asdict(self.policy)
@@ -156,7 +176,33 @@ class PublicAdmission:
         previous_base.pop("enabled")
         current_base.pop("enabled")
         previous_pools, current_pools = previous_base.pop("pools"), current_base.pop("pools")
-        if previous_base != current_base or set(previous_pools) != set(current_pools):
+        previous_fetch_cap = previous_base.pop("max_starts_per_window")
+        current_fetch_cap = current_base.pop("max_starts_per_window")
+        previous_allocations = previous_base.pop("source_allocations", {})
+        current_allocations = current_base.pop("source_allocations", {})
+        previous_sources = set(previous_base.pop("enabled_sources"))
+        current_sources = set(current_base.pop("enabled_sources"))
+        added_bing_allocations = (
+            not previous_allocations
+            and current_allocations == {
+                GOOGLE_SOURCE_ID: "serpapi_google", BING_SOURCE_ID: "serpapi_bing",
+            }
+            and current_sources - previous_sources == {BING_SOURCE_ID}
+            and GOOGLE_SOURCE_ID in previous_sources
+            and set(current_pools) - set(previous_pools)
+            == {"serpapi_google", "serpapi_bing"}
+        )
+        increased_fetch_capacity = (
+            allow_fetch_capacity_increase
+            and type(previous_fetch_cap) is int and type(current_fetch_cap) is int
+            and current_fetch_cap > previous_fetch_cap
+        )
+        if (previous_base != current_base
+                or previous_fetch_cap != current_fetch_cap and not increased_fetch_capacity
+                or current_sources != previous_sources and not added_bing_allocations
+                or previous_allocations != current_allocations and not added_bing_allocations
+                or not (set(previous_pools) == set(current_pools)
+                        or added_bing_allocations)):
             raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
 
         changed_pools = []
@@ -171,16 +217,19 @@ class PublicAdmission:
                 continue
             if set(old_values) != set(new_values):
                 raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
-            for field, old_value in old_values.items():
-                new_value = new_values[field]
-                if field in budget_fields:
+            for limit_field, old_value in old_values.items():
+                new_value = new_values[limit_field]
+                if limit_field in budget_fields:
                     if new_value < old_value:
                         raise AdmissionDenied("POLICY_MIGRATION_NOT_MONOTONIC")
                 elif new_value != old_value:
                     raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
-            if any(old_values[field] < new_values[field] for field in budget_fields):
+            if any(old_values[limit_field] < new_values[limit_field]
+                   for limit_field in budget_fields):
                 changed_pools.append(name)
-        if not changed_pools:
+        if added_bing_allocations:
+            changed_pools.append("source_allocations")
+        if not changed_pools and not increased_fetch_capacity:
             raise AdmissionDenied("POLICY_MIGRATION_NO_CHANGE")
 
         def operation(state):
@@ -199,7 +248,30 @@ class PublicAdmission:
                 if (isinstance(slot, dict)
                         and _parse(slot.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
                     raise AdmissionDenied("POLICY_MIGRATION_BUSY")
-            for key, usage in quota.items():
+            migrated_quota = deepcopy(quota)
+            if added_bing_allocations:
+                # The old policy enabled only Google SerpApi. Preserve its
+                # current day/month usage under Google's new allocation while
+                # retaining the provider-level shared counters unchanged.
+                for window, suffix in (
+                    ("day", now.strftime("%Y-%m-%d")),
+                    ("month", now.strftime("%Y-%m")),
+                ):
+                    legacy = migrated_quota.get(
+                        f"serpapi:{window}:{suffix}", {"requests": 0, "cost": 0}
+                    )
+                    if (not isinstance(legacy, dict)
+                            or type(legacy.get("requests")) is not int
+                            or type(legacy.get("cost")) is not int
+                            or legacy["requests"] < 0 or legacy["cost"] < 0):
+                        raise AdmissionDenied("STATE_INVALID")
+                    limit = self._pools["serpapi_google"]
+                    request_limit = limit.daily_requests if window == "day" else limit.monthly_requests
+                    cost_limit = limit.daily_cost_units if window == "day" else limit.monthly_cost_units
+                    if legacy["requests"] > request_limit or legacy["cost"] > cost_limit:
+                        raise AdmissionDenied("POLICY_MIGRATION_QUOTA_INCOMPATIBLE")
+                    migrated_quota[f"serpapi_google:{window}:{suffix}"] = dict(legacy)
+            for key, usage in migrated_quota.items():
                 if not isinstance(key, str) or not isinstance(usage, dict):
                     raise AdmissionDenied("STATE_INVALID")
                 parts = key.split(":")
@@ -223,6 +295,9 @@ class PublicAdmission:
                 "from_policy_digest": previous_digest,
                 "to_policy_digest": self.policy_digest,
                 "changed_pools": changed_pools,
+                "changed_admission_limits": (
+                    ["max_starts_per_window"] if increased_fetch_capacity else []
+                ),
                 "authorization_note": authorization_note,
                 "quota_preserved": True,
                 "jobs_preserved": True,
@@ -230,6 +305,7 @@ class PublicAdmission:
             }
             audit = [*audit, record]
             state["policy_digest"] = self.policy_digest
+            state["quota"] = migrated_quota
             state["policy_migration_audit"] = audit
             return state, record
 
@@ -284,19 +360,34 @@ class PublicAdmission:
         limit = self._pools[pool_name]
         day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
 
-        def result(daily, monthly):
-            return {
+        uses_provider_cycle = (bool(self.policy.source_allocations)
+                               and (pool_name == "serpapi"
+                                    or pool_name in self.policy.source_allocations.values()))
+
+        def result(daily, monthly, *, cycle_end=None):
+            monthly_value = {
+                "limit": limit.monthly_requests,
+                "used": monthly["requests"],
+                "remaining": max(0, limit.monthly_requests - monthly["requests"]),
+            }
+            if uses_provider_cycle and not cycle_end:
+                monthly_value.update(used=None, remaining=None)
+            value = {
                 "daily": {
                     "limit": limit.daily_requests,
                     "used": daily["requests"],
                     "remaining": max(0, limit.daily_requests - daily["requests"]),
                 },
-                "monthly": {
-                    "limit": limit.monthly_requests,
-                    "used": monthly["requests"],
-                    "remaining": max(0, limit.monthly_requests - monthly["requests"]),
-                },
+                "monthly": monthly_value,
             }
+            if uses_provider_cycle:
+                value["billing_cycle_ends_at"] = cycle_end
+                value["billing_cycle_status"] = "KNOWN" if cycle_end else "UNKNOWN"
+            source_ids = [source for source, allocation_pool in self.policy.source_allocations.items()
+                          if allocation_pool == pool_name]
+            if len(source_ids) == 1:
+                value["source_id"] = source_ids[0]
+            return value
 
         def read(state):
             if not state:
@@ -317,10 +408,167 @@ class PublicAdmission:
                 return value
 
             daily = usage(f"{pool_name}:day:{day}")
-            monthly = usage(f"{pool_name}:month:{month}")
-            return state, result(daily, monthly)
+            cycle_end = state.get("serpapi_cycle_ends_at") if uses_provider_cycle else None
+            if cycle_end is not None:
+                try:
+                    parsed_cycle_end = date.fromisoformat(cycle_end)
+                except (TypeError, ValueError):
+                    raise AdmissionDenied("STATE_INVALID") from None
+                if parsed_cycle_end.isoformat() != cycle_end:
+                    raise AdmissionDenied("STATE_INVALID")
+                if parsed_cycle_end < now.date():
+                    cycle_end = None
+            monthly_key = (f"{pool_name}:cycle:{cycle_end}" if cycle_end
+                           else f"{pool_name}:month:{month}")
+            monthly = usage(monthly_key)
+            return state, result(daily, monthly, cycle_end=cycle_end)
 
         return self.store.transact(self.state_key, read)
+
+    def set_serpapi_billing_cycle(self, cycle_ends_at: str, *, now: datetime) -> None:
+        """Pin combined Google/Bing reservations to the provider renewal boundary."""
+        now = _utc(now)
+        if (not self.policy.source_allocations
+                or not isinstance(cycle_ends_at, str)):
+            raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+        try:
+            cycle_date = date.fromisoformat(cycle_ends_at)
+        except ValueError:
+            raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN") from None
+        if cycle_date.isoformat() != cycle_ends_at or cycle_date < now.date():
+            raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+
+        def op(state):
+            self._guard_clock(state, now)
+            previous_cycle = state.get("serpapi_cycle_ends_at")
+            if previous_cycle == cycle_ends_at:
+                return
+            quota = state["quota"]
+            if previous_cycle is None:
+                # Conservatively carry the pre-migration UTC-month ledger into
+                # the first provider cycle. Later renewal cycles start fresh.
+                legacy_month = now.strftime("%Y-%m")
+                cycle_keys = [f"serpapi:cycle:{cycle_ends_at}"] + [
+                    f"{allocation_pool}:cycle:{cycle_ends_at}"
+                    for allocation_pool in self.policy.source_allocations.values()
+                ]
+                if any(key in quota for key in cycle_keys):
+                    raise AdmissionDenied("STATE_INVALID")
+                if len(quota) + len(cycle_keys) > self.policy.max_records:
+                    raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
+                source_usage = quota.get(
+                    f"serpapi:month:{legacy_month}", {"requests": 0, "cost": 0}
+                )
+                if (not isinstance(source_usage, dict)
+                        or type(source_usage.get("requests")) is not int
+                        or type(source_usage.get("cost")) is not int
+                        or source_usage["requests"] < 0 or source_usage["cost"] < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                quota[f"serpapi:cycle:{cycle_ends_at}"] = dict(source_usage)
+                for source_id, allocation_pool in self.policy.source_allocations.items():
+                    existing = quota.get(f"{allocation_pool}:month:{legacy_month}",
+                                         {"requests": 0, "cost": 0})
+                    if (not isinstance(existing, dict)
+                            or type(existing.get("requests")) is not int
+                            or type(existing.get("cost")) is not int
+                            or existing["requests"] < 0 or existing["cost"] < 0):
+                        raise AdmissionDenied("STATE_INVALID")
+                    quota[f"{allocation_pool}:cycle:{cycle_ends_at}"] = dict(existing)
+            state["serpapi_cycle_ends_at"] = cycle_ends_at
+        self._transaction(op)
+
+    def reconcile_serpapi_account_usage(self, cycle_ends_at: str, monthly_used: int,
+                                        *, now: datetime) -> None:
+        """Align initial local allocations with provider usage; reject later drift.
+
+        Before Bing is first enabled, all provider usage predates the Bing
+        allocation and is conservatively assigned to Google. After that
+        one-time baseline, account usage may not exceed the shared local ledger:
+        an increase would mean a request outside this designated local host and
+        cannot be attributed safely to either source.
+        """
+        now = _utc(now)
+        if (not self.policy.source_allocations or not isinstance(cycle_ends_at, str)
+                or type(monthly_used) is not int or not 0 <= monthly_used <= 1_000_000):
+            raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_INVALID")
+        try:
+            cycle_date = date.fromisoformat(cycle_ends_at)
+        except ValueError:
+            raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN") from None
+        if cycle_date.isoformat() != cycle_ends_at or cycle_date < now.date():
+            raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+        allocations = self.policy.source_allocations
+        google_pool = allocations.get(GOOGLE_SOURCE_ID)
+        if (google_pool != "serpapi_google"
+                or allocations.get(BING_SOURCE_ID) != "serpapi_bing"
+                or set(allocations) != {GOOGLE_SOURCE_ID, BING_SOURCE_ID}):
+            raise AdmissionDenied("QUOTA_SOURCE_ALLOCATION_INVALID")
+
+        def op(state):
+            self._guard_clock(state, now)
+            if state.get("serpapi_cycle_ends_at") != cycle_ends_at:
+                raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+            if monthly_used > self._pools["serpapi"].monthly_requests:
+                raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
+            quota = state.get("quota")
+            if not isinstance(quota, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            shared_key = f"serpapi:cycle:{cycle_ends_at}"
+            shared = quota.get(shared_key, {"requests": 0, "cost": 0})
+            google_key = f"{google_pool}:cycle:{cycle_ends_at}"
+            google = quota.get(google_key, {"requests": 0, "cost": 0})
+            bing_key = f"{allocations[BING_SOURCE_ID]}:cycle:{cycle_ends_at}"
+            bing = quota.get(bing_key, {"requests": 0, "cost": 0})
+            if any(not isinstance(value, dict)
+                   or type(value.get("requests")) is not int
+                   or type(value.get("cost")) is not int
+                   or value["requests"] < 0 or value["cost"] < 0
+                   for value in (shared, google, bing)):
+                raise AdmissionDenied("STATE_INVALID")
+            if (google["requests"] + bing["requests"] != shared["requests"]
+                    or google["cost"] + bing["cost"] != shared["cost"]):
+                raise AdmissionDenied("QUOTA_ALLOCATION_STATE_MISMATCH")
+
+            baseline_key = "serpapi_account_usage_baseline_cycle"
+            last_used_key = "serpapi_account_usage_last_observed"
+            baseline_cycle = state.get(baseline_key)
+            last_observed = state.get(last_used_key)
+            if baseline_cycle is not None:
+                try:
+                    parsed_baseline = date.fromisoformat(baseline_cycle)
+                except (TypeError, ValueError):
+                    raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_STATE_INVALID") from None
+                if (parsed_baseline.isoformat() != baseline_cycle
+                        or parsed_baseline > cycle_date):
+                    raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_STATE_INVALID")
+            elif last_observed is not None:
+                raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_STATE_INVALID")
+            if baseline_cycle != cycle_ends_at:
+                delta = max(0, monthly_used - shared["requests"])
+                limit = self._pools[google_pool]
+                if (monthly_used > self._pools["serpapi"].monthly_requests
+                        or google["requests"] + delta > limit.monthly_requests
+                        or google["cost"] + delta > limit.monthly_cost_units):
+                    raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
+                shared = dict(shared)
+                google = dict(google)
+                shared["requests"] += delta
+                shared["cost"] += delta
+                google["requests"] += delta
+                google["cost"] += delta
+                quota[shared_key] = shared
+                quota[google_key] = google
+                state[baseline_key] = cycle_ends_at
+            else:
+                if (type(last_observed) is not int or last_observed < 0
+                        or monthly_used < last_observed
+                        or monthly_used > shared["requests"]):
+                    raise AdmissionDenied("QUOTA_EXTERNAL_USAGE_UNRECONCILED")
+
+            state[last_used_key] = monthly_used
+            state["serpapi_account_usage_checked_at"] = now.isoformat()
+
+        self._transaction(op)
 
     def transact_owned(self, job_id: str, owner: str, fence: int, *, now: datetime, operation):
         """Run an internal pure mutation only while the current job lease is held."""
@@ -653,6 +901,8 @@ class PublicAdmission:
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
         pool = self._pool_name(source_id, pool_name)
         limit = self._pools[pool]
+        allocation_pool = self.policy.source_allocations.get(source_id)
+        allocation = self._pools.get(allocation_pool) if allocation_pool else None
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
 
         def op(state):
@@ -668,8 +918,19 @@ class PublicAdmission:
                 raise AdmissionDenied("ATTEMPT_CAPACITY")
             day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
             quota = state["quota"]
+            cycle_end = state.get("serpapi_cycle_ends_at")
+            if self.policy.source_allocations and pool == "serpapi":
+                try:
+                    cycle_date = date.fromisoformat(cycle_end) if cycle_end else None
+                except (TypeError, ValueError):
+                    cycle_date = None
+                if (cycle_date is None or cycle_date.isoformat() != cycle_end
+                        or cycle_date < now.date()):
+                    raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
             # Never delete a newer window: workers can straddle a UTC boundary.
-            daily_key, monthly_key = f"{pool}:day:{day}", f"{pool}:month:{month}"
+            daily_key = f"{pool}:day:{day}"
+            monthly_key = (f"{pool}:cycle:{cycle_end}" if pool == "serpapi" and cycle_end
+                           else f"{pool}:month:{month}")
             # Counters are scoped to UTC calendar windows. Once the server clock
             # has advanced, older windows can no longer affect admission; prune
             # only canonical, known-pool keys strictly before the active window.
@@ -689,17 +950,40 @@ class PublicAdmission:
                         parsed = date.fromisoformat(f"{window_value}-01")
                         if parsed.strftime("%Y-%m") == window_value and window_value < month:
                             del quota[key]
+                    elif window_kind == "cycle" and cycle_end:
+                        parsed = date.fromisoformat(window_value)
+                        if parsed.isoformat() == window_value and window_value < cycle_end:
+                            del quota[key]
                 except ValueError:
                     continue
-            if len(quota) + sum(key not in quota for key in (daily_key, monthly_key)) > self.policy.max_records:
+            allocation_monthly_key = (f"{allocation_pool}:cycle:{cycle_end}"
+                                      if allocation is not None and cycle_end
+                                      else f"{allocation_pool}:month:{month}")
+            allocation_keys = (() if allocation is None else (
+                f"{allocation_pool}:day:{day}", allocation_monthly_key,
+            ))
+            required_keys = (daily_key, monthly_key, *allocation_keys)
+            if len(quota) + sum(key not in quota for key in required_keys) > self.policy.max_records:
                 raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
             daily = quota.setdefault(daily_key, {"requests": 0, "cost": 0})
             monthly = quota.setdefault(monthly_key, {"requests": 0, "cost": 0})
+            allocation_daily = (quota.setdefault(allocation_keys[0], {"requests": 0, "cost": 0})
+                                if allocation is not None else None)
+            allocation_monthly = (quota.setdefault(allocation_keys[1], {"requests": 0, "cost": 0})
+                                  if allocation is not None else None)
             if (daily["requests"] >= limit.daily_requests
                     or monthly["requests"] >= limit.monthly_requests
                     or daily["cost"] + limit.cost_per_attempt > limit.daily_cost_units
                     or monthly["cost"] + limit.cost_per_attempt > limit.monthly_cost_units):
                 raise AdmissionDenied("QUOTA_EXHAUSTED")
+            if allocation is not None and (
+                    allocation_daily["requests"] >= allocation.daily_requests
+                    or allocation_monthly["requests"] >= allocation.monthly_requests
+                    or allocation_daily["cost"] + allocation.cost_per_attempt
+                    > allocation.daily_cost_units
+                    or allocation_monthly["cost"] + allocation.cost_per_attempt
+                    > allocation.monthly_cost_units):
+                raise AdmissionDenied("SOURCE_ALLOCATION_EXHAUSTED")
             inflight = state["inflight"]
             for key in list(inflight):
                 if _parse(inflight[key]["expires_at"]) <= now:
@@ -711,7 +995,12 @@ class PublicAdmission:
             for bucket in (daily, monthly):
                 bucket["requests"] += 1
                 bucket["cost"] += limit.cost_per_attempt
+            for bucket in (allocation_daily, allocation_monthly):
+                if bucket is not None:
+                    bucket["requests"] += 1
+                    bucket["cost"] += allocation.cost_per_attempt
             job["receipts"][receipt_id] = {"source_id": source_id, "pool": pool,
+                                          "allocation_pool": allocation_pool,
                                           "reserved_at": now.isoformat()}
             inflight[f"{job_id}:{receipt_id}"] = {
                 "pool": pool, "expires_at": (now + timedelta(

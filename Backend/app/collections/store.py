@@ -940,6 +940,108 @@ class CollectionStore:
             return ""
 
 
+def bing_verification_update(record: dict, data_mode: str) -> dict | None:
+    """Validate Bing SERP evidence for attachment to its saved Google candidate."""
+    from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, source_capability
+    from app.sources.google_trends.trending_now import normalize_keyword
+    from app.sources.serpapi.normalization import canonical_url
+
+    if (not isinstance(record, dict)
+            or record.get("record_type") != "BING_SAVED_CANDIDATE_VERIFICATION"
+            or data_mode != "LIVE"
+            or record.get("candidate_source_id") != GOOGLE_SOURCE_ID):
+        return None
+    candidate_id = record.get("candidate_keyword_id")
+    identity = record.get("candidate_identity")
+    keyword = record.get("candidate_keyword")
+    if (not isinstance(candidate_id, str) or len(candidate_id) != 64
+            or any(char not in "0123456789abcdef" for char in candidate_id)
+            or not isinstance(identity, str) or len(identity) != 64
+            or any(char not in "0123456789abcdef" for char in identity)):
+        return None
+    try:
+        title, normalized = normalize_keyword(keyword)
+        observed = datetime.fromisoformat(
+            record.get("candidate_observed_at", "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if (hashlib.sha256(normalized.encode("utf-8")).hexdigest() != identity
+            or observed.tzinfo is None or observed.utcoffset() is None):
+        return None
+    verification = record.get("bing_verification")
+    if (not isinstance(verification, dict)
+            or verification.get("status") != "VERIFIED"
+            or verification.get("provider_id") != source_capability(BING_SOURCE_ID).provider_id
+            or verification.get("verification_mode") != "BING_SERP"
+            or verification.get("query") != title
+            or verification.get("market") != "US"
+            or verification.get("language") != "en-US"):
+        return None
+    fetched = verification.get("fetched_at")
+    provider_created = verification.get("provider_created_at")
+    try:
+        fetched_dt = datetime.fromisoformat(fetched.replace("Z", "+00:00"))
+        created_dt = (datetime.fromisoformat(provider_created.replace("Z", "+00:00"))
+                      if provider_created is not None else None)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if (fetched_dt.tzinfo is None or fetched_dt.utcoffset() is None
+            or created_dt is not None and (created_dt.tzinfo is None or created_dt.utcoffset() is None)
+            or verification.get("delivery_state") not in {"FRESH", "CACHED"}):
+        return None
+    results = verification.get("results")
+    if (not isinstance(results, list) or len(results) > 100
+            or verification.get("result_count") != len(results)
+            or type(verification.get("provider_result_count")) is not int
+            or verification["provider_result_count"] < len(results)):
+        return None
+    clean_results = []
+    for item in results:
+        if not isinstance(item, dict):
+            return None
+        try:
+            url = canonical_url(item.get("canonical_url"))
+        except ValueError:
+            return None
+        rank = item.get("provider_rank")
+        result_fetched = item.get("fetched_at")
+        if (url != item.get("canonical_url") or type(rank) is not int or rank < 1
+                or not isinstance(result_fetched, str)):
+            return None
+        clean_results.append(dict(item))
+    return {"candidate_id": candidate_id, "identity": identity,
+            "keyword": title, "observed_at": observed.astimezone(timezone.utc).isoformat(),
+            "verification": {**verification, "results": clean_results}}
+
+
+def saved_source_record(record: dict) -> dict:
+    """Reconstruct source evidence for a cache-only collection reclassification."""
+    from app.sources.catalog import GOOGLE_SOURCE_ID
+
+    if not isinstance(record, dict):
+        raise ValueError("saved keyword row is required")
+    try:
+        evidence = json.loads(record.get("evidence", "{}"))
+    except (TypeError, ValueError):
+        evidence = {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    if record.get("source") == GOOGLE_SOURCE_ID:
+        return {**evidence, "canonical_keyword": record.get("keyword")}
+    return {
+        "article_display": record.get("keyword"),
+        "article_original": record.get("keyword"),
+        "project": record.get("project"),
+        "observation_date": record.get("observed_at"),
+        "fetched_at": evidence.get("fetched_at"),
+        "provider_rank": evidence.get("provider_rank"),
+        "views_ceil": evidence.get("views_ceil"),
+        "country_scope": evidence.get("country_scope"),
+        "access": evidence.get("access"),
+    }
+
+
 def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status="SUCCESS") -> dict | None:
     if source == "google_web_serp" and record.get("data_source") == "GOOGLE_TRENDS":
         from app.sources.google_trends.trending_now import normalize_keyword
@@ -970,8 +1072,9 @@ def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status
                 "canonical_keyword_identity", "region", "language", "time_window_hours",
                 "provider_data_at", "provider_created_at", "fetched_at", "source_url",
                 "delivery_state", "trend_clusters", "serp_verification", "quality_flags",
+                "bing_verification", "bing_verification_history",
             )
-            evidence = {key: record.get(key) for key in evidence_fields}
+            evidence = {key: record[key] for key in evidence_fields if key in record}
             encoded_evidence = json.dumps(evidence, ensure_ascii=False, sort_keys=True,
                                           allow_nan=False, separators=(",", ":"))
             # RSS and Trending Now are discovery paths within one Google source.

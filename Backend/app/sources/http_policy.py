@@ -122,8 +122,9 @@ class HttpPolicy:
         url: str,
         *,
         headers: Mapping[str, str],
-        params: Mapping[str, str | int] | None = None,
         max_response_bytes: int,
+        params: Mapping[str, str | int] | None = None,
+        extensions: Mapping[str, object] | None = None,
         total_timeout_seconds: float | None = None,
     ) -> httpx.Response:
         """Stream a GET under shared timeouts and reject oversized bodies before buffering."""
@@ -152,6 +153,7 @@ class HttpPolicy:
                     url,
                     headers=headers,
                     params=params,
+                    extensions=extensions,
                     timeout=self.request_timeout(),
                     follow_redirects=False,
                 ) as response:

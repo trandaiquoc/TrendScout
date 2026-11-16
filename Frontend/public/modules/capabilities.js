@@ -114,6 +114,8 @@ function renderSerpApiProviderBudget(capabilities, translate) {
   const quota = capabilities?.google_quota || {};
   const provider = quota.provider_account || {};
   const workflow = capabilities?.google_workflow || {};
+  const googleAllocation = quota.serpapi_google || quota.serpapi;
+  const bingAllocation = quota.serpapi_bing;
   const format = (value) => Number.isInteger(value)
     ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(value)
     : translate('common.unavailable');
@@ -133,9 +135,19 @@ function renderSerpApiProviderBudget(capabilities, translate) {
     provider.plan_renewal_date || translate('common.unavailable'));
   capabilityRow(values, translate('sources.provider-checked'), checkedAt);
   capabilityRow(values, translate('sources.google-allocation'),
-    quota.serpapi?.monthly?.limit == null ? translate('common.unavailable')
-      : format(quota.serpapi.monthly.limit));
-  capabilityRow(values, translate('sources.bing-allocation'), translate('common.unavailable'));
+    googleAllocation?.monthly?.limit == null ? translate('common.unavailable')
+      : translate('sources.local-allocation-summary', {
+        limit: format(googleAllocation.monthly.limit),
+        used: format(googleAllocation.monthly.used),
+        remaining: format(googleAllocation.monthly.remaining),
+      }));
+  capabilityRow(values, translate('sources.bing-allocation'),
+    bingAllocation?.monthly?.limit == null ? translate('common.unavailable')
+      : translate('sources.local-allocation-summary', {
+        limit: format(bingAllocation.monthly.limit),
+        used: format(bingAllocation.monthly.used),
+        remaining: format(bingAllocation.monthly.remaining),
+      }));
 }
 
 export function loadCapabilities(locale = 'vi') {
@@ -212,6 +224,15 @@ function savedFetchSummary(activity, translate) {
   return `${status} · ${count} · ${date}`;
 }
 
+function scheduleTimestamp(value, timezone) {
+  const timestamp = typeof value === 'string' ? new Date(value) : null;
+  return timestamp && !Number.isNaN(timestamp.getTime())
+    ? new Intl.DateTimeFormat(document.documentElement.lang || 'vi', {
+      dateStyle: 'medium', timeStyle: 'short', timeZone: timezone,
+    }).format(timestamp)
+    : null;
+}
+
 export function renderSourceCapabilities(capabilities, translate) {
   renderSerpApiProviderBudget(capabilities, translate);
   const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
@@ -232,7 +253,9 @@ export function renderSourceCapabilities(capabilities, translate) {
       const badge=document.createElement('span'); badge.className='pill pill--gray';
       const badges=document.createElement('div'); badges.className='source-card-badges';
       const adapterBadge=document.createElement('span'); adapterBadge.className='source-adapter-badge';
-      adapterBadge.textContent=localizedStatus(descriptor.adapter_status,translate);
+      const statusBadge = descriptor.local_live_verification_status === 'LOCAL_LIVE_VERIFIED'
+        ? descriptor.local_live_verification_status : descriptor.adapter_status;
+      adapterBadge.textContent=localizedStatus(statusBadge,translate);
       badges.append(adapterBadge,badge); head.append(icon,badges); card.append(head);
       const title=document.createElement('h2'); title.textContent=descriptor.display_name || descriptor.source_id; card.append(title);
       const summary=document.createElement('p'); summary.textContent=localizedSourceText(descriptor,'meaning',descriptor.metric?.meaning,translate); card.append(summary);
@@ -245,12 +268,13 @@ export function renderSourceCapabilities(capabilities, translate) {
       if (descriptor.source_id === 'google_web_serp') {
         const workflow = capabilities?.google_workflow || {};
         const quota = capabilities?.google_quota || {};
+        const googleSerpQuota = quota.serpapi_google || quota.serpapi;
         capabilityRow(list, translate('source.google-trends-discovery'), localizedStatus(workflow.trends_discovery, translate));
         capabilityRow(list, translate('source.google-rss-discovery'), localizedStatus(workflow.rss_discovery, translate));
         capabilityRow(list, translate('source.google-serp-verification'), localizedStatus(workflow.serp_verification, translate));
         capabilityRow(list, translate('source.google-account-api'), localizedStatus(workflow.account_api, translate));
         capabilityRow(list, translate('source.google-serpapi-budget'),
-          `${translate('source.quota-daily')}: ${quotaUse(quota.serpapi?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.serpapi?.monthly, translate)}`);
+          `${translate('source.quota-daily')}: ${quotaUse(googleSerpQuota?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(googleSerpQuota?.monthly, translate)}`);
         capabilityRow(list, translate('source.google-rss-budget'),
           `${translate('source.quota-daily')}: ${quotaUse(quota.google_rss?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.google_rss?.monthly, translate)}`);
         const provider = quota.provider_account || {};
@@ -284,6 +308,61 @@ export function renderSourceCapabilities(capabilities, translate) {
             ? saved.delivery_state : null;
           capabilityRow(list, translate('source.google-delivery'),
             delivered ? translate(`fetch.delivery.${delivered}`) : translate('common.unavailable'));
+        }
+      }
+      if (descriptor.source_id === 'bing_web_serp') {
+        const workflow = capabilities?.google_workflow || {};
+        const quota = capabilities?.google_quota || {};
+        const allocation = quota.serpapi_bing;
+        capabilityRow(list, translate('source.bing-serp-verification'),
+          localizedStatus(workflow.bing_serp_verification, translate));
+        capabilityRow(list, translate('source.bing-serpapi-budget'),
+          `${translate('source.quota-daily')}: ${quotaUse(allocation?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(allocation?.monthly, translate)}`);
+        const saved = descriptor.last_saved_fetch;
+        if (saved && ['SUCCESS', 'PARTIAL'].includes(saved.status)) {
+          capabilityRow(list, translate('source.bing-latest-fetch'),
+            savedFetchSummary(saved, translate));
+          const coverage = saved.bing_coverage;
+          if (coverage && typeof coverage === 'object') {
+            if (typeof coverage.query === 'string') {
+              capabilityRow(list, translate('source.bing-latest-query'), coverage.query);
+            }
+            const resultCount = Number.isInteger(coverage.accepted_result_count)
+              ? new Intl.NumberFormat(document.documentElement.lang || 'vi')
+                .format(coverage.accepted_result_count)
+              : translate('common.unavailable');
+            capabilityRow(list, translate('source.bing-latest-results'), resultCount);
+            capabilityRow(list, translate('source.bing-latest-delivery'),
+              coverage.delivery_state
+                ? translate(`fetch.delivery.${coverage.delivery_state}`)
+                : translate('common.unavailable'));
+            capabilityRow(list, translate('source.bing-latest-provider-time'),
+              coverage.provider_created_at || translate('common.unavailable'));
+            capabilityRow(list, translate('source.bing-latest-cache'),
+              coverage.provider_cache_state || translate('common.unavailable'));
+          }
+        }
+      }
+      if (['google_web_serp', 'bing_web_serp'].includes(descriptor.source_id)) {
+        const schedule = capabilities?.refresh_schedule?.sources?.[descriptor.source_id];
+        const policy = capabilities?.refresh_schedule || {};
+        if (schedule && schedule.status !== 'UNAVAILABLE') {
+          const slots = Array.isArray(schedule.slots) ? schedule.slots.join(' · ') : '';
+          capabilityRow(list, translate('source.refresh-schedule'),
+            slots ? translate('source.refresh-schedule-summary', {
+              slots,
+              timezone: schedule.timezone || policy.timezone || 'Asia/Ho_Chi_Minh',
+              spacing: schedule.minimum_spacing_hours || policy.minimum_spacing_hours || 8,
+              count: schedule.max_attempts_per_day || policy.max_attempts_per_day || 3,
+            }) : translate('common.unavailable'));
+          const next = schedule.initial_acceptance_available
+            ? translate('source.refresh-initial-available')
+            : scheduleTimestamp(schedule.next_eligible_at, schedule.timezone || policy.timezone);
+          capabilityRow(list, translate('source.refresh-next'),
+            next || translate('common.unavailable'));
+          capabilityRow(list, translate('source.refresh-last'),
+            scheduleTimestamp(schedule.last_attempt_at, schedule.timezone || policy.timezone)
+              || translate('common.unavailable'));
         }
       }
       const categoryLabel=translate(`sources.category.${descriptor.category}`);

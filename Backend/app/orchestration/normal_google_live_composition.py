@@ -12,7 +12,7 @@ from pathlib import Path
 from app.discovery.contracts import ProcessingGrant
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import DistributedFetchWorker
-from app.jobs.public_admission import PublicAdmission
+from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.normal_wikimedia_live_policy import (
@@ -21,7 +21,8 @@ from app.normal_wikimedia_live_policy import (
     normal_google_live_policy,
 )
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
-from app.sources.catalog import GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+from app.sources.bing_search.handler import BingSavedCandidateHandler
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
 from app.sources.google_trends.budget import SerpApiAccountBudget
 from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
 from app.sources.google_trends.rss_gateway import GoogleTrendsRSSGateway
@@ -30,7 +31,17 @@ from app.sources.google_trends.workflow import GoogleDiscoveryFallbackHandler
 from app.sources.guarded_collector import CollectionLimits
 from app.sources.live_gateway import LivePageGateway, SourceApproval
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
+from app.sources.refresh_eligibility import (
+    BING_REFRESH_STATE_KEY,
+    GOOGLE_REFRESH_STATE_KEY,
+    MIN_SOURCE_SPACING,
+    SCHEDULE_SLOTS,
+    SCHEDULE_TIMEZONE,
+    SLOT_GRACE,
+    schedule_metadata,
+)
 from app.sources.serpapi.account import SerpApiAccountClient
+from app.sources.serpapi.errors import SerpApiError
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -126,13 +137,17 @@ async def normal_google_live_composition(*, user_agent,
                                          state_directory=None,
                                          google_settings: GoogleLiveSettings | None = None,
                                          credential_provider=None,
-                                         collection_store=None):
+                                         collection_store=None,
+                                         force_refresh_trends: bool = False,
+                                         allow_initial_google_acceptance: bool = False,
+                                         allow_initial_bing_acceptance: bool = False):
     """Compose one local worker; no Google call is made without its own approval."""
     config = google_settings or GoogleLiveSettings.from_environment()
     if (os.environ.get("VERCEL") or not isinstance(config, GoogleLiveSettings)
-            or config.local_runtime_approved is not True
             or not isinstance(user_agent, str) or not user_agent.strip()
-            or not callable(utcnow)):
+            or not callable(utcnow) or type(force_refresh_trends) is not bool
+            or type(allow_initial_google_acceptance) is not bool
+            or type(allow_initial_bing_acceptance) is not bool):
         raise ValueError("explicit local Google LIVE opt-in and valid configuration required")
     if credential_provider is None:
         from app.local_credentials import LocalCredentialProvider
@@ -153,9 +168,54 @@ async def normal_google_live_composition(*, user_agent,
         serpapi_monthly_budget=config.serpapi_monthly_budget,
         rss_daily_budget=config.rss_daily_budget,
         rss_monthly_budget=config.rss_monthly_budget,
-        batches_per_hour=config.batches_per_hour,
+        fetch_starts_per_hour=config.fetch_starts_per_hour,
+        bing_enabled=config.paid_bing_approved,
+        bing_daily_budget=config.bing_daily_budget,
     )
     admission = PublicAdmission(store, policy, state_key=GOOGLE_STATE_KEY)
+    existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
+    if config.paid_bing_approved:
+        if not existing_state:
+            raise ValueError("Bing LIVE requires an existing Google SerpApi ledger to migrate")
+    if existing_state and existing_state.get("policy_digest") != admission.policy_digest:
+        old_google_policy = normal_google_live_policy(
+            serpapi_daily_budget=config.serpapi_daily_budget,
+            serpapi_monthly_budget=config.serpapi_monthly_budget,
+            rss_daily_budget=config.rss_daily_budget,
+            rss_monthly_budget=config.rss_monthly_budget,
+            fetch_starts_per_hour=1,
+            bing_enabled=False,
+            bing_daily_budget=config.bing_daily_budget,
+        )
+        if (not config.paid_bing_approved
+                and existing_state.get("policy_digest") == PublicAdmission(
+                    store, old_google_policy, state_key=GOOGLE_STATE_KEY
+                ).policy_digest
+                and config.fetch_starts_per_hour > 1):
+            admission.migrate_bounded_quota_policy(
+                old_google_policy,
+                authorization_note="LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1",
+                now=utcnow(),
+                allow_fetch_capacity_increase=True,
+            )
+        elif config.paid_bing_approved:
+            if not config.policy_migration_approved:
+                raise ValueError("explicit SerpApi Bing quota-policy migration approval required")
+            admission.migrate_bounded_quota_policy(
+                normal_google_live_policy(
+                    serpapi_daily_budget=config.serpapi_daily_budget,
+                    serpapi_monthly_budget=config.serpapi_monthly_budget,
+                    rss_daily_budget=config.rss_daily_budget,
+                    rss_monthly_budget=config.rss_monthly_budget,
+                    fetch_starts_per_hour=config.fetch_starts_per_hour,
+                    bing_enabled=False,
+                    bing_daily_budget=config.bing_daily_budget,
+                ),
+                authorization_note="OWNER_APPROVED_GOOGLE_BING_SHARED_ALLOCATION",
+                now=utcnow(),
+            )
+        else:
+            raise ValueError("stored Google LIVE policy does not match a supported local migration")
     runner = GuardedAttemptRunner(admission, clock=utcnow)
     cache = SharedCache(store)
     resources = []
@@ -174,19 +234,20 @@ async def normal_google_live_composition(*, user_agent,
         resources.append(wiki)
 
         def resolve_cache_grant(source_id, now):
-            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}:
+            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
                 return None
             return CacheGrant(
                 source_id, GOOGLE_POLICY_VERSION,
                 now + timedelta(seconds=_MAX_CACHE_RETENTION_SECONDS),
-                max_fresh_seconds=24 * 60 * 60 if source_id == WIKIMEDIA_SOURCE_ID else 60 * 60,
+                max_fresh_seconds=(24 * 60 * 60 if source_id == WIKIMEDIA_SOURCE_ID
+                                   else 60 * 60),
                 max_stale_seconds=_MAX_CACHE_RETENTION_SECONDS,
                 max_retention_seconds=_MAX_CACHE_RETENTION_SECONDS,
                 allowed=True,
             )
 
         def resolve_checkpoint(source_id, now):
-            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}:
+            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
                 return None
             return CheckpointGrant(
                 source_id, "LIVE", GOOGLE_POLICY_VERSION,
@@ -194,15 +255,19 @@ async def normal_google_live_composition(*, user_agent,
             )
 
         def resolve_processing(now):
+            processed_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+            if BING_SOURCE_ID in policy.enabled_sources:
+                processed_sources.add(BING_SOURCE_ID)
             return tuple(ProcessingGrant(
                 source_id, True, False, now + timedelta(minutes=15), GOOGLE_POLICY_VERSION
-            ) for source_id in sorted({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}))
+            ) for source_id in sorted(processed_sources))
 
         credential_status = "NOT_CONFIGURED"
         account_client = None
         budget = None
         serpapi_credentials = credential_provider
-        paid_requested = config.paid_discovery_approved or config.paid_serp_approved
+        paid_requested = (config.paid_discovery_approved or config.paid_serp_approved
+                          or config.paid_bing_approved)
         if paid_requested:
             try:
                 key = credential_provider.resolve("SERPAPI_API_KEY")
@@ -222,14 +287,33 @@ async def normal_google_live_composition(*, user_agent,
                     )
                     resources.append(account_client)
                     serpapi_credentials = _PinnedSerpApiCredential(key)
-                    budget = SerpApiAccountBudget(
-                        account_client,
-                        cross_machine_reserve=config.cross_machine_reserve,
-                        on_snapshot=lambda snapshot: quota_state.update(
+
+                    def on_account_snapshot(snapshot):
+                        quota_state.update(
                             status=snapshot.get("budget_status", "AVAILABLE"),
                             snapshot={key: value for key, value in snapshot.items()
                                       if key != "budget_status"},
-                        ),
+                        )
+                        if policy.source_allocations and snapshot.get("budget_status") != "UNAVAILABLE":
+                            renewal = snapshot.get("plan_renewal_date")
+                            monthly_limit = snapshot.get("monthly_limit")
+                            monthly_remaining = snapshot.get("monthly_remaining")
+                            if (not renewal or monthly_limit != 250
+                                    or type(monthly_remaining) is not int
+                                    or not 0 <= monthly_remaining <= monthly_limit):
+                                raise SerpApiError("QUOTA_ACCOUNT_PLAN_MISMATCH")
+                            try:
+                                admission.set_serpapi_billing_cycle(renewal, now=utcnow())
+                                admission.reconcile_serpapi_account_usage(
+                                    renewal, monthly_limit - monthly_remaining, now=utcnow()
+                                )
+                            except AdmissionDenied as exc:
+                                raise SerpApiError(exc.code) from None
+
+                    budget = SerpApiAccountBudget(
+                        account_client,
+                        cross_machine_reserve=config.cross_machine_reserve,
+                        on_snapshot=on_account_snapshot,
                     )
                     quota_state["status"] = "NOT_CHECKED"
                 except Exception:
@@ -261,6 +345,15 @@ async def normal_google_live_composition(*, user_agent,
             )
             resources.append(serp_gateway)
 
+        bing_gateway = None
+        if paid_ready and config.paid_bing_approved:
+            bing_gateway = await LivePageGateway.controlled_network(
+                BING_SOURCE_ID, serpapi_credentials,
+                _GoogleLocalApproval(BING_SOURCE_ID, enabled=True, clock=utcnow),
+                runner, clock=utcnow,
+            )
+            resources.append(bing_gateway)
+
         rss_gateway = None
         if config.rss_approved:
             rss_gateway = await GoogleTrendsRSSGateway.controlled_network(
@@ -282,19 +375,23 @@ async def normal_google_live_composition(*, user_agent,
             snapshot = admission.quota_snapshot("serpapi", now=utcnow())
             return min(snapshot["daily"]["remaining"], snapshot["monthly"]["remaining"])
 
-        trends_handler = (GoogleTrendsDiscoveryHandler(
+        trends_handler = GoogleTrendsDiscoveryHandler(
             trends_gateway=trends_gateway,
+            data_mode="LIVE",
             policy_fingerprint=policy.plan_fingerprint,
             utcnow=utcnow,
             cache=cache,
             resolve_cache_grant=resolve_cache_grant,
             serp_gateway=serp_gateway,
+            force_refresh=force_refresh_trends,
+            atomic_store=store,
+            allow_initial_acceptance=allow_initial_google_acceptance,
             ensure_paid_budget=budget.ensure_attempt_allowed if budget else None,
             remaining_paid_attempts=remaining_paid_attempts,
             previously_observed=previously_observed,
             recently_verified=recently_verified,
             previous_verification=previous_verification,
-        ) if trends_gateway is not None else None)
+        )
         rss_handler = (GoogleTrendsRSSHandler(
             gateway=rss_gateway,
             policy_fingerprint=policy.plan_fingerprint,
@@ -310,6 +407,15 @@ async def normal_google_live_composition(*, user_agent,
         google_handler = (GoogleDiscoveryFallbackHandler(
             trending_now=trends_handler, rss=rss_handler
         ) if trends_handler or rss_handler else None)
+        bing_handler = (BingSavedCandidateHandler(
+            gateway=bing_gateway,
+            collection_store=collection_store,
+            atomic_store=store,
+            policy_fingerprint=policy.plan_fingerprint,
+            ensure_paid_budget=budget.ensure_attempt_allowed,
+            utcnow=utcnow,
+            allow_initial_acceptance=allow_initial_bing_acceptance,
+        ) if bing_gateway is not None and budget is not None else None)
 
         handlers = D5SourceHandlers(
             query_collectors={
@@ -319,6 +425,7 @@ async def normal_google_live_composition(*, user_agent,
             },
             wikimedia=wiki,
             google_trends_handler=google_handler,
+            bing_search_handler=bing_handler,
             plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(
                 max_queries=1, max_pages_per_query=1, max_requests=3,
@@ -336,8 +443,7 @@ async def normal_google_live_composition(*, user_agent,
         ).build()
         worker = DistributedFetchWorker(
             admission,
-            handlers={source: handlers[source]
-                      for source in (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID)},
+            handlers={source: handlers[source] for source in policy.enabled_sources},
             resolve_grant=resolve_checkpoint,
             utcnow=utcnow,
             snapshot_blobs=snapshot_blobs,
@@ -349,11 +455,13 @@ async def normal_google_live_composition(*, user_agent,
             provider_retry_after_seconds=pace_request.retry_after_seconds,
         )
         facade.entity_lookup_before_request = pace_request.wait_sync
+        facade.normal_bing_live = bing_gateway is not None
         facade.google_account_quota_state = quota_state
         facade.google_capabilities = {
-            "trends_discovery": "LIVE_CONFIGURED" if trends_gateway else "NOT_CONFIGURED",
+            "trends_discovery": "LIVE_CONFIGURED" if trends_gateway else "CACHE_ONLY",
             "rss_discovery": "LIVE_CONFIGURED" if rss_gateway else "NOT_CONFIGURED",
             "serp_verification": "LIVE_CONFIGURED" if serp_gateway else "NOT_CONFIGURED",
+            "bing_serp_verification": "LIVE_CONFIGURED" if bing_gateway else "NOT_APPROVED",
             "account_api": quota_state["status"],
             "credential_status": credential_status,
             "local_serpapi_daily_budget": config.serpapi_daily_budget,
@@ -365,14 +473,50 @@ async def normal_google_live_composition(*, user_agent,
             "live_verified": False,
         }
 
+        def refresh_schedule_metadata():
+            sources = {}
+            for source_id, state_key, initial_allowed in (
+                (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
+                 allow_initial_google_acceptance),
+                (BING_SOURCE_ID, BING_REFRESH_STATE_KEY, allow_initial_bing_acceptance),
+            ):
+                try:
+                    sources[source_id] = schedule_metadata(
+                        store, state_key, utcnow(),
+                        error_code=f"{source_id.upper()}_SCHEDULE_STATE_INVALID",
+                        allow_initial_acceptance=initial_allowed,
+                    )
+                except AdmissionDenied as error:
+                    sources[source_id] = {"status": "UNAVAILABLE", "error_code": error.code}
+            return {
+                "timezone": str(SCHEDULE_TIMEZONE),
+                "slots": [slot.strftime("%H:%M") for slot in SCHEDULE_SLOTS],
+                "slot_grace_minutes": int(SLOT_GRACE.total_seconds() // 60),
+                "minimum_spacing_hours": int(MIN_SOURCE_SPACING.total_seconds() // 3600),
+                "max_attempts_per_day": len(SCHEDULE_SLOTS),
+                "user_triggered_only": True,
+                "sources": sources,
+            }
+
+        facade.refresh_schedule_metadata = refresh_schedule_metadata
+
         def google_quota_metadata():
             try:
-                return {
+                metadata = {
                     "serpapi": admission.quota_snapshot("serpapi", now=utcnow()),
                     "google_rss": admission.quota_snapshot("google_rss", now=utcnow()),
                     "provider_account": quota_state.get("snapshot"),
                     "provider_account_status": quota_state.get("status", "NOT_CONFIGURED"),
                 }
+                if "serpapi_google" in policy.pools:
+                    metadata["serpapi_google"] = admission.quota_snapshot(
+                        "serpapi_google", now=utcnow()
+                    )
+                if "serpapi_bing" in policy.pools:
+                    metadata["serpapi_bing"] = admission.quota_snapshot(
+                        "serpapi_bing", now=utcnow()
+                    )
+                return metadata
             except Exception:
                 return {"status": "UNAVAILABLE"}
 

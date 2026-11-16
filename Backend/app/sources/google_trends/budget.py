@@ -50,5 +50,7 @@ class SerpApiAccountBudget:
         if self.on_snapshot is not None:
             try:
                 self.on_snapshot(snapshot)
+            except SerpApiError:
+                raise
             except Exception:
                 raise SerpApiError("QUOTA_STATE_UNAVAILABLE") from None

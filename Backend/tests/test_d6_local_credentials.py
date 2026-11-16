@@ -34,6 +34,19 @@ class LocalCredentialProviderTests(unittest.TestCase):
         self.assertEqual(self.provider.status(), {
             "SERPAPI_API_KEY": "MISSING", "YOUTUBE_API_KEY": "PRESENT"})
 
+    def test_accepts_standard_quoted_env_values_and_utf8_bom(self):
+        self.write('\ufeffSERPAPI_API_KEY="sample-serp-key-123"\n')
+        self.assertEqual(self.provider.resolve("SERPAPI_API_KEY"), "sample-serp-key-123")
+        self.assertEqual(self.provider.status()["SERPAPI_API_KEY"], "PRESENT")
+
+    def test_rejects_unmatched_quotes_and_does_not_expand_shell_syntax(self):
+        self.write("SERPAPI_API_KEY=\"sample-serp-key-123'\n")
+        with self.assertRaises(InvalidCredentialConfig):
+            self.provider.resolve("SERPAPI_API_KEY")
+        self.write("SERPAPI_API_KEY=$HOME/sample-serp-key-123\n")
+        self.assertEqual(self.provider.resolve("SERPAPI_API_KEY"),
+                         "$HOME/sample-serp-key-123")
+
     def test_rejects_shared_permissions_symlink_and_malformed_input(self):
         for contents, mode in (("YOUTUBE_API_KEY=sample-key-123\n", 0o644),
                                ("YOUTUBE_API_KEY=abc def ghi\n", 0o600),

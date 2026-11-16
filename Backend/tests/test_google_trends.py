@@ -1,18 +1,20 @@
 """Google Trends contracts and local guard behavior, exercised offline only."""
 
 import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.collections.store import CollectionStore, keyword_record
+from app.collections.store import CollectionStore, keyword_record, saved_source_record
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import SourceWorkContext
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
-from app.jobs.shared_cache import CacheGrant
+from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import (
     _GoogleLocalApproval,
@@ -35,7 +37,12 @@ from app.sources.google_trends.verification_plan import (
     select_verification_candidates,
     validate_dynamic_context,
 )
-from app.sources.live_gateway import GatewayPage
+from app.sources.live_gateway import (
+    GatewayError,
+    GatewayPage,
+    LiveGatewayFailureDiagnostic,
+)
+from app.sources.refresh_eligibility import GOOGLE_REFRESH_STATE_KEY
 from app.sources.serpapi.account import (
     SerpApiAccountClient,
     parse_account_response,
@@ -310,6 +317,228 @@ class SerpApiAccountTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_google_refreshes_stale_cache_once_per_eligible_user_slot(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        atomic = LocalSQLiteAtomicStateStore.for_local_live(root / "state.sqlite")
+        cache = SharedCache(atomic)
+        current = [datetime(2026, 11, 16, 3, 5, tzinfo=timezone.utc)]
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            def __init__(self):
+                self.calls = []
+
+            async def fetch_page(self, *, context, on_page_receipt, **_kwargs):
+                self.calls.append(context)
+                payload = _trending_response([_trend_row()])
+                page = parse_trending_now_response(
+                    payload, request=context, sensitive_key=FAKE_KEY
+                )
+                gateway_page = GatewayPage(GOOGLE_SOURCE_ID, "LIVE", page)
+                on_page_receipt(gateway_page)
+                return gateway_page
+
+        gateway = TrendsGateway()
+        budget_checks = []
+
+        async def check_budget():
+            budget_checks.append(current[0])
+            return {"budget_status": "AVAILABLE", "total_remaining": 240}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=gateway, policy_fingerprint="a" * 64,
+            utcnow=lambda: current[0], cache=cache,
+            resolve_cache_grant=lambda _source, now: CacheGrant(
+                GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            ),
+            force_refresh=True, atomic_store=atomic,
+            allow_initial_acceptance=True, ensure_paid_budget=check_budget,
+        )
+
+        async def fetch_at(index, local_time):
+            current[0] = local_time.astimezone(timezone.utc)
+            context = SourceWorkContext(
+                f"{index:032x}", "test-worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+                current[0] + timedelta(minutes=5), None, lambda _value: 1,
+                lambda: "ACTIVE",
+            )
+            return await handler(context)
+
+        try:
+            first = await fetch_at(1, datetime(2026, 11, 16, 10, 5, tzinfo=ZoneInfo(
+                "Asia/Ho_Chi_Minh")))
+            self.assertEqual(first["delivery_state"], "FRESH")
+            self.assertEqual(first["record_count"], 1)
+            self.assertEqual(first["coverage"]["eligible_slot"], "INITIAL_ACCEPTANCE")
+            self.assertEqual(gateway.calls[0].force_refresh, True)
+
+            same_slot = await fetch_at(2, datetime(2026, 11, 16, 10, 6, tzinfo=ZoneInfo(
+                "Asia/Ho_Chi_Minh")))
+            self.assertEqual(same_slot["delivery_state"], "CACHED")
+            self.assertEqual(len(gateway.calls), 1)
+
+            too_soon = await fetch_at(3, datetime(2026, 11, 16, 15, 5, tzinfo=ZoneInfo(
+                "Asia/Ho_Chi_Minh")))
+            self.assertEqual(too_soon["delivery_state"], "CACHED")
+            self.assertEqual(too_soon["coverage"]["refresh_state"], "NOT_YET_ELIGIBLE")
+            self.assertEqual(len(gateway.calls), 1)
+
+            evening = await fetch_at(4, datetime(2026, 11, 16, 23, 5, tzinfo=ZoneInfo(
+                "Asia/Ho_Chi_Minh")))
+            self.assertEqual(evening["delivery_state"], "FRESH")
+            self.assertEqual(evening["coverage"]["eligible_slot"],
+                             "2026-11-16T23:00:00+07:00")
+
+            next_morning = await fetch_at(5, datetime(2026, 11, 17, 7, 5, tzinfo=ZoneInfo(
+                "Asia/Ho_Chi_Minh")))
+            self.assertEqual(next_morning["delivery_state"], "FRESH")
+            self.assertEqual(next_morning["coverage"]["eligible_slot"],
+                             "2026-11-17T07:00:00+07:00")
+            self.assertEqual(len(gateway.calls), 3)
+            self.assertEqual(len(budget_checks), 3)
+            self.assertTrue(all(call.force_refresh for call in gateway.calls))
+            state = atomic.transact(
+                GOOGLE_REFRESH_STATE_KEY, lambda value: (value, value)
+            )
+            self.assertEqual(state["last_slot"], "2026-11-17T07:00:00+07:00")
+        finally:
+            directory.cleanup()
+
+    async def test_google_failure_returns_safe_transport_diagnostic(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        atomic = LocalSQLiteAtomicStateStore.for_local_live(root / "state.sqlite")
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                diagnostic = LiveGatewayFailureDiagnostic(
+                    GOOGLE_SOURCE_ID, "BODY_STREAM", 200, "ReadError", 23,
+                    1_000_000, "sanitized-attempt-id", "UPSTREAM_ERROR",
+                )
+                raise GatewayError("UPSTREAM_ERROR", diagnostic=diagnostic)
+
+        async def check_budget():
+            return {"budget_status": "AVAILABLE", "total_remaining": 10}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=TrendsGateway(), policy_fingerprint="a" * 64,
+            utcnow=lambda: NOW, cache=SharedCache(atomic),
+            resolve_cache_grant=lambda _source, now: CacheGrant(
+                GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            ),
+            atomic_store=atomic, allow_initial_acceptance=True,
+            ensure_paid_budget=check_budget,
+        )
+        context = SourceWorkContext(
+            "diagnostic-job", "test-worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+        )
+
+        try:
+            result = await handler(context)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["error_code"], "UPSTREAM_ERROR")
+        self.assertEqual(result["coverage"]["transport_diagnostic"], {
+            "source_id": GOOGLE_SOURCE_ID,
+            "failure_phase": "BODY_STREAM",
+            "http_status": 200,
+            "exception_class": "ReadError",
+            "bytes_received": 23,
+            "response_size_limit": 1_000_000,
+            "attempt_id": "sanitized-attempt-id",
+            "error_code": "UPSTREAM_ERROR",
+        })
+
+    async def test_cache_only_google_discovery_serves_saved_records_without_paid_checks(self):
+        candidate = _candidate("portable outdoor blanket", ["Home & Garden"])
+        candidate.update({
+            "source_id": GOOGLE_SOURCE_ID,
+            "provider_id": "serpapi_google_trends_trending_now",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "fetched_at": "2026-11-15T17:50:24.177260+00:00",
+            "provider_created_at": "2026-11-15T16:14:45+00:00",
+        })
+        cached_payload = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "CACHED",
+            "records": [candidate], "record_count": 1,
+            "coverage": {"provider_record_count": 1}, "quality_flags": [],
+        }
+
+        class Cache:
+            def get(self, _scope, *, grant, now):
+                return {"status": "STALE", "fetched_at": "2026-11-15T17:50:23.705698+00:00",
+                        "payload": cached_payload}
+
+            def put(self, *_args, **_kwargs):
+                raise AssertionError("cache-only delivery must not refresh its saved age")
+
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", NOW + timedelta(hours=1),
+            3600, 7200, 7200, allowed=True,
+        )
+
+        async def paid_budget_must_not_be_checked():
+            raise AssertionError("cache delivery must not call the paid account API")
+
+        handler = GoogleTrendsDiscoveryHandler(
+            policy_fingerprint="a" * 64, utcnow=lambda: NOW, cache=Cache(),
+            resolve_cache_grant=lambda _source, _now: grant,
+            ensure_paid_budget=paid_budget_must_not_be_checked,
+            data_mode="LIVE",
+        )
+        context = SourceWorkContext(
+            "cache-only-job", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+        )
+
+        result = await handler(context)
+
+        self.assertEqual(handler.__call_mode__(), "LIVE")
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(result["record_count"], 1)
+        self.assertEqual(result["records"][0]["delivery_state"], "CACHED")
+        self.assertEqual(result["records"][0]["fetched_at"],
+                         "2026-11-15T17:50:24.177260+00:00")
+        self.assertEqual(result["coverage"]["shared_cache_state"], "STALE")
+        self.assertEqual(result["records"][0]["serp_verification"]["status"],
+                         "NOT_CONFIGURED")
+
+    async def test_cache_only_google_cache_miss_is_unavailable_not_empty_success(self):
+        class Cache:
+            def get(self, *_args, **_kwargs):
+                return {"status": "UNAVAILABLE", "reason": "CACHE_MISS"}
+
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", NOW + timedelta(hours=1),
+            3600, 7200, 7200, allowed=True,
+        )
+        handler = GoogleTrendsDiscoveryHandler(
+            policy_fingerprint="a" * 64, utcnow=lambda: NOW, cache=Cache(),
+            resolve_cache_grant=lambda _source, _now: grant, data_mode="LIVE",
+        )
+        context = SourceWorkContext(
+            "cache-miss-job", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+        )
+
+        result = await handler(context)
+
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertEqual(result["error_code"], "SOURCE_NOT_CONFIGURED")
+        self.assertEqual(result["record_count"], 0)
+        self.assertEqual(result["coverage"]["attempted_calls"], 0)
+
     async def test_cached_trends_candidates_can_be_serp_verified_without_refreshing_trends(self):
         candidate = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
         candidate.update({
@@ -483,17 +712,35 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError("credential lookup is forbidden without paid-path approval")
 
         config = GoogleLiveSettings(
-            local_runtime_approved=True,
             serpapi_daily_budget=3,
             serpapi_monthly_budget=3,
             rss_daily_budget=1,
             rss_monthly_budget=1,
-            batches_per_hour=2,
+            fetch_starts_per_hour=2,
         )
+        state_dir = root / "google-state"
+        state_dir.mkdir(mode=0o700)
+        atomic_state = LocalSQLiteAtomicStateStore.for_local_live(
+            state_dir / "state.sqlite"
+        )
+        old_policy = normal_google_live_policy(
+            serpapi_daily_budget=3, serpapi_monthly_budget=3,
+            rss_daily_budget=1, rss_monthly_budget=1,
+            fetch_starts_per_hour=1,
+        )
+        old_admission = PublicAdmission(
+            atomic_state, old_policy, state_key=GOOGLE_STATE_KEY
+        )
+        old_state = {
+            "schema": 1, "policy_digest": old_admission.policy_digest,
+            "operational_enabled": True, "jobs": {}, "keys": {},
+            "starts": [NOW.isoformat()], "quota": {}, "inflight": {},
+        }
+        atomic_state.transact(GOOGLE_STATE_KEY, lambda _state: (old_state, None))
         try:
             async with normal_google_live_composition(
                 user_agent="TrendScoutTest/1.0 (https://example.invalid)",
-                state_directory=root / "google-state",
+                state_directory=state_dir,
                 google_settings=config,
                 credential_provider=NeverReadCredentials(),
                 collection_store=store,
@@ -502,7 +749,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(facade.normal_google_live)
                 self.assertEqual(facade.data_mode, "LIVE")
                 self.assertEqual(facade.google_capabilities["trends_discovery"],
-                                 "NOT_CONFIGURED")
+                                 "CACHE_ONLY")
                 self.assertEqual(facade.google_capabilities["rss_discovery"],
                                  "NOT_CONFIGURED")
                 self.assertEqual(facade.google_capabilities["serp_verification"],
@@ -512,6 +759,10 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(facade.admission.policy.pools["serpapi"].daily_requests, 3)
                 self.assertEqual(facade.admission.policy.pools["google_rss"].daily_requests, 1)
                 self.assertEqual(facade.admission.policy.max_starts_per_window, 2)
+            migrated = atomic_state.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
+            self.assertEqual(migrated["starts"], old_state["starts"])
+            self.assertEqual(migrated["policy_migration_audit"][0]["changed_admission_limits"],
+                             ["max_starts_per_window"])
         finally:
             directory.cleanup()
 
@@ -542,6 +793,36 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trends["id"], rss["id"])
         self.assertEqual(trends["project"], "google_trends:US:en")
 
+    def test_cached_google_reclassification_preserves_source_and_bing_evidence(self):
+        common = {
+            "data_source": "GOOGLE_TRENDS",
+            "canonical_keyword": "portable outdoor blanket",
+            "canonical_keyword_identity": hashlib.sha256(
+                b"portable outdoor blanket"
+            ).hexdigest(),
+            "provider_id": "serpapi_google_trends_trending_now",
+            "transport_id": "serpapi", "discovery_mode": "SERPAPI_TRENDING_NOW",
+            "region": "US", "language": "en", "time_window_hours": 24,
+            "fetched_at": NOW.isoformat(), "delivery_state": "FRESH",
+            "source_url": "https://trends.google.com/trending?geo=US",
+            "quality_flags": [], "trend_clusters": [{"trend_cluster_id": "cluster-1"}],
+            "bing_verification": {"status": "VERIFIED", "query": "portable outdoor blanket"},
+            "bing_verification_history": [{"status": "VERIFIED"}],
+        }
+        initial = keyword_record(common, GOOGLE_SOURCE_ID, "LIVE")
+        saved = {
+            "source": initial["source"], "keyword": initial["keyword"],
+            "project": initial["project"], "observed_at": initial["observed_at"],
+            "data_mode": initial["data_mode"], "evidence": initial["evidence"],
+        }
+        replayed = keyword_record(saved_source_record(saved), GOOGLE_SOURCE_ID, "LIVE")
+
+        self.assertIsNotNone(replayed)
+        self.assertEqual(replayed["id"], initial["id"])
+        evidence = json.loads(replayed["evidence"])
+        self.assertEqual(evidence["bing_verification"], common["bing_verification"])
+        self.assertEqual(evidence["bing_verification_history"], common["bing_verification_history"])
+
     def test_google_pool_limits_are_separate_and_validated(self):
         policy = normal_google_live_policy(serpapi_daily_budget=3,
                                            serpapi_monthly_budget=90,
@@ -559,11 +840,11 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         store = LocalSQLiteAtomicStateStore.for_local_live(root / "quota.sqlite")
         previous = normal_google_live_policy(
             serpapi_daily_budget=3, serpapi_monthly_budget=3,
-            rss_daily_budget=1, rss_monthly_budget=1, batches_per_hour=2,
+            rss_daily_budget=1, rss_monthly_budget=1, fetch_starts_per_hour=2,
         )
         updated = normal_google_live_policy(
             serpapi_daily_budget=10, serpapi_monthly_budget=10,
-            rss_daily_budget=1, rss_monthly_budget=1, batches_per_hour=2,
+            rss_daily_budget=1, rss_monthly_budget=1, fetch_starts_per_hour=2,
         )
         old_admission = PublicAdmission(store, previous, state_key=GOOGLE_STATE_KEY)
         new_admission = PublicAdmission(store, updated, state_key=GOOGLE_STATE_KEY)
@@ -600,7 +881,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
 
             rss_change = normal_google_live_policy(
                 serpapi_daily_budget=10, serpapi_monthly_budget=10,
-                rss_daily_budget=2, rss_monthly_budget=2, batches_per_hour=2,
+                rss_daily_budget=2, rss_monthly_budget=2, fetch_starts_per_hour=2,
             )
             rss_admission = PublicAdmission(store, rss_change, state_key=GOOGLE_STATE_KEY)
             with self.assertRaises(AdmissionDenied) as error:
@@ -612,6 +893,49 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code, "POLICY_MIGRATION_SCOPE_INVALID")
         finally:
             directory.cleanup()
+
+    def test_local_cache_capacity_migration_preserves_old_admission_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(
+                Path(directory) / "capacity.sqlite"
+            )
+            previous = normal_google_live_policy(fetch_starts_per_hour=1)
+            updated = normal_google_live_policy(fetch_starts_per_hour=60)
+            old_admission = PublicAdmission(store, previous, state_key=GOOGLE_STATE_KEY)
+            new_admission = PublicAdmission(store, updated, state_key=GOOGLE_STATE_KEY)
+            original = {
+                "schema": 1, "policy_digest": old_admission.policy_digest,
+                "operational_enabled": True, "jobs": {"old": {"state": "FAILED"}},
+                "keys": {}, "starts": [NOW.isoformat()], "quota": {}, "inflight": {},
+            }
+            store.transact(GOOGLE_STATE_KEY, lambda _state: (original, None))
+
+            audit = new_admission.migrate_bounded_quota_policy(
+                previous,
+                authorization_note="LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1",
+                now=NOW,
+                allow_fetch_capacity_increase=True,
+            )
+
+            state = store.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
+            self.assertEqual(new_admission.policy.max_starts_per_window, 60)
+            self.assertEqual(state["starts"], original["starts"])
+            self.assertEqual(state["jobs"], original["jobs"])
+            self.assertEqual(state["quota"], original["quota"])
+            self.assertEqual(audit["changed_admission_limits"], ["max_starts_per_window"])
+
+            smaller = PublicAdmission(
+                store, normal_google_live_policy(fetch_starts_per_hour=30),
+                state_key=GOOGLE_STATE_KEY,
+            )
+            with self.assertRaises(AdmissionDenied) as error:
+                smaller.migrate_bounded_quota_policy(
+                    updated,
+                    authorization_note="CAPACITY_DECREASE_MUST_FAIL",
+                    now=NOW,
+                    allow_fetch_capacity_increase=True,
+                )
+            self.assertEqual(error.exception.code, "POLICY_MIGRATION_SCOPE_INVALID")
 
     def test_rss_and_paid_serp_reservations_use_separate_pools_and_replay_once(self):
         directory = tempfile.TemporaryDirectory()

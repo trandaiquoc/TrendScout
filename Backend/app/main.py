@@ -109,12 +109,16 @@ def create_app(
     elif local_live_context_factory is not None:
         raise ValueError("local live context requires explicit opt-in")
     if distributed_public_fetch is not None:
-        expected_sources = ({WIKIMEDIA_SOURCE_ID}
-            if getattr(distributed_public_fetch, "normal_wikimedia_live", False) else (
-            {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
-            if getattr(distributed_public_fetch, "normal_google_live", False) else {
+        if getattr(distributed_public_fetch, "normal_wikimedia_live", False):
+            expected_sources = {WIKIMEDIA_SOURCE_ID}
+        elif getattr(distributed_public_fetch, "normal_google_live", False):
+            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+            if getattr(distributed_public_fetch, "normal_bing_live", False):
+                expected_sources.add(BING_SOURCE_ID)
+        else:
+            expected_sources = {
                 WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
-            }))
+            }
         if (not isinstance(distributed_public_fetch, DistributedPublicFetch)
                 or settings.environment_profile not in {"local", "test"}
                 or read_only
@@ -122,7 +126,8 @@ def create_app(
                     or distributed_public_fetch.data_mode != "LIVE"
                     or not (getattr(distributed_public_fetch, "local_live", False)
                             or getattr(distributed_public_fetch, "normal_wikimedia_live", False)
-                            or getattr(distributed_public_fetch, "normal_google_live", False))))
+                            or getattr(distributed_public_fetch, "normal_google_live", False)
+                            or getattr(distributed_public_fetch, "normal_bing_live", False))))
                 or (not local_live_opt_in and (run_mode != "synthetic"
                     or not settings.public_fetch_enabled
                     or distributed_public_fetch.data_mode != "SYNTHETIC"))
@@ -463,7 +468,8 @@ def _validate_local_live_facade(facade):
             or facade.data_mode != "LIVE"
             or not (getattr(facade, "local_live", False)
                     or getattr(facade, "normal_wikimedia_live", False)
-                    or getattr(facade, "normal_google_live", False))):
+            or getattr(facade, "normal_google_live", False)
+            or getattr(facade, "normal_bing_live", False))):
         raise ValueError("local composition did not provide a guarded LIVE facade")
 
 

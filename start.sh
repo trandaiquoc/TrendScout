@@ -38,7 +38,7 @@ if ! "$python_bin" -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1"
   exit 1
 fi
 
-printf 'Starting normal Wikimedia LIVE on http://127.0.0.1:%s/dashboard/\n' "$port"
+printf 'Starting the local multi-source LIVE web application on http://127.0.0.1:%s/dashboard/\n' "$port"
 printf '%s\n' 'Local only; one worker. Press Ctrl+C to stop.'
 cd "$project_dir/Backend"
-exec env TREND_SCOUT_DEMO_PORT="$port" "$python_bin" -m scripts.run_wikimedia_live_local --port "$port"
+exec env TREND_SCOUT_DEMO_PORT="$port" "$python_bin" -m scripts.run_google_live_local --port "$port"

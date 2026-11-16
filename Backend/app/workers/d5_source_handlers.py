@@ -86,6 +86,7 @@ class D5SourceHandlers:
                  wikimedia: WikimediaTopPageGateway, plan: QueryPlan,
                  limits: CollectionLimits,
                  google_trends_handler: Callable | None = None,
+                 bing_search_handler: Callable | None = None,
                  observation_date: Callable[[], date] | None = None,
                  shared_cache: SharedCache | None = None,
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
@@ -105,6 +106,10 @@ class D5SourceHandlers:
                     not callable(google_trends_handler)
                     or not callable(getattr(google_trends_handler, "__call_mode__", None))
                 ))
+                or (bing_search_handler is not None and (
+                    not callable(bing_search_handler)
+                    or not callable(getattr(bing_search_handler, "__call_mode__", None))
+                ))
                 or not isinstance(plan, QueryPlan) or not isinstance(limits, CollectionLimits)
                 or (observation_date is not None and not callable(observation_date))
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
@@ -118,6 +123,7 @@ class D5SourceHandlers:
         self.query_collectors = dict(query_collectors)
         self.wikimedia = wikimedia
         self.google_trends_handler = google_trends_handler
+        self.bing_search_handler = bing_search_handler
         self.plan = plan
         self.limits = limits
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
@@ -137,6 +143,12 @@ class D5SourceHandlers:
                 mode = self.google_trends_handler.__call_mode__()
                 setattr(collect_google, "__trendscout_data_mode__", mode)
                 handlers[source] = collect_google
+            elif source == BING_SOURCE_ID and self.bing_search_handler is not None:
+                async def collect_bing(context, handler=self.bing_search_handler):
+                    return await handler(context)
+                mode = self.bing_search_handler.__call_mode__()
+                setattr(collect_bing, "__trendscout_data_mode__", mode)
+                handlers[source] = collect_bing
             else:
                 handlers[source] = (self._query_handler(source)
                     if self.query_collectors[source] is not None else self._unavailable_handler())

@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.fetches import validate_public_request_origin
+from app.collections.store import saved_source_record
 
 router = APIRouter()
 
@@ -252,16 +253,8 @@ async def organize(request: Request):
     grouped = {}
     for row in rows:
         item = dict(row)
-        try:
-            evidence = json.loads(item["evidence"])
-        except (TypeError, ValueError):
-            evidence = {}
         grouped.setdefault(item["source"], {"source_id": item["source"], "data_mode": item["data_mode"], "records": []})
-        grouped[item["source"]]["records"].append({"article_display": item["keyword"],
-            "article_original": item["keyword"], "project": item["project"], "observation_date": item["observed_at"],
-            "fetched_at": evidence.get("fetched_at"), "provider_rank": evidence.get("provider_rank"),
-            "views_ceil": evidence.get("views_ceil"), "country_scope": evidence.get("country_scope"),
-            "access": evidence.get("access")})
+        grouped[item["source"]]["records"].append(saved_source_record(item))
     return await service.process_fetch("organize-" + str(uuid.uuid4()), list(grouped.values()))
 
 
@@ -271,25 +264,19 @@ async def reclassify_from_cached_evidence(request: Request):
     _mutating(request)
     service = _service(request)
     with service.store.connect() as db:
-        rows = db.execute("SELECT * FROM keywords WHERE eligible=1 "
-            + ("AND data_mode=? " if service.store.data_mode_scope else "")
-            + "ORDER BY observed_at DESC",
-            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchall()
+        query = "SELECT * FROM keywords WHERE (eligible=1 OR " \
+            "(source='google_web_serp' AND rejection_reason='INVALID_GOOGLE_TRENDS_RECORD'))"
+        parameters = ()
+        if service.store.data_mode_scope:
+            query += " AND data_mode=?"
+            parameters = (service.store.data_mode_scope,)
+        query += " ORDER BY observed_at DESC"
+        rows = db.execute(query, parameters).fetchall()
     grouped = {}
     for row in rows:
         item = dict(row)
-        try:
-            evidence = json.loads(item["evidence"])
-        except (TypeError, ValueError):
-            evidence = {}
         grouped.setdefault(item["source"], {"source_id": item["source"], "data_mode": item["data_mode"], "records": []})
-        grouped[item["source"]]["records"].append({
-            "article_display": item["keyword"], "article_original": item["keyword"],
-            "project": item["project"], "observation_date": item["observed_at"],
-            "fetched_at": evidence.get("fetched_at"), "provider_rank": evidence.get("provider_rank"),
-            "views_ceil": evidence.get("views_ceil"), "country_scope": evidence.get("country_scope"),
-            "access": evidence.get("access"),
-        })
+        grouped[item["source"]]["records"].append(saved_source_record(item))
     # Reuse the accepted local pipeline and cached entity context; do not enrich from Wikimedia.
     return await service.process_fetch("organize-cache-" + str(uuid.uuid4()), list(grouped.values()),
                                        cached_context_only=True)

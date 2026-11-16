@@ -31,6 +31,11 @@ from app.sources.google_trends.trending_now import (
     parse_trending_now_response,
 )
 from app.sources.http_policy import HttpPolicy
+from app.sources.http_policy import (
+    HttpDeadlineExceeded,
+    HttpRequestFailure,
+    HttpResponseTooLarge,
+)
 from app.sources.query_plan import get_query_plan
 from app.sources.serpapi.client import SerpApiClient, build_request_params
 from app.sources.serpapi.errors import SerpApiError
@@ -61,20 +66,41 @@ def _contains_secret(value: str, secret: str) -> bool:
 class GatewayError(Exception):
     """Stable error code without upstream URL, response body or credential."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, diagnostic=None):
         self.code = code
+        self.diagnostic = diagnostic
         super().__init__(code)
+
+
+@dataclass(frozen=True)
+class LiveGatewayFailureDiagnostic:
+    """Safe transport facts; excludes the request URL, headers and response body."""
+
+    source_id: str
+    failure_phase: str
+    http_status: int | None
+    exception_class: str | None
+    bytes_received: int
+    response_size_limit: int
+    attempt_id: str
+    error_code: str
 
 
 def _matches_bounded_google_local_policy(policy, builder) -> bool:
     """Accept only the reviewed Google policy shape with bounded quota values."""
     try:
+        bing_enabled = BING_SOURCE_ID in policy.enabled_sources
+        google_allocation = (policy.pools.get("serpapi_google")
+                             if bing_enabled else policy.pools["serpapi"])
+        bing_allocation = policy.pools.get("serpapi_bing") if bing_enabled else None
         expected = builder(
-            serpapi_daily_budget=policy.pools["serpapi"].daily_requests,
-            serpapi_monthly_budget=policy.pools["serpapi"].monthly_requests,
+            serpapi_daily_budget=google_allocation.daily_requests,
+            serpapi_monthly_budget=google_allocation.monthly_requests,
             rss_daily_budget=policy.pools["google_rss"].daily_requests,
             rss_monthly_budget=policy.pools["google_rss"].monthly_requests,
-            batches_per_hour=policy.max_starts_per_window,
+            fetch_starts_per_hour=policy.max_starts_per_window,
+            bing_enabled=bing_enabled,
+            bing_daily_budget=(bing_allocation.daily_requests if bing_allocation else 3),
         )
     except (AttributeError, KeyError, TypeError, ValueError):
         return False
@@ -140,7 +166,7 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
             store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
             valid = (not os.environ.get("VERCEL")
-                     and source_id in {GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID}
+                     and source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID, WIKIMEDIA_SOURCE_ID}
                      and approval.policy_version == GOOGLE_POLICY_VERSION
                      and approval.local_controls_verified is True
                      and isinstance(runner, GuardedAttemptRunner)
@@ -302,6 +328,10 @@ class LivePageGateway:
                 if not isinstance(context, SerpContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
                 params = build_request_params(context, cursor)
+                if self.source_id == BING_SOURCE_ID:
+                    # A newly admitted Bing verification must fetch the provider,
+                    # even when SerpApi has a same-query result in its own cache.
+                    params["no_cache"] = "true"
             else:
                 if not isinstance(context, YouTubeContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
@@ -332,6 +362,21 @@ class LivePageGateway:
         key = self._credential()
         endpoint = source_capability(self.source_id).endpoint
         parsed_receipt = []
+        failure_diagnostic = None
+
+        def record_diagnostic(code, phase, *, http_status=None, exception_class=None,
+                              bytes_received=0, response_size_limit=_MAX_RESPONSE_BYTES):
+            nonlocal failure_diagnostic
+            failure_diagnostic = LiveGatewayFailureDiagnostic(
+                source_id=self.source_id,
+                failure_phase=phase,
+                http_status=http_status,
+                exception_class=exception_class,
+                bytes_received=bytes_received,
+                response_size_limit=response_size_limit,
+                attempt_id=attempt_id,
+                error_code=code,
+            )
 
         async def parse_response(response):
             dummy = httpx.AsyncClient(
@@ -381,51 +426,111 @@ class LivePageGateway:
             # transport is closed only when the gateway itself is closed.
             async with httpx.AsyncClient(transport=transport, follow_redirects=False,
                                          trust_env=False) as client:
-                async with asyncio.timeout(timeout_seconds):
-                    async with client.stream("GET", endpoint, headers={"Accept": "application/json"},
-                        extensions={"trendscout_params": params}, timeout=self.policy.request_timeout(),
-                        follow_redirects=False) as response:
-                        length = response.headers.get("Content-Length")
-                        if length and length.isdigit() and int(length) > _MAX_RESPONSE_BYTES:
-                            return ("RESPONSE_TOO_LARGE", None)
-                        content = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            if len(content) + len(chunk) > _MAX_RESPONSE_BYTES:
-                                return ("RESPONSE_TOO_LARGE", None)
-                            content.extend(chunk)
-                        raw = bytes(content).decode("utf-8", errors="replace")
-                        # Scan the entire bounded response for accidental secret
-                        # reflection, including JSON-escaped text, before parsing.
-                        decoded = raw
-                        try:
-                            document = json.loads(raw)
-                            if (self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
-                                    and isinstance(document, dict)):
-                                # SerpApi legitimately echoes its API key inside its
-                                # pagination URL. The parser consumes only the numeric
-                                # offset from this field and never persists the URL.
-                                document = {name: value for name, value in document.items()
-                                            if name != "serpapi_pagination"}
-                            decoded = json.dumps(document, ensure_ascii=False)
-                        except (ValueError, RecursionError):
-                            pass
-                        if _contains_secret(decoded, key):
-                            return ("SENSITIVE_UPSTREAM_RESPONSE", None)
-                        safe_response = httpx.Response(response.status_code, headers=response.headers,
-                                                       content=bytes(content))
-                        return ("RESPONSE", safe_response)
+                try:
+                    response = await self.policy.get_bounded(
+                        client,
+                        endpoint,
+                        headers={
+                            "Accept": "application/json",
+                            "Accept-Encoding": "identity",
+                        },
+                        extensions={"trendscout_params": params},
+                        max_response_bytes=_MAX_RESPONSE_BYTES,
+                        total_timeout_seconds=timeout_seconds,
+                    )
+                except HttpResponseTooLarge as error:
+                    record_diagnostic(
+                        "RESPONSE_TOO_LARGE",
+                        error.phase,
+                        http_status=error.status_code,
+                        bytes_received=error.bytes_received,
+                        response_size_limit=error.max_response_bytes or _MAX_RESPONSE_BYTES,
+                    )
+                    return ("RESPONSE_TOO_LARGE", None)
+                except HttpDeadlineExceeded as error:
+                    detail = error.diagnostic
+                    record_diagnostic(
+                        "UPSTREAM_TIMEOUT",
+                        detail.phase if detail else "REQUEST_DISPATCH",
+                        http_status=detail.http_status if detail else None,
+                        exception_class=detail.exception_class if detail else "HttpDeadlineExceeded",
+                        bytes_received=detail.bytes_received if detail else 0,
+                        response_size_limit=detail.max_response_bytes if detail else _MAX_RESPONSE_BYTES,
+                    )
+                    return ("UPSTREAM_TIMEOUT", None)
+                except HttpRequestFailure as error:
+                    detail = error.diagnostic
+                    timeout_classes = {
+                        "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+                        "PoolTimeout", "TimeoutException",
+                    }
+                    code = ("UPSTREAM_TIMEOUT" if detail.exception_class in timeout_classes
+                            else "UPSTREAM_ERROR")
+                    record_diagnostic(
+                        code,
+                        detail.phase,
+                        http_status=detail.http_status,
+                        exception_class=detail.exception_class,
+                        bytes_received=detail.bytes_received,
+                        response_size_limit=detail.max_response_bytes,
+                    )
+                    return (code, None)
+                except GatewayError as error:
+                    record_diagnostic(error.code, "OUTBOUND_REQUEST_VALIDATION")
+                    return (error.code, None)
+                except Exception as error:
+                    exception_name = type(error).__name__
+                    if (type(error).__module__ != "httpx"
+                            or exception_name not in {
+                                "ConnectError", "ConnectTimeout", "DecodingError", "ReadError",
+                                "ReadTimeout", "RemoteProtocolError", "RequestError", "WriteError",
+                                "WriteTimeout", "PoolTimeout", "CloseError", "TimeoutException",
+                            }):
+                        exception_name = "RequestError"
+                    record_diagnostic(
+                        "UPSTREAM_ERROR",
+                        "REQUEST_DISPATCH",
+                        exception_class=exception_name,
+                    )
+                    return ("UPSTREAM_ERROR", None)
+
+                content = response.content
+                raw = content.decode("utf-8", errors="replace")
+                # Scan the entire bounded response for accidental secret
+                # reflection, including JSON-escaped text, before parsing.
+                decoded = raw
+                try:
+                    document = json.loads(raw)
+                    if (self.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
+                            and isinstance(document, dict)):
+                        # SerpApi legitimately echoes its API key inside its
+                        # pagination URL. The parser consumes only the numeric
+                        # offset from this field and never persists the URL.
+                        document = {name: value for name, value in document.items()
+                                    if name != "serpapi_pagination"}
+                    decoded = json.dumps(document, ensure_ascii=False)
+                except (ValueError, RecursionError):
+                    pass
+                if _contains_secret(decoded, key):
+                    return ("SENSITIVE_UPSTREAM_RESPONSE", None)
+                safe_response = httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    content=content,
+                )
+                return ("RESPONSE", safe_response)
 
         outcome = await self.runner.run(job_id=job_id, owner=owner, fence=fence,
             source_id=self.source_id, attempt_id=attempt_id, timeout_seconds=timeout_seconds,
             request=request,
             before_settle=before_settle if on_page_receipt is not None else None)
         if outcome.status != "COMPLETED":
-            raise GatewayError(outcome.status)
+            raise GatewayError(outcome.status, diagnostic=failure_diagnostic)
         if outcome.settlement_pending and not parsed_receipt:
-            raise GatewayError("SETTLEMENT_PENDING")
+            raise GatewayError("SETTLEMENT_PENDING", diagnostic=failure_diagnostic)
         code, response = outcome.value
         if code != "RESPONSE":
-            raise GatewayError(code)
+            raise GatewayError(code, diagnostic=failure_diagnostic)
         if parsed_receipt:
             receipt, error = parsed_receipt[0]
             if error is not None:

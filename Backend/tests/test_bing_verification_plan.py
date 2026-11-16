@@ -13,6 +13,7 @@ NOW = datetime(2026, 11, 16, 8, tzinfo=timezone.utc)
 
 def row(keyword, *, category="Fashion", source=GOOGLE_SOURCE_ID, observed="2026-11-16T07:00:00Z"):
     return {
+        "record_id": hashlib.sha256(keyword.casefold().encode()).hexdigest(),
         "canonical_keyword": keyword,
         "source_id": source,
         "data_mode": "LIVE",

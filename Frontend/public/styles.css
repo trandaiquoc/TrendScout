@@ -1128,9 +1128,9 @@ button:disabled { filter:saturate(.65); }
 .algorithm-result-examples{display:grid;gap:.75rem;margin-top:.75rem}.algorithm-result-example{border:1px solid var(--line);border-radius:.6rem;padding:.75rem;min-width:0}.algorithm-result-example h3{font-size:1rem;margin:0 0 .5rem;overflow-wrap:anywhere}.algorithm-result-example .detail-list{margin:0}
 .google-trend-evidence { margin-top: 12px; border-top: 1px solid var(--line); }
 .google-trend-evidence > summary { padding: 10px 2px; color: var(--accent-strong); cursor: pointer; font-size: 12px; font-weight: 700; }
-.google-trend-cluster, .google-serp-verification { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
-.google-trend-cluster h3, .google-serp-verification h3 { margin: 4px 2px; color: var(--ink-strong); font-size: 11px; }
-.google-trend-clusters .workbench-detail-grid, .google-serp-verification .workbench-detail-grid { margin: 6px 0; }
-.google-serp-results { display: grid; gap: 8px; margin: 8px 0; padding-left: 24px; }
-.google-serp-results li { padding-left: 2px; overflow-wrap: anywhere; }
-.google-serp-results small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.google-trend-cluster, .google-serp-verification, .bing-serp-verification { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.google-trend-cluster h3, .google-serp-verification h3, .bing-serp-verification h3 { margin: 4px 2px; color: var(--ink-strong); font-size: 11px; }
+.google-trend-clusters .workbench-detail-grid, .google-serp-verification .workbench-detail-grid, .bing-serp-verification .workbench-detail-grid { margin: 6px 0; }
+.google-serp-results, .bing-serp-results { display: grid; gap: 8px; margin: 8px 0; padding-left: 24px; }
+.google-serp-results li, .bing-serp-results li { padding-left: 2px; overflow-wrap: anywhere; }
+.google-serp-results small, .bing-serp-results small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }

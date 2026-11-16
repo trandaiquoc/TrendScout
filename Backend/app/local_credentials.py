@@ -1,4 +1,4 @@
-"""Read personal demo credentials from an owner-only project .env file.
+"""Read local provider credentials from the project-root .env file.
 
 This resolver does not enable a provider or prove that a credential works.
 """
@@ -23,10 +23,17 @@ class InvalidCredentialConfig(ValueError):
 
 class LocalCredentialProvider:
     def __init__(self, path: Path | None = None):
-        if path is None and os.name == "nt":
-            app_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-            path = app_data / "TrendScout" / ".env"
-        self.path = path or Path(__file__).resolve().parents[2] / ".env"
+        self._verify_private_parent = path is not None
+        if path is None:
+            project_env = Path(__file__).resolve().parents[2] / ".env"
+            if os.name == "nt" and not project_env.exists():
+                app_data = Path(os.environ.get("LOCALAPPDATA")
+                                or Path.home() / "AppData" / "Local")
+                path = app_data / "TrendScout" / ".env"
+                self._verify_private_parent = True
+            else:
+                path = project_env
+        self.path = Path(path)
 
     def _read(self):
         try:
@@ -43,7 +50,7 @@ class LocalCredentialProvider:
             if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_SIZE:
                 raise InvalidCredentialConfig("Credential file permissions or type are unsafe")
             try:
-                if os.name == "nt":
+                if os.name == "nt" and self._verify_private_parent:
                     verify_private_directory(self.path.parent)
                 verify_private_file(self.path)
             except UnsafeLocalFile:
@@ -58,7 +65,7 @@ class LocalCredentialProvider:
             if len(raw) > MAX_FILE_SIZE:
                 raise InvalidCredentialConfig("Credential file is too large")
             try:
-                lines = raw.decode("utf-8").splitlines()
+                lines = raw.decode("utf-8-sig").splitlines()
             except UnicodeError:
                 raise InvalidCredentialConfig("Credential file is not UTF-8") from None
             values = {}
@@ -72,6 +79,12 @@ class LocalCredentialProvider:
                     continue
                 if not separator or name in values:
                     raise InvalidCredentialConfig("Credential file format is invalid")
+                value = value.strip()
+                if value.startswith(("'", '"')) or value.endswith(("'", '"')):
+                    if (len(value) < 2 or value[0] not in {"'", '"'}
+                            or value[-1] != value[0]):
+                        raise InvalidCredentialConfig("Credential value format is invalid")
+                    value = value[1:-1]
                 if value and (not 8 <= len(value) <= 256
                               or any(ord(char) < 33 or ord(char) > 126 for char in value)):
                     raise InvalidCredentialConfig("Credential value format is invalid")

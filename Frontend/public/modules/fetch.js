@@ -141,6 +141,10 @@ export class PublicFetchController {
 
   kindForError(error) {
     if (error instanceof ApiError && error.status === 429) {
+      if (error.body?.detail?.code === 'STATUS_POLL_LIMIT'
+          || error.body?.code === 'STATUS_POLL_LIMIT') {
+        return 'poll-limit';
+      }
       return 'rate-limited';
     }
     if (error instanceof ApiError && error.status === 409) {

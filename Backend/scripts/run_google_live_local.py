@@ -1,7 +1,8 @@
-"""Run the separately opted-in Wikimedia + Google LIVE profile locally."""
+"""Run the local multi-source LIVE web application."""
 
 import argparse
 import os
+from dataclasses import replace
 from functools import partial
 
 from app.google_live_settings import GoogleLiveSettings
@@ -10,9 +11,22 @@ from app.orchestration.normal_google_live_composition import normal_google_live_
 from app.settings import Settings
 
 
+def local_live_settings():
+    """Return the fixed local-web source policy; launch scripts pass no approvals."""
+    return replace(
+        GoogleLiveSettings.from_environment(),
+        trends_approved=True,
+        serp_approved=False,
+        rss_approved=False,
+        bing_approved=True,
+        policy_migration_approved=True,
+        account_api_approved=True,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Run the separately approved local Google LIVE profile."
+        description="Run the local multi-source LIVE web application."
     )
     parser.add_argument(
         "--port", type=int,
@@ -21,11 +35,11 @@ def main(argv=None):
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    google_settings = GoogleLiveSettings.from_environment()
-    if not google_settings.local_runtime_approved:
-        parser.error(
-            "set TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED=true before using this separate profile"
-        )
+    # The local web demo enables Google discovery and one-candidate Bing
+    # verification. Both require user Fetch, a fresh Account API preflight,
+    # persistent source schedules and the shared provider/source budgets.
+    # Shell and PowerShell launchers only start this server-owned policy.
+    google_settings = local_live_settings()
     settings = Settings.from_environment({
         "TREND_SCOUT_ENVIRONMENT": "local",
         "TREND_SCOUT_RUN_MODE": "live",
@@ -41,6 +55,9 @@ def main(argv=None):
             normal_google_live_composition,
             user_agent=settings.wikimedia_user_agent,
             google_settings=google_settings,
+            force_refresh_trends=True,
+            allow_initial_google_acceptance=True,
+            allow_initial_bing_acceptance=True,
         ),
     )
     run_normal_google_live(application, port=arguments.port)
