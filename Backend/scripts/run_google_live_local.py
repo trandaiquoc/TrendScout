@@ -32,6 +32,11 @@ def main(argv=None):
         "--port", type=int,
         default=int(os.environ.get("TREND_SCOUT_DEMO_PORT", "8000")),
     )
+    parser.add_argument(
+        "--youtube-owner-acceptance", action="store_true",
+        help=("Use the owner-authorized initial YouTube acceptance outside a scheduled slot; "
+              "record the actual time, preserve expired SQLite blobs, and allow one search call."),
+    )
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65535:
         parser.error("--port must be between 1 and 65535")
@@ -58,6 +63,9 @@ def main(argv=None):
             force_refresh_trends=True,
             allow_initial_google_acceptance=True,
             allow_initial_bing_acceptance=True,
+            allow_initial_youtube_acceptance=arguments.youtube_owner_acceptance,
+            preserve_expired_data=arguments.youtube_owner_acceptance,
+            youtube_max_queries=1 if arguments.youtube_owner_acceptance else 2,
         ),
     )
     run_normal_google_live(application, port=arguments.port)

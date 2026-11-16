@@ -146,6 +146,24 @@ def _candidate_history(collection_store, *, now):
     return frozenset(observed), frozenset(verified), prior_verification
 
 
+def _youtube_scope_anchor(schedule):
+    """Use the real attempt time when the owner authorizes initial acceptance."""
+    if not isinstance(schedule, dict):
+        raise ValueError("YouTube schedule metadata is invalid")
+    value = schedule.get("last_slot")
+    if value == "INITIAL_ACCEPTANCE":
+        value = schedule.get("last_attempt_at")
+    if not isinstance(value, str) or not value:
+        raise ValueError("YouTube schedule has no reserved slot")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("YouTube schedule slot is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("YouTube schedule slot must include a timezone")
+    return parsed
+
+
 @asynccontextmanager
 async def normal_google_live_composition(*, user_agent,
                                          utcnow=lambda: datetime.now(timezone.utc),
@@ -155,14 +173,21 @@ async def normal_google_live_composition(*, user_agent,
                                          collection_store=None,
                                          force_refresh_trends: bool = False,
                                          allow_initial_google_acceptance: bool = False,
-                                         allow_initial_bing_acceptance: bool = False):
+                                         allow_initial_bing_acceptance: bool = False,
+                                         allow_initial_youtube_acceptance: bool = False,
+                                         preserve_expired_data: bool = False,
+                                         youtube_max_queries: int = 2):
     """Compose one local worker; no Google call is made without its own approval."""
     config = google_settings or GoogleLiveSettings.from_environment()
     if (os.environ.get("VERCEL") or not isinstance(config, GoogleLiveSettings)
             or not isinstance(user_agent, str) or not user_agent.strip()
             or not callable(utcnow) or type(force_refresh_trends) is not bool
             or type(allow_initial_google_acceptance) is not bool
-            or type(allow_initial_bing_acceptance) is not bool):
+            or type(allow_initial_bing_acceptance) is not bool
+            or type(allow_initial_youtube_acceptance) is not bool
+            or type(preserve_expired_data) is not bool
+            or type(youtube_max_queries) is not int
+            or not 1 <= youtube_max_queries <= 2):
         raise ValueError("explicit local Google LIVE opt-in and valid configuration required")
     if credential_provider is None:
         from app.local_credentials import LocalCredentialProvider
@@ -176,8 +201,11 @@ async def normal_google_live_composition(*, user_agent,
     )
     secure_private_directory(directory)
     store = LocalSQLiteAtomicStateStore.for_local_live(directory / "state.sqlite")
-    snapshot_blobs = LocalSQLiteSnapshotBlobs(store)
-    snapshot_blobs.purge_expired(now=utcnow())
+    snapshot_blobs = LocalSQLiteSnapshotBlobs(
+        store, preserve_expired=preserve_expired_data
+    )
+    if not preserve_expired_data:
+        snapshot_blobs.purge_expired(now=utcnow())
     policy = normal_google_live_policy(
         serpapi_daily_budget=config.serpapi_daily_budget,
         serpapi_monthly_budget=config.serpapi_monthly_budget,
@@ -299,7 +327,8 @@ async def normal_google_live_composition(*, user_agent,
         )
         return {"cache_entries": int(cache_deleted), **checkpoint_counts}
 
-    cleanup_youtube_data()
+    if not preserve_expired_data:
+        cleanup_youtube_data()
     resources = []
     quota_state = {"status": "NOT_CONFIGURED", "snapshot": None}
     try:
@@ -555,12 +584,14 @@ async def normal_google_live_composition(*, user_agent,
                 slot = candidate_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    allow_initial_acceptance=allow_initial_youtube_acceptance,
                 )
                 if slot is None:
                     return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
                 reserved = reserve_source_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    allow_initial_acceptance=allow_initial_youtube_acceptance,
                 )
                 if reserved is None:
                     return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
@@ -576,11 +607,12 @@ async def normal_google_live_composition(*, user_agent,
                 error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
             )
             try:
-                reserved_slot = datetime.fromisoformat(schedule["last_slot"])
-            except (KeyError, TypeError, ValueError):
+                reserved_slot = _youtube_scope_anchor(schedule)
+            except ValueError:
                 raise AdmissionDenied("YOUTUBE_SCHEDULE_STATE_INVALID") from None
             return select_youtube_query_scopes(
-                now=reserved_slot, plan=DEFAULT_QUERY_PLAN, max_queries=2
+                now=reserved_slot, plan=DEFAULT_QUERY_PLAN,
+                max_queries=youtube_max_queries,
             )
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
@@ -606,7 +638,8 @@ async def normal_google_live_composition(*, user_agent,
             shared_cache=cache,
             resolve_cache_grant=resolve_cache_grant,
             source_limits={YOUTUBE_SOURCE_ID: CollectionLimits(
-                max_queries=2, max_pages_per_query=1, max_requests=2,
+                max_queries=youtube_max_queries, max_pages_per_query=1,
+                max_requests=youtube_max_queries,
                 max_retries_per_page=0, deadline_seconds=60, max_results=50,
             )},
             resolve_provider_batch=resolve_youtube_provider_batch,
@@ -655,7 +688,8 @@ async def normal_google_live_composition(*, user_agent,
                 (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
                  allow_initial_google_acceptance),
                 (BING_SOURCE_ID, BING_REFRESH_STATE_KEY, allow_initial_bing_acceptance),
-                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY, False),
+                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY,
+                 allow_initial_youtube_acceptance),
             ):
                 try:
                     sources[source_id] = schedule_metadata(
@@ -719,7 +753,9 @@ async def normal_google_live_composition(*, user_agent,
                 return {"status": "UNAVAILABLE"}
 
         facade.youtube_quota_metadata = youtube_quota_metadata
-        facade.youtube_retention_cleanup = cleanup_youtube_data
+        facade.youtube_retention_cleanup = (
+            None if preserve_expired_data else cleanup_youtube_data
+        )
 
         def google_quota_metadata():
             try:

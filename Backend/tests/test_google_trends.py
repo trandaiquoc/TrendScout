@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,6 +19,7 @@ from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import (
     _GoogleLocalApproval,
+    _youtube_scope_anchor,
     normal_google_live_composition,
 )
 from app.sources.catalog import GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
@@ -50,6 +52,7 @@ from app.sources.serpapi.account import (
 from app.sources.serpapi.errors import SerpApiError
 from app.sources.serpapi.models import ProviderPage
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 FAKE_KEY = "fixture-serpapi-key-never-real"
@@ -696,6 +699,60 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(first)
         self.assertIs(approval.current(GOOGLE_SOURCE_ID), first)
         self.assertIsNone(approval.current("bing_web_serp"))
+
+    def test_youtube_initial_acceptance_scope_uses_actual_attempt_timestamp(self):
+        attempt = "2026-11-16T16:53:18+00:00"
+        self.assertEqual(
+            _youtube_scope_anchor({
+                "last_slot": "INITIAL_ACCEPTANCE",
+                "last_attempt_at": attempt,
+            }).isoformat(),
+            attempt,
+        )
+        with self.assertRaises(ValueError):
+            _youtube_scope_anchor({"last_slot": "INITIAL_ACCEPTANCE"})
+
+    async def test_owner_acceptance_preserves_expired_blobs_and_exposes_initial_slot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_dir = root / "google-state"
+            state_dir.mkdir(mode=0o700)
+            atomic = LocalSQLiteAtomicStateStore.for_local_live(state_dir / "state.sqlite")
+            blobs = LocalSQLiteSnapshotBlobs(atomic)
+            expired = blobs.put(
+                [{"retained_fixture": "existing"}],
+                now=NOW - timedelta(days=10),
+                retain_until=NOW - timedelta(days=9),
+            )
+            collection_store = CollectionStore(
+                root / "collections.sqlite", data_mode_scope="LIVE"
+            )
+
+            class NeverReadCredentials:
+                def resolve(self, _reference):
+                    raise AssertionError("credentials must not be read without LIVE approval")
+
+            async with normal_google_live_composition(
+                user_agent="TrendScoutTest/1.0 (https://example.invalid)",
+                state_directory=state_dir,
+                google_settings=GoogleLiveSettings(),
+                credential_provider=NeverReadCredentials(),
+                collection_store=collection_store,
+                utcnow=lambda: NOW,
+                allow_initial_youtube_acceptance=True,
+                preserve_expired_data=True,
+                youtube_max_queries=1,
+            ) as facade:
+                schedule = facade.refresh_schedule_metadata()["sources"][YOUTUBE_SOURCE_ID]
+                self.assertTrue(schedule["initial_acceptance_available"])
+                self.assertIsNone(facade.youtube_retention_cleanup)
+
+            with closing(atomic._connect()) as connection:
+                retained = connection.execute(
+                    "SELECT 1 FROM source_snapshot_blobs WHERE digest=?",
+                    (expired["digest"],),
+                ).fetchone()
+            self.assertIsNotNone(retained)
 
     async def test_google_runtime_constructs_without_provider_requests_by_default(self):
         directory = tempfile.TemporaryDirectory()

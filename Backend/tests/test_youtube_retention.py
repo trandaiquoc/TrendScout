@@ -161,6 +161,32 @@ class YouTubeRetentionSweeperTests(unittest.IsolatedAsyncioTestCase):
 
 
 class YouTubeCheckpointRetentionTests(unittest.TestCase):
+    def test_owner_acceptance_preserves_expired_blobs_during_startup_and_new_puts(self):
+        now = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            private = private_test_directory(temporary)
+            store = LocalSQLiteAtomicStateStore.for_local_live(private / "state.sqlite")
+            blobs = LocalSQLiteSnapshotBlobs(store, preserve_expired=True)
+            old = blobs.put(
+                [{"provider_video_id": "AbCdEf12345"}],
+                now=now,
+                retain_until=now + timedelta(hours=1),
+            )
+            later = now + timedelta(hours=2)
+
+            self.assertEqual(blobs.purge_expired(now=later), 0)
+            new = blobs.put(
+                [{"provider_video_id": "ZyXwVu98765"}],
+                now=later,
+                retain_until=later + timedelta(hours=1),
+            )
+            with closing(store._connect()) as connection:
+                digests = {row[0] for row in connection.execute(
+                    "SELECT digest FROM source_snapshot_blobs"
+                )}
+
+            self.assertEqual(digests, {old["digest"], new["digest"]})
+
     def test_expired_youtube_checkpoints_and_only_unshared_expired_blobs_are_removed(self):
         now = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temporary:

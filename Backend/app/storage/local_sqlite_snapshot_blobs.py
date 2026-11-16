@@ -25,10 +25,13 @@ def _utc(value):
 class LocalSQLiteSnapshotBlobs:
     """Store bounded JSON lists outside the small atomic admission-state document."""
 
-    def __init__(self, store: LocalSQLiteAtomicStateStore):
+    def __init__(self, store: LocalSQLiteAtomicStateStore, *, preserve_expired: bool = False):
         if type(store) is not LocalSQLiteAtomicStateStore or store.data_mode != "LIVE":
             raise ValueError("owner-only local LIVE SQLite storage is required")
+        if type(preserve_expired) is not bool:
+            raise ValueError("expired snapshot preservation must be explicit")
         self.store = store
+        self.preserve_expired = preserve_expired
         with closing(self.store._connect()) as connection:
             connection.execute("""CREATE TABLE IF NOT EXISTS source_snapshot_blobs (
                 digest TEXT PRIMARY KEY,
@@ -39,6 +42,8 @@ class LocalSQLiteSnapshotBlobs:
             )""")
 
     def purge_expired(self, *, now):
+        if self.preserve_expired:
+            return 0
         now = _utc(now).isoformat()
         with closing(self.store._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -117,9 +122,11 @@ class LocalSQLiteSnapshotBlobs:
         with closing(self.store._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                connection.execute(
-                    "DELETE FROM source_snapshot_blobs WHERE retain_until<=?", (now.isoformat(),)
-                )
+                if not self.preserve_expired:
+                    connection.execute(
+                        "DELETE FROM source_snapshot_blobs WHERE retain_until<=?",
+                        (now.isoformat(),),
+                    )
                 existing = connection.execute(
                     "SELECT payload,raw_bytes,item_count,retain_until FROM source_snapshot_blobs "
                     "WHERE digest=?", (digest,)
