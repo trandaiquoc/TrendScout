@@ -63,8 +63,7 @@ class WikimediaGatewayError(GatewayError):
                  diagnostic: WikimediaFailureDiagnostic | None = None):
         self.retry_after_seconds = retry_after_seconds
         self.retry_after_unbounded_seconds = retry_after_unbounded_seconds
-        self.diagnostic = diagnostic
-        super().__init__(code)
+        super().__init__(code, diagnostic=diagnostic)
 
 
 class _SharedTransport(httpx.AsyncBaseTransport):
