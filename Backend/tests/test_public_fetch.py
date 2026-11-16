@@ -224,6 +224,12 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(youtube["configuration_status"], "NOT_CONFIGURED")
         self.assertEqual(youtube["live_verification_status"], "NOT_VERIFIED")
         self.assertFalse(youtube["enabled_for_current_operation"])
+        workflow = value["youtube_workflow"]
+        self.assertEqual(workflow["policy_status"], "APPROVED")
+        self.assertEqual(workflow["policy_version"], "d6-youtube-v2")
+        self.assertTrue(workflow["policy_agreement_required"])
+        self.assertEqual(workflow["approval_status"], "PENDING_LIVE_APPROVAL")
+        self.assertEqual(workflow["live_host_status"], "NOT_DESIGNATED")
         for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             self.assertEqual(sources[source_id]["approval_status"], "PENDING_APPROVAL")
             self.assertFalse(sources[source_id]["enabled_for_current_operation"])

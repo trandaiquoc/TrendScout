@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 
+from app.sources.youtube.policy import YOUTUBE_POLICY_APPROVED
+
 
 def _flag(environment: Mapping[str, str], name: str) -> bool:
     raw = environment.get(name, "false").strip().lower()
@@ -43,7 +45,7 @@ class GoogleLiveSettings:
     cross_machine_reserve: int = 6
     bing_daily_budget: int = 3
     youtube_live_approved: bool = False
-    youtube_policy_approved: bool = False
+    youtube_policy_approved: bool = YOUTUBE_POLICY_APPROVED
     youtube_live_host: str | None = None
 
     @classmethod
@@ -82,9 +84,7 @@ class GoogleLiveSettings:
             youtube_live_approved=_flag(
                 environment, "TREND_SCOUT_YOUTUBE_LIVE_APPROVED"
             ),
-            youtube_policy_approved=_flag(
-                environment, "TREND_SCOUT_YOUTUBE_POLICY_APPROVED"
-            ),
+            youtube_policy_approved=YOUTUBE_POLICY_APPROVED,
             youtube_live_host=(environment.get("TREND_SCOUT_YOUTUBE_LIVE_HOST", "")
                                .strip() or None),
         )

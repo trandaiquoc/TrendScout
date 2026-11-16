@@ -2,22 +2,32 @@
 
 **Reviewed:** 16 November 2026
 
-**Status:** offline implementation complete; genuine LIVE acceptance remains blocked by owner-side policy publication, project quota/API evidence, and host designation. No YouTube request was sent.
+**Status:** offline implementation complete. The owner-approved Privacy Policy and Terms are publicly available and verified. Genuine LIVE acceptance remains blocked by project/key verification, current quota evidence, a designated LIVE host, and an eligible runtime. No YouTube request was sent.
 
 ## Gate status
 
 | Gate | Weight | Status | Evidence |
 |---|---:|---|---|
-| G0 — Repository synchronization | 8% | PASS | At the continuation baseline, `git fetch origin` completed and `HEAD` matched `origin/main` at `58bc042db982dcac1ed93ebe4f534b9820c2b1c1`; the three implementation commits below are local descendants. No reset or overwrite was used. |
+| G0 — Repository synchronization | 8% | PASS | `git fetch origin` completed on 16 November 2026. `HEAD` and `origin/main` match at `c5ab57724cd2090b2b807d4c700a5908648957cf`. No reset or overwrite was used; the pre-existing untracked `.playwright-cli/` directory was preserved. |
 | G1 — YouTube API contract | 12% | PASS (offline) | Fixed `search.list` and bounded `videos.list` request builders/parsers, source identity, validation, pagination binding and method-specific gateway routing are implemented and tested. No provider response was received. |
 | G2 — Quota governance | 18% | PASS (offline) | Separate durable search and other-method pools, pre-request reservation, provider-day timezone handling and conservative failure accounting are implemented and tested. Actual Cloud project quota remains UNKNOWN. |
 | G3 — Schedule, cache and Source Center | 12% | PASS (offline) | Manual schedule eligibility, cache-first/stale delivery, focused expiry, and Vietnamese/English Source Center budget and status fields are implemented and tested. |
-| G4 — Genuine YouTube LIVE evidence | 16% | BLOCKED — 0% | The owner authorized up to two requests total (at most one `search.list` and one `videos.list`, no retries); neither was used. The policy pages remain draft and the YouTube API key's project association is unverified. Owner-provided quota screenshots identify `trendscout-demo-youtube`, show 100 `search.list` calls/day and 10,000 other-method units/day with 0 usage at screenshot time; current project state was not independently verified. The in-app versioned agreement flow is implemented but cannot be exercised against the real app until policy approval/publication. |
+| G4 — Genuine YouTube LIVE evidence | 16% | BLOCKED — 0% | The owner authorized up to two requests total (at most one `search.list` and one `videos.list`, no retries); neither was used. Owner-approved policies are publicly verified, and code now records their approval separately from LIVE approval. The API key/project association and current project quota remain unverified. The hosted API reports `read_only=true`, `fetch_enabled=false`, and no selectable sources, so it cannot run the agreement/Fetch flow. No provider request was sent. |
 | G5 — SQLite and application flow | 16% | PASS (offline) | Synthetic-only tests prove Fetch result persistence, API readback after SQLite reopen, source-selection combinations, cache-only delivery and exclusion from keyword scoring. No synthetic record is labeled LIVE. |
-| G6 — Regression and browser QA | 12% | PARTIAL (6 points credited) | Focused backend suites passed, including all Wikimedia gateway tests; frontend 19/19, changed-file Ruff, JS syntax and diff checks passed. The one full Backend run ended 904 passed and 16 failed because the Firestore transactional tests require an unconfigured loopback emulator. Real-app browser QA covered the accessible draft-policy flow; the consent dialog remained correctly blocked. |
-| G7 — Report and local commits | 6% | PASS after the final report commit | Implementation and report changes are committed locally; no push, deployment or billing change was made. |
+| G6 — Regression and browser QA | 12% | PARTIAL (6 points credited) | Focused backend suites passed, including all 18 Wikimedia gateway tests; frontend 19/19, changed-file Ruff, JS syntax and diff checks passed. The one full Backend run ended 904 passed and 16 failed because Firestore emulator setup was unavailable. The actual local-app browser run is documented below. A current hosted-site capability check confirmed read-only mode and disabled Fetch; the newly changed API fallback still needs deployment verification. |
+| G7 — Report and local commits | 6% | PASS | The owner-approved policy pages were pushed in `c5ab577`; this report records the deployed public pages and current hosted API behavior. The present code/report changes remain local until committed. |
 
 **Weighted gate progress: 78%.** G4 contributes 0%; G6 receives 6/12 points. The goal remains incomplete and is not 100% complete.
+
+## Public policy publication, verified 16 November 2026
+
+The owner explicitly approved publication and confirmed that the owner details were in the ignored `.env.youtube-audit-owner` file. The final pages were generated from allowlisted owner fields, reviewed, committed and pushed as `c5ab577`. Both public URLs returned HTTP 200. Their deployed HTML matched the tracked files byte-for-byte; the privacy page carried policy version `d6-youtube-v2`, and the owner field matched the configured value. The comparison emitted only lengths/equality status; no `.env` values were printed.
+
+- Privacy Policy: https://trend-scout-mu.vercel.app/dashboard/privacy.html
+- Terms of Service: https://trend-scout-mu.vercel.app/dashboard/terms.html
+- Dashboard: https://trend-scout-mu.vercel.app/dashboard/
+
+The policy approval is now source-controlled against the exact approved version in `Backend/app/sources/youtube/policy.py`; a later version change will fail closed until separately approved. LIVE approval remains separate. The current hosted API was queried read-only and returned HTTP 200 with `environment=vercel`, `read_only=true`, `fetch_enabled=false`, `source_selection_supported=false`, `policy_status` and `policy_version` absent, and YouTube/Bing disabled. The code change in this continuation fills those policy metadata fields, but does not enable Fetch or source selection.
 
 ## Repository and implementation
 
@@ -41,7 +51,7 @@ Documentation was checked on 16 November 2026:
 - [`search.list` reference](https://developers.google.com/youtube/data/reference/rest/v3/search/list): `maxResults` supports up to 50; `regionCode=US` restricts results to videos viewable in that region, and `relevanceLanguage=en` is a relevance preference. Neither establishes the residence of creators or viewers. The method has a separate documented daily bucket and each page request costs quota.
 - [`videos.list` reference](https://developers.google.com/youtube/data/reference/rest/v3/videos/list): `part=snippet` exposes title/channel metadata; a call costs one unit; `maxResults` is not supported with the `id` filter. Statistics are deliberately not requested.
 - [Quota calculator](https://developers.google.com/youtube/data/determine_quota_cost?hl=en), updated 12 November 2026: documented defaults are 100 `search.list` calls/day in its separate bucket and 10,000 units/day for other methods; requests including invalid ones cost at least one point, and daily quota resets at midnight Pacific Time. These are documentation defaults, **not verified project limits**.
-- [YouTube Developer Policies](https://developers.google.com/youtube/terms/developer-policies): an API client must require privacy-policy agreement before users can use its features; applicable API data must be deleted or refreshed within 30 calendar days. The current privacy/terms pages remain draft. The in-app agreement flow is implemented; a local operator-only deletion-request workflow is implemented and focused-test verified, with manual backup/log limits documented.
+- [YouTube Developer Policies](https://developers.google.com/youtube/terms/developer-policies): an API client must require privacy-policy agreement before users can use its features; applicable API data must be deleted or refreshed within 30 calendar days. The owner-approved privacy/terms pages are now published. The in-app agreement flow is implemented; a local operator-only deletion-request workflow is implemented and focused-test verified, with manual backup/log limits documented.
 - [Getting started](https://developers.google.com/youtube/v3/getting-started?authuser=01) and [API key authentication](https://developers.google.com/youtube/data/guides/authentication): the standard project/API-key setup steps do not list publication of a privacy policy as a registration prerequisite. The [YouTube API Services Terms](https://developers.google.com/youtube/terms/api-services-terms-of-service) and Developer Policies do require a published privacy policy before the API Client provides API-backed features to users; Google may request additional information during review. **Registration can proceed without this policy; using YouTube through TrendScout cannot.**
 - [Additional derived-metrics policy](https://developers.google.com/youtube/terms/derived-metrics-policy?hl=en): applicable additional analytics use requires accepting the policy amendment. TrendScout leaves YouTube keyword extraction and derived metrics disabled.
 - [YouTube revision history](https://developers.google.com/youtube/data/revision_history): since July 2025, `mostPopular` reflects Trending Music, Movies and Gaming charts, so it is not used to claim broad consumer-product coverage.
@@ -59,6 +69,8 @@ The internal 200/month limits are ceilings, not expected consumption. Owner-prov
 
 ## Cache, SQLite and application evidence
 
+The following local-app browser evidence predates owner policy approval; its policy-draft observations are historical and do not describe the current published static pages.
+
 - The live source result is stored in the existing durable worker/checkpoint path and read through the Fetch status API. The SQLite reopen test reads back video ID/title from a separate temporary database and labels its record `SYNTHETIC`.
 - Shared cache uses a YouTube-specific scope and grant. Retention cleanup only deletes the affected YouTube cache entry; a regression test confirms Google cache data remains. The ordinary collection/keyword table does not receive YouTube video titles as keywords; source snapshots retain bounded counts and provenance.
 - No user database was reset, migrated by a live app run, or used for quota QA in this turn. Tests used isolated temporary SQLite state. Existing Google, Bing and Wikimedia data were not changed. No database row counts are claimed for this continuation.
@@ -74,9 +86,9 @@ The internal 200/month limits are ceilings, not expected consumption. Owner-prov
 - Full Backend regression was run once: **904 passed, 16 failed, 1,039 subtests passed**. All 16 failures are in `emulator_tests/test_firestore_transactional.py`; they fail during setup because `FIRESTORE_EMULATOR_HOST` is unset. The suite was not rerun and no Firestore emulator was started. The four Wikimedia diagnostic failures from the previous run are fixed; the focused Wikimedia gateway suite passes 18/18.
 - Frontend Node tests: **19 passed, 0 failed**.
 - Focused Ruff over changed backend modules/tests: **passed**. Changed frontend modules passed Node syntax checks. `git diff --check`: **passed**.
-- Real-app browser checks passed for the policy-draft gate and accessible surfaces listed above. The policy consent dialog and accepted consent flow cannot be exercised until owner approval/publication; browser console showed one missing favicon 404 and the intentional 409 rejection. No provider request, deploy or push was performed.
+- Real-app browser checks passed for the historical policy gate and accessible surfaces listed above. The current hosted API still disables Fetch, so its live agreement/consent flow cannot be exercised. Public static policy pages were deployed and verified; no provider request was made. The code change in this continuation has not yet been checked on the hosted API.
 
-## Exact remaining G4 prerequisites
+## G4 prerequisites recorded before owner publication (historical)
 
 1. Sign into project `trendscout-demo-youtube`, verify YouTube Data API v3 is enabled, and check current `search.list`/other-method quotas. The owner screenshots are useful evidence, but the key/project relationship and current quota were not independently matched.
 2. Persistently designate the one authorized LIVE host `QUOC`; the Windows process environment is currently not designated. Keep other hosts disabled.
@@ -98,7 +110,7 @@ No other owner quota approval is requested; the existing two-request authorizati
 - Corrected the dashboard's no-data English localization and made the Skip navigation link focus the main region from the keyboard.
 - Updated draft policy/terms wording, setup guidance, consent/API regression coverage and this report. No user database was reset or modified.
 
-### Blockers and owner confirmations required to resume G4
+### Blockers recorded before owner publication (historical)
 
 - The Privacy Policy and Terms remain draft. The owner must confirm the operational details (data retention, logs/backups and deletion handling), approve and publish them, then set `TREND_SCOUT_YOUTUBE_POLICY_APPROVED=true`. The standard Google project/API-key registration checklist does not require this publication; the API Client's user-facing YouTube features do.
 - Sign into `trendscout-demo-youtube` and confirm YouTube Data API v3 enablement and current method quotas. Provider quota remains UNKNOWN until checked live.
@@ -110,10 +122,20 @@ No other owner quota approval is requested; the existing two-request authorizati
 - Full regression currently has 16 Firestore emulator setup failures because `FIRESTORE_EMULATOR_HOST` is unset. No emulator was started; the earlier four Wikimedia failures are repaired.
 - The standard launcher performs a SerpApi account preflight. To avoid unrelated external requests, the real-app browser QA used a temporary isolated composition with paid-source approvals disabled and a provider egress guard. Its disabled Bing display is not the standard launcher configuration: the standard launcher enables Bing in code.
 
-## Local commits
+## Commits before policy publication (historical)
 
 - Implementation: `ac78355` — `feat(d6): add YouTube source and quota governance`
 - Wikimedia diagnostic repair: `cffdf7f` — `fix(wikimedia): preserve sanitized diagnostics`.
 - YouTube retention, targeted deletion and runbook: `6dcbf19` — `feat(youtube): add targeted deletion workflow`.
 - Draft policy pages, manual Pages workflow and browser accessibility/localization fixes: `3a4c9ac` — `docs(policy): prepare manual Pages publication`.
-- This acceptance-report commit is identified by the final handoff. No push is included.
+- This section predates policy publication and the `c5ab577` push.
+
+## Current continuation update — 16 November 2026
+
+- The owner approved public publication. Both policy URLs returned HTTP 200 and their served HTML matched the tracked pages byte-for-byte. The owner field matched `.env.youtube-audit-owner`; no values were printed. Public URLs are listed above.
+- `Backend/app/sources/youtube/policy.py` now records approval for the exact published version. A new policy version fails closed until the approved version is updated. `GoogleLiveSettings` ignores the former local policy-approval variable. LIVE approval remains separate and fail-closed.
+- The Vercel capability endpoint still reports `read_only=true`, `fetch_enabled=false`, and `source_selection_supported=false`; no sources are enabled, including Bing. The code change adds truthful YouTube policy status/version to the no-runtime response but does not enable public Fetch or provider traffic.
+- G0 remains PASS at `c5ab57724cd2090b2b807d4c700a5908648957cf`; local HEAD equals `origin/main`. G4 remains BLOCKED (0%), G6 remains PARTIAL (6/12), and total progress remains 78%.
+- No YouTube requests were sent. Provider usage remains 0 `search.list`, 0 `videos.list`. The previously authorized maximum remains one `search.list` plus, only if necessary, one `videos.list`, without retries.
+- Current unresolved evidence: API-key/project association, current Cloud API/quota state, and a suitable hosted runtime with shared job/quota state. The Vercel deployment has no such runtime, so the existing hosted page cannot complete the Fetch/consent flow.
+- Code and report changes in this continuation remain local until committed; the public static policy-page commit `c5ab577` is already pushed.

@@ -8,6 +8,7 @@ from starlette.requests import Request
 from app.api.fetches import _require_youtube_policy_consent
 from app.google_live_settings import GoogleLiveSettings
 from app.sources.youtube.policy import (
+    YOUTUBE_POLICY_APPROVED,
     YOUTUBE_POLICY_VERSION,
     YOUTUBE_POLICY_VERSION_HEADER,
 )
@@ -38,18 +39,20 @@ class DistributedFacade:
 
 
 class YouTubePolicyConsentTests(unittest.TestCase):
-    def test_live_runtime_requires_separate_live_and_policy_approval(self):
-        live_only = GoogleLiveSettings.from_environment({
-            "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "true",
+    def test_publication_approval_is_code_managed_and_live_stays_separate(self):
+        no_live_approval = GoogleLiveSettings.from_environment({
+            "TREND_SCOUT_YOUTUBE_POLICY_APPROVED": "false",
         })
-        both_approved = GoogleLiveSettings.from_environment({
+        live_approved = GoogleLiveSettings.from_environment({
             "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "true",
-            "TREND_SCOUT_YOUTUBE_POLICY_APPROVED": "true",
         })
 
-        self.assertFalse(live_only.youtube_approval_configured)
-        self.assertFalse(live_only.youtube_policy_approved)
-        self.assertTrue(both_approved.youtube_approval_configured)
+        self.assertTrue(YOUTUBE_POLICY_APPROVED)
+        self.assertTrue(no_live_approval.youtube_policy_approved)
+        self.assertFalse(no_live_approval.youtube_live_approved)
+        self.assertFalse(no_live_approval.youtube_approval_configured)
+        self.assertTrue(live_approved.youtube_policy_approved)
+        self.assertTrue(live_approved.youtube_approval_configured)
 
     def test_unpublished_policy_blocks_youtube_fetch(self):
         with self.assertRaises(HTTPException) as raised:

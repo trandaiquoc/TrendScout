@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from app.ports.storage import StorageError
 from app.sources.catalog import SOURCE_CAPABILITIES, WIKIMEDIA_SOURCE_ID
 from app.sources.query_plan import get_query_plan
+from app.sources.youtube.policy import YOUTUBE_POLICY_APPROVED, YOUTUBE_POLICY_VERSION
 
 router = APIRouter()
 _RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_catalog.json"
@@ -411,6 +412,10 @@ async def capabilities(request: Request, response: Response):
                     else None)
     youtube_workflow = getattr(distributed, "youtube_capabilities", {
         "approval_status": "PENDING_LIVE_APPROVAL",
+        "policy_status": "APPROVED" if YOUTUBE_POLICY_APPROVED else "DRAFT",
+        "policy_version": YOUTUBE_POLICY_VERSION,
+        "policy_agreement_required": True,
+        "live_host_status": "NOT_DESIGNATED",
         "configuration_status": "NOT_CONFIGURED",
         "live_status": "CACHE_ONLY",
         "provider_quota_status": "UNKNOWN",
