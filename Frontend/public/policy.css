@@ -1,18 +1,128 @@
-:root { font-family: system-ui, -apple-system, sans-serif; color: #17223b; background: #f5f7fb; }
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #17223b;
+  background: #eef2f8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; }
-header { background: #fff; border-bottom: 1px solid #dbe3ef; padding: 15px 5%; display: flex; align-items: center; justify-content: space-between; }
-header a { color: #17356e; font-weight: 700; }
-main { max-width: 1380px; margin: 24px auto; padding: 0 32px 48px; }
-h1 { font-size: 34px; margin: 8px 0; }
-h2 { font-size: 17px; margin: 0 0 8px; }
-p, li { font-size: 14px; line-height: 1.45; margin: 5px 0; }
-a { color: #064db2; }
-.draft { background: #fff2d5; color: #704200; padding: 10px 14px; font-weight: 750; font-size: 13px; }
-.intro { margin: 12px 0 18px; color: #47566d; }
-.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-section { background: white; padding: 15px 18px; border: 1px solid #dbe3ef; border-radius: 8px; }
-.placeholder { color: #8d340f; font-weight: 700; }
-footer { margin-top: 16px; font-size: 13px; }
-@media (max-width: 700px) { .grid { grid-template-columns: 1fr; } main { padding: 0 18px 36px; } }
-@media print { header { padding: 8px 0; } main { margin: 0; padding: 8px 0; } .grid { display: block; } section { break-inside: avoid; margin-bottom: 8px; } .draft { print-color-adjust: exact; } }
+
+body {
+  min-width: 320px;
+  margin: 0;
+  line-height: 1.65;
+}
+
+a { color: #174ea6; text-underline-offset: 0.18em; }
+a:hover { color: #0c3577; }
+a:focus-visible { outline: 3px solid #1769aa; outline-offset: 3px; }
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 64px;
+  padding: 12px max(20px, calc((100vw - 900px) / 2));
+  background: #fff;
+  border-bottom: 1px solid #d7e0ed;
+}
+
+.site-header a { font-weight: 650; }
+.brand { color: #18366e; font-size: 1.08rem; text-decoration: none; }
+.site-header nav { font-size: 0.95rem; }
+
+main {
+  width: min(100% - 32px, 820px);
+  margin: 32px auto 64px;
+  padding: clamp(22px, 5vw, 52px);
+  background: #fff;
+  border: 1px solid #d7e0ed;
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgb(28 47 81 / 7%);
+}
+
+h1 {
+  margin: 22px 0 8px;
+  color: #142748;
+  font-size: clamp(2rem, 5vw, 2.65rem);
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+}
+
+h2 {
+  margin: 0 0 8px;
+  color: #19345f;
+  font-size: 1.2rem;
+  line-height: 1.35;
+}
+
+p, dd { margin: 0; font-size: 1rem; }
+p + p { margin-top: 12px; }
+
+.draft {
+  margin: 0;
+  padding: 11px 14px;
+  color: #6b3700;
+  background: #fff0ce;
+  border: 1px solid #e7c786;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.035em;
+}
+
+.intro { max-width: 68ch; color: #43536c; font-size: 1.06rem; }
+
+.policy-facts {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0;
+  padding: 16px 18px;
+  background: #f5f7fb;
+  border: 1px solid #dce4ef;
+  border-radius: 10px;
+}
+
+.policy-facts div { display: grid; grid-template-columns: minmax(100px, 145px) 1fr; gap: 12px; }
+.policy-facts dt { color: #465873; font-size: 0.92rem; font-weight: 700; }
+.policy-facts dd { overflow-wrap: anywhere; }
+.placeholder { color: #813d00; font-weight: 700; }
+
+section {
+  margin: 0;
+  padding: 22px 0;
+  border-bottom: 1px solid #e1e7f0;
+}
+
+section:last-of-type { border-bottom: 0; }
+code { overflow-wrap: anywhere; font-size: 0.92em; }
+
+footer {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #d7e0ed;
+}
+
+footer nav { font-size: 0.95rem; }
+
+@media (max-width: 560px) {
+  .site-header { min-height: 58px; padding-inline: 16px; }
+  main { width: min(100% - 20px, 820px); margin-block: 10px 28px; padding: 20px 17px 26px; border-radius: 10px; }
+  .policy-facts { padding: 13px; }
+  .policy-facts div { grid-template-columns: 1fr; gap: 0; }
+  .policy-facts dt { margin-top: 8px; }
+  section { padding-block: 18px; }
+}
+
+@media print {
+  :root { background: #fff; }
+  .site-header { padding: 8px 0; }
+  main { width: auto; margin: 0; padding: 12px 0; border: 0; box-shadow: none; }
+  section, .policy-facts { break-inside: avoid; }
+  .draft { print-color-adjust: exact; }
+}

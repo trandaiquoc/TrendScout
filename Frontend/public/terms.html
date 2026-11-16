@@ -1,12 +1,72 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Terms of Service — TrendScout</title><link rel="stylesheet" href="/dashboard/policy.css"></head>
-<body><header><a href="/dashboard/">✳ TrendScout</a><nav><a href="/dashboard/">Dashboard</a> · <a href="/dashboard/privacy.html">Privacy Policy</a></nav></header>
-<main><div class="draft">DRAFT — LOCAL CHANGES NOT YET PUBLISHED; owner review required</div>
-<h1>Terms of Service</h1><p class="intro">Operator: Trần Đại Quốc · Contact: <a href="mailto:tdquoc02@gmail.com">tdquoc02@gmail.com</a> · Proposed effective date: 12 November 2026, subject to owner approval and publication.</p>
-<div class="grid">
-<section><h2>1. Demonstration service</h2><p>TrendScout is a personal demonstration for exploring keywords and source evidence. The local demo uses SYNTHETIC fixtures. The public dashboard is read-only. Availability, source coverage and features may change; no production service or accuracy guarantee is represented.</p></section>
-<section><h2>2. YouTube API Services</h2><p>The YouTube integration is implemented but defaults to disabled. As of 16 November 2026, no live YouTube API request has been made. The application requires a user agreement to the current TrendScout policy version before YouTube Fetch and rejects access until the owner approves and publishes the policy. By accepting the in-app agreement before using an enabled TrendScout feature that accesses YouTube API Services, users also agree to be bound by the <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a>. YouTube-derived metrics and keyword extraction remain disabled pending separate policy approval.</p></section>
-<section><h2>3. Privacy and data</h2><p>Read the <a href="/dashboard/privacy.html">TrendScout Privacy Policy</a> and <a href="https://policies.google.com/privacy">Google Privacy Policy</a>. The deletion procedure, log practices and response time remain under review.</p></section>
-<section><h2>4. Appropriate use and limitations</h2><p>Do not disrupt the service, bypass access controls, or use it unlawfully. Source positions are not search volume or purchase intent; inferred indicators are not guarantees or financial advice.</p></section>
-<section><h2>5. Other terms and contact</h2><p>The owner has not selected a governing-law or dispute clause. Questions: <a href="mailto:tdquoc02@gmail.com">tdquoc02@gmail.com</a>.</p><p>This draft has not been accepted on anyone's behalf; the operator must review it before publication.</p></section>
-</div><footer><a href="/dashboard/">Back to dashboard</a> · <a href="/dashboard/privacy.html">Privacy Policy</a></footer></main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Draft terms of service for the TrendScout local demonstration.">
+  <title>Terms of Service — TrendScout</title>
+  <link rel="stylesheet" href="policy.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="https://github.com/trandaiquoc/TrendScout">TrendScout</a>
+    <nav aria-label="Policy documents"><a href="privacy.html">Privacy Policy</a></nav>
+  </header>
+  <main>
+    <p class="draft" role="status">DRAFT — OWNER REVIEW REQUIRED · NOT PUBLISHED · NOT EFFECTIVE</p>
+    <h1>Terms of Service</h1>
+    <p class="intro">These draft terms describe the current local TrendScout demonstration. They are not an offer of a hosted or production service and are not effective until the owner approves and publishes them.</p>
+
+    <dl class="policy-facts">
+      <div><dt>Operator</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: confirm the public operator name.]</dd></div>
+      <div><dt>Contact</dt><dd class="placeholder">[OWNER REVIEW REQUIRED: provide a public contact address.]</dd></div>
+      <div><dt>Effective date</dt><dd>To be set after approval and publication.</dd></div>
+    </dl>
+
+    <section>
+      <h2>1. Demonstration service</h2>
+      <p>TrendScout is a local demonstration for exploring candidate keywords and reviewing their source evidence. It may use synthetic fixtures in offline mode and may contact selected data providers only when an operator configures and enables the corresponding source. Features and data coverage can change as the demonstration is developed.</p>
+      <p>These pages may be published as static policy documents. Their publication does not publish or operate the local backend.</p>
+    </section>
+
+    <section>
+      <h2>2. Permitted use</h2>
+      <p>Use the demonstration lawfully and for evaluation. Do not attempt to bypass its source approvals, consent checks, rate limits, retention controls, or other access protections. Do not use it to disrupt a provider or service, or to collect personal information through source queries.</p>
+      <p>The current demonstration has no user accounts and no self-service account controls. You are responsible for keeping access to your local computer and browser storage appropriate for your use.</p>
+    </section>
+
+    <section>
+      <h2>3. Source evidence and limitations</h2>
+      <p>TrendScout presents provider-reported records, collection times, query scope, and application-generated summaries. Search position is not search volume, view count, popularity, purchase intent, or proof of a trend. A US region filter does not prove that creators or viewers are located in the United States.</p>
+      <p>Keyword candidates and any future indicators depend on the selected provider, its coverage, the sample, the observation window, and the application's methods. They are exploratory evidence, not a guarantee of accuracy, future demand, availability, or commercial outcome. TrendScout currently excludes YouTube records from keyword extraction and scoring.</p>
+    </section>
+
+    <section>
+      <h2>4. YouTube API Services and user agreement</h2>
+      <p>YouTube access is disabled unless the owner approves and publishes the Privacy Policy and Terms, and separately enables the feature. Before an enabled YouTube Fetch, the application requires the user to accept the exact current TrendScout policy version. If approval or publication is missing, the server blocks the Fetch.</p>
+      <p>When using a TrendScout feature that accesses YouTube API Services, you agree to be bound by the <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a> and the applicable <a href="https://developers.google.com/youtube/terms/developer-policies/">YouTube Developer Policies</a>. You must also review the <a href="https://policies.google.com/privacy">Google Privacy Policy</a> and the TrendScout <a href="privacy.html">Privacy Policy</a>.</p>
+    </section>
+
+    <section>
+      <h2>5. Data and deletion</h2>
+      <p>Provider data is handled as described in the <a href="privacy.html">Privacy Policy</a>. The local deletion workflow can remove YouTube data held in supported TrendScout SQLite stores after an operator verifies the request. It does not remove data held by YouTube, browser local storage on your device, or copies in backups or console output outside the application.</p>
+    </section>
+
+    <section>
+      <h2>6. Availability and changes</h2>
+      <p>This is a demonstration that may be unavailable, incomplete, or changed without advance notice. No uptime, particular source coverage, or long-term availability is promised. Do not rely on it as the sole basis for a business or purchasing decision.</p>
+      <p>When these terms or the Privacy Policy change, the operator will update the published pages and the application policy version before enabling affected features. Users will be asked to accept the updated version where the application requires it.</p>
+    </section>
+
+    <section>
+      <h2>7. Owner review still required</h2>
+      <p class="placeholder">Before publication, the owner must confirm the operator and contact details and obtain appropriate review of governing law, dispute handling, liability language, age eligibility, and any other legal terms. This draft intentionally does not choose those legal positions.</p>
+    </section>
+
+    <footer>
+      <p class="placeholder">Owner action required: replace every bracketed placeholder, review this document with the Privacy Policy, approve both documents, and publish them before enabling YouTube.</p>
+      <nav aria-label="Related documents"><a href="privacy.html">Privacy Policy</a> · <a href="https://www.youtube.com/t/terms">YouTube Terms of Service</a></nav>
+    </footer>
+  </main>
+</body>
+</html>

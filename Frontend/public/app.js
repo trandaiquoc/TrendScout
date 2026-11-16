@@ -2073,6 +2073,11 @@ async function openDetail(id) {
 }
 
 function showView(name) {
+  if (name === 'main-content') {
+    closeMobileNav();
+    $('#main-content').focus();
+    return;
+  }
   const legacyOverview = name === 'results' || name === 'keywords';
   const dashboardTab = name === 'analysis' ? 'analysis' : 'overview';
   const valid = new Set(['overview', 'analysis', 'collections', 'sources', 'runs', 'algorithms', 'quality', 'research', 'settings']);
@@ -2619,6 +2624,9 @@ function bindEvents() {
   });
   document.addEventListener('trendscout:locale', () => {
     updateNavigationLabels();
+    if (!state.persistedDatasetAvailable && isLocalLiveDemo(state.capabilities)) {
+      $('#overview-context').textContent = t('overview.no-fetch-context');
+    }
     if (state.run) {
       updateRun(state.run);
     }
