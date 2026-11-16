@@ -648,10 +648,15 @@ class CollectionService:
                 flags.extend(str(value) for value in source_flags)
             elif source_flags:
                 flags.append(str(source_flags))
-            manifests.append({key: source.get(key) for key in (
-                  "source_id", "status", "data_mode", "delivery_state", "record_count",
-                  "coverage", "quality_flags",
-                "error_code", "retry_after_seconds") if source.get(key) is not None})
+            manifest = {key: source.get(key) for key in (
+                "source_id", "status", "data_mode", "delivery_state", "coverage",
+                "quality_flags", "error_code", "retry_after_seconds",
+            ) if source.get(key) is not None}
+            # Keep source-level counts so a later targeted deletion can redact one
+            # provider from mixed Fetch history without guessing aggregate totals.
+            manifest["record_count"] = declared
+            manifest["received_record_count"] = len(raw_records)
+            manifests.append(manifest)
         if skipped:
             flags.append("CLEANING_REJECTIONS")
         if policy_excluded:

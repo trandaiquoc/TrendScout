@@ -85,8 +85,10 @@ class SmartCollectionsTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(tuple(snapshot[:5]), ("PARTIAL", 1, 1, 0, 0))
         self.assertIn("YOUTUBE_KEYWORD_EXTRACTION_DISABLED", snapshot["quality_flags"])
-        self.assertEqual(json.loads(snapshot["source_manifest"])[0]["source_id"],
-                         "youtube_video_search")
+        manifest = json.loads(snapshot["source_manifest"])
+        self.assertEqual(manifest[0]["source_id"], "youtube_video_search")
+        self.assertEqual(manifest[0]["record_count"], 1)
+        self.assertEqual(manifest[0]["received_record_count"], 1)
 
     def test_youtube_capability_keeps_observation_and_cache_delivery_times_separate(self):
         from types import SimpleNamespace

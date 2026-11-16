@@ -54,7 +54,10 @@ from app.sources.serpapi.errors import SerpApiError
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION
 from app.sources.youtube.query_planner import select_youtube_query_scopes
-from app.sources.youtube.retention import purge_expired_youtube_cache
+from app.sources.youtube.retention import (
+    purge_expired_youtube_cache,
+    purge_expired_youtube_checkpoints,
+)
 from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
@@ -286,13 +289,17 @@ async def normal_google_live_composition(*, user_agent,
             allowed=True,
         )
 
-    def cleanup_youtube_cache():
+    def cleanup_youtube_data():
         now = utcnow()
-        return purge_expired_youtube_cache(
+        cache_deleted = purge_expired_youtube_cache(
             cache, youtube_cache_scope, youtube_cache_grant_at(now), now=now
         )
+        checkpoint_counts = purge_expired_youtube_checkpoints(
+            store, snapshot_blobs, now=now, state_key=GOOGLE_STATE_KEY
+        )
+        return {"cache_entries": int(cache_deleted), **checkpoint_counts}
 
-    cleanup_youtube_cache()
+    cleanup_youtube_data()
     resources = []
     quota_state = {"status": "NOT_CONFIGURED", "snapshot": None}
     try:
@@ -712,7 +719,7 @@ async def normal_google_live_composition(*, user_agent,
                 return {"status": "UNAVAILABLE"}
 
         facade.youtube_quota_metadata = youtube_quota_metadata
-        facade.youtube_retention_cleanup = cleanup_youtube_cache
+        facade.youtube_retention_cleanup = cleanup_youtube_data
 
         def google_quota_metadata():
             try:

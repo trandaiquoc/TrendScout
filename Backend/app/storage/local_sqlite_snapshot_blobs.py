@@ -48,6 +48,58 @@ class LocalSQLiteSnapshotBlobs:
             connection.commit()
             return cursor.rowcount
 
+    def delete_expired_unreferenced(self, digests, *, now):
+        """Delete expired candidates only when no persisted checkpoint refers to them."""
+        now = _utc(now).isoformat()
+        if (not isinstance(digests, (set, frozenset, tuple, list))
+                or any(not isinstance(value, str)
+                       or len(value) != 64
+                       or any(char not in "0123456789abcdef" for char in value)
+                       for value in digests)):
+            raise ValueError("snapshot digest candidates must be lowercase SHA-256 values")
+        candidates = set(digests)
+        if not candidates:
+            return {"deleted": 0, "retained_referenced": 0}
+
+        def referenced_digests(value):
+            found = set()
+            if isinstance(value, dict):
+                reference = value.get("snapshot_ref")
+                digest = reference.get("digest") if isinstance(reference, dict) else None
+                if isinstance(digest, str):
+                    found.add(digest)
+                for child in value.values():
+                    found.update(referenced_digests(child))
+            elif isinstance(value, list):
+                for child in value:
+                    found.update(referenced_digests(child))
+            return found
+
+        with closing(self.store._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                references = set()
+                for (serialized,) in connection.execute(
+                        "SELECT state_json FROM atomic_state"):
+                    state = json.loads(serialized)
+                    if not isinstance(state, dict):
+                        raise ValueError("atomic state must be an object")
+                    references.update(referenced_digests(state))
+                retained = candidates & references
+                deletable = candidates - retained
+                deleted = 0
+                for digest in deletable:
+                    cursor = connection.execute(
+                        "DELETE FROM source_snapshot_blobs WHERE digest=? AND retain_until<=?",
+                        (digest, now),
+                    )
+                    deleted += cursor.rowcount
+                connection.commit()
+                return {"deleted": deleted, "retained_referenced": len(retained)}
+            except BaseException:
+                connection.rollback()
+                raise
+
     def put(self, records, *, now, retain_until):
         now, retain_until = _utc(now), _utc(retain_until)
         if not isinstance(records, list) or len(records) > 5000 or retain_until <= now:

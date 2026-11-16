@@ -1,17 +1,25 @@
 """YouTube-only cache deletion at provider retention boundaries."""
 
 import asyncio
+import json
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from local_security_helpers import private_test_directory
+
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.main import _run_youtube_retention_sweeper
-from app.sources.catalog import YOUTUBE_SOURCE_ID
+from app.sources.catalog import GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
-from app.sources.youtube.retention import purge_expired_youtube_cache
+from app.sources.youtube.retention import (
+    purge_expired_youtube_cache,
+    purge_expired_youtube_checkpoints,
+)
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
 
 
 class MemoryAtomicStore:
@@ -150,6 +158,90 @@ class YouTubeRetentionSweeperTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertEqual(calls, ["cleanup"])
+
+
+class YouTubeCheckpointRetentionTests(unittest.TestCase):
+    def test_expired_youtube_checkpoints_and_only_unshared_expired_blobs_are_removed(self):
+        now = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as temporary:
+            private = private_test_directory(temporary)
+            store = LocalSQLiteAtomicStateStore.for_local_live(private / "state.sqlite")
+            blobs = LocalSQLiteSnapshotBlobs(store)
+            retention_end = now - timedelta(hours=1)
+            shared = blobs.put([{"provider_video_id": "AbCdEf12345"}],
+                               now=now - timedelta(hours=3), retain_until=retention_end)
+            youtube_only = blobs.put([{"provider_video_id": "ZyXwVu98765"}],
+                                     now=now - timedelta(hours=3), retain_until=retention_end)
+            later = blobs.put([{"provider_video_id": "LmNoPq54321"}],
+                              now=now - timedelta(hours=3),
+                              retain_until=now + timedelta(hours=1))
+            expired = (now - timedelta(minutes=1)).isoformat()
+            fresh = (now + timedelta(minutes=30)).isoformat()
+            job_expiry = (now + timedelta(hours=1)).isoformat()
+
+            def seed(_state):
+                return ({"jobs": {
+                    "expired-youtube": {
+                        "expires_at": job_expiry,
+                        "source_checkpoints": {YOUTUBE_SOURCE_ID: {
+                            "retain_until": expired,
+                            "snapshot_ref": {**shared, "path": ["result", "records"]},
+                        }},
+                    },
+                    "expired-youtube-only": {
+                        "expires_at": job_expiry,
+                        "source_checkpoints": {YOUTUBE_SOURCE_ID: {
+                            "retain_until": expired,
+                            "snapshot_ref": {**youtube_only, "path": ["result", "records"]},
+                        }},
+                    },
+                    "fresh-youtube": {
+                        "expires_at": job_expiry,
+                        "source_checkpoints": {YOUTUBE_SOURCE_ID: {
+                            "retain_until": fresh,
+                            "snapshot_ref": {**later, "path": ["result", "records"]},
+                        }},
+                    },
+                    "other-source": {
+                        "expires_at": job_expiry,
+                        "source_checkpoints": {GOOGLE_SOURCE_ID: {
+                            "retain_until": expired,
+                            "snapshot_ref": {**shared, "path": ["result", "records"]},
+                        }},
+                    },
+                }, "quota": {"youtube": {"used": 2}}}, None)
+
+            store.transact("normal-google-live-v1", seed)
+            result = purge_expired_youtube_checkpoints(
+                store, blobs, now=now, state_key="normal-google-live-v1"
+            )
+            self.assertEqual(result, {
+                "expired_checkpoints": 2,
+                "invalid_checkpoints": 0,
+                "deleted_blobs": 1,
+                "retained_referenced_blobs": 1,
+            })
+            with closing(store._connect()) as connection:
+                state = json.loads(connection.execute(
+                    "SELECT state_json FROM atomic_state WHERE state_key=?",
+                    ("normal-google-live-v1",),
+                ).fetchone()[0])
+                persisted_digests = {row[0] for row in connection.execute(
+                    "SELECT digest FROM source_snapshot_blobs")}
+            self.assertNotIn(YOUTUBE_SOURCE_ID,
+                             state["jobs"]["expired-youtube"]["source_checkpoints"])
+            self.assertIn(GOOGLE_SOURCE_ID,
+                          state["jobs"]["other-source"]["source_checkpoints"])
+            self.assertIn(YOUTUBE_SOURCE_ID,
+                          state["jobs"]["fresh-youtube"]["source_checkpoints"])
+            self.assertEqual(state["quota"], {"youtube": {"used": 2}})
+            self.assertNotIn(youtube_only["digest"], persisted_digests)
+            self.assertIn(shared["digest"], persisted_digests)
+            self.assertIn(later["digest"], persisted_digests)
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 if __name__ == "__main__":
