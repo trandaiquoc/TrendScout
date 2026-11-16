@@ -155,6 +155,16 @@
         <section class="view-panel" data-view="sources" hidden aria-labelledby="sources-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="sources.kicker"></p><h1 id="sources-heading" data-i18n="sources.title"></h1><p data-i18n="sources.description"></p></div><span class="page-heading-mark" aria-hidden="true">◎</span></div>
           <div class="notice notice--info"><span class="notice-icon" aria-hidden="true">i</span><p data-i18n="sources.scope-note"></p></div>
+          <section class="panel fetch-defaults" aria-labelledby="fetch-defaults-heading">
+            <div class="panel-heading"><div><p class="section-kicker" data-i18n="sources.fetch-defaults-kicker"></p><h2 id="fetch-defaults-heading" data-i18n="sources.fetch-defaults-title"></h2></div></div>
+            <p class="fine-print" data-i18n="sources.fetch-defaults-help"></p>
+            <fieldset id="fetch-default-sources" class="fetch-default-source-list"><legend class="sr-only" data-i18n="sources.fetch-defaults-title"></legend></fieldset>
+            <p id="fetch-default-status" class="fine-print" role="status" aria-live="polite"></p>
+          </section>
+          <section id="serpapi-provider-budget" class="panel serpapi-provider-budget" aria-labelledby="serpapi-provider-heading" hidden>
+            <div class="panel-heading"><div><p class="section-kicker" data-i18n="sources.provider-kicker"></p><h2 id="serpapi-provider-heading" data-i18n="sources.provider-title"></h2></div></div>
+            <dl id="serpapi-provider-budget-values" class="detail-list"></dl>
+          </section>
           <div class="source-library-heading"><h2 data-i18n="sources.active-title"></h2></div>
           <p id="source-registry-state" class="source-registry-state" role="status" data-i18n="common.loading"></p>
           <button id="source-capabilities-retry" class="button button-secondary" type="button" hidden data-i18n="phoenix.retry"></button>

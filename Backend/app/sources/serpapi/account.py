@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 
@@ -34,6 +34,7 @@ class AccountQuotaSnapshot:
     month_to_date_searches: int
     current_hour_searches: int
     hourly_limit: int
+    plan_renewal_date: str | None = None
 
     def public_metadata(self) -> dict:
         """Expose numeric quota metadata only; omit account identifiers and raw JSON."""
@@ -45,6 +46,7 @@ class AccountQuotaSnapshot:
             "month_to_date_searches": self.month_to_date_searches,
             "current_hour_searches": self.current_hour_searches,
             "hourly_limit": self.hourly_limit,
+            "plan_renewal_date": self.plan_renewal_date,
         }
 
 
@@ -76,6 +78,15 @@ def parse_account_response(response: httpx.Response, *, observed_at: datetime) -
         month_usage = _count(payload, "this_month_usage")
         this_hour = _count(payload, "this_hour_searches")
         hourly_limit = _count(payload, "account_rate_limit_per_hour")
+        renewal = payload.get("plan_renewal_date")
+        if renewal is not None:
+            if not isinstance(renewal, str) or len(renewal) != 10:
+                raise ValueError("invalid account renewal date")
+            renewal_date = date.fromisoformat(renewal)
+            if renewal_date.isoformat() != renewal:
+                raise ValueError("invalid account renewal date")
+        else:
+            renewal = None
         if total_left is None or month_usage is None or this_hour is None or hourly_limit is None:
             raise ValueError("account quota fields are incomplete")
         monthly_remaining = min(plan_left, total_left) if plan_left is not None else None
@@ -89,6 +100,7 @@ def parse_account_response(response: httpx.Response, *, observed_at: datetime) -
             month_to_date_searches=month_usage,
             current_hour_searches=this_hour,
             hourly_limit=hourly_limit,
+            plan_renewal_date=renewal,
         )
     except SerpApiError:
         raise

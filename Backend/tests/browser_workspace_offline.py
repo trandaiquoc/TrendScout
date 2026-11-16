@@ -221,6 +221,11 @@ CHECK = r"""<script>
       check(document.activeElement===menuButton,'mobile navigation restores focus to its trigger');
     }
     await go('sources');await wait(40);
+    const fetchDefaults=document.querySelector('#fetch-default-sources');
+    check(fetchDefaults?.querySelectorAll('input[type=checkbox]').length===4,'Source Center renders one default-Fetch control per source');
+    check([...fetchDefaults.querySelectorAll('input[type=checkbox]')].every(input=>input.disabled),'source preferences cannot enable server-disabled adapters');
+    check(!document.querySelector('#serpapi-provider-budget').hidden,'shared SerpApi account quota is shown in Source Center');
+    check(document.querySelector('#serpapi-provider-budget').textContent.includes('Bing'),'provider section distinguishes the Bing allocation');
     const sourceLibrary=document.querySelector('#source-library-disclosure');
     check(Boolean(sourceLibrary&&!sourceLibrary.open),'secondary locked research inventory starts collapsed');
     const sourceSearch=document.querySelector('#source-library-search');sourceSearch.value='youtube';sourceSearch.dispatchEvent(new Event('input',{bubbles:true}));

@@ -244,6 +244,7 @@ def _account_response(*, remaining=9, plan_remaining=9, hour_used=2, hour_limit=
         "plan_searches_left": plan_remaining,
         "total_searches_left": remaining,
         "this_month_usage": 241,
+        "plan_renewal_date": "2026-12-14",
         "this_hour_searches": hour_used,
         "account_rate_limit_per_hour": hour_limit,
     })
@@ -269,11 +270,13 @@ class SerpApiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].url.params["api_key"], FAKE_KEY)
         self.assertEqual(snapshot.total_remaining, 9)
         self.assertEqual(snapshot.monthly_remaining, 9)
+        self.assertEqual(snapshot.plan_renewal_date, "2026-12-14")
         self.assertNotIn(FAKE_KEY, repr(snapshot))
         self.assertNotIn("private@example.invalid", repr(snapshot))
         self.assertEqual(set(snapshot.public_metadata()), {
             "observed_at", "monthly_limit", "monthly_remaining", "total_remaining",
             "month_to_date_searches", "current_hour_searches", "hourly_limit",
+            "plan_renewal_date",
         })
 
     async def test_account_budget_fails_closed_when_remaining_is_below_reserve(self):

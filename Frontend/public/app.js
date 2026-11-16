@@ -1,5 +1,5 @@
 import { getJson, requestJson } from './modules/api.js';
-import { acceptsDiscovery, canStartFetch, isLocalLiveDemo, loadCapabilities, renderSourceCapabilities } from './modules/capabilities.js';
+import { acceptsDiscovery, canStartFetch, defaultFetchSourceIds, isLocalLiveDemo, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
 import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
@@ -972,6 +972,7 @@ async function loadPublicCapabilities() {
       scheduleCapabilityRefresh(60000);
     }
     renderSourceCapabilities(capabilities, t);
+    renderFetchDefaults(capabilities, t);
     sourceLibrary.setCapabilities(capabilities);
     renderFetchPresentation();
   } catch {
@@ -979,6 +980,7 @@ async function loadPublicCapabilities() {
     state.fetchReady = false;
     state.fetchBlockReason = null;
     renderSourceCapabilities(null, t);
+    renderFetchDefaults(null, t);
     sourceLibrary.setCapabilities(null);
     renderFetchPresentation();
     $('#fetch-readiness').textContent = t('fetch.capability-unavailable');
@@ -1029,7 +1031,7 @@ const fetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale,
   sourceIds: () => {
     const selected = $('#fetch-source-select')?.value;
-    return selected ? [selected] : null;
+    return selected ? [selected] : defaultFetchSourceIds(state.capabilities);
   },
 });
 const historyFetchController = new PublicFetchController({

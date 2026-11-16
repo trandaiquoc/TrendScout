@@ -63,6 +63,17 @@ def initial_offset(context: QueryContext) -> ScopedOffset:
 
 def validate_context(context: QueryContext) -> None:
     """Reject client-created queries and tampered plan or provider metadata."""
+    if context.plan_id == "bing-saved-candidate-serp" and context.plan_version == 1:
+        try:
+            from app.sources.bing_search.verification_plan import validate_dynamic_context
+            valid = validate_dynamic_context(
+                context, policy_fingerprint=context.plan_fingerprint
+            )
+        except (AttributeError, TypeError, ValueError):
+            valid = False
+        if valid:
+            return
+        raise ValueError("Query is outside the registered Bing candidate plan")
     if context.plan_id == "google-trend-candidate-serp" and context.plan_version == 1:
         try:
             from app.sources.google_trends.verification_plan import validate_dynamic_context

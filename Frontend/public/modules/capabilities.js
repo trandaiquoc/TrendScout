@@ -29,6 +29,114 @@ const STATUS_FIELDS = [
   ['sources.latest-fetch', null],
   ['sources.production-readiness', 'production_readiness'],
 ];
+const FETCH_DEFAULTS_KEY = 'trendscout.fetch-default-sources.v1';
+
+function enabledSourceIds(capabilities) {
+  return (Array.isArray(capabilities?.sources) ? capabilities.sources : [])
+    .filter((source) => source?.enabled_for_current_operation === true)
+    .map((source) => source.source_id)
+    .filter((sourceId) => typeof sourceId === 'string');
+}
+
+function readFetchDefaults() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FETCH_DEFAULTS_KEY) || 'null');
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+      ? [...new Set(parsed)] : null;
+  } catch {
+    return null;
+  }
+}
+
+export function defaultFetchSourceIds(capabilities) {
+  const enabled = enabledSourceIds(capabilities);
+  const saved = readFetchDefaults();
+  if (!saved) return null;
+  const selected = saved.filter((sourceId) => enabled.includes(sourceId));
+  return selected.length ? selected : null;
+}
+
+export function renderFetchDefaults(capabilities, translate) {
+  const fieldset = document.querySelector('#fetch-default-sources');
+  const status = document.querySelector('#fetch-default-status');
+  if (!fieldset) return;
+  const saved = readFetchDefaults();
+  const enabled = enabledSourceIds(capabilities);
+  const selected = new Set(saved ? saved.filter((sourceId) => enabled.includes(sourceId)) : enabled);
+  const labels = {
+    wikimedia_pageviews_top_per_country: 'fetch.source.wikimedia',
+    google_web_serp: 'fetch.source.google',
+    bing_web_serp: 'fetch.source.bing',
+    youtube_video_search: 'fetch.source.youtube',
+  };
+  fieldset.replaceChildren();
+  for (const source of Array.isArray(capabilities?.sources) ? capabilities.sources : []) {
+    const sourceId = source?.source_id;
+    if (typeof sourceId !== 'string') continue;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = sourceId;
+    input.checked = selected.has(sourceId);
+    input.disabled = source.enabled_for_current_operation !== true;
+    const label = document.createElement('label');
+    const nameKey = labels[sourceId];
+    label.append(input, document.createTextNode(' ' + (nameKey ? translate(nameKey) : source.display_name || sourceId)));
+    fieldset.append(label);
+  }
+  fieldset.onchange = () => {
+    const values = [...fieldset.querySelectorAll('input[type="checkbox"]:checked')]
+      .map((input) => input.value);
+    if (!values.length) {
+      fieldset.querySelector('input[type="checkbox"]:enabled')?.click();
+      if (status) status.textContent = translate('sources.fetch-defaults-required');
+      return;
+    }
+    try {
+      localStorage.setItem(FETCH_DEFAULTS_KEY, JSON.stringify(values));
+      if (status) status.textContent = translate('sources.fetch-defaults-saved');
+    } catch {
+      if (status) status.textContent = translate('sources.fetch-defaults-storage-error');
+    }
+  };
+  if (status) status.textContent = saved
+    ? translate('sources.fetch-defaults-saved') : translate('sources.fetch-defaults-all');
+}
+
+function renderSerpApiProviderBudget(capabilities, translate) {
+  const section = document.querySelector('#serpapi-provider-budget');
+  const values = document.querySelector('#serpapi-provider-budget-values');
+  if (!section || !values) return;
+  const sourceIds = new Set((Array.isArray(capabilities?.sources) ? capabilities.sources : [])
+    .map((source) => source?.source_id));
+  section.hidden = !sourceIds.has('google_web_serp') && !sourceIds.has('bing_web_serp');
+  values.replaceChildren();
+  if (section.hidden) return;
+  const quota = capabilities?.google_quota || {};
+  const provider = quota.provider_account || {};
+  const workflow = capabilities?.google_workflow || {};
+  const format = (value) => Number.isInteger(value)
+    ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(value)
+    : translate('common.unavailable');
+  const observed = provider.observed_at ? new Date(provider.observed_at) : null;
+  const checkedAt = observed && !Number.isNaN(observed.getTime())
+    ? new Intl.DateTimeFormat(document.documentElement.lang || 'vi', {dateStyle:'medium',timeStyle:'short'}).format(observed)
+    : translate('common.unavailable');
+  capabilityRow(values, translate('sources.provider-status'),
+    localizedStatus(quota.provider_account_status || workflow.account_api, translate));
+  capabilityRow(values, translate('sources.provider-usage'), translate('source.provider-quota-summary', {
+    limit: format(provider.monthly_limit), used: format(provider.month_to_date_searches),
+    remaining: format(provider.monthly_remaining ?? provider.total_remaining),
+  }));
+  capabilityRow(values, translate('sources.provider-reserve'),
+    format(workflow.cross_machine_reserve));
+  capabilityRow(values, translate('sources.provider-reset'),
+    provider.plan_renewal_date || translate('common.unavailable'));
+  capabilityRow(values, translate('sources.provider-checked'), checkedAt);
+  capabilityRow(values, translate('sources.google-allocation'),
+    quota.serpapi?.monthly?.limit == null ? translate('common.unavailable')
+      : format(quota.serpapi.monthly.limit));
+  capabilityRow(values, translate('sources.bing-allocation'), translate('common.unavailable'));
+}
 
 export function loadCapabilities(locale = 'vi') {
   return getJson('/api/v1/capabilities', { locale });
@@ -105,6 +213,7 @@ function savedFetchSummary(activity, translate) {
 }
 
 export function renderSourceCapabilities(capabilities, translate) {
+  renderSerpApiProviderBudget(capabilities, translate);
   const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
   const grid = document.querySelector('#source-registry-list');
   const state = document.querySelector('#source-registry-state');
@@ -144,11 +253,19 @@ export function renderSourceCapabilities(capabilities, translate) {
           `${translate('source.quota-daily')}: ${quotaUse(quota.serpapi?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.serpapi?.monthly, translate)}`);
         capabilityRow(list, translate('source.google-rss-budget'),
           `${translate('source.quota-daily')}: ${quotaUse(quota.google_rss?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.google_rss?.monthly, translate)}`);
-        const providerRemaining = quota.provider_account
-          && Number.isInteger(quota.provider_account.total_remaining)
-          ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(quota.provider_account.total_remaining)
+        const provider = quota.provider_account || {};
+        const formatProviderCount = (value) => Number.isInteger(value)
+          ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(value)
           : translate('common.unavailable');
-        capabilityRow(list, translate('source.google-provider-remaining'), providerRemaining);
+        capabilityRow(list, translate('source.google-provider-quota'), translate('source.provider-quota-summary', {
+          limit: formatProviderCount(provider.monthly_limit),
+          used: formatProviderCount(provider.month_to_date_searches),
+          remaining: formatProviderCount(provider.monthly_remaining ?? provider.total_remaining),
+        }));
+        capabilityRow(list, translate('source.google-provider-reset'),
+          provider.plan_renewal_date || translate('common.unavailable'));
+        capabilityRow(list, translate('source.google-provider-remaining'),
+          formatProviderCount(provider.total_remaining));
         const saved = descriptor.last_saved_fetch?.google_coverage;
         if (saved && typeof saved === 'object') {
           const modeKey = saved.discovery_mode === 'RSS_LIMITED_DISCOVERY'
