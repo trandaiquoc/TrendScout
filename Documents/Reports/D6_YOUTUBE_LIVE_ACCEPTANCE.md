@@ -1,23 +1,25 @@
 # D6 YouTube LIVE Acceptance
 
-**Reviewed:** 16 November 2026
+**Reviewed:** 17 November 2026
 
-**Status:** offline implementation complete. The owner-approved Privacy Policy and Terms are publicly available and verified. Genuine LIVE acceptance remains blocked by API-key/project verification and current quota evidence for the designated Windows host `QUOC`. Vercel remains intentionally read-only. No YouTube request was sent.
+**Status:** 84% complete. The Windows `QUOC` local LIVE application, approved policy consent, SQLite persistence, Source Center, Run History, and Data Quality were exercised. The attempted YouTube-only Fetch failed before provider HTTP because the owner-acceptance launcher admitted an out-of-schedule initial slot and the query planner rejected its timestamp. That bypass path has now been removed. No real YouTube response was obtained, so G4 is not passed and this report does not claim 100%. The next eligible refresh is 15:00 `Asia/Ho_Chi_Minh` on 17 November 2026. Vercel remains intentionally read-only.
 
 ## Gate status
 
 | Gate | Weight | Status | Evidence |
 |---|---:|---|---|
-| G0 — Repository synchronization | 8% | PASS | `git fetch origin` completed on 16 November 2026; `HEAD` and `origin/main` both point to `2c8e03b`. No reset or overwrite was used; the pre-existing untracked `.playwright-cli/` directory was preserved. |
+| G0 — Repository synchronization | 8% | PASS | `git fetch origin` found `origin/main` at `6def12b`; local commits `1d35603`, `de3bebb` and `23fbb9b` are ahead without rewriting or pushing. Untracked `.playwright-cli/` was preserved. |
 | G1 — YouTube API contract | 12% | PASS (offline) | Fixed `search.list` and bounded `videos.list` request builders/parsers, source identity, validation, pagination binding and method-specific gateway routing are implemented and tested. No provider response was received. |
 | G2 — Quota governance | 18% | PASS (offline) | Separate durable search and other-method pools, pre-request reservation, provider-day timezone handling and conservative failure accounting are implemented and tested. Actual Cloud project quota remains UNKNOWN. |
-| G3 — Schedule, cache and Source Center | 12% | PASS (offline) | Manual schedule eligibility, cache-first/stale delivery, focused expiry, and Vietnamese/English Source Center budget and status fields are implemented and tested. |
-| G4 — Genuine YouTube LIVE evidence | 16% | BLOCKED — 0% | The owner authorized up to two requests total (at most one `search.list` and one `videos.list`, no retries); neither was used. Owner-approved policies are publicly verified, and code now records their approval separately from LIVE approval. The pasted project/quota evidence is not a current reading; API key/project association and current quota remain unverified. Vercel is intentionally read-only and does not block the designated local Windows acceptance. No provider request was sent. |
-| G5 — SQLite and application flow | 16% | PASS (offline) | Synthetic-only tests prove Fetch result persistence, API readback after SQLite reopen, source-selection combinations, cache-only delivery and exclusion from keyword scoring. No synthetic record is labeled LIVE. |
-| G6 — Regression and browser QA | 12% | PARTIAL (6 points credited) | Focused backend suites passed, including all 18 Wikimedia gateway tests; the current focused run passed 39 tests. Ruff and `git diff --check` passed. The owner waived the unrelated legacy Firestore emulator suite for D6; its 16 setup failures remain reported and were not represented as passes. Hosted browser QA confirmed the policy state. Vercel is intentionally read-only, so its disabled Fetch/source selection is not a D6 blocker. Windows `QUOC` live browser acceptance remains incomplete while G4 is blocked. |
-| G7 — Report and commits | 6% | PASS | Implementation commit `3b27393` was pushed; the hosted API returned the approved policy status/version. This follow-up records that deployment verification. |
+| G3 — Schedule, cache and Source Center | 12% | PASS | Local Source Center shows approved `d6-youtube-v2`, the actual refresh schedule, provider quota as UNKNOWN, and the next eligible time. Cache and schedule behavior remain covered by focused tests. |
+| G4 — Genuine YouTube LIVE evidence | 16% | NOT PASSED — 0% | The accepted YouTube-only Fetch ended `PARTIAL`; its source is `FAILED` with `SOURCE_EXECUTION_FAILED`. The one-shot owner-acceptance path admitted an out-of-schedule initial attempt; query planning then rejected its timestamp before gateway dispatch. That bypass has been removed. Internal YouTube usage stayed at 0 and `last_provider_request_at` stayed null; no YouTube HTTP status, video IDs or provider response exist. The reservation was preserved. Next eligible: 08:00 UTC / 15:00 Vietnam time on 17 November. |
+| G5 — SQLite and application flow | 16% | PASS | The real Windows run persisted its failed source outcome to SQLite; API readback, Source Center, Run History and Data Quality agree. Restarted FastAPI with the schedule-only code reports `initial_acceptance_available=false`, 08:00 UTC next eligibility, zero internal YouTube usage, and no provider request. The failed result has zero provider records and zero YouTube keyword rows. |
+| G6 — Regression and browser QA | 12% | PASS | Current focused backend suites: 70 passed and 5 subtests passed; Frontend: 19 passed; focused Ruff and `git diff --check` passed. Windows browser checks covered consent, Vietnamese/English, light/dark, 390px layout, keyboard navigation, YouTube-only scope, Source Center, filtered Run History, details and Data Quality. The Firestore emulator waiver remains; its 16 setup failures were not rerun or claimed as passes. |
+| G7 — Report and commits | 6% | PASS | Local code commits `1d35603`, `de3bebb` and `23fbb9b`, plus this report, are committed without pushing or deploying. |
 
-**Weighted gate progress: 78%.** G4 contributes 0%; G6 receives 6/12 points. The goal remains incomplete and is not 100% complete.
+**Weighted gate progress: 84%.** G4 contributes 0%; all other weighted gates pass. The goal remains incomplete until a genuine scheduled YouTube response is accepted. No provider retries, extra searches, resets, pushes, deployments or D7 work were performed.
+
+> Sections below describing the 16 November preflight and earlier browser checks are retained as historical records. The “Current Windows QUOC LIVE acceptance” section at the end supersedes their statements about the current runtime, consent, host configuration, database, browser state and provider-call count.
 
 ## Public policy publication, verified 16 November 2026
 
@@ -151,3 +153,33 @@ No other owner quota approval is requested; the existing two-request authorizati
 - Read-only inspection of the existing SQLite state found no YouTube schedule reservation, cache entry, checkpoint or internal YouTube quota reservation. The next scheduled opportunity was 23:00 `Asia/Ho_Chi_Minh`; no slot was reserved. Three snapshot blobs were already past their retention deadline. The normal runtime purges expired blobs at startup, so startup was withheld and those rows were left untouched.
 - No local server or browser acceptance run was started. This continuation made zero YouTube provider calls and consumed zero YouTube quota. Current provider usage remains unknown; the owner screenshot's earlier zero does not establish current usage. D6 remains at 78%: G4 0%, G6 6/12. The authorized ceiling remains at most one `search.list` request and, only if needed, one `videos.list` request, with no retries.
 - Required evidence for the next safe attempt: an authenticated Cloud Console session or sanitized official lookup result showing the API key's parent project matches the intended project, plus a current view of YouTube Data API v3 enablement and method quota/usage. Do not include or transmit the key string in evidence. After that, resolve the project-setting mismatch, set the host/approval only for the current process, and run acceptance on `QUOC` at an eligible slot.
+
+## Current Windows QUOC LIVE acceptance — 17 November 2026
+
+### Runtime and approval
+
+- The actual Windows hostname was `QUOC`. The local FastAPI runtime resolved `YOUTUBE_API_KEY` as present without reading or printing the value. The YouTube adapter uses the API key independently of `GOOGLE_CLOUD_PROJECT`; this does not verify which Cloud project owns the key.
+- The code-approved and published YouTube policy version is `d6-youtube-v2`. The local Source Center showed the policy as approved and published, and the actual Fetch consent dialog required that version and recorded the accepted agreement before the Fetch submission.
+- The accepted Fetch body was exactly `{"sources":["youtube_video_search"]}`. No Google, Bing, Wikimedia or other source was selected for this request.
+
+### One attempted application Fetch; no provider request
+
+- The local API accepted Fetch ID `6588d73a0b77343cccd24d70c7aba103` with HTTP 202. Its terminal result was `PARTIAL`; `youtube_video_search` was `FAILED` with `SOURCE_EXECUTION_FAILED` and zero records.
+- The local cause is the initial-acceptance planner mismatch: the owner-acceptance launcher admitted and reserved an `INITIAL_ACCEPTANCE` at 00:41:25 on 17 November Vietnam time, but the query planner accepted only 07:00, 15:00 or 23:00 schedule slots. The handler failed before gateway dispatch. This was an application error, not a YouTube provider error; there is no provider HTTP status or real video ID to report. The owner-acceptance flag no longer bypasses schedule eligibility.
+- Evidence that no provider request was made: the YouTube internal quota snapshot remains 0/6 daily and 0/200 monthly for both methods, `last_provider_request_at` is null, the durable provider quota ledger has no YouTube usage keys, and the failed snapshot reports `provider_record_count=0`. Neither `search.list` nor `videos.list` reached the provider. No retry or second Fetch was sent.
+- The initial-acceptance schedule reservation was preserved rather than reset. Its recorded attempt is `2026-11-16T17:41:25Z` (00:41:25 Vietnam time). The capability API and Source Center report the next eligible window as **2026-11-17 08:00 UTC / 15:00 Asia/Ho_Chi_Minh** after the eight-hour minimum spacing. The 07:00 slot is not eligible.
+- Internal quota is application policy only. Provider quota remains `UNKNOWN`; the owner-supplied Cloud screenshot is historical and does not verify current quota or API-key ownership. A successful API response would prove service access, not project ownership.
+
+### SQLite, UI and browser evidence
+
+- The existing durable state was opened without reset or deletion. Its migration audit records the additive D6 YouTube policy change and confirms prior jobs, reservations and quota counters were preserved. The prior SerpApi and RSS usage remains intact.
+- The live collection SQLite row records the Fetch job as processing `COMPLETED`, while its dataset outcome is `FAILED`; the source manifest preserves `SOURCE_EXECUTION_FAILED`, and there are zero YouTube LIVE keyword rows. Run History now exposes the dataset `outcome_status` separately from internal processing status, so this row displays `Thất bại` instead of a false success. The Vietnamese status filter sends the stable `FAILED` code and returns the YouTube row.
+- Source Center displays `d6-youtube-v2`, the failed source, the schedule and 15:00 next eligibility. Data Quality displays the LIVE failure, zero received/saved/rejected and one quality note. Run History details show the same failed YouTube source and zero provider records.
+- Windows browser QA also verified Vietnamese/English rendering, light/dark theme, 390×844 with no horizontal overflow, keyboard skip-navigation focus, consent version and YouTube-only selection. One non-blocking favicon request returned 404.
+
+### Code and verification in this continuation
+
+- Local code commits: `de3bebb` (`fix(d6): preserve live acceptance and report outcomes`) adds the narrowly scoped legacy ledger migration with quota/history preservation and separates Fetch outcome from processing completion in Run History; the browser filter uses stable status codes in both locales. Commit `23fbb9b` (`fix(youtube): enforce scheduled live fetch windows`) removes the out-of-schedule YouTube initial-acceptance path. The owner-acceptance launcher now only limits the query count to one and preserves expired blobs; normal schedule and approval gates still apply.
+- Current focused backend regressions: **70 passed, 5 subtests passed**. Frontend Node tests: **19 passed, 0 failed**. Focused Ruff and `git diff --check` passed. The Firestore emulator suite was not run under the explicit D6 waiver; the earlier 16 setup failures are not represented as passes. Previously passing Wikimedia 18/18 results were preserved and not rerun.
+- The normal next step is a user-triggered YouTube-only Fetch at or after the displayed eligible window, with consent and all backend gates still active. Do not reset the schedule or quota ledger to make it earlier. No `videos.list` request is needed unless a later successful `search.list` result proves otherwise. This acceptance remains at **84%**, not 100%, until genuine provider-backed evidence and the corresponding cache-only readback are recorded.
+- No Git push, production deployment, state reset, data deletion, automatic Fetch, or D7 work occurred.
