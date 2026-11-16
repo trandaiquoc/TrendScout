@@ -62,7 +62,10 @@ export function renderFetchDefaults(capabilities, translate) {
   if (!fieldset) return;
   const saved = readFetchDefaults();
   const enabled = enabledSourceIds(capabilities);
-  const selected = new Set(saved ? saved.filter((sourceId) => enabled.includes(sourceId)) : enabled);
+  const initial = saved ? saved.filter((sourceId) => enabled.includes(sourceId))
+    : enabled.filter((sourceId) => sourceId !== 'youtube_video_search'
+      || (capabilities?.youtube_workflow?.approval_status === 'APPROVED_FOR_LOCAL_RUNTIME'));
+  const selected = new Set(initial);
   const labels = {
     wikimedia_pageviews_top_per_country: 'fetch.source.wikimedia',
     google_web_serp: 'fetch.source.google',
@@ -150,6 +153,71 @@ function renderSerpApiProviderBudget(capabilities, translate) {
       }));
 }
 
+function renderYouTubeBudget(capabilities, translate) {
+  const section = document.querySelector('#youtube-provider-budget');
+  const values = document.querySelector('#youtube-provider-budget-values');
+  if (!section || !values) return;
+  const source = (capabilities?.sources || []).find((item) =>
+    item?.source_id === 'youtube_video_search');
+  section.hidden = !source;
+  values.replaceChildren();
+  if (!source) return;
+
+  const workflow = capabilities?.youtube_workflow || {};
+  const quota = capabilities?.youtube_quota || {};
+  const schedule = capabilities?.refresh_schedule?.sources?.youtube_video_search || {};
+  const saved = source.last_saved_fetch || {};
+  const formatCount = (value) => Number.isInteger(value) && value >= 0
+    ? new Intl.NumberFormat(document.documentElement.lang || 'vi').format(value)
+    : translate('common.unavailable');
+  const time = (value, zone = 'Asia/Ho_Chi_Minh') =>
+    scheduleTimestamp(value, zone) || translate('common.unavailable');
+
+  capabilityRow(values, translate('sources.youtube-provider'), workflow.provider || 'YouTube Data API v3');
+  capabilityRow(values, translate('sources.youtube-approval'),
+    localizedStatus(workflow.approval_status || source.approval_status, translate));
+  capabilityRow(values, translate('sources.youtube-key'),
+    localizedStatus(workflow.configuration_status || source.configuration_status, translate));
+  capabilityRow(values, translate('sources.youtube-host'),
+    localizedStatus(workflow.live_host_status || 'NOT_DESIGNATED', translate));
+  capabilityRow(values, translate('sources.youtube-provider-quota'),
+    localizedStatus(quota.provider_quota?.status || 'UNKNOWN', translate));
+  capabilityRow(values, translate('sources.youtube-search-budget'),
+    `${translate('source.quota-daily')}: ${quotaUse(quota.search?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUse(quota.search?.monthly, translate)}`);
+  capabilityRow(values, translate('sources.youtube-other-budget'),
+    `${translate('source.quota-daily')}: ${quotaUnitUse(quota.other_methods?.daily, translate)} · ${translate('source.quota-monthly')}: ${quotaUnitUse(quota.other_methods?.monthly, translate)}`);
+  capabilityRow(values, translate('sources.youtube-next-reset'),
+    time(quota.search?.daily?.reset_at, 'America/Los_Angeles'));
+  capabilityRow(values, translate('sources.youtube-last-request'),
+    time(quota.last_provider_request_at, 'America/Los_Angeles'));
+  capabilityRow(values, translate('sources.youtube-last-attempt-reserved'),
+    time(quota.last_attempt_reserved_at, 'America/Los_Angeles'));
+  capabilityRow(values, translate('sources.youtube-last-observation'),
+    time(saved.last_successful_observation_at || saved.fetched_at || null));
+  capabilityRow(values, translate('sources.youtube-last-cached-delivery'),
+    time(saved.last_cache_delivery_at));
+  const observationAt = saved.last_successful_observation_at || saved.fetched_at;
+  const fetchedAt = observationAt ? new Date(observationAt) : null;
+  const ageHours = fetchedAt && !Number.isNaN(fetchedAt.getTime())
+    ? Math.max(0, Math.floor((Date.now() - fetchedAt.getTime()) / 3_600_000)) : null;
+  capabilityRow(values, translate('sources.youtube-cache-age'), ageHours === null
+    ? translate('common.unavailable')
+    : translate('sources.youtube-cache-age-hours', { hours: formatCount(ageHours) }));
+  capabilityRow(values, translate('sources.youtube-last-delivery'),
+    saved.delivery_state ? translate(`fetch.delivery.${saved.delivery_state}`)
+      : translate('common.unavailable'));
+  capabilityRow(values, translate('sources.youtube-result-count'),
+    formatCount(saved.last_successful_observation_record_count ?? saved.record_count));
+  capabilityRow(values, translate('sources.youtube-last-error'),
+    saved.error_code || translate('common.unavailable'));
+  capabilityRow(values, translate('source.refresh-schedule'),
+    Array.isArray(schedule.slots)
+      ? `${schedule.slots.join(' · ')} · ${schedule.timezone || 'Asia/Ho_Chi_Minh'}`
+      : translate('common.unavailable'));
+  capabilityRow(values, translate('source.refresh-next'),
+    time(schedule.next_eligible_at, schedule.timezone || 'Asia/Ho_Chi_Minh'));
+}
+
 export function loadCapabilities(locale = 'vi') {
   return getJson('/api/v1/capabilities', { locale });
 }
@@ -209,6 +277,17 @@ function quotaUse(value, translate) {
   });
 }
 
+function quotaUnitUse(value, translate) {
+  if (!value || !Number.isInteger(value.units_reserved)
+      || !Number.isInteger(value.units_limit)
+      || !Number.isInteger(value.units_remaining)) return translate('common.unavailable');
+  const format = (number) => new Intl.NumberFormat(document.documentElement.lang || 'vi').format(number);
+  return translate('source.quota-use', {
+    used: format(value.units_reserved), limit: format(value.units_limit),
+    remaining: format(value.units_remaining),
+  });
+}
+
 function savedFetchSummary(activity, translate) {
   if (!activity) return translate('source.fetch-no-saved-data');
   const status = ['SUCCESS', 'PARTIAL', 'FAILED'].includes(activity.status)
@@ -235,6 +314,7 @@ function scheduleTimestamp(value, timezone) {
 
 export function renderSourceCapabilities(capabilities, translate) {
   renderSerpApiProviderBudget(capabilities, translate);
+  renderYouTubeBudget(capabilities, translate);
   const descriptors = new Map((Array.isArray(capabilities?.sources) ? capabilities.sources : []).map(source => [source.source_id, source]));
   const grid = document.querySelector('#source-registry-list');
   const state = document.querySelector('#source-registry-state');

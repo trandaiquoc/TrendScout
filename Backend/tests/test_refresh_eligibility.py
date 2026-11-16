@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from app.jobs.public_admission import AdmissionDenied
 from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
+    YOUTUBE_REFRESH_STATE_KEY,
     eligible_slot,
     reserve_source_slot,
     schedule_metadata,
@@ -89,6 +90,36 @@ class RefreshEligibilityTests(unittest.TestCase):
     def test_utc_time_is_converted_to_the_configured_local_schedule(self):
         self.assertEqual(eligible_slot(datetime(2026, 11, 16, 0, 5, tzinfo=timezone.utc)),
                          "2026-11-16T07:00:00+07:00")
+
+    def test_youtube_slots_are_user_triggered_and_enforce_eight_hour_spacing(self):
+        first = datetime(2026, 11, 16, 7, 5, tzinfo=LOCAL)
+        self.assertEqual(reserve_source_slot(
+            self.store, YOUTUBE_REFRESH_STATE_KEY, first,
+            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+        ), "2026-11-16T07:00:00+07:00")
+        self.assertIsNone(reserve_source_slot(
+            self.store, YOUTUBE_REFRESH_STATE_KEY,
+            datetime(2026, 11, 16, 15, 4, 59, tzinfo=LOCAL),
+            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+        ))
+        self.assertEqual(reserve_source_slot(
+            self.store, YOUTUBE_REFRESH_STATE_KEY,
+            datetime(2026, 11, 16, 15, 5, tzinfo=LOCAL),
+            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+        ), "2026-11-16T15:00:00+07:00")
+        self.assertEqual(reserve_source_slot(
+            self.store, YOUTUBE_REFRESH_STATE_KEY,
+            datetime(2026, 11, 16, 23, 5, tzinfo=LOCAL),
+            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+        ), "2026-11-16T23:00:00+07:00")
+        metadata = schedule_metadata(
+            self.store, YOUTUBE_REFRESH_STATE_KEY,
+            datetime(2026, 11, 17, 7, 5, tzinfo=LOCAL),
+            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+        )
+        self.assertTrue(metadata["user_triggered_only"])
+        self.assertEqual(metadata["slots"], ["07:00", "15:00", "23:00"])
+        self.assertEqual(metadata["minimum_spacing_hours"], 8)
 
 
 if __name__ == "__main__":

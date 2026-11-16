@@ -872,11 +872,114 @@ function renderFetchPresentation() {
       })
       .join(' | ')
     : '';
-  status.textContent = isActionState
-    ? [t(liveDemo ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey),
-      sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '']
-      .filter(Boolean).join(' ')
-    : '';
+  status.replaceChildren();
+  if (isActionState) {
+    const message = document.createElement('p');
+    message.textContent = [
+      t(liveDemo ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey),
+      sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '',
+    ].filter(Boolean).join(' ');
+    status.append(message);
+    renderYouTubeFetchEvidence(status, presentation.fetch);
+  }
+}
+
+function renderYouTubeFetchEvidence(container, fetchStatus) {
+  const source = (Array.isArray(fetchStatus?.sources) ? fetchStatus.sources : [])
+    .find((item) => item?.source_id === 'youtube_video_search');
+  if (!source || !['SUCCESS', 'PARTIAL'].includes(source.status)
+      || !Array.isArray(source.records) || !source.records.length) return;
+
+  const records = source.records.slice(0, 10);
+  const section = document.createElement('section');
+  section.className = 'youtube-fetch-evidence';
+  const heading = element('h2', t('fetch.youtube-evidence-title', {
+    count: number(source.record_count ?? source.records.length),
+  }));
+  const brand = document.createElement('a');
+  brand.className = 'youtube-brand';
+  brand.href = 'https://www.youtube.com/';
+  brand.target = '_blank';
+  brand.rel = 'noopener noreferrer';
+  brand.setAttribute('aria-label', 'YouTube');
+  brand.title = 'YouTube';
+  const logo = document.createElement('img');
+  logo.src = '/dashboard/assets/youtube-logo.svg';
+  logo.alt = '';
+  logo.decoding = 'async';
+  brand.append(logo);
+  const headingRow = document.createElement('div');
+  headingRow.className = 'youtube-evidence-heading';
+  headingRow.append(heading, brand);
+  const note = element('p', t('fetch.youtube-evidence-attribution'));
+  section.append(headingRow, note);
+  const list = document.createElement('ol');
+  for (const record of records) {
+    if (!record || typeof record !== 'object') continue;
+    const item = document.createElement('li');
+    const url = safeExternalEvidenceUrl(record.canonical_video_url);
+    let videoUrl = null;
+    try {
+      const parsed = url ? new URL(url) : null;
+      videoUrl = parsed && ['youtube.com', 'www.youtube.com'].includes(parsed.hostname)
+        && parsed.pathname === '/watch'
+        && parsed.searchParams.get('v') === record.provider_video_id ? parsed.href : null;
+    } catch { videoUrl = null; }
+    const title = typeof record.title === 'string' && record.title.trim()
+      ? record.title : record.provider_video_id;
+    if (videoUrl) {
+      const link = document.createElement('a');
+      link.textContent = title;
+      link.href = videoUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      item.append(link);
+    } else {
+      item.append(document.createTextNode(title));
+    }
+    const details = [
+      typeof record.channel_title === 'string' ? record.channel_title : null,
+      typeof record.published_at === 'string' ? record.published_at : null,
+      Number.isInteger(record.result_rank) ? `#${record.result_rank}` : null,
+    ].filter(Boolean).join(' · ');
+    if (details) item.append(document.createTextNode(` — ${details}`));
+    if (typeof record.description === 'string' && record.description.trim()) {
+      const description = element('p', record.description);
+      item.append(description);
+    }
+    list.append(item);
+  }
+  section.append(list);
+  if (source.records.length > records.length) {
+    section.append(element('p', t('fetch.youtube-evidence-truncated', {
+      shown: number(records.length), total: number(source.records.length),
+    })));
+  }
+  const delivery = source.delivery_state;
+  if (delivery) {
+    section.append(element('p', t('fetch.youtube-evidence-delivery', {
+      state: t(`fetch.delivery.${delivery}`),
+    })));
+  }
+  const coverage = source.coverage && typeof source.coverage === 'object' ? source.coverage : {};
+  for (const query of Array.isArray(coverage.queries) ? coverage.queries.slice(0, 2) : []) {
+    if (typeof query?.original_query !== 'string') continue;
+    section.append(element('p', t('fetch.youtube-query-coverage', {
+      query: query.original_query,
+      accepted: number(Number.isInteger(query.accepted) ? query.accepted : 0),
+      rejected: number(Number.isInteger(query.rejected) ? query.rejected : 0),
+    })));
+  }
+  if (Number.isInteger(coverage.records_omitted_storage_limit)
+      && coverage.records_omitted_storage_limit > 0) {
+    section.append(element('p', t('fetch.youtube-evidence-storage-limit', {
+      count: number(coverage.records_omitted_storage_limit),
+    })));
+  }
+  if (coverage.stop_reason === 'PAGE_CAP_REACHED') {
+    section.append(element('p', t('fetch.youtube-evidence-page-cap')));
+  }
+  container.append(section);
 }
 
 function refreshCollectionJob(fetchId) {

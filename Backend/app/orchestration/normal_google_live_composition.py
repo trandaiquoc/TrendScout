@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +14,7 @@ from app.discovery.contracts import ProcessingGrant
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
-from app.jobs.shared_cache import CacheGrant, SharedCache
+from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.normal_wikimedia_live_policy import (
     GOOGLE_POLICY_VERSION,
@@ -22,13 +23,18 @@ from app.normal_wikimedia_live_policy import (
 )
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.bing_search.handler import BingSavedCandidateHandler
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.sources.google_trends.budget import SerpApiAccountBudget
 from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
 from app.sources.google_trends.rss_gateway import GoogleTrendsRSSGateway
 from app.sources.google_trends.rss_handler import GoogleTrendsRSSHandler
 from app.sources.google_trends.workflow import GoogleDiscoveryFallbackHandler
-from app.sources.guarded_collector import CollectionLimits
+from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
 from app.sources.live_gateway import LivePageGateway, SourceApproval
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.refresh_eligibility import (
@@ -38,11 +44,16 @@ from app.sources.refresh_eligibility import (
     SCHEDULE_SLOTS,
     SCHEDULE_TIMEZONE,
     SLOT_GRACE,
+    YOUTUBE_REFRESH_STATE_KEY,
+    candidate_slot,
+    reserve_source_slot,
     schedule_metadata,
 )
 from app.sources.serpapi.account import SerpApiAccountClient
 from app.sources.serpapi.errors import SerpApiError
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
+from app.sources.youtube.query_planner import select_youtube_query_scopes
+from app.sources.youtube.retention import purge_expired_youtube_cache
 from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
@@ -171,6 +182,7 @@ async def normal_google_live_composition(*, user_agent,
         fetch_starts_per_hour=config.fetch_starts_per_hour,
         bing_enabled=config.paid_bing_approved,
         bing_daily_budget=config.bing_daily_budget,
+        youtube_enabled=True,
     )
     admission = PublicAdmission(store, policy, state_key=GOOGLE_STATE_KEY)
     existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
@@ -178,46 +190,108 @@ async def normal_google_live_composition(*, user_agent,
         if not existing_state:
             raise ValueError("Bing LIVE requires an existing Google SerpApi ledger to migrate")
     if existing_state and existing_state.get("policy_digest") != admission.policy_digest:
-        old_google_policy = normal_google_live_policy(
-            serpapi_daily_budget=config.serpapi_daily_budget,
-            serpapi_monthly_budget=config.serpapi_monthly_budget,
-            rss_daily_budget=config.rss_daily_budget,
-            rss_monthly_budget=config.rss_monthly_budget,
-            fetch_starts_per_hour=1,
-            bing_enabled=False,
-            bing_daily_budget=config.bing_daily_budget,
-        )
-        if (not config.paid_bing_approved
-                and existing_state.get("policy_digest") == PublicAdmission(
-                    store, old_google_policy, state_key=GOOGLE_STATE_KEY
-                ).policy_digest
-                and config.fetch_starts_per_hour > 1):
-            admission.migrate_bounded_quota_policy(
-                old_google_policy,
-                authorization_note="LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1",
-                now=utcnow(),
-                allow_fetch_capacity_increase=True,
-            )
-        elif config.paid_bing_approved:
-            if not config.policy_migration_approved:
-                raise ValueError("explicit SerpApi Bing quota-policy migration approval required")
-            admission.migrate_bounded_quota_policy(
-                normal_google_live_policy(
+        def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
+            return normal_google_live_policy(
                     serpapi_daily_budget=config.serpapi_daily_budget,
                     serpapi_monthly_budget=config.serpapi_monthly_budget,
                     rss_daily_budget=config.rss_daily_budget,
                     rss_monthly_budget=config.rss_monthly_budget,
-                    fetch_starts_per_hour=config.fetch_starts_per_hour,
-                    bing_enabled=False,
+                    fetch_starts_per_hour=(config.fetch_starts_per_hour
+                                           if fetch_starts_per_hour is None
+                                           else fetch_starts_per_hour),
+                    bing_enabled=bing_enabled,
                     bing_daily_budget=config.bing_daily_budget,
-                ),
-                authorization_note="OWNER_APPROVED_GOOGLE_BING_SHARED_ALLOCATION",
-                now=utcnow(),
+                    youtube_enabled=youtube_enabled,
             )
+
+        def migration_target(previous_policy, next_policy, note, *, allow_capacity=False):
+            PublicAdmission(store, next_policy, state_key=GOOGLE_STATE_KEY).migrate_bounded_quota_policy(
+                previous_policy,
+                authorization_note=note,
+                now=utcnow(),
+                allow_fetch_capacity_increase=allow_capacity,
+            )
+
+        previous_without_youtube = make_policy(
+            bing_enabled=config.paid_bing_approved, youtube_enabled=False
+        )
+        if existing_state.get("policy_digest") == PublicAdmission(
+                store, previous_without_youtube, state_key=GOOGLE_STATE_KEY
+        ).policy_digest:
+            migration_target(
+                previous_without_youtube, policy,
+                "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+            )
+        elif config.paid_bing_approved:
+            previous_without_bing = make_policy(bing_enabled=False, youtube_enabled=False)
+            previous_without_bing_digest = PublicAdmission(
+                store, previous_without_bing, state_key=GOOGLE_STATE_KEY
+            ).policy_digest
+            if existing_state.get("policy_digest") == previous_without_bing_digest:
+                with_bing = make_policy(bing_enabled=True, youtube_enabled=False)
+                migration_target(
+                    previous_without_bing, with_bing,
+                    "OWNER_APPROVED_GOOGLE_BING_SHARED_ALLOCATION",
+                )
+                migration_target(
+                    with_bing, policy,
+                    "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+                )
+            else:
+                raise ValueError("stored Google LIVE policy does not match a supported local migration")
+        elif config.fetch_starts_per_hour > 1:
+            old_capacity_policy = make_policy(
+                bing_enabled=False, youtube_enabled=False, fetch_starts_per_hour=1
+            )
+            old_capacity_digest = PublicAdmission(
+                store, old_capacity_policy, state_key=GOOGLE_STATE_KEY
+            ).policy_digest
+            if existing_state.get("policy_digest") == old_capacity_digest:
+                current_without_youtube = make_policy(
+                    bing_enabled=False, youtube_enabled=False
+                )
+                migration_target(
+                    old_capacity_policy, current_without_youtube,
+                    "LOCAL_FETCH_CACHE_CAPACITY_POLICY_V1", allow_capacity=True,
+                )
+                migration_target(
+                    current_without_youtube, policy,
+                    "GOAL_AUTHORIZED_ADDITIVE_YOUTUBE_BUDGET_V1",
+                )
+            else:
+                raise ValueError("stored Google LIVE policy does not match a supported local migration")
         else:
             raise ValueError("stored Google LIVE policy does not match a supported local migration")
     runner = GuardedAttemptRunner(admission, clock=utcnow)
     cache = SharedCache(store)
+    youtube_cache_scope = CacheScope(
+        source_id=YOUTUBE_SOURCE_ID,
+        provider_id="youtube_data_api_v3",
+        query=DEFAULT_QUERY_PLAN.fingerprint,
+        plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+        market=DEFAULT_QUERY_PLAN.market,
+        language=DEFAULT_QUERY_PLAN.language,
+        window=DEFAULT_QUERY_PLAN.time_filter_rule,
+        parser_version="source-v1",
+        policy_version=GOOGLE_POLICY_VERSION,
+    )
+    def youtube_cache_grant_at(now):
+        return CacheGrant(
+            YOUTUBE_SOURCE_ID, GOOGLE_POLICY_VERSION,
+            now + timedelta(seconds=_MAX_CACHE_RETENTION_SECONDS),
+            max_fresh_seconds=8 * 60 * 60,
+            max_stale_seconds=_MAX_CACHE_RETENTION_SECONDS,
+            max_retention_seconds=_MAX_CACHE_RETENTION_SECONDS,
+            allowed=True,
+        )
+
+    def cleanup_youtube_cache():
+        now = utcnow()
+        return purge_expired_youtube_cache(
+            cache, youtube_cache_scope, youtube_cache_grant_at(now), now=now
+        )
+
+    cleanup_youtube_cache()
     resources = []
     quota_state = {"status": "NOT_CONFIGURED", "snapshot": None}
     try:
@@ -234,12 +308,16 @@ async def normal_google_live_composition(*, user_agent,
         resources.append(wiki)
 
         def resolve_cache_grant(source_id, now):
-            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+                                 BING_SOURCE_ID, YOUTUBE_SOURCE_ID}:
                 return None
+            if source_id == YOUTUBE_SOURCE_ID:
+                return youtube_cache_grant_at(now)
             return CacheGrant(
                 source_id, GOOGLE_POLICY_VERSION,
                 now + timedelta(seconds=_MAX_CACHE_RETENTION_SECONDS),
                 max_fresh_seconds=(24 * 60 * 60 if source_id == WIKIMEDIA_SOURCE_ID
+                                   else 8 * 60 * 60 if source_id == YOUTUBE_SOURCE_ID
                                    else 60 * 60),
                 max_stale_seconds=_MAX_CACHE_RETENTION_SECONDS,
                 max_retention_seconds=_MAX_CACHE_RETENTION_SECONDS,
@@ -247,7 +325,8 @@ async def normal_google_live_composition(*, user_agent,
             )
 
         def resolve_checkpoint(source_id, now):
-            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+            if source_id not in {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+                                 BING_SOURCE_ID, YOUTUBE_SOURCE_ID}:
                 return None
             return CheckpointGrant(
                 source_id, "LIVE", GOOGLE_POLICY_VERSION,
@@ -354,6 +433,35 @@ async def normal_google_live_composition(*, user_agent,
             )
             resources.append(bing_gateway)
 
+        runtime_host = socket.gethostname().strip()
+        youtube_host_status = (
+            "DESIGNATED"
+            if config.youtube_live_host
+            and runtime_host.casefold() == config.youtube_live_host.casefold()
+            else "NOT_DESIGNATED"
+        )
+        youtube_credential_status = "MISSING"
+        try:
+            youtube_key = credential_provider.resolve("YOUTUBE_API_KEY")
+            if (isinstance(youtube_key, str) and 8 <= len(youtube_key) <= 256
+                    and all(33 <= ord(char) <= 126 for char in youtube_key)):
+                youtube_credential_status = "PRESENT"
+            else:
+                youtube_key = None
+        except Exception:
+            youtube_key = None
+            youtube_credential_status = "INVALID_CONFIG"
+        youtube_gateway = None
+        if (config.youtube_approval_configured
+                and youtube_host_status == "DESIGNATED"
+                and youtube_key is not None):
+            youtube_gateway = await LivePageGateway.controlled_network(
+                YOUTUBE_SOURCE_ID, credential_provider,
+                _GoogleLocalApproval(YOUTUBE_SOURCE_ID, enabled=True, clock=utcnow),
+                runner, clock=utcnow,
+            )
+            resources.append(youtube_gateway)
+
         rss_gateway = None
         if config.rss_approved:
             rss_gateway = await GoogleTrendsRSSGateway.controlled_network(
@@ -417,11 +525,64 @@ async def normal_google_live_composition(*, user_agent,
             allow_initial_acceptance=allow_initial_bing_acceptance,
         ) if bing_gateway is not None and budget is not None else None)
 
+        def resolve_youtube_provider_batch(source_id, now):
+            if source_id != YOUTUBE_SOURCE_ID:
+                return None
+            if not config.youtube_approval_configured:
+                return {"allowed": False, "error_code": "SOURCE_NOT_APPROVED"}
+            if youtube_host_status != "DESIGNATED":
+                return {"allowed": False, "error_code": "LIVE_HOST_NOT_DESIGNATED"}
+            if youtube_credential_status != "PRESENT" or youtube_gateway is None:
+                return {"allowed": False, "error_code": "CREDENTIAL_NOT_CONFIGURED"}
+            try:
+                quota = admission.quota_snapshot("youtube", now=now)
+            except Exception:
+                return {"allowed": False, "error_code": "QUOTA_STATE_UNAVAILABLE"}
+            if (quota["daily"]["remaining"] <= 0
+                    or quota["monthly"]["remaining"] <= 0
+                    or quota["daily"]["units_remaining"] <= 0
+                    or quota["monthly"]["units_remaining"] <= 0):
+                return {"allowed": False, "error_code": "QUOTA_EXHAUSTED"}
+            try:
+                slot = candidate_slot(
+                    store, YOUTUBE_REFRESH_STATE_KEY, now,
+                    error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                )
+                if slot is None:
+                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
+                reserved = reserve_source_slot(
+                    store, YOUTUBE_REFRESH_STATE_KEY, now,
+                    error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                )
+                if reserved is None:
+                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
+            except AdmissionDenied as error:
+                return {"allowed": False, "error_code": error.code}
+            return {"allowed": True, "slot": reserved}
+
+        def resolve_youtube_query_scopes(source_id, now):
+            if source_id != YOUTUBE_SOURCE_ID:
+                return None
+            schedule = schedule_metadata(
+                store, YOUTUBE_REFRESH_STATE_KEY, now,
+                error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+            )
+            try:
+                reserved_slot = datetime.fromisoformat(schedule["last_slot"])
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("YOUTUBE_SCHEDULE_STATE_INVALID") from None
+            return select_youtube_query_scopes(
+                now=reserved_slot, plan=DEFAULT_QUERY_PLAN, max_queries=2
+            )
+
+        youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
+                             if youtube_gateway is not None else None)
+
         handlers = D5SourceHandlers(
             query_collectors={
                 "google_web_serp": None,
                 "bing_web_serp": None,
-                "youtube_video_search": None,
+                "youtube_video_search": youtube_collector,
             },
             wikimedia=wiki,
             google_trends_handler=google_handler,
@@ -436,6 +597,12 @@ async def normal_google_live_composition(*, user_agent,
             ).date(),
             shared_cache=cache,
             resolve_cache_grant=resolve_cache_grant,
+            source_limits={YOUTUBE_SOURCE_ID: CollectionLimits(
+                max_queries=2, max_pages_per_query=1, max_requests=2,
+                max_retries_per_page=0, deadline_seconds=60, max_results=50,
+            )},
+            resolve_provider_batch=resolve_youtube_provider_batch,
+            resolve_query_scopes=resolve_youtube_query_scopes,
             max_wikimedia_date_attempts=3,
             include_wikimedia_transport_metrics=True,
             unavailable_mode="LIVE",
@@ -456,6 +623,7 @@ async def normal_google_live_composition(*, user_agent,
         )
         facade.entity_lookup_before_request = pace_request.wait_sync
         facade.normal_bing_live = bing_gateway is not None
+        facade.normal_youtube_live = youtube_gateway is not None
         facade.google_account_quota_state = quota_state
         facade.google_capabilities = {
             "trends_discovery": "LIVE_CONFIGURED" if trends_gateway else "CACHE_ONLY",
@@ -479,6 +647,7 @@ async def normal_google_live_composition(*, user_agent,
                 (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
                  allow_initial_google_acceptance),
                 (BING_SOURCE_ID, BING_REFRESH_STATE_KEY, allow_initial_bing_acceptance),
+                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY, False),
             ):
                 try:
                     sources[source_id] = schedule_metadata(
@@ -499,6 +668,47 @@ async def normal_google_live_composition(*, user_agent,
             }
 
         facade.refresh_schedule_metadata = refresh_schedule_metadata
+
+        facade.youtube_capabilities = {
+            "provider": "YouTube Data API v3",
+            "approval_status": ("APPROVED_FOR_LOCAL_RUNTIME"
+                                if config.youtube_approval_configured
+                                else "PENDING_LIVE_APPROVAL"),
+            "live_host_status": youtube_host_status,
+            "configuration_status": youtube_credential_status,
+            "live_status": "LIVE_CONFIGURED" if youtube_gateway else "CACHE_ONLY",
+            "data_mode": "LIVE",
+            "keyword_extraction": "DISABLED_PENDING_POLICY_APPROVAL",
+            "derived_metrics": "DISABLED_PENDING_POLICY_APPROVAL",
+            "provider_quota_status": "UNKNOWN",
+            "provider_quota_reason": "PROJECT_SPECIFIC_LIMITS_REQUIRE_GOOGLE_CLOUD_CONSOLE_EVIDENCE",
+        }
+
+        def youtube_quota_metadata():
+            try:
+                return {
+                    "provider_quota": {
+                        "status": "UNKNOWN",
+                        "search_calls_per_day": None,
+                        "other_method_units_per_day": None,
+                        "reason": "PROJECT_SPECIFIC_LIMITS_REQUIRE_GOOGLE_CLOUD_CONSOLE_EVIDENCE",
+                    },
+                    "search": admission.quota_snapshot("youtube", now=utcnow()),
+                    "other_methods": admission.quota_snapshot("youtube_other", now=utcnow()),
+                    "last_attempt_reserved_at": admission.last_attempt_reserved_at(
+                        YOUTUBE_SOURCE_ID
+                    ),
+                    "last_provider_request_at": admission.last_provider_request_at(
+                        YOUTUBE_SOURCE_ID
+                    ),
+                    "provider_timezone": "America/Los_Angeles",
+                    "internal_monthly_timezone": "UTC",
+                }
+            except Exception:
+                return {"status": "UNAVAILABLE"}
+
+        facade.youtube_quota_metadata = youtube_quota_metadata
+        facade.youtube_retention_cleanup = cleanup_youtube_cache
 
         def google_quota_metadata():
             try:

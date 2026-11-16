@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -41,6 +42,81 @@ class QueryContext:
         }
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class YouTubeVideoListRequest:
+    """Server-owned videos.list request; raw statistics are excluded by policy."""
+
+    operation: str
+    plan_fingerprint: str
+    provider_id: str = "youtube_data_api_v3"
+    source_id: str = "youtube_video_search"
+    video_ids: tuple[str, ...] = ()
+    region_code: str = "US"
+    video_category_id: str | None = None
+    max_results: int = 50
+
+    def __post_init__(self):
+        if (not isinstance(self.operation, str)
+                or self.operation not in {"most_popular", "metadata"}
+                or not isinstance(self.plan_fingerprint, str)
+                or self.provider_id != "youtube_data_api_v3"
+                or self.source_id != "youtube_video_search"
+                or self.region_code != "US"
+                or not re.fullmatch(r"[a-f0-9]{64}", self.plan_fingerprint)
+                or not isinstance(self.video_ids, tuple)
+                or type(self.max_results) is not int or not 1 <= self.max_results <= 50):
+            raise ValueError("invalid server-owned videos.list request")
+        if self.operation == "most_popular":
+            if (self.video_ids or self.region_code != "US"
+                    or self.video_category_id is not None
+                    and (not isinstance(self.video_category_id, str)
+                         or not re.fullmatch(r"[0-9]{1,8}", self.video_category_id))):
+                raise ValueError("invalid mostPopular chart request")
+        elif (not 1 <= len(self.video_ids) <= 50
+              or any(not isinstance(value, str)
+                     or not re.fullmatch(r"[A-Za-z0-9_-]{11}", value)
+                     for value in self.video_ids)
+              or len(set(self.video_ids)) != len(self.video_ids)
+              or self.video_category_id is not None):
+            raise ValueError("invalid videos.list metadata request")
+
+    @property
+    def context_key(self) -> str:
+        """Bind chart pagination to the exact server-owned request shape."""
+        payload = {
+            "operation": self.operation,
+            "plan_fingerprint": self.plan_fingerprint,
+            "provider_id": self.provider_id,
+            "source_id": self.source_id,
+            "video_ids": self.video_ids,
+            "region_code": self.region_code,
+            "video_category_id": self.video_category_id,
+            "max_results": self.max_results,
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class YouTubeVideoListItem:
+    video_id: str
+    canonical_video_url: str
+    title: str
+    description: str | None
+    channel_id: str | None
+    channel_title: str | None
+    published_at: datetime | None
+    category_id: str | None
+    live_broadcast_content: str | None
+
+
+@dataclass(frozen=True)
+class VideoListPage:
+    items: tuple[YouTubeVideoListItem, ...]
+    next_page_token: str | None
+    response_status: int
 
 
 @dataclass(frozen=True, repr=False)

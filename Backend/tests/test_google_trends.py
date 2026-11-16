@@ -20,7 +20,7 @@ from app.orchestration.normal_google_live_composition import (
     _GoogleLocalApproval,
     normal_google_live_composition,
 )
-from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.sources.catalog import GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
 from app.sources.google_trends.rss import parse_google_trends_rss
 from app.sources.google_trends.trending_now import (
@@ -759,10 +759,17 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(facade.admission.policy.pools["serpapi"].daily_requests, 3)
                 self.assertEqual(facade.admission.policy.pools["google_rss"].daily_requests, 1)
                 self.assertEqual(facade.admission.policy.max_starts_per_window, 2)
+                self.assertIn(YOUTUBE_SOURCE_ID, facade.admission.policy.enabled_sources)
+                self.assertFalse(facade.normal_youtube_live)
+                self.assertEqual(facade.youtube_capabilities["live_status"], "CACHE_ONLY")
+                self.assertEqual(facade.youtube_quota_metadata()["provider_quota"]["status"],
+                                 "UNKNOWN")
             migrated = atomic_state.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
             self.assertEqual(migrated["starts"], old_state["starts"])
             self.assertEqual(migrated["policy_migration_audit"][0]["changed_admission_limits"],
                              ["max_starts_per_window"])
+            self.assertEqual(migrated["policy_migration_audit"][1]["changed_admission_limits"],
+                             ["enabled_sources"])
         finally:
             directory.cleanup()
 
@@ -869,9 +876,12 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(audit["quota_preserved"])
             self.assertEqual(audit["changed_pools"], ["serpapi"])
-            self.assertEqual(new_admission.quota_snapshot("serpapi", now=NOW)["daily"], {
-                "limit": 10, "used": 2, "remaining": 8,
-            })
+            serpapi_daily = new_admission.quota_snapshot("serpapi", now=NOW)["daily"]
+            self.assertEqual(
+                (serpapi_daily["limit"], serpapi_daily["used"],
+                 serpapi_daily["remaining"]),
+                (10, 2, 8),
+            )
             state = store.transact(GOOGLE_STATE_KEY, lambda value: (value, value))
             self.assertEqual(state["quota"], original_state["quota"])
             self.assertEqual(state["jobs"], original_state["jobs"])

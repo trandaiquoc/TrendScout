@@ -219,10 +219,12 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sources[WIKIMEDIA_SOURCE_ID]["live_verification_status"], "LOCAL_LIVE_VERIFIED")
         youtube = sources[YOUTUBE_SOURCE_ID]
         self.assertEqual(youtube["adapter_status"], "IMPLEMENTED_OFFLINE_VERIFIED")
-        self.assertEqual(youtube["supported_data_modes"], ["SYNTHETIC"])
+        self.assertEqual(youtube["supported_data_modes"], ["LIVE"])
+        self.assertEqual(youtube["approval_status"], "PENDING_LIVE_APPROVAL")
+        self.assertEqual(youtube["configuration_status"], "NOT_CONFIGURED")
         self.assertEqual(youtube["live_verification_status"], "NOT_VERIFIED")
         self.assertFalse(youtube["enabled_for_current_operation"])
-        for source_id in (YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+        for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             self.assertEqual(sources[source_id]["approval_status"], "PENDING_APPROVAL")
             self.assertFalse(sources[source_id]["enabled_for_current_operation"])
         self.assertEqual(value["query_plan"]["request_budget_per_source"], 1)

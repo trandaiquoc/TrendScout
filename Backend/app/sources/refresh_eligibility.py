@@ -11,6 +11,7 @@ SLOT_GRACE = timedelta(minutes=10)
 MIN_SOURCE_SPACING = timedelta(hours=8)
 GOOGLE_REFRESH_STATE_KEY = "normal-google-trends-refresh-v1"
 BING_REFRESH_STATE_KEY = "normal-bing-search-schedule-v1"
+YOUTUBE_REFRESH_STATE_KEY = "normal-youtube-search-schedule-v1"
 
 
 def eligible_slot(now: datetime, *, last_attempt_at: datetime | None = None) -> str | None:

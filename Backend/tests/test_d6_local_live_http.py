@@ -1,5 +1,6 @@
 """Guarded local LIVE HTTP integration using only fixture handlers."""
 
+import asyncio
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
@@ -40,7 +41,7 @@ _OFFLINE_GUARD_COUNTS = None
 
 
 class NoEntityContext:
-    def __init__(self, _store):
+    def __init__(self, _store, before_request=None):
         pass
 
     def enrich(self, _records):
@@ -86,7 +87,11 @@ def _live_facade(directory):
             "status": "SUCCESS",
             "data_mode": "LIVE",
             "record_count": 1,
-            "records": [{"raw": "fixture-private-content"}],
+            "records": [{
+                "provider_video_id": "AbCdEf12345",
+                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                "title": "Offline fixture video",
+            }],
         }
 
     handler.__trendscout_data_mode__ = "LIVE"
@@ -306,6 +311,15 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             facade, checkpoints, attempts = _live_facade(directory)
             lifecycle = {"entered": 0, "exited": 0}
+            retention_runs = []
+            loop = asyncio.get_running_loop()
+            retention_ran = asyncio.Event()
+
+            def retention_cleanup():
+                retention_runs.append("youtube-only")
+                loop.call_soon_threadsafe(retention_ran.set)
+
+            facade.youtube_retention_cleanup = retention_cleanup
 
             @asynccontextmanager
             async def composition():
@@ -323,6 +337,8 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(lifecycle, {"entered": 0, "exited": 0})
             inner = app.app
             async with inner.router.lifespan_context(inner):
+                await asyncio.wait_for(retention_ran.wait(), timeout=1)
+                self.assertEqual(retention_runs, ["youtube-only"])
                 self.assertEqual(attempts["count"], 0)
                 transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
                 async with httpx.AsyncClient(transport=transport,
@@ -349,9 +365,14 @@ class LocalLiveHttpTests(unittest.IsolatedAsyncioTestCase):
                     source_results = status.json()["sources"]
                     self.assertEqual(sum(item["status"] == "FAILED" for item in source_results), 1)
                     self.assertEqual(sum(item["status"] == "SUCCESS" for item in source_results), 3)
-                    self.assertTrue(all(item["delivery_state"] == "FRESH"
-                                        for item in source_results))
+                    self.assertTrue(all(
+                        item["delivery_state"] == (
+                            "FRESH" if item["status"] == "SUCCESS" else None
+                        )
+                        for item in source_results
+                    ))
                     self.assertNotIn("fixture-private-content", status.text)
+                    self.assertIn("AbCdEf12345", status.text)
                     again = await client.get(first.json()["status_url"])
                     self.assertEqual(again.json()["status"], status.json()["status"])
                     self.assertEqual(attempts["count"], 4)

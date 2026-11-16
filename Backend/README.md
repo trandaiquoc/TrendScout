@@ -275,13 +275,15 @@ run_local_live(app, port=8001)
 
 App construction and startup do not run a Fetch. A user POST can trigger the existing source handlers, and only a backend-owned source approval can make a source available. A missing processing grant yields no derived candidates. `LocalLiveGuard` is not authentication against other local processes. The composition still uses the one-job/attempt limits and shared SerpApi pool; do not delete or reset its SQLite ledger to regain allowance. Source checkpoints are volatile and logically TTL-bounded, but physical erasure from SQLite WAL, swap, crash dumps, backups, or logs is not guaranteed. Vercel and the normal `create_app()` path remain outside this live composition. The runtime is not provider-live verified; all D6.1B validation must use fixture handlers or mock transports.
 
-## D3B — YouTube search adapter ngoại tuyến
+## D3B — YouTube search adapter: giai đoạn offline ban đầu
+
+Phần này ghi lại ranh giới của D3B. D6 sau đó bổ sung đường LIVE local có guard, quota, lịch, cache và Source Center; xem mục **D6 — YouTube Data API v3** bên dưới. D3B contract tests dùng MockTransport; đường LIVE D6 đi qua `LivePageGateway` và không dùng adapter fixture như bằng chứng LIVE.
 
 `app/sources/youtube/` triển khai adapter query-based riêng cho YouTube Data API v3 `search.list`; không ép video search resource vào `PageObservation`/Wikimedia scoring. Adapter dùng fixed endpoint và allowlist tham số từ plan server-side `demo-us-en` v1, deduplicate theo provider/video ID nhưng giữ từng query evidence, và chỉ tạo descriptor `result_rank` (vị trí trong query response), không tạo views, trend score hay demand score.
 
-Implementation được cô lập ở chế độ offline: constructor chỉ nhận `httpx.MockTransport`; credential boundary đọc tham chiếu server-side `YOUTUBE_API_KEY` và gửi giá trị qua header `X-Goog-Api-Key`, không đưa key vào URL. Giai đoạn này không có resolver môi trường, endpoint live, registry factory hay đường gọi từ Public Fetch; fixtures là dữ liệu synthetic. Quota tracker đếm từng attempt/retry, nhưng không suy ra quota còn lại của Google Cloud project.
+Boundary của adapter D3B đọc credential server-side theo tên `YOUTUBE_API_KEY` và gửi qua header `X-Goog-Api-Key`, không đưa key vào URL. Dữ liệu trong contract fixtures là `SYNTHETIC`; quota tracker của adapter không suy ra quota còn lại của Google Cloud project.
 
-Default plan giữ nguyên 14 query và một page/query. Cursor do provider trả về được gắn với query/plan/filter/cutoff context; page cap, request budget, retry wait, deadline, cancellation, malformed body, quota và rate-limit đều có stop/error state riêng. Request/response body không được lưu. YouTube vẫn `PENDING_APPROVAL`, `NOT_CONFIGURED`, `NOT_VERIFIED`, `default_enabled=false`; không được dùng như nguồn live hoặc trong multi-source scoring.
+Query plan đăng ký vẫn có 14 seed, nhưng D6 live planner chỉ chọn tối đa hai scope curated cho mỗi slot đủ điều kiện. Cursor được gắn với query/plan/filter/cutoff context; page cap, request budget, retry wait, deadline, cancellation, malformed body, quota và rate-limit có stop/error state riêng. Request/response body không được lưu. D6 chỉ dùng raw video evidence; keyword extraction và derived metrics YouTube tiếp tục bị tắt khi chưa được duyệt.
 
 Chạy adapter contract tests riêng:
 
@@ -333,3 +335,13 @@ The Google LIVE run uses one bounded HTTPS request with `Accept-Encoding: identi
 The current local quota policy is shown by the live Account API and Source Center; do not infer provider remaining quota from a local `.env` file. Local SQLite reservations do not coordinate separate computers, so the local schedule and reserve cannot prevent a simultaneous request from another host.
 
 The lower-level `GoogleLiveSettings` environment switches still apply to directly composed runtimes and tests; they are not launcher arguments. They do not prove provider entitlement or permission. Do not enable Google SERP, RSS or Bing by changing browser state.
+
+## D6 — YouTube Data API v3
+
+D6 adds the official YouTube `search.list` source to the normal local LIVE Fetch pipeline, with bounded `videos.list` support. It remains disabled unless the owner enables it in the server process environment and designates exactly one host. `start.sh` and `start.ps1` continue to start the same web application; they do not set approval flags, select a host, or trigger Fetch. The dashboard user selects YouTube and clicks Fetch; schedule, cache, admission and quota checks remain server-owned.
+
+Put `YOUTUBE_API_KEY` in the private project-root `.env` file described above. The credential provider reads that file; the launcher does not source it. The non-secret settings `TREND_SCOUT_YOUTUBE_LIVE_APPROVED` and `TREND_SCOUT_YOUTUBE_LIVE_HOST` are read from the server process environment, not from `.env`. Keep approval false and host unset until the project owner has verified the Google Cloud API/quota, approved the final privacy/terms and data-retention behavior, and completed the required user-agreement flow. A key being present does not prove the API is enabled or that the project has the documented default quota.
+
+The selected host value must match `socket.gethostname()` on the one machine allowed to send provider requests. Do not copy that host designation to a second machine: local SQLite ledgers do not coordinate quota across hosts. Other hosts may only read their own persisted cache. Current acceptance status and exact owner-side blockers are recorded in [D6 YouTube acceptance](../Documents/Reports/D6_YOUTUBE_LIVE_ACCEPTANCE.md) and [the policy review](../Documents/Reports/evidence/youtube-audit/POLICY_REVIEW_AND_OWNER_DECISIONS.md).
+
+Internal ceilings are six `search.list` calls per America/Los_Angeles provider day and 200 per UTC calendar month; the separate `videos.list` pool is six units per provider day and 200 per UTC month. These are application limits, not the Google Cloud project's quota. Provider quota remains `UNKNOWN` until Cloud Console evidence is reviewed. Refresh is manual-only at 07:00, 15:00 and 23:00 Asia/Ho_Chi_Minh, with a ten-minute slot grace and at least eight hours between attempts. Fresh cache is delivered without a provider request; expired YouTube cache entries are removed by the focused cleanup path. YouTube records remain source evidence and do not enter keyword extraction, collection scoring or composite trend metrics.

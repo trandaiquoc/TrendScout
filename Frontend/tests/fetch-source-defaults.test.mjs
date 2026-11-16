@@ -9,6 +9,7 @@ const caps = {
     { source_id: 'wikimedia_pageviews_top_per_country', enabled_for_current_operation: true },
     { source_id: 'google_web_serp', enabled_for_current_operation: true },
     { source_id: 'bing_web_serp', enabled_for_current_operation: false },
+    { source_id: 'youtube_video_search', enabled_for_current_operation: true },
   ],
 };
 
@@ -29,6 +30,12 @@ test('no saved preference leaves server enabled-source defaults in control', () 
 test('saved defaults are restricted to sources the server currently enables', () => {
   withStorage(JSON.stringify(['bing_web_serp', 'google_web_serp']), () => {
     assert.deepEqual(defaultFetchSourceIds(caps), ['google_web_serp']);
+  });
+});
+
+test('YouTube can be explicitly included in saved Fetch defaults', () => {
+  withStorage(JSON.stringify(['youtube_video_search', 'google_web_serp']), () => {
+    assert.deepEqual(defaultFetchSourceIds(caps), ['youtube_video_search', 'google_web_serp']);
   });
 });
 

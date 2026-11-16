@@ -25,9 +25,11 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('mailto:tdquoc02@gmail.com', response.text)
             self.assertIn('https://policies.google.com/privacy', response.text)
             self.assertIn('https://www.youtube.com/t/terms', response.text)
-        self.assertIn('procedure must be implemented and tested', privacy.text)
-        self.assertIn('two business days', privacy.text)
-        self.assertIn('No YouTube-derived metrics or keyword processing are claimed to be approved', privacy.text)
+        self.assertIn('required user agreement flow is implemented and verified', privacy.text)
+        self.assertIn('not yet implemented or verified', privacy.text)
+        self.assertIn('two-business-day acknowledgment', privacy.text)
+        self.assertIn('zero live YouTube API requests', privacy.text)
+        self.assertIn('No YouTube-derived metrics or keyword extraction are enabled', privacy.text)
 
     async def test_read_only_dashboard_serves_policy_without_enable_fetch(self):
         app = create_app(read_only=True)

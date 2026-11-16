@@ -140,7 +140,11 @@ class DistributedDiscoveryTests(unittest.TestCase):
         sources[3]["data_mode"] = "LIVE"
         grant = ProcessingGrant(GOOGLE_SOURCE_ID, True, False,
                                 NOW + timedelta(minutes=5), "test-policy")
-        result = discover_fetch_results(sources, now=NOW, processing_grants=(grant,))
+        youtube_grant = ProcessingGrant(YOUTUBE_SOURCE_ID, True, True,
+                                        NOW + timedelta(minutes=5), "youtube-test-grant")
+        result = discover_fetch_results(
+            sources, now=NOW, processing_grants=(grant, youtube_grant)
+        )
         candidate = next(item for item in result["candidates"] if item["keyword"] == "quiet luxury")
         self.assertEqual(result["data_mode"], "MIXED")
         self.assertEqual(candidate["data_mode"], "MIXED")

@@ -1,7 +1,12 @@
 """Versioned local policy for ordinary, user-initiated Wikimedia Fetches."""
 
-from app.jobs.public_admission import AdmissionPolicy, PoolLimit
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+from app.jobs.public_admission import YOUTUBE_OTHER_POOL, AdmissionPolicy, PoolLimit
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 
 POLICY_VERSION = "NORMAL_WIKIMEDIA_LIVE_V1"
@@ -35,7 +40,8 @@ def normal_google_live_policy(*, serpapi_daily_budget: int = 6,
                               rss_monthly_budget: int = 900,
                               fetch_starts_per_hour: int = 60,
                               bing_enabled: bool = False,
-                              bing_daily_budget: int = 3) -> AdmissionPolicy:
+                              bing_daily_budget: int = 3,
+                              youtube_enabled: bool = False) -> AdmissionPolicy:
     """Local, owner-only Google policy with explicit SerpApi and RSS ledgers.
 
     SerpApi has a bounded 10-attempt daily / 180-attempt monthly ceiling;
@@ -53,8 +59,8 @@ def normal_google_live_policy(*, serpapi_daily_budget: int = 6,
     ):
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"{name} is outside the reviewed bounded range")
-    if type(bing_enabled) is not bool:
-        raise ValueError("Bing approval must be an explicit boolean")
+    if type(bing_enabled) is not bool or type(youtube_enabled) is not bool:
+        raise ValueError("source approval must be an explicit boolean")
     enabled_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
     pools = {
             "wikimedia": PoolLimit(
@@ -98,6 +104,18 @@ def normal_google_live_policy(*, serpapi_daily_budget: int = 6,
             GOOGLE_SOURCE_ID: "serpapi_google",
             BING_SOURCE_ID: "serpapi_bing",
         }
+    if youtube_enabled:
+        enabled_sources.add(YOUTUBE_SOURCE_ID)
+        pools["youtube"] = PoolLimit(
+            daily_requests=6, monthly_requests=200,
+            daily_cost_units=6, monthly_cost_units=200,
+            cost_per_attempt=1, max_inflight=1, attempt_timeout_seconds=30,
+        )
+        pools[YOUTUBE_OTHER_POOL] = PoolLimit(
+            daily_requests=6, monthly_requests=200,
+            daily_cost_units=6, monthly_cost_units=200,
+            cost_per_attempt=1, max_inflight=1, attempt_timeout_seconds=30,
+        )
     return AdmissionPolicy(
         enabled_sources=frozenset(enabled_sources),
         pools=pools,

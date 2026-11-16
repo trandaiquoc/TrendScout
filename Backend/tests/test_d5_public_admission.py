@@ -8,7 +8,13 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
+from app.jobs.public_admission import (
+    YOUTUBE_OTHER_POOL,
+    AdmissionDenied,
+    AdmissionPolicy,
+    PoolLimit,
+    PublicAdmission,
+)
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.storage.local_file_security import secure_private_directory, verify_private_file
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -345,6 +351,116 @@ class PublicAdmissionTests(unittest.TestCase):
         self.assertIn("unknown:day:2020-01-01", quota)
         self.assertIn("serpapi:month:bad-month", quota)
         self.assertIn("serpapi:day:2028-01-01", quota)
+
+    def test_youtube_quota_pools_are_separate_and_month_ceiling_is_enforced(self):
+        pools = {
+            "serpapi": PoolLimit(2, 5, 2, 5, 1),
+            "youtube": PoolLimit(6, 200, 6, 200, 1),
+            YOUTUBE_OTHER_POOL: PoolLimit(6, 200, 6, 200, 1),
+        }
+        config = policy(pools=pools)
+        control = coordinator(self.path, config)
+        job = control.admit("youtube-month-budget-test", now=NOW)["job_id"]
+        fence = control.claim(job, "worker", now=NOW)["fence"]
+
+        def set_search_usage(state):
+            state["quota"]["youtube:month:2026-11"] = {"requests": 199, "cost": 199}
+            return state, None
+
+        control.store.transact("public", set_search_usage)
+        self.assertEqual(control.quota_snapshot("youtube", now=NOW)["monthly"]["used"], 199)
+        self.assertEqual(control.quota_snapshot(YOUTUBE_OTHER_POOL, now=NOW)["monthly"]["used"], 0)
+
+        self.assertEqual(control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-month-search-attempt", now=NOW,
+        ), "NEW")
+        control.record_provider_request_started(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-month-search-attempt", now=NOW,
+        )
+        self.assertEqual(control.last_provider_request_at(YOUTUBE_SOURCE_ID), NOW.isoformat())
+        control.settle_attempt(job, "worker", fence,
+                               attempt_id="youtube-month-search-attempt", now=NOW)
+        self.assertEqual(control.quota_snapshot("youtube", now=NOW)["monthly"]["used"], 200)
+        with self.assertRaisesRegex(AdmissionDenied, "QUOTA_EXHAUSTED"):
+            control.reserve_attempt(
+                job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+                attempt_id="youtube-month-search-attempt-overflow", now=NOW,
+            )
+
+        self.assertEqual(control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            pool_name=YOUTUBE_OTHER_POOL,
+            attempt_id="youtube-other-method-attempt", now=NOW,
+        ), "NEW")
+        other = control.quota_snapshot(YOUTUBE_OTHER_POOL, now=NOW)
+        self.assertEqual(other["daily"]["used"], 1)
+        self.assertEqual(other["monthly"]["used"], 1)
+        search = control.quota_snapshot("youtube", now=NOW)
+        self.assertEqual(search["daily"]["used"], 1)
+        self.assertEqual(search["monthly"]["used"], 200)
+        self.assertEqual(search["daily"]["timezone"], "America/Los_Angeles")
+        self.assertEqual(search["monthly"]["timezone"], "UTC")
+
+    def test_youtube_provider_reset_tracks_pacific_dst_boundary(self):
+        pools = {
+            "serpapi": PoolLimit(2, 5, 2, 5, 1),
+            "youtube": PoolLimit(6, 200, 6, 200, 1),
+            YOUTUBE_OTHER_POOL: PoolLimit(6, 200, 6, 200, 1),
+        }
+        control = coordinator(self.path, policy(pools=pools))
+        before_reset = datetime(2026, 3, 9, 6, 59, tzinfo=timezone.utc)
+        job = control.admit("youtube-before-dst-reset", now=before_reset)["job_id"]
+        fence = control.claim(job, "worker", now=before_reset)["fence"]
+        control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-dst-before", now=before_reset,
+        )
+        control.settle_attempt(job, "worker", fence,
+                               attempt_id="youtube-dst-before", now=before_reset)
+        before_snapshot = control.quota_snapshot("youtube", now=before_reset)
+        self.assertEqual(before_snapshot["daily"]["used"], 1)
+        self.assertEqual(before_snapshot["daily"]["reset_at"], "2026-03-09T07:00:00+00:00")
+
+        after_reset = datetime(2026, 3, 9, 7, 0, tzinfo=timezone.utc)
+        job = control.admit("youtube-after-dst-reset", now=after_reset)["job_id"]
+        fence = control.claim(job, "worker", now=after_reset)["fence"]
+        control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-dst-after", now=after_reset,
+        )
+        after_snapshot = control.quota_snapshot("youtube", now=after_reset)
+        self.assertEqual(after_snapshot["daily"]["used"], 1)
+        self.assertEqual(after_snapshot["daily"]["reset_at"], "2026-03-10T07:00:00+00:00")
+
+    def test_youtube_monthly_usage_history_survives_later_months(self):
+        pools = {
+            "serpapi": PoolLimit(2, 5, 2, 5, 1),
+            "youtube": PoolLimit(6, 200, 6, 200, 1),
+            YOUTUBE_OTHER_POOL: PoolLimit(6, 200, 6, 200, 1),
+        }
+        control = coordinator(self.path, policy(pools=pools))
+        november = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)
+        job = control.admit("youtube-history-november", now=november)["job_id"]
+        fence = control.claim(job, "worker", now=november)["fence"]
+        control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-history-november-attempt", now=november,
+        )
+        control.settle_attempt(job, "worker", fence,
+                               attempt_id="youtube-history-november-attempt", now=november)
+
+        december = datetime(2026, 12, 1, 12, tzinfo=timezone.utc)
+        job = control.admit("youtube-history-december", now=december)["job_id"]
+        fence = control.claim(job, "worker", now=december)["fence"]
+        control.reserve_attempt(
+            job, "worker", fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="youtube-history-december-attempt", now=december,
+        )
+        quota = control.store.transact("public", lambda state: (state, state["quota"]))
+        self.assertEqual(quota["youtube:month:2026-11"], {"requests": 1, "cost": 1})
+        self.assertEqual(quota["youtube:month:2026-12"], {"requests": 1, "cost": 1})
 
 
 if __name__ == "__main__":

@@ -217,7 +217,7 @@ class DistributedFetchWorker:
             value["delivery_state"] = "FRESH"
         if value.get("data_mode") != expected_mode:
             raise ValueError("source result provenance mismatch")
-        if (value.get("delivery_state") not in {"FRESH", "CACHED", None}
+        if (value.get("delivery_state") not in {"FRESH", "CACHED", "STALE_CACHE", None}
                 or value["status"] not in {"FAILED", "UNAVAILABLE"}
                 and value.get("delivery_state") is None):
             raise ValueError("invalid result delivery state")

@@ -235,6 +235,13 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_id not in _ALLOWED:
             rejected_records += 1
             continue
+        if source_id == YOUTUBE_SOURCE_ID and source_result.get("data_mode") == "LIVE":
+            # Keep API Data available as attributed video evidence only. A generic
+            # ProcessingGrant must not implicitly authorize YouTube text extraction.
+            processing_blocked = True
+            records = source_result.get("records", [])
+            rejected_records += len(records) if isinstance(records, list) else 1
+            continue
         coverage = source_result.get("coverage", {})
         if source_id == WIKIMEDIA_SOURCE_ID and isinstance(coverage, dict):
             source_coverage.append({

@@ -90,7 +90,7 @@
               <button id="open-fetch" class="button button-primary" type="button" disabled aria-describedby="fetch-readiness"><span data-i18n="fetch.cta"></span><span aria-hidden="true">→</span></button>
               <button id="open-history-fetch" class="button button-secondary" type="button" hidden disabled data-i18n="fetch.history-cta"></button>
               <p id="fetch-readiness" class="fetch-help" data-i18n="fetch.disabled"></p>
-              <p id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></p>
+              <div id="fetch-status" class="fetch-status" role="status" aria-live="polite" hidden></div>
             </div>
           </div>
           <div class="dashboard-tabs" role="tablist" data-i18n-aria="dashboard.tablist" aria-label="Dashboard views">
@@ -164,6 +164,11 @@
           <section id="serpapi-provider-budget" class="panel serpapi-provider-budget" aria-labelledby="serpapi-provider-heading" hidden>
             <div class="panel-heading"><div><p class="section-kicker" data-i18n="sources.provider-kicker"></p><h2 id="serpapi-provider-heading" data-i18n="sources.provider-title"></h2></div></div>
             <dl id="serpapi-provider-budget-values" class="detail-list"></dl>
+          </section>
+          <section id="youtube-provider-budget" class="panel serpapi-provider-budget" aria-labelledby="youtube-provider-heading" hidden>
+            <div class="panel-heading"><div><p class="section-kicker" data-i18n="sources.youtube-kicker"></p><h2 id="youtube-provider-heading" data-i18n="sources.youtube-title"></h2></div><a class="youtube-brand" href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer" aria-label="YouTube" title="YouTube"><img src="/dashboard/assets/youtube-logo.svg" alt=""></a></div>
+            <p class="fine-print" data-i18n="sources.youtube-policy-note"></p>
+            <dl id="youtube-provider-budget-values" class="detail-list"></dl>
           </section>
           <div class="source-library-heading"><h2 data-i18n="sources.active-title"></h2></div>
           <p id="source-registry-state" class="source-registry-state" role="status" data-i18n="common.loading"></p>

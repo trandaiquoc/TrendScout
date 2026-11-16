@@ -50,6 +50,17 @@ from app.sources.catalog import (
 )
 
 _logger = logging.getLogger(__name__)
+_YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS = 60 * 60
+
+
+async def _run_youtube_retention_sweeper(cleanup, *, sleep=asyncio.sleep):
+    """Run local YouTube-only cache expiry without making provider requests."""
+    while True:
+        try:
+            await asyncio.to_thread(cleanup)
+        except Exception:
+            _logger.exception("Local YouTube cache retention sweep failed")
+        await sleep(_YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS)
 
 
 def create_app(
@@ -112,7 +123,7 @@ def create_app(
         if getattr(distributed_public_fetch, "normal_wikimedia_live", False):
             expected_sources = {WIKIMEDIA_SOURCE_ID}
         elif getattr(distributed_public_fetch, "normal_google_live", False):
-            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}
             if getattr(distributed_public_fetch, "normal_bing_live", False):
                 expected_sources.add(BING_SOURCE_ID)
         else:
@@ -157,6 +168,15 @@ def create_app(
                 async with local_live_context_factory() as local_live_fetch:
                     _validate_local_live_facade(local_live_fetch)
                     app.state.distributed_public_fetch = local_live_fetch
+                    retention_task = None
+                    youtube_retention_cleanup = getattr(
+                        local_live_fetch, "youtube_retention_cleanup", None
+                    )
+                    if callable(youtube_retention_cleanup):
+                        retention_task = asyncio.create_task(
+                            _run_youtube_retention_sweeper(youtube_retention_cleanup),
+                            name="trendscout-youtube-retention",
+                        )
                     try:
                         from app.collections.service import CollectionService
                         from app.collections.store import CollectionStore
@@ -178,6 +198,9 @@ def create_app(
                     try:
                         yield
                     finally:
+                        if retention_task is not None:
+                            retention_task.cancel()
+                            await asyncio.gather(retention_task, return_exceptions=True)
                         app.state.distributed_public_fetch = None
                         app.state.collection_service = None
                         app.state.public_fetch_enabled = False

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 from dataclasses import fields, is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -31,6 +32,7 @@ from app.sources.wikimedia.live_gateway import (
     WikimediaRequest,
     WikimediaTopPageGateway,
 )
+from app.sources.youtube.query_planner import YOUTUBE_QUERY_PLANNER_VERSION
 
 _QUERY_SOURCES = frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID})
 _ALL_SOURCES = _QUERY_SOURCES | {WIKIMEDIA_SOURCE_ID}
@@ -90,6 +92,9 @@ class D5SourceHandlers:
                  observation_date: Callable[[], date] | None = None,
                  shared_cache: SharedCache | None = None,
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
+                 source_limits: Mapping[str, CollectionLimits] | None = None,
+                 resolve_provider_batch: Callable[[str, datetime], dict | None] | None = None,
+                 resolve_query_scopes: Callable[[str, datetime], tuple[str, ...] | None] | None = None,
                  max_wikimedia_date_attempts: int = 1,
                  include_wikimedia_transport_metrics: bool = False,
                  unavailable_mode: str | None = None,
@@ -115,6 +120,15 @@ class D5SourceHandlers:
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
                 or ((shared_cache is None) != (resolve_cache_grant is None))
                 or (resolve_cache_grant is not None and not callable(resolve_cache_grant))
+                or (source_limits is not None and (
+                    not isinstance(source_limits, Mapping)
+                    or not set(source_limits) <= _QUERY_SOURCES
+                    or any(not isinstance(value, CollectionLimits)
+                           for value in source_limits.values())
+                ))
+                or (resolve_provider_batch is not None
+                    and not callable(resolve_provider_batch))
+                or (resolve_query_scopes is not None and not callable(resolve_query_scopes))
                 or type(max_wikimedia_date_attempts) is not int
                 or not 1 <= max_wikimedia_date_attempts <= 3
                 or type(include_wikimedia_transport_metrics) is not bool
@@ -129,6 +143,9 @@ class D5SourceHandlers:
         self.observation_date = observation_date or (lambda: datetime.now(timezone.utc).date())
         self.shared_cache = shared_cache
         self.resolve_cache_grant = resolve_cache_grant
+        self.source_limits = dict(source_limits or {})
+        self.resolve_provider_batch = resolve_provider_batch
+        self.resolve_query_scopes = resolve_query_scopes
         self.max_wikimedia_date_attempts = max_wikimedia_date_attempts
         self.include_wikimedia_transport_metrics = include_wikimedia_transport_metrics
         self.unavailable_mode = unavailable_mode
@@ -150,8 +167,12 @@ class D5SourceHandlers:
                 setattr(collect_bing, "__trendscout_data_mode__", mode)
                 handlers[source] = collect_bing
             else:
-                handlers[source] = (self._query_handler(source)
-                    if self.query_collectors[source] is not None else self._unavailable_handler())
+                if self.query_collectors[source] is not None:
+                    handlers[source] = self._query_handler(source)
+                elif source == YOUTUBE_SOURCE_ID and self.shared_cache is not None:
+                    handlers[source] = self._youtube_cache_only_handler()
+                else:
+                    handlers[source] = self._unavailable_handler()
         async def collect_wikimedia(context):
             observation_date = self.observation_date()
             history_days = context.request_metadata.get("history_days")
@@ -177,6 +198,7 @@ class D5SourceHandlers:
 
     def _query_handler(self, source_id):
         collector = self.query_collectors[source_id]
+        limits = self.source_limits.get(source_id, self.limits)
 
         async def collect(context: SourceWorkContext):
             return await self._with_cache(
@@ -188,15 +210,19 @@ class D5SourceHandlers:
             saved_progress = (context.resume_snapshot or {}).get("progress", {})
             resume_snapshot = (saved_progress.get("collector")
                                if isinstance(saved_progress, dict) else None)
+            query_scopes = (self.resolve_query_scopes(source_id, self.utcnow())
+                            if source_id == YOUTUBE_SOURCE_ID
+                            and self.resolve_query_scopes is not None else None)
             result = await collector.collect(
                 plan=self.plan,
-                limits=self.limits,
+                limits=limits,
                 job_id=context.job_id,
                 owner=context.owner,
                 fence=context.fence,
                 heartbeat=context.heartbeat,
                 checkpoint=lambda snapshot: context.checkpoint({"collector": snapshot}),
                 resume_snapshot=resume_snapshot,
+                query_scopes=query_scopes,
             )
             retry_times = [row.retry_at for row in result.queries if row.retry_at is not None]
             should_defer = result.stop_reason == "DEFERRED" and bool(retry_times)
@@ -210,14 +236,56 @@ class D5SourceHandlers:
                 for record in records for evidence in record.get("evidence", [])
                 if isinstance(evidence, dict)
             )
-            query_results = [{
-                "query_fingerprint": row.query_fingerprint,
-                "pages": row.pages,
-                "accepted": row.accepted,
-                "rejected": row.rejected,
-                "reason": row.reason,
-                "retry_at": _jsonable(row.retry_at),
-            } for row in result.queries]
+            query_results = []
+            selected_scopes = query_scopes or tuple(seed.scope for seed in self.plan.seeds)
+            seeds_by_scope = {seed.scope: seed for seed in self.plan.seeds}
+            for index, row in enumerate(result.queries):
+                query_result = {
+                    "query_fingerprint": row.query_fingerprint,
+                    "pages": row.pages,
+                    "accepted": row.accepted,
+                    "rejected": row.rejected,
+                    "reason": row.reason,
+                    "retry_at": _jsonable(row.retry_at),
+                }
+                if source_id == YOUTUBE_SOURCE_ID:
+                    scope = selected_scopes[index] if index < len(selected_scopes) else None
+                    seed = seeds_by_scope.get(scope)
+                    query_result.update({
+                        "original_query": seed.query if seed else None,
+                        "query_source": "CURATED_SLOT_ROTATION",
+                        "taxonomy_scope": scope,
+                        "market_filter": self.plan.market,
+                        "language_filter": self.plan.language,
+                        "request_timestamps": [
+                            _jsonable(value) for value in row.request_timestamps
+                        ],
+                        "next_page_available": row.reason == "PAGE_CAP_REACHED",
+                        "next_page_token_saved": row.reason == "PAGE_CAP_REACHED",
+                    })
+                query_results.append(query_result)
+            youtube_fetch_times = [record.fetched_at for record in result.records
+                                   if source_id == YOUTUBE_SOURCE_ID
+                                   and isinstance(getattr(record, "fetched_at", None), datetime)
+                                   and record.fetched_at.tzinfo is not None
+                                   and record.fetched_at.utcoffset() is not None]
+            youtube_request_times = [timestamp for query in query_results
+                                     for timestamp in query.get("request_timestamps", [])]
+            youtube_coverage = ({
+                "provider_method": "search.list",
+                "provider_id": "youtube_data_api_v3",
+                "provider_request_count": result.attempted_calls,
+                "query_planner_version": YOUTUBE_QUERY_PLANNER_VERSION,
+                "query_plan_id": self.plan.plan_id,
+                "query_plan_version": self.plan.version,
+                "query_plan_fingerprint": self.plan.fingerprint,
+                "market_filter": self.plan.market,
+                "language_filter": self.plan.language,
+                "batch_requested_at": min(youtube_request_times)
+                    if youtube_request_times else None,
+                "source_fetched_at": _jsonable(max(youtube_fetch_times))
+                    if youtube_fetch_times else None,
+            } if source_id == YOUTUBE_SOURCE_ID else {})
             return {
                 "status": "PARTIAL" if omitted or result.checkpoint_records_omitted or should_defer
                           else result.status,
@@ -230,18 +298,33 @@ class D5SourceHandlers:
                              "complete": result.complete,
                              "records_omitted_storage_limit": (
                                  omitted + result.checkpoint_records_omitted),
+                             "query_scopes": list(query_scopes or ()),
                              "queries": query_results,
                              "stop_reason": result.stop_reason,
+                             **youtube_coverage,
                              "retry_at": _jsonable(max(retry_times)) if should_defer else None},
             }
 
         setattr(collect, "__trendscout_data_mode__", collector.gateway.data_mode)
         return collect
 
+    def _youtube_cache_only_handler(self):
+        async def no_live_adapter(_context):
+            return {"status": "UNAVAILABLE", "data_mode": "LIVE", "record_count": 0,
+                    "records": [], "error_code": "SOURCE_NOT_APPROVED"}
+
+        async def cached_only(context):
+            return await self._with_cache(YOUTUBE_SOURCE_ID, context, lambda: no_live_adapter(context))
+
+        setattr(cached_only, "__trendscout_data_mode__", "LIVE")
+        return cached_only
+
     async def _with_cache(self, source_id, context, collect, *, query_scope=None):
         if self.shared_cache is None:
             return await collect()
         now = self.utcnow()
+        batch_decision = None
+        stale_fallback = None
         try:
             grant = self.resolve_cache_grant(source_id, now)
         except Exception:
@@ -261,17 +344,73 @@ class D5SourceHandlers:
                 policy_version=grant.policy_version,
             )
             cached = self.shared_cache.get(scope, grant=grant, now=now)
-            if cached.get("status") == "CACHED" and cached.get("origin") in {"SYNTHETIC", "LIVE"}:
+            cached_status = cached.get("status")
+            if (cached_status in {"CACHED", "STALE"}
+                    and cached.get("origin") in {"SYNTHETIC", "LIVE"}):
                 payload = cached.get("payload")
                 if (not isinstance(payload, dict)
                         or payload.get("data_mode") != cached.get("origin")
-                        or payload.get("delivery_state", "FRESH") not in {"FRESH", "CACHED"}):
+                        or payload.get("delivery_state", "FRESH")
+                        not in {"FRESH", "CACHED", "STALE_CACHE"}):
                     raise CacheUnavailable()
-                return {**payload, "delivery_state": "CACHED"}
+                if cached_status == "CACHED":
+                    return self._cache_delivery(payload, "CACHED", now)
+                if source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None:
+                    try:
+                        batch_decision = self.resolve_provider_batch(source_id, now)
+                    except Exception:
+                        batch_decision = {"allowed": False,
+                                          "error_code": "REFRESH_POLICY_UNAVAILABLE"}
+                    if (not isinstance(batch_decision, dict)
+                            or batch_decision.get("allowed") is not True):
+                        return self._cache_delivery(payload, "STALE_CACHE", now)
+                else:
+                    return self._cache_delivery(payload, "STALE_CACHE", now)
+                stale_fallback = payload
 
-        result = await collect()
+        if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
+                and batch_decision is None):
+            try:
+                decision = self.resolve_provider_batch(source_id, now)
+            except Exception:
+                decision = {"allowed": False, "error_code": "REFRESH_POLICY_UNAVAILABLE"}
+            if not isinstance(decision, dict) or decision.get("allowed") is not True:
+                return {
+                    "status": "UNAVAILABLE", "data_mode": "LIVE", "records": [],
+                    "record_count": 0,
+                    "error_code": (decision.get("error_code")
+                                   if isinstance(decision, dict) else None)
+                                   or "NOT_YET_ELIGIBLE",
+                    "delivery_state": "NOT_ELIGIBLE",
+                    "coverage": {"refresh_eligible": False},
+                }
+
+        try:
+            result = await collect()
+        except Exception:
+            if stale_fallback is None:
+                raise
+            result = {
+                "status": "FAILED", "data_mode": "LIVE", "records": [],
+                "record_count": 0, "error_code": "SOURCE_REFRESH_FAILED",
+            }
         if not isinstance(result, dict):
             return result
+        if (stale_fallback is not None
+                and result.get("status") in {"FAILED", "UNAVAILABLE", "PARTIAL"}
+                and not result.get("records")):
+            fallback = self._cache_delivery(stale_fallback, "STALE_CACHE", now)
+            error_code = result.get("error_code")
+            if not isinstance(error_code, str) or not re.fullmatch(r"[A-Z0-9_]{1,64}", error_code):
+                error_code = "SOURCE_REFRESH_FAILED"
+            fallback["status"] = "PARTIAL"
+            fallback["error_code"] = error_code
+            fallback["coverage"].update({
+                "refresh_attempt_status": result.get("status"),
+                "refresh_error_code": error_code,
+                "refresh_attempted_at": now.isoformat(),
+            })
+            return fallback
         result.setdefault("delivery_state", "FRESH")
         negative_day_cache = (result.get("status") == "UNAVAILABLE"
                               and result.get("error_code") == "DAY_UNAVAILABLE")
@@ -297,6 +436,14 @@ class D5SourceHandlers:
                 if "CACHE_WRITE_FAILED" not in flags:
                     flags.append("CACHE_WRITE_FAILED")
         return result
+
+    @staticmethod
+    def _cache_delivery(payload, delivery_state, delivered_at):
+        """Return cached evidence with its original observation time and this delivery time."""
+        coverage = payload.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage["cache_delivery_at"] = delivered_at.astimezone(timezone.utc).isoformat()
+        return {**payload, "delivery_state": delivery_state, "coverage": coverage}
 
     async def _wikimedia_handler(self, context: SourceWorkContext, observation_date=None):
         context.heartbeat()

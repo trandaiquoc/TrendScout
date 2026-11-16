@@ -723,12 +723,12 @@ class YouTubeAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         capability = source_capability(YOUTUBE_SOURCE_ID)
         self.assertEqual(capability.adapter_status, "IMPLEMENTED_OFFLINE_VERIFIED")
-        self.assertEqual(capability.readiness, "PENDING_APPROVAL")
+        self.assertEqual(capability.readiness, "IMPLEMENTED")
         self.assertEqual(capability.approval_status, "PENDING_APPROVAL")
-        self.assertEqual(capability.configuration_status, "NOT_CONFIGURED")
+        self.assertEqual(capability.configuration_status, "SERVER_SIDE_OPTIONAL")
         self.assertEqual(capability.live_verification_status, "NOT_VERIFIED")
         self.assertFalse(capability.default_enabled)
-        self.assertNotIn("LIVE", capability.supported_data_modes)
+        self.assertIn("LIVE", capability.supported_data_modes)
 
 
 if __name__ == "__main__":

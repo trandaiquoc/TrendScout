@@ -42,6 +42,8 @@ class GoogleLiveSettings:
     fetch_starts_per_hour: int = 60
     cross_machine_reserve: int = 6
     bing_daily_budget: int = 3
+    youtube_live_approved: bool = False
+    youtube_live_host: str | None = None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None):
@@ -76,6 +78,11 @@ class GoogleLiveSettings:
             bing_daily_budget=_bounded_int(
                 environment, "TREND_SCOUT_BING_SERPAPI_DAILY_BUDGET", 3, 1, 3
             ),
+            youtube_live_approved=_flag(
+                environment, "TREND_SCOUT_YOUTUBE_LIVE_APPROVED"
+            ),
+            youtube_live_host=(environment.get("TREND_SCOUT_YOUTUBE_LIVE_HOST", "")
+                               .strip() or None),
         )
 
     @property
@@ -89,3 +96,7 @@ class GoogleLiveSettings:
     @property
     def paid_bing_approved(self) -> bool:
         return self.bing_approved and self.account_api_approved
+
+    @property
+    def youtube_approval_configured(self) -> bool:
+        return self.youtube_live_approved

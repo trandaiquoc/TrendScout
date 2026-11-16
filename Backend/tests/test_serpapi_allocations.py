@@ -64,12 +64,18 @@ class SharedSerpApiAllocationTests(unittest.TestCase):
             self.assertEqual(state["jobs"], original["jobs"])
             self.assertEqual(state["starts"], original["starts"])
             new.set_serpapi_billing_cycle("2026-12-11", now=NOW)
-            self.assertEqual(new.quota_snapshot("serpapi", now=NOW)["monthly"], {
-                "limit": 244, "used": 4, "remaining": 240,
-            })
-            self.assertEqual(new.quota_snapshot("serpapi_bing", now=NOW)["monthly"], {
-                "limit": 122, "used": 0, "remaining": 122,
-            })
+            serpapi_monthly = new.quota_snapshot("serpapi", now=NOW)["monthly"]
+            self.assertEqual(
+                (serpapi_monthly["limit"], serpapi_monthly["used"],
+                 serpapi_monthly["remaining"]),
+                (244, 4, 240),
+            )
+            bing_monthly = new.quota_snapshot("serpapi_bing", now=NOW)["monthly"]
+            self.assertEqual(
+                (bing_monthly["limit"], bing_monthly["used"],
+                 bing_monthly["remaining"]),
+                (122, 0, 122),
+            )
             self.assertEqual(new.quota_snapshot("serpapi", now=NOW)["billing_cycle_ends_at"],
                              "2026-12-11")
 
@@ -247,7 +253,7 @@ class SharedSerpApiAllocationTests(unittest.TestCase):
                     state = local_state.transact(
                         GOOGLE_STATE_KEY, lambda value: (value, value)
                     )
-                    self.assertEqual(len(state["policy_migration_audit"]), 1)
+                    self.assertEqual(len(state["policy_migration_audit"]), 2)
                     self.assertEqual(state["quota"]["serpapi:month:2026-11"], {
                         "requests": 4, "cost": 4,
                     })

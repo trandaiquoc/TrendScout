@@ -12,7 +12,7 @@ from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant
-from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 
 class DistributedPublicFetch:
@@ -57,7 +57,12 @@ class DistributedPublicFetch:
             self.data_mode = "LIVE"
         elif normal_google_live:
             from app.normal_wikimedia_live_policy import normal_google_live_policy
-            from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+            from app.sources.catalog import (
+                BING_SOURCE_ID,
+                GOOGLE_SOURCE_ID,
+                WIKIMEDIA_SOURCE_ID,
+                YOUTUBE_SOURCE_ID,
+            )
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
             pools = admission.policy.pools
             bing_enabled = BING_SOURCE_ID in admission.policy.enabled_sources
@@ -73,10 +78,11 @@ class DistributedPublicFetch:
                     fetch_starts_per_hour=admission.policy.max_starts_per_window,
                     bing_enabled=bing_enabled,
                     bing_daily_budget=(bing_pool.daily_requests if bing_pool else 3),
+                    youtube_enabled=True,
                 )
             except (KeyError, TypeError, ValueError):
                 expected = None
-            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
+            expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}
             if bing_enabled:
                 expected_sources.add(BING_SOURCE_ID)
             if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
@@ -172,7 +178,7 @@ class DistributedPublicFetch:
                 delivery_state = result.get("delivery_state")
                 if result["status"] in {"FAILED", "UNAVAILABLE"}:
                     delivery_state = None
-                elif delivery_state not in {"FRESH", "CACHED"}:
+                elif delivery_state not in {"FRESH", "CACHED", "STALE_CACHE"}:
                     delivery_state = "FRESH"
                 source_results.append({
                     "source_id": source_id,
@@ -206,7 +212,9 @@ class DistributedPublicFetch:
                     "limitations": ["DISCOVERY_PROCESSING_FAILED"],
                 }
         visible_sources = source_results if include_records or self.data_mode != "LIVE" else [
-            {key: value for key, value in item.items() if key != "records"} for item in source_results
+            (item if item.get("source_id") == YOUTUBE_SOURCE_ID else
+             {key: value for key, value in item.items() if key != "records"})
+            for item in source_results
         ]
         return {
             "fetch_id": job["job_id"],

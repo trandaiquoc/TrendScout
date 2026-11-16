@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from app.ports.atomic_state import AtomicStateStore
 from app.sources.catalog import (
@@ -32,6 +33,8 @@ SOURCE_ALLOCATION_POOLS = {
     GOOGLE_SOURCE_ID: "serpapi_google",
     BING_SOURCE_ID: "serpapi_bing",
 }
+YOUTUBE_OTHER_POOL = "youtube_other"
+YOUTUBE_PROVIDER_TIMEZONE = ZoneInfo("America/Los_Angeles")
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -93,9 +96,17 @@ class AdmissionPolicy:
                 or not self.enabled_sources or not self.enabled_sources <= SOURCE_POOLS.keys()
                 or not re.fullmatch(r"[a-f0-9]{64}", self.plan_fingerprint)
                 or not required_pools <= set(self.pools)
-                or extra_pools and not (
-                    extra_pools == {"google_rss"} and GOOGLE_SOURCE_ID in self.enabled_sources
+                or extra_pools and any(
+                    pool not in {
+                        "google_rss": GOOGLE_SOURCE_ID,
+                        YOUTUBE_OTHER_POOL: YOUTUBE_SOURCE_ID,
+                    } or owner not in self.enabled_sources
+                    for pool, owner in {
+                        "google_rss": GOOGLE_SOURCE_ID,
+                        YOUTUBE_OTHER_POOL: YOUTUBE_SOURCE_ID,
+                    }.items() if pool in extra_pools
                 )
+                or extra_pools - {"google_rss", YOUTUBE_OTHER_POOL}
                 or any(source not in self.enabled_sources
                        or SOURCE_ALLOCATION_POOLS.get(source) != pool
                        or pool not in self.pools or pool == SOURCE_POOLS[source]
@@ -192,6 +203,14 @@ class PublicAdmission:
             and set(current_pools) - set(previous_pools)
             == {"serpapi_google", "serpapi_bing"}
         )
+        added_youtube_source = (
+            current_sources - previous_sources == {YOUTUBE_SOURCE_ID}
+            and GOOGLE_SOURCE_ID in previous_sources
+            and WIKIMEDIA_SOURCE_ID in previous_sources
+            and previous_allocations == current_allocations
+            and set(current_pools) - set(previous_pools)
+            == {SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}
+        )
         increased_fetch_capacity = (
             allow_fetch_capacity_increase
             and type(previous_fetch_cap) is int and type(current_fetch_cap) is int
@@ -199,10 +218,11 @@ class PublicAdmission:
         )
         if (previous_base != current_base
                 or previous_fetch_cap != current_fetch_cap and not increased_fetch_capacity
-                or current_sources != previous_sources and not added_bing_allocations
+                or current_sources != previous_sources
+                and not (added_bing_allocations or added_youtube_source)
                 or previous_allocations != current_allocations and not added_bing_allocations
                 or not (set(previous_pools) == set(current_pools)
-                        or added_bing_allocations)):
+                        or added_bing_allocations or added_youtube_source)):
             raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
 
         changed_pools = []
@@ -229,6 +249,8 @@ class PublicAdmission:
                 changed_pools.append(name)
         if added_bing_allocations:
             changed_pools.append("source_allocations")
+        if added_youtube_source:
+            changed_pools.extend(sorted({SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}))
         if not changed_pools and not increased_fetch_capacity:
             raise AdmissionDenied("POLICY_MIGRATION_NO_CHANGE")
 
@@ -275,8 +297,23 @@ class PublicAdmission:
                 if not isinstance(key, str) or not isinstance(usage, dict):
                     raise AdmissionDenied("STATE_INVALID")
                 parts = key.split(":")
-                if len(parts) != 3 or parts[0] not in self._pools or parts[1] not in {"day", "month"}:
+                if (len(parts) != 3 or parts[0] not in self._pools
+                        or parts[1] not in {"day", "month", "cycle"}):
                     raise AdmissionDenied("STATE_INVALID")
+                if parts[1] == "cycle":
+                    try:
+                        cycle_date = date.fromisoformat(parts[2])
+                    except ValueError:
+                        raise AdmissionDenied("STATE_INVALID") from None
+                    if cycle_date.isoformat() != parts[2]:
+                        raise AdmissionDenied("STATE_INVALID")
+                elif parts[1] == "month":
+                    try:
+                        month_date = date.fromisoformat(f"{parts[2]}-01")
+                    except ValueError:
+                        raise AdmissionDenied("STATE_INVALID") from None
+                    if month_date.strftime("%Y-%m") != parts[2]:
+                        raise AdmissionDenied("STATE_INVALID")
                 requests, cost = usage.get("requests"), usage.get("cost")
                 if (type(requests) is not int or type(cost) is not int
                         or requests < 0 or cost < 0):
@@ -296,7 +333,8 @@ class PublicAdmission:
                 "to_policy_digest": self.policy_digest,
                 "changed_pools": changed_pools,
                 "changed_admission_limits": (
-                    ["max_starts_per_window"] if increased_fetch_capacity else []
+                    (["max_starts_per_window"] if increased_fetch_capacity else [])
+                    + (["enabled_sources"] if added_youtube_source else [])
                 ),
                 "authorization_note": authorization_note,
                 "quota_preserved": True,
@@ -332,7 +370,8 @@ class PublicAdmission:
         selected = SOURCE_POOLS[source_id] if pool_name is None else pool_name
         if (selected not in self._pools
                 or selected != SOURCE_POOLS[source_id]
-                and not (source_id == GOOGLE_SOURCE_ID and selected == "google_rss")):
+                and not (source_id == GOOGLE_SOURCE_ID and selected == "google_rss")
+                and not (source_id == YOUTUBE_SOURCE_ID and selected == YOUTUBE_OTHER_POOL)):
             raise AdmissionDenied("SOURCE_POOL_NOT_ENABLED")
         return selected
 
@@ -352,13 +391,68 @@ class PublicAdmission:
             return state, state.get("operational_enabled") is True
         return self.store.transact(self.state_key, operation)
 
+    def last_attempt_reserved_at(self, source_id: str) -> str | None:
+        """Read the latest durable pre-request reservation time for one source."""
+        if source_id not in self.policy.enabled_sources:
+            raise ValueError("configured source required")
+
+        def read(state):
+            if not state:
+                return state, None
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("STATE_INVALID")
+            values = state.get("last_attempt_reserved_at", {})
+            if not isinstance(values, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            value = values.get(source_id)
+            if value is None:
+                return state, None
+            if not isinstance(value, str):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                parsed = _parse(value)
+            except (TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            return state, parsed.isoformat()
+
+        return self.store.transact(self.state_key, read)
+
+    def last_provider_request_at(self, source_id: str) -> str | None:
+        """Read the latest timestamp at which a guarded request was dispatched."""
+        if source_id not in self.policy.enabled_sources:
+            raise ValueError("configured source required")
+
+        def read(state):
+            if not state:
+                return state, None
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("STATE_INVALID")
+            values = state.get("last_provider_request_at", {})
+            if not isinstance(values, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            value = values.get(source_id)
+            if value is None:
+                return state, None
+            if not isinstance(value, str):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                parsed = _parse(value)
+            except (TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            return state, parsed.isoformat()
+
+        return self.store.transact(self.state_key, read)
+
     def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:
         """Return bounded local reservation counts for one configured pool."""
         now = _utc(now)
         if not isinstance(pool_name, str) or pool_name not in self._pools:
             raise ValueError("configured quota pool required")
         limit = self._pools[pool_name]
-        day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
+        day_date = self._quota_day(pool_name, now)
+        day, month = day_date.isoformat(), now.strftime("%Y-%m")
 
         uses_provider_cycle = (bool(self.policy.source_allocations)
                                and (pool_name == "serpapi"
@@ -369,6 +463,10 @@ class PublicAdmission:
                 "limit": limit.monthly_requests,
                 "used": monthly["requests"],
                 "remaining": max(0, limit.monthly_requests - monthly["requests"]),
+                "units_limit": limit.monthly_cost_units,
+                "units_reserved": monthly["cost"],
+                "units_remaining": max(0, limit.monthly_cost_units - monthly["cost"]),
+                "timezone": "UTC",
             }
             if uses_provider_cycle and not cycle_end:
                 monthly_value.update(used=None, remaining=None)
@@ -377,9 +475,25 @@ class PublicAdmission:
                     "limit": limit.daily_requests,
                     "used": daily["requests"],
                     "remaining": max(0, limit.daily_requests - daily["requests"]),
+                    "units_limit": limit.daily_cost_units,
+                    "units_reserved": daily["cost"],
+                    "units_remaining": max(0, limit.daily_cost_units - daily["cost"]),
+                    "timezone": (str(YOUTUBE_PROVIDER_TIMEZONE)
+                                 if pool_name in {SOURCE_POOLS[YOUTUBE_SOURCE_ID],
+                                                  YOUTUBE_OTHER_POOL}
+                                 else "UTC"),
                 },
                 "monthly": monthly_value,
             }
+            if pool_name in {SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}:
+                local_day = now.astimezone(YOUTUBE_PROVIDER_TIMEZONE).date()
+                next_reset = datetime.combine(
+                    local_day + timedelta(days=1), datetime.min.time(),
+                    tzinfo=YOUTUBE_PROVIDER_TIMEZONE,
+                )
+                value["daily"]["reset_at"] = next_reset.astimezone(timezone.utc).isoformat()
+                value["daily"]["timezone"] = str(YOUTUBE_PROVIDER_TIMEZONE)
+                value["monthly"]["timezone"] = "UTC"
             if uses_provider_cycle:
                 value["billing_cycle_ends_at"] = cycle_end
                 value["billing_cycle_status"] = "KNOWN" if cycle_end else "UNKNOWN"
@@ -916,7 +1030,8 @@ class PublicAdmission:
                 return "REPLAY"
             if len(job["receipts"]) >= self.policy.max_records:
                 raise AdmissionDenied("ATTEMPT_CAPACITY")
-            day, month = now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
+            day_date = self._quota_day(pool, now)
+            day, month = day_date.isoformat(), now.strftime("%Y-%m")
             quota = state["quota"]
             cycle_end = state.get("serpapi_cycle_ends_at")
             if self.policy.source_allocations and pool == "serpapi":
@@ -931,8 +1046,8 @@ class PublicAdmission:
             daily_key = f"{pool}:day:{day}"
             monthly_key = (f"{pool}:cycle:{cycle_end}" if pool == "serpapi" and cycle_end
                            else f"{pool}:month:{month}")
-            # Counters are scoped to UTC calendar windows. Once the server clock
-            # has advanced, older windows can no longer affect admission; prune
+            # Once the server clock has advanced, older windows can no longer
+            # affect admission; prune
             # only canonical, known-pool keys strictly before the active window.
             # Unknown/future/malformed entries are retained so corrupt state can
             # consume capacity and fail closed rather than being silently erased.
@@ -940,15 +1055,20 @@ class PublicAdmission:
                 parts = key.split(":") if isinstance(key, str) else ()
                 if len(parts) != 3 or parts[0] not in self._pools:
                     continue
-                _, window_kind, window_value = parts
+                quota_pool, window_kind, window_value = parts
                 try:
                     if window_kind == "day":
                         parsed = date.fromisoformat(window_value)
-                        if parsed.isoformat() == window_value and window_value < day:
+                        pool_day = self._quota_day(quota_pool, now).isoformat()
+                        if parsed.isoformat() == window_value and window_value < pool_day:
                             del quota[key]
                     elif window_kind == "month":
                         parsed = date.fromisoformat(f"{window_value}-01")
-                        if parsed.strftime("%Y-%m") == window_value and window_value < month:
+                        is_youtube_history = quota_pool in {
+                            SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL,
+                        }
+                        if (parsed.strftime("%Y-%m") == window_value and window_value < month
+                                and not is_youtube_history):
                             del quota[key]
                     elif window_kind == "cycle" and cycle_end:
                         parsed = date.fromisoformat(window_value)
@@ -1002,6 +1122,10 @@ class PublicAdmission:
             job["receipts"][receipt_id] = {"source_id": source_id, "pool": pool,
                                           "allocation_pool": allocation_pool,
                                           "reserved_at": now.isoformat()}
+            last_attempts = state.setdefault("last_attempt_reserved_at", {})
+            if not isinstance(last_attempts, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            last_attempts[source_id] = now.isoformat()
             inflight[f"{job_id}:{receipt_id}"] = {
                 "pool": pool, "expires_at": (now + timedelta(
                     seconds=limit.attempt_timeout_seconds)).isoformat()}
@@ -1024,6 +1148,12 @@ class PublicAdmission:
             return state["inflight"].pop(f"{job_id}:{receipt_id}", None) is not None
         return self._transaction(op)
 
+    @staticmethod
+    def _quota_day(pool_name: str, now: datetime) -> date:
+        if pool_name in {SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}:
+            return now.astimezone(YOUTUBE_PROVIDER_TIMEZONE).date()
+        return now.date()
+
     def check_attempt(self, job_id: str, owner: str, fence: int, *, attempt_id: str,
                       source_id: str, now: datetime, pool_name: str | None = None) -> datetime:
         """Recheck the switch, lease and reservation immediately before outbound I/O."""
@@ -1045,6 +1175,34 @@ class PublicAdmission:
             return min(_parse(slot["expires_at"]), _parse(job["lease_until"]),
                        _parse(job["expires_at"]))
         return self._transaction(op)
+
+    def record_provider_request_started(self, job_id: str, owner: str, fence: int, *,
+                                        attempt_id: str, source_id: str, now: datetime,
+                                        pool_name: str | None = None) -> None:
+        """Persist request dispatch time after the reservation and before network I/O."""
+        now = _utc(now)
+        if not isinstance(attempt_id, str) or not _KEY.fullmatch(attempt_id):
+            raise ValueError("invalid attempt identity")
+        pool = self._pool_name(source_id, pool_name)
+        receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
+
+        def operation(state):
+            self._guard_clock(state, now)
+            job = state["jobs"].get(job_id)
+            self._require_lease(job, owner, fence, now)
+            receipt = job["receipts"].get(receipt_id)
+            slot_key = f"{job_id}:{receipt_id}"
+            slot = state["inflight"].get(slot_key)
+            if (not receipt or receipt.get("source_id") != source_id
+                    or receipt.get("pool") != pool or not slot or slot.get("pool") != pool
+                    or _parse(slot["expires_at"]) <= now):
+                raise AdmissionDenied("ATTEMPT_NOT_ACTIVE")
+            values = state.setdefault("last_provider_request_at", {})
+            if not isinstance(values, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            values[source_id] = now.isoformat()
+
+        self._transaction(operation)
 
     def finish(self, job_id: str, owner: str, fence: int, *, now: datetime,
                partial: bool = False) -> None:

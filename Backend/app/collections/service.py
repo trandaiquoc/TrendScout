@@ -22,7 +22,7 @@ from app.collections.store import (
     keyword_record,
     now,
 )
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.taxonomy.registry import resolve as resolve_category
 
 # Calibrated against the real local-model Smart Home positive (0.538 with its
@@ -123,6 +123,7 @@ class CollectionService:
             db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at)
                 VALUES(?,'PROCESSING','CLEANING',?)""", (fetch_id, now()))
         records, rejected, bing_updates = [], [], []
+        policy_excluded = 0
         skipped = replay_skipped if retry_existing_snapshot and not sources else 0
         available = (sum(len(source.get("records", [])) for source in sources
                           if isinstance(source.get("records"), list))
@@ -130,6 +131,10 @@ class CollectionService:
         self._update_job(fetch_id, stage="EXTRACTING_KEYWORDS", available=available, skipped=skipped)
         for source in sources:
             source_id, mode = source.get("source_id", ""), source.get("data_mode", "")
+            if source_id == YOUTUBE_SOURCE_ID:
+                raw_records = source.get("records", [])
+                policy_excluded += len(raw_records) if isinstance(raw_records, list) else 0
+                continue
             snapshot_status = source.get("status", "SUCCESS")
             if snapshot_status not in {"SUCCESS", "PARTIAL"}:
                 continue
@@ -237,9 +242,12 @@ class CollectionService:
             except Exception:
                 # Context enrichment is optional evidence; provider Fetch and analysis continue.
                 pass
-        self._update_job(fetch_id, stage="ANALYZING_SEMANTIC_MEANING", skipped=skipped)
+        self._update_job(fetch_id, stage="ANALYZING_SEMANTIC_MEANING",
+                         skipped=skipped + policy_excluded)
         if sources and not fetch_id.startswith("organize-"):
-            self._persist_dataset_snapshot(fetch_id, sources, records, available, skipped)
+            self._persist_dataset_snapshot(
+                fetch_id, sources, records, available, skipped, policy_excluded
+            )
         if sources and not records and not fetch_id.startswith("organize-"):
             # A failed or empty source response is still an auditable snapshot,
             # but it must not replay analysis and rewrite timestamps or results
@@ -257,12 +265,14 @@ class CollectionService:
                 fetch_id, stage="COMPLETED", status="COMPLETED", available=available,
                 eligible=snapshot["eligible_keyword_count"] if snapshot else 0,
                 processed=0, assigned=0, unassigned=0, created_collections=0,
-                suggestions=0, skipped=skipped, cached_embeddings=0, inferred_embeddings=0,
+                suggestions=0, skipped=skipped + policy_excluded,
+                cached_embeddings=0, inferred_embeddings=0,
             )
             return {
                 "fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                 "processed": 0, "assigned": 0, "unassigned": 0,
-                "created_collections": 0, "suggestions": 0, "skipped": skipped,
+                "created_collections": 0, "suggestions": 0,
+                "skipped": skipped + policy_excluded,
             }
         analysis = self._analyze_persisted_keywords(records)
         # The source response can be capped or paginated. Classification operates on every
@@ -447,12 +457,13 @@ class CollectionService:
                 db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
                     error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
                     VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
-                    (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped,
+                    (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped + policy_excluded,
                      "LOCAL_MODEL_UNAVAILABLE", now(), eligible,
                      self._thread_state.embedding_counts["cached_embeddings"],
                      self._thread_state.embedding_counts["inferred_embeddings"]))
             return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
-                    "processed": 0, "assigned": 0, "unassigned": len(records), "skipped": skipped}
+                    "processed": 0, "assigned": 0, "unassigned": len(records),
+                    "skipped": skipped + policy_excluded}
 
         assigned = 0
         unassigned_rows = []
@@ -572,7 +583,7 @@ class CollectionService:
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                    "processed": len(records), "assigned": assigned,
                    "unassigned": self._unassigned_count(), "created_collections": created,
-                   "suggestions": suggestions, "skipped": skipped,
+                   "suggestions": suggestions, "skipped": skipped + policy_excluded,
                    "eligible": eligible,
                    "cached_embeddings": self._thread_state.embedding_counts["cached_embeddings"],
                    "inferred_embeddings": self._thread_state.embedding_counts["inferred_embeddings"],
@@ -583,7 +594,7 @@ class CollectionService:
         self._update_job(fetch_id, stage="COMPLETED", status="COMPLETED", available=available,
             eligible=eligible, processed=outcome["processed"], assigned=assigned,
             unassigned=outcome["unassigned"], created_collections=created,
-            suggestions=suggestions, skipped=skipped,
+            suggestions=suggestions, skipped=skipped + policy_excluded,
             cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
             inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"],
             membership_reconciliation_id=reconciliation_id)
@@ -615,7 +626,8 @@ class CollectionService:
         with self.store.connect() as db:
             db.execute(f"UPDATE fetch_jobs SET {','.join(assignments)} WHERE fetch_id=?", parameters)
 
-    def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped):
+    def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped,
+                                  policy_excluded=0):
         manifests, flags, modes = [], [], set()
         provider_count = 0
         for source in sources:
@@ -642,6 +654,8 @@ class CollectionService:
                 "error_code", "retry_after_seconds") if source.get(key) is not None})
         if skipped:
             flags.append("CLEANING_REJECTIONS")
+        if policy_excluded:
+            flags.append("YOUTUBE_KEYWORD_EXTRACTION_DISABLED")
         dates, fetched = [], []
         for record in records:
             try:

@@ -81,7 +81,7 @@ class SourceCatalogTests(unittest.TestCase):
     def test_four_capabilities_have_central_endpoint_and_readiness_metadata(self):
         expected = {
             WIKIMEDIA_SOURCE_ID: ("wikimedia_aqs", "IMPLEMENTED", True),
-            YOUTUBE_SOURCE_ID: ("youtube_data_api_v3", "PENDING_APPROVAL", False),
+            YOUTUBE_SOURCE_ID: ("youtube_data_api_v3", "IMPLEMENTED", False),
             GOOGLE_SOURCE_ID: ("serpapi_google", "PENDING_APPROVAL", False),
             BING_SOURCE_ID: ("serpapi_bing", "PENDING_APPROVAL", False),
         }
@@ -158,11 +158,11 @@ class SourceCatalogTests(unittest.TestCase):
         self.assertEqual(wikimedia.production_readiness, "NOT_PRODUCTION_READY")
         youtube = source_capability(YOUTUBE_SOURCE_ID)
         self.assertEqual(youtube.adapter_status, "IMPLEMENTED_OFFLINE_VERIFIED")
-        self.assertEqual(youtube.readiness, "PENDING_APPROVAL")
+        self.assertEqual(youtube.readiness, "IMPLEMENTED")
         self.assertEqual(youtube.approval_status, "PENDING_APPROVAL")
-        self.assertEqual(youtube.configuration_status, "NOT_CONFIGURED")
+        self.assertEqual(youtube.configuration_status, "SERVER_SIDE_OPTIONAL")
         self.assertEqual(youtube.live_verification_status, "NOT_VERIFIED")
-        self.assertEqual(youtube.supported_data_modes, ("SYNTHETIC",))
+        self.assertEqual(youtube.supported_data_modes, ("LIVE",))
         self.assertFalse(youtube.default_enabled)
         for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
             capability = source_capability(source_id)

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import httpx
 from test_d5_public_admission import NOW, coordinator, policy
 
+from app.jobs.public_admission import YOUTUBE_OTHER_POOL, PoolLimit
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.sources.google_trends.trending_now import (
     TRENDING_NOW_ENGINE,
@@ -27,7 +28,9 @@ from app.sources.live_gateway import (
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.serpapi.errors import SerpApiError
 from app.sources.serpapi.pagination import build_contexts, initial_offset
+from app.sources.youtube.models import YouTubeVideoListRequest
 from app.sources.youtube.pagination import build_execution_plan
+from app.sources.youtube.video_list import YOUTUBE_VIDEO_LIST_ENDPOINT
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
 FAKE_SECRET = "fixture-secret-never-real"
@@ -57,7 +60,12 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         path = str(Path(self.directory.name) / "ledger.sqlite")
-        self.control = coordinator(path, policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint))
+        selected_policy = policy(plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint)
+        self.control = coordinator(path, replace(
+            selected_policy,
+            pools={**selected_policy.pools,
+                   YOUTUBE_OTHER_POOL: PoolLimit(2, 3, 2, 3, 1)},
+        ))
         self.job = self.control.admit("public-fetch-idempotency", now=NOW)["job_id"]
         self.fence = self.control.claim(self.job, "worker", now=NOW)["fence"]
         self.runner = GuardedAttemptRunner(self.control, clock=lambda: NOW)
@@ -117,6 +125,72 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0].headers["x-goog-api-key"], FAKE_SECRET)
         self.assertNotIn(FAKE_SECRET, str(seen[0].url))
         self.assertNotIn(FAKE_SECRET, " ".join(logs.output))
+
+    async def test_videos_list_uses_fixed_endpoint_and_separate_other_method_budget(self):
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(200, json={
+                "kind": "youtube#videoListResponse",
+                "items": [{
+                    "kind": "youtube#video",
+                    "id": "abcdefghijk",
+                    "snippet": {
+                        "title": "Offline chart fixture",
+                        "channelId": "UCfixture_123",
+                        "channelTitle": "Fixture channel",
+                        "publishedAt": "2026-11-12T11:00:00Z",
+                        "liveBroadcastContent": "none",
+                    },
+                }],
+            })
+
+        gateway = self.gateway(YOUTUBE_SOURCE_ID, handler)
+        request = YouTubeVideoListRequest(
+            "most_popular", self.control.policy.plan_fingerprint, max_results=10
+        )
+        result = await gateway.fetch_page(
+            context=request,
+            cursor=None,
+            job_id=self.job,
+            owner="worker",
+            fence=self.fence,
+            attempt_id="youtube-other-attempt-0001",
+            timeout_seconds=1,
+        )
+
+        self.assertEqual(result.data_mode, "SYNTHETIC")
+        self.assertEqual(result.page.items[0].video_id, "abcdefghijk")
+        self.assertEqual(str(seen[0].url.copy_with(query=None)), YOUTUBE_VIDEO_LIST_ENDPOINT)
+        self.assertEqual(seen[0].url.params["chart"], "mostPopular")
+        self.assertEqual(seen[0].url.params["regionCode"], "US")
+        self.assertEqual(seen[0].url.params["part"], "snippet")
+        self.assertEqual(seen[0].url.params["maxResults"], "10")
+        self.assertNotIn("statistics", seen[0].url.params["part"])
+        self.assertEqual(seen[0].headers["x-goog-api-key"], FAKE_SECRET)
+        self.assertEqual(self.control.quota_snapshot("youtube", now=NOW)["daily"]["used"], 0)
+        metadata_request = YouTubeVideoListRequest(
+            "metadata", self.control.policy.plan_fingerprint,
+            video_ids=("abcdefghijk",),
+        )
+        await gateway.fetch_page(
+            context=metadata_request,
+            cursor=None,
+            job_id=self.job,
+            owner="worker",
+            fence=self.fence,
+            attempt_id="youtube-other-attempt-0002",
+            timeout_seconds=1,
+        )
+        self.assertEqual(seen[1].url.path, "/youtube/v3/videos")
+        self.assertEqual(seen[1].url.params["id"], "abcdefghijk")
+        self.assertEqual(seen[1].url.params["part"], "snippet")
+        self.assertNotIn("maxResults", seen[1].url.params)
+        self.assertNotIn("regionCode", seen[1].url.params)
+        self.assertEqual(self.control.quota_snapshot(
+            YOUTUBE_OTHER_POOL, now=NOW
+        )["daily"]["used"], 2)
 
     async def test_network_factory_requires_approvals_and_opens_no_connection(self):
         gateway = await LivePageGateway.controlled_network(

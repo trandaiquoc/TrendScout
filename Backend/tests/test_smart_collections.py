@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -47,6 +48,82 @@ class SmartCollectionsTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_live_youtube_video_text_is_kept_out_of_keyword_and_collection_processing(self):
+        live_store = CollectionStore(Path(self.temp.name) / "youtube-live-collections.sqlite",
+                                     data_mode_scope="LIVE")
+        service = CollectionService(live_store)
+        source = {
+            "source_id": "youtube_video_search",
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "record_count": 1,
+            "records": [{
+                "provider_video_id": "AbCdEf12345",
+                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                "title": "Portable Solar Generator Review",
+                "description": "Consumer product video evidence",
+                "fetched_at": "2026-11-16T00:00:00+00:00",
+                "data_mode": "LIVE",
+            }],
+            "coverage": {"provider_method": "search.list", "source_fetched_at":
+                         "2026-11-16T00:00:00+00:00"},
+        }
+
+        result = service._process_fetch("youtube-evidence-policy-test", [source])
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["available"], 1)
+        self.assertEqual(result["skipped"], 1)
+        with live_store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM keywords").fetchone()[0], 0)
+            snapshot = db.execute(
+                "SELECT status,provider_record_count,received_record_count,retained_keyword_count,"
+                "rejected_record_count,source_manifest,quality_flags FROM dataset_snapshots "
+                "WHERE dataset_id='youtube-evidence-policy-test'"
+            ).fetchone()
+        self.assertEqual(tuple(snapshot[:5]), ("PARTIAL", 1, 1, 0, 0))
+        self.assertIn("YOUTUBE_KEYWORD_EXTRACTION_DISABLED", snapshot["quality_flags"])
+        self.assertEqual(json.loads(snapshot["source_manifest"])[0]["source_id"],
+                         "youtube_video_search")
+
+    def test_youtube_capability_keeps_observation_and_cache_delivery_times_separate(self):
+        from types import SimpleNamespace
+
+        from app.api.capabilities import _saved_source_activity
+
+        source = {
+            "source_id": "youtube_video_search",
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "record_count": 1,
+            "records": [{
+                "provider_video_id": "AbCdEf12345",
+                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                "title": "Portable Solar Generator Review",
+                "fetched_at": "2026-11-15T08:00:00+00:00",
+                "data_mode": "LIVE",
+            }],
+            "coverage": {
+                "provider_method": "search.list",
+                "source_fetched_at": "2026-11-15T08:00:00+00:00",
+                "cache_delivery_at": "2026-11-16T08:00:00+00:00",
+            },
+        }
+        self.service._process_fetch("youtube-cache-delivery-capability", [source])
+        request = SimpleNamespace(app=SimpleNamespace(
+            state=SimpleNamespace(collection_service=self.service)
+        ))
+
+        activity = _saved_source_activity(request)["youtube_video_search"]
+
+        self.assertEqual(activity["last_successful_observation_at"],
+                         "2026-11-15T08:00:00+00:00")
+        self.assertEqual(activity["last_cache_delivery_at"],
+                         "2026-11-16T08:00:00+00:00")
+        self.assertEqual(activity["delivery_state"], "CACHED")
 
     def test_configured_local_store_directory_is_respected(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(

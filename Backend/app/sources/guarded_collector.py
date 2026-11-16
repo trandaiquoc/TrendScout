@@ -83,6 +83,7 @@ class QueryProgress:
     rejected: int
     reason: str
     retry_at: datetime | None = None
+    request_timestamps: tuple[datetime, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,10 @@ def _receipt_page(source, value, context):
         page = YouTubeProviderPage(tuple(items), token, total, value.get("response_status"))
     else:
         raise ValueError("unsupported pending page source")
-    return GatewayPage(source, value.get("data_mode"), page)
+    return GatewayPage(
+        source, value.get("data_mode"), page,
+        _parse_datetime(value.get("request_started_at"), optional=True),
+    )
 
 
 def _serialize_receipt(result):
@@ -228,7 +232,12 @@ def _serialize_receipt(result):
         }
     else:
         raise ValueError("unsupported pending page receipt")
-    return {"source_id": result.source_id, "data_mode": result.data_mode, **serialized}
+    return {
+        "source_id": result.source_id,
+        "data_mode": result.data_mode,
+        "request_started_at": _checkpoint_json(result.request_started_at),
+        **serialized,
+    }
 
 
 def _restore_checkpoint(source, data_mode, plan, limits, contexts, snapshot):
@@ -341,7 +350,8 @@ class GuardedQueryCollector:
     async def collect(self, *, plan: QueryPlan, limits: CollectionLimits,
                       job_id: str, owner: str, fence: int,
                       heartbeat=lambda: None, checkpoint=None,
-                      resume_snapshot=None) -> CollectionResult:
+                      resume_snapshot=None,
+                      query_scopes: tuple[str, ...] | None = None) -> CollectionResult:
         if not isinstance(plan, QueryPlan) or get_query_plan(plan.plan_id, plan.version) != plan:
             raise ValueError("registered server plan required")
         if plan.fingerprint != self.gateway.runner.admission.policy.plan_fingerprint:
@@ -350,17 +360,30 @@ class GuardedQueryCollector:
                 or (checkpoint is not None and not callable(checkpoint))):
             raise ValueError("validated limits required")
         limits.validate(plan)
+        if query_scopes is not None:
+            known_scopes = {seed.scope for seed in plan.seeds}
+            if (not isinstance(query_scopes, tuple) or not query_scopes
+                    or len(query_scopes) > limits.max_queries
+                    or len(query_scopes) != len(set(query_scopes))
+                    or any(scope not in known_scopes for scope in query_scopes)):
+                raise ValueError("query scopes must be a bounded subset of the registered plan")
         source = self.gateway.source_id
+        def build_selected_contexts(started_at):
+            generated = (build_contexts(plan, source, started_at)
+                         if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
+                         else build_execution_plan(plan, started_at).queries)
+            if query_scopes is None:
+                return generated
+            contexts_by_scope = {context.taxonomy_scope_label: context for context in generated}
+            return tuple(contexts_by_scope[scope] for scope in query_scopes)
+
         started = self.utcnow()
-        contexts = (build_contexts(plan, source, started) if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
-                    else build_execution_plan(plan, started).queries)
+        contexts = build_selected_contexts(started)
         restored = _restore_checkpoint(source, self.gateway.data_mode, plan, limits, contexts,
                                        resume_snapshot)
         if restored is not None:
             started, query_states, restored_records, checkpoint_records_omitted, pending_page = restored
-            contexts = (build_contexts(plan, source, started)
-                        if source in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}
-                        else build_execution_plan(plan, started).queries)
+            contexts = build_selected_contexts(started)
         else:
             query_states, restored_records, checkpoint_records_omitted, pending_page = [], [], 0, None
             for context in contexts:
@@ -420,6 +443,7 @@ class GuardedQueryCollector:
             pages, accepted, rejected = state["pages"], state["accepted"], state["rejected"]
             rank_offset = state["rank_offset"]
             reason, retry_at = state["reason"], state["retry_at"]
+            request_timestamps = []
             if state["done"]:
                 progress.append(QueryProgress(context.query_fingerprint, pages, accepted, rejected,
                                               reason, retry_at))
@@ -452,6 +476,8 @@ class GuardedQueryCollector:
                         result = pending_page["restored"]
                         pending_page = None
                         attempted += 1
+                        if result.request_started_at is not None:
+                            request_timestamps.append(result.request_started_at)
                         page = result.page
                         break
                     attempted += 1
@@ -476,11 +502,16 @@ class GuardedQueryCollector:
                                 self.gateway.runner.admission.max_attempt_seconds(source)),
                             on_page_receipt=persist_receipt if checkpoint is not None else None,
                         )
+                        if result.request_started_at is not None:
+                            request_timestamps.append(result.request_started_at)
                         if result.data_mode != self.gateway.data_mode or result.source_id != source:
                             raise GatewayError("PROVENANCE_MISMATCH")
                         page = result.page
                         break
                     except (GatewayError, SerpApiError, YouTubeSourceError, AdmissionDenied) as exc:
+                        request_started_at = self.gateway.last_provider_request_started_at
+                        if request_started_at is not None:
+                            request_timestamps.append(request_started_at)
                         code = exc.code.value if isinstance(exc, YouTubeSourceError) else exc.code
                         if code in {"RESULT_PERSISTENCE_FAILED", "SETTLEMENT_PENDING"}:
                             # Keep the job reclaimable while the durable receipt
@@ -597,7 +628,10 @@ class GuardedQueryCollector:
                     save_checkpoint()
                 if page_done:
                     break
-            progress.append(QueryProgress(context.query_fingerprint, pages, accepted, rejected, reason, retry_at))
+            progress.append(QueryProgress(
+                context.query_fingerprint, pages, accepted, rejected, reason, retry_at,
+                tuple(request_timestamps),
+            ))
         all_selected = limits.max_queries == len(contexts)
         complete = all_selected and all(row.reason == "END_OF_PAGES" for row in progress)
         status = "SUCCESS" if complete else ("PARTIAL" if any(row.pages for row in progress) else "FAILED")

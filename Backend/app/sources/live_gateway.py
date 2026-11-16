@@ -17,6 +17,7 @@ from urllib.parse import unquote
 
 import httpx
 
+from app.jobs.public_admission import YOUTUBE_OTHER_POOL
 from app.ports.credentials import CredentialProvider
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -30,9 +31,9 @@ from app.sources.google_trends.trending_now import (
     build_trending_now_params,
     parse_trending_now_response,
 )
-from app.sources.http_policy import HttpPolicy
 from app.sources.http_policy import (
     HttpDeadlineExceeded,
+    HttpPolicy,
     HttpRequestFailure,
     HttpResponseTooLarge,
 )
@@ -43,8 +44,18 @@ from app.sources.serpapi.models import QueryContext as SerpContext
 from app.sources.serpapi.quota import SharedQuotaPool
 from app.sources.youtube.client import YouTubeSearchClient, build_search_params
 from app.sources.youtube.errors import YouTubeSourceError
-from app.sources.youtube.models import QueryContext as YouTubeContext
+from app.sources.youtube.models import (
+    QueryContext as YouTubeContext,
+)
+from app.sources.youtube.models import (
+    YouTubeVideoListRequest,
+)
 from app.sources.youtube.pagination import build_execution_plan
+from app.sources.youtube.video_list import (
+    YOUTUBE_VIDEO_LIST_ENDPOINT,
+    build_video_list_params,
+    parse_video_list_response,
+)
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
 _MAX_RESPONSE_BYTES = 1_000_000
@@ -101,6 +112,7 @@ def _matches_bounded_google_local_policy(policy, builder) -> bool:
             fetch_starts_per_hour=policy.max_starts_per_window,
             bing_enabled=bing_enabled,
             bing_daily_budget=(bing_allocation.daily_requests if bing_allocation else 3),
+            youtube_enabled=YOUTUBE_SOURCE_ID in policy.enabled_sources,
         )
     except (AttributeError, KeyError, TypeError, ValueError):
         return False
@@ -166,7 +178,8 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
             store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
             valid = (not os.environ.get("VERCEL")
-                     and source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID, WIKIMEDIA_SOURCE_ID}
+                    and source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                                      WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID}
                      and approval.policy_version == GOOGLE_POLICY_VERSION
                      and approval.local_controls_verified is True
                      and isinstance(runner, GuardedAttemptRunner)
@@ -215,15 +228,21 @@ class GatewayPage:
     source_id: str
     data_mode: str
     page: object = field(repr=False)
+    request_started_at: datetime | None = None
 
 
 class _CredentialTransport(httpx.AsyncBaseTransport):
     """Inject secrets below HTTPX request logging, keeping outer URLs clean."""
 
     def __init__(self, source_id: str, key: str, inner: httpx.AsyncBaseTransport,
-                 expected_params: dict):
+                 expected_params: dict, *, endpoint: str | None = None):
         self._source_id, self._key, self._inner = source_id, key, inner
-        self._endpoint = source_capability(source_id).endpoint
+        source_endpoint = source_capability(source_id).endpoint
+        allowed_endpoints = ({source_endpoint, YOUTUBE_VIDEO_LIST_ENDPOINT}
+                             if source_id == YOUTUBE_SOURCE_ID else {source_endpoint})
+        self._endpoint = source_endpoint if endpoint is None else endpoint
+        if self._endpoint not in allowed_endpoints:
+            raise ValueError("endpoint is outside the source allowlist")
         self._expected_params = dict(expected_params)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -275,6 +294,7 @@ class LivePageGateway:
             raise ValueError("live gateway requires the controlled HTTP transport")
         self.source_id, self.credentials, self.approvals = source_id, credentials, approvals
         self.runner, self._inner, self._offline, self.clock = runner, inner, offline, clock
+        self._last_provider_request_started_at = None
         self.policy = policy or HttpPolicy(max_retries=0)
         if not isinstance(self.policy, HttpPolicy) or self.policy.max_retries != 0:
             raise ValueError("gateway performs one attempt; retries belong to the worker")
@@ -314,6 +334,13 @@ class LivePageGateway:
             raise GatewayError("CREDENTIAL_UNAVAILABLE")
         return value
 
+    def _endpoint_for(self, context) -> str:
+        if isinstance(context, YouTubeVideoListRequest):
+            if self.source_id != YOUTUBE_SOURCE_ID:
+                raise GatewayError("INVALID_SERVER_QUERY")
+            return YOUTUBE_VIDEO_LIST_ENDPOINT
+        return source_capability(self.source_id).endpoint
+
     def _params(self, context, cursor, max_results):
         try:
             if isinstance(context, GoogleTrendsRequest):
@@ -332,6 +359,11 @@ class LivePageGateway:
                     # A newly admitted Bing verification must fetch the provider,
                     # even when SerpApi has a same-query result in its own cache.
                     params["no_cache"] = "true"
+            elif isinstance(context, YouTubeVideoListRequest):
+                if (self.source_id != YOUTUBE_SOURCE_ID
+                        or context.plan_fingerprint != self.runner.admission.policy.plan_fingerprint):
+                    raise ValueError("source or policy mismatch")
+                params = build_video_list_params(context, page_token=cursor)
             else:
                 if not isinstance(context, YouTubeContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
@@ -352,6 +384,7 @@ class LivePageGateway:
                          max_results=50, timeout_seconds=15, on_page_receipt=None) -> GatewayPage:
         if self._closed:
             raise GatewayError("GATEWAY_CLOSED")
+        self._last_provider_request_started_at = None
         if on_page_receipt is not None and not callable(on_page_receipt):
             raise GatewayError("INVALID_RECEIPT_CALLBACK")
         approved = self._check_approval()
@@ -360,9 +393,12 @@ class LivePageGateway:
                 <= self.policy.total_timeout_seconds):
             raise GatewayError("INVALID_TIMEOUT")
         key = self._credential()
-        endpoint = source_capability(self.source_id).endpoint
+        endpoint = self._endpoint_for(context)
+        pool_name = (YOUTUBE_OTHER_POOL
+                     if isinstance(context, YouTubeVideoListRequest) else None)
         parsed_receipt = []
         failure_diagnostic = None
+        request_started_at = None
 
         def record_diagnostic(code, phase, *, http_status=None, exception_class=None,
                               bytes_received=0, response_size_limit=_MAX_RESPONSE_BYTES):
@@ -392,6 +428,8 @@ class LivePageGateway:
                                            self.policy, utcnow=self.clock)
                     page = parser.parse_response(response, context=context, cursor=cursor,
                                                  sensitive_key=key)
+                elif isinstance(context, YouTubeVideoListRequest):
+                    page = parse_video_list_response(response, request=context)
                 else:
                     parser = YouTubeSearchClient(client=dummy, credential_resolver=None,
                                                  http_policy=self.policy, utcnow=self.clock)
@@ -399,7 +437,7 @@ class LivePageGateway:
                                                  max_results=max_results)
             finally:
                 await dummy.aclose()
-            return GatewayPage(self.source_id, self.data_mode, page)
+            return GatewayPage(self.source_id, self.data_mode, page, request_started_at)
 
         async def before_settle(value):
             code, response = value
@@ -416,17 +454,30 @@ class LivePageGateway:
                 await callback_result
 
         async def request():
+            nonlocal request_started_at
             try:
                 if self._check_approval() != approved:
                     raise GatewayError("SOURCE_NOT_APPROVED")
             except GatewayError:
                 return ("SOURCE_NOT_APPROVED", None)
-            transport = _CredentialTransport(self.source_id, key, self._inner, params)
+            transport = _CredentialTransport(
+                self.source_id, key, self._inner, params, endpoint=endpoint
+            )
             # A per-attempt client closes its wrapper but the shared underlying
             # transport is closed only when the gateway itself is closed.
             async with httpx.AsyncClient(transport=transport, follow_redirects=False,
                                          trust_env=False) as client:
                 try:
+                    request_started_at = self.clock()
+                    await asyncio.to_thread(
+                        self.runner.admission.record_provider_request_started,
+                        job_id, owner, fence,
+                        attempt_id=attempt_id,
+                        source_id=self.source_id,
+                        now=request_started_at,
+                        pool_name=pool_name,
+                    )
+                    self._last_provider_request_started_at = request_started_at
                     response = await self.policy.get_bounded(
                         client,
                         endpoint,
@@ -522,6 +573,7 @@ class LivePageGateway:
 
         outcome = await self.runner.run(job_id=job_id, owner=owner, fence=fence,
             source_id=self.source_id, attempt_id=attempt_id, timeout_seconds=timeout_seconds,
+            pool_name=pool_name,
             request=request,
             before_settle=before_settle if on_page_receipt is not None else None)
         if outcome.status != "COMPLETED":
@@ -546,3 +598,7 @@ class LivePageGateway:
     @property
     def data_mode(self) -> str:
         return "SYNTHETIC" if self._offline else "LIVE"
+
+    @property
+    def last_provider_request_started_at(self) -> datetime | None:
+        return self._last_provider_request_started_at

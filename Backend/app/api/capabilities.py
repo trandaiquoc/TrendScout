@@ -1,6 +1,7 @@
 """Public, non-secret view of runtime and source capabilities."""
 
 import json
+import re
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -49,6 +50,18 @@ def _public_saved_account_snapshot(value):
     return snapshot
 
 
+def _safe_utc_timestamp(value):
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _latest_saved_account_snapshot(saved_activity):
     saved_snapshot = _public_saved_account_snapshot(
         saved_activity.get("_serpapi_account_snapshot")
@@ -90,6 +103,7 @@ def _saved_source_activity(request):
         return {}
 
     latest = {}
+    latest_youtube_observation = None
     latest_account_snapshot = None
     latest_account_observed_at = None
     for row in rows:
@@ -117,6 +131,19 @@ def _saved_source_activity(request):
                             or observed_at > latest_account_observed_at):
                         latest_account_snapshot = account_snapshot
                         latest_account_observed_at = observed_at
+            if source_id == "youtube_video_search":
+                coverage = source.get("coverage")
+                source_fetched_at = (_safe_utc_timestamp(coverage.get("source_fetched_at"))
+                                     if isinstance(coverage, dict) else None)
+                if (latest_youtube_observation is None and source_fetched_at is not None
+                        and source.get("status") in {"SUCCESS", "PARTIAL"}
+                        and source.get("data_mode", row["data_mode"]) == "LIVE"):
+                    latest_youtube_observation = {
+                        "fetched_at": source_fetched_at,
+                        "record_count": (source.get("record_count")
+                                         if type(source.get("record_count")) is int
+                                         and source.get("record_count") >= 0 else None),
+                    }
             if source_id in latest:
                 if source_id == "bing_web_serp":
                     _merge_saved_bing_evidence(latest[source_id], source)
@@ -132,6 +159,13 @@ def _saved_source_activity(request):
                 "observation_start": row["observation_start"],
                 "observation_end": row["observation_end"],
             }
+            delivery_state = source.get("delivery_state")
+            if delivery_state in {"FRESH", "CACHED", "STALE_CACHE"}:
+                activity["delivery_state"] = delivery_state
+            error_code = source.get("error_code")
+            if (source_id == "youtube_video_search" and isinstance(error_code, str)
+                    and re.fullmatch(r"[A-Z0-9_]{1,64}", error_code)):
+                activity["error_code"] = error_code
             if source_id == "google_web_serp":
                 coverage = source.get("coverage")
                 if isinstance(coverage, dict):
@@ -157,7 +191,8 @@ def _saved_source_activity(request):
                     if account_quota is not None:
                         summary["account_quota"] = account_quota
                     if (status in {"SUCCESS", "PARTIAL"}
-                            and source.get("delivery_state") in {"FRESH", "CACHED"}):
+                            and source.get("delivery_state")
+                            in {"FRESH", "CACHED", "STALE_CACHE"}):
                         summary["delivery_state"] = source["delivery_state"]
                     activity["google_coverage"] = summary
             if source_id == "bing_web_serp":
@@ -182,16 +217,72 @@ def _saved_source_activity(request):
                     if account_quota is not None:
                         summary["account_quota"] = account_quota
                     if (status in {"SUCCESS", "PARTIAL"}
-                            and source.get("delivery_state") in {"FRESH", "CACHED"}):
+                            and source.get("delivery_state")
+                            in {"FRESH", "CACHED", "STALE_CACHE"}):
                         summary["delivery_state"] = source["delivery_state"]
                     activity["bing_coverage"] = summary
                     original_fetched_at = (summary.get("fetched_at")
                                            or summary.get("cache_fetched_at"))
                     if isinstance(original_fetched_at, str):
                         activity["fetched_at"] = original_fetched_at
+            if source_id == "youtube_video_search":
+                coverage = source.get("coverage")
+                if isinstance(coverage, dict):
+                    summary = {}
+                    for key in (
+                        "provider_method", "provider_id", "query_planner_version",
+                        "query_plan_id", "market_filter", "language_filter",
+                    ):
+                        value = coverage.get(key)
+                        if isinstance(value, str) and 0 < len(value) <= 128:
+                            summary[key] = value
+                    for key in ("query_plan_version", "provider_request_count",
+                                "records_omitted_storage_limit"):
+                        value = coverage.get(key)
+                        if type(value) is int and value >= 0:
+                            summary[key] = value
+                    summary["source_fetched_at"] = _safe_utc_timestamp(
+                        coverage.get("source_fetched_at")
+                    )
+                    summary["cache_delivery_at"] = _safe_utc_timestamp(
+                        coverage.get("cache_delivery_at")
+                    )
+                    query_summaries = []
+                    queries = coverage.get("queries")
+                    if isinstance(queries, list):
+                        for query in queries[:2]:
+                            if not isinstance(query, dict):
+                                continue
+                            item = {}
+                            for key in ("original_query", "query_source", "taxonomy_scope",
+                                        "market_filter", "language_filter", "reason"):
+                                value = query.get(key)
+                                if isinstance(value, str) and len(value) <= 256:
+                                    item[key] = value
+                            for key in ("pages", "accepted", "rejected"):
+                                value = query.get(key)
+                                if type(value) is int and value >= 0:
+                                    item[key] = value
+                            item["request_timestamps"] = [
+                                timestamp for raw in query.get("request_timestamps", [])[:3]
+                                if (timestamp := _safe_utc_timestamp(raw)) is not None
+                            ] if isinstance(query.get("request_timestamps", []), list) else []
+                            query_summaries.append(item)
+                    summary["queries"] = query_summaries
+                    activity["youtube_coverage"] = summary
+                    activity["last_cache_delivery_at"] = summary["cache_delivery_at"]
             latest[source_id] = activity
     if latest_account_snapshot is not None:
         latest["_serpapi_account_snapshot"] = latest_account_snapshot
+    youtube_activity = latest.get("youtube_video_search")
+    if isinstance(youtube_activity, dict) and latest_youtube_observation is not None:
+        youtube_activity["last_successful_observation_at"] = (
+            latest_youtube_observation["fetched_at"]
+        )
+        youtube_activity["last_successful_observation_record_count"] = (
+            latest_youtube_observation["record_count"]
+        )
+        youtube_activity["fetched_at"] = latest_youtube_observation["fetched_at"]
     return latest
 
 
@@ -287,13 +378,26 @@ async def capabilities(request: Request, response: Response):
         distributed is not None
         and (getattr(distributed, "normal_wikimedia_live", False)
              or getattr(distributed, "normal_google_live", False)
-             or getattr(distributed, "normal_bing_live", False))
+             or getattr(distributed, "normal_bing_live", False)
+             or getattr(distributed, "normal_youtube_live", False))
         and distributed.data_mode == "LIVE"
     )
     google_quota = (distributed.google_quota_metadata()
                     if distributed is not None
                     and callable(getattr(distributed, "google_quota_metadata", None))
                     else None)
+    youtube_workflow = getattr(distributed, "youtube_capabilities", {
+        "approval_status": "PENDING_LIVE_APPROVAL",
+        "configuration_status": "NOT_CONFIGURED",
+        "live_status": "CACHE_ONLY",
+        "provider_quota_status": "UNKNOWN",
+        "keyword_extraction": "DISABLED_PENDING_POLICY_APPROVAL",
+        "derived_metrics": "DISABLED_PENDING_POLICY_APPROVAL",
+    })
+    youtube_quota = (distributed.youtube_quota_metadata()
+                     if distributed is not None
+                     and callable(getattr(distributed, "youtube_quota_metadata", None))
+                     else None)
     if (isinstance(google_quota, dict)
             and google_quota.get("provider_account") is None
             and google_quota.get("provider_account_status")
@@ -322,6 +426,8 @@ async def capabilities(request: Request, response: Response):
             "live_verified": False,
         }),
         "google_quota": google_quota,
+        "youtube_workflow": youtube_workflow,
+        "youtube_quota": youtube_quota,
         "refresh_schedule": (distributed.refresh_schedule_metadata()
                              if distributed is not None
                              and callable(getattr(distributed, "refresh_schedule_metadata", None))
@@ -386,7 +492,7 @@ async def capabilities(request: Request, response: Response):
                 "icon": item.icon,
                 "provider_id": item.provider_id,
                 "category": ("trends_search_interest" if item.source_id == "wikimedia_pageviews_top_per_country" else "video_streaming" if item.source_id == "youtube_video_search" else "search_engines"),
-                "documentation_url": ("https://doc.wikimedia.org/generated-data-platform/aqs/" if item.source_id == "wikimedia_pageviews_top_per_country" else "https://developers.google.com/youtube/v3/docs/search/list" if item.source_id == "youtube_video_search" else "https://serpapi.com/bing-search-api" if item.source_id == "bing_web_serp" else "https://serpapi.com/search-api"),
+                "documentation_url": ("https://doc.wikimedia.org/generated-data-platform/aqs/" if item.source_id == "wikimedia_pageviews_top_per_country" else "https://developers.google.com/youtube/data/reference/rest/v3/search/list?hl=en" if item.source_id == "youtube_video_search" else "https://serpapi.com/bing-search-api" if item.source_id == "bing_web_serp" else "https://serpapi.com/search-api"),
                 "quota": {"status": "UNKNOWN", "remaining": None, "total": None, "reset_at": None},
                 "adapter_status": (
                     "LIVE_CONFIGURED"
@@ -402,7 +508,9 @@ async def capabilities(request: Request, response: Response):
                     else item.adapter_status
                 ),
                 "approval_status": (
-                    "APPROVED_FOR_LOCAL_RUNTIME"
+                    youtube_workflow.get("approval_status", item.approval_status)
+                    if item.source_id == "youtube_video_search"
+                    else "APPROVED_FOR_LOCAL_RUNTIME"
                     if item.source_id == "bing_web_serp"
                     and getattr(distributed, "normal_bing_live", False)
                     else "APPROVED_FOR_LOCAL_RUNTIME"
@@ -415,7 +523,9 @@ async def capabilities(request: Request, response: Response):
                     else item.approval_status
                 ),
                 "configuration_status": (
-                    "PRESENT"
+                    youtube_workflow.get("configuration_status", item.configuration_status)
+                    if item.source_id == "youtube_video_search"
+                    else "PRESENT"
                     if item.source_id == "bing_web_serp"
                     and getattr(distributed, "normal_bing_live", False)
                     else "PRESENT"
@@ -437,7 +547,9 @@ async def capabilities(request: Request, response: Response):
                          or getattr(distributed, "normal_google_live", False)
                          and item.source_id == "google_web_serp"
                          or getattr(distributed, "normal_bing_live", False)
-                         and item.source_id == "bing_web_serp")
+                         and item.source_id == "bing_web_serp"
+                         or getattr(distributed, "normal_youtube_live", False)
+                         and item.source_id == "youtube_video_search")
                     else list(item.supported_data_modes)),
                 "query_based": item.query_based,
                 "metric": {

@@ -395,11 +395,105 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             ).hexdigest(), now=self.clock(),
         ))
 
+    async def test_youtube_source_selection_supports_requested_combinations(self):
+        combinations = (
+            (YOUTUBE_SOURCE_ID,),
+            (YOUTUBE_SOURCE_ID, BING_SOURCE_ID),
+            (YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID),
+            SOURCES,
+        )
+        handled = []
+        handlers = {}
+        for source in SOURCES:
+            def collect(context, expected=source):
+                self.assertEqual(context.source_id, expected)
+                handled.append(expected)
+                records = ([{
+                    "provider_video_id": "AbCdEf12345",
+                    "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                    "title": "Offline fixture video",
+                }] if expected == YOUTUBE_SOURCE_ID else [{"source_id": expected}])
+                return {"status": "SUCCESS", "data_mode": "SYNTHETIC",
+                        "records": records, "record_count": len(records)}
+
+            collect.__trendscout_data_mode__ = "SYNTHETIC"
+            handlers[source] = collect
+
+        worker = self.worker(handlers)
+        for index, selected in enumerate(combinations):
+            if index:
+                self.clock.value += timedelta(hours=1)
+            handled.clear()
+            self.admission.admit(
+                f"youtube-source-combinations-{index:02d}",
+                now=self.clock(),
+                request_metadata={"sources": list(selected)},
+            )
+            result = await worker.run_once("source-combination-worker")
+            self.assertEqual(result["state"], "COMPLETED")
+            self.assertEqual(set(result["sources"]), set(selected))
+            self.assertEqual(set(handled), set(selected))
+            if selected == (YOUTUBE_SOURCE_ID,):
+                self.assertEqual(result["sources"][YOUTUBE_SOURCE_ID]["records"][0]
+                                 ["provider_video_id"], "AbCdEf12345")
+
+    async def test_youtube_fetch_result_is_readable_after_sqlite_reopen(self):
+        video = {
+            "provider_video_id": "AbCdEf12345",
+            "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+            "title": "Offline evidence fixture",
+        }
+
+        def youtube_handler(context):
+            self.assertEqual(context.source_id, YOUTUBE_SOURCE_ID)
+            return {"status": "SUCCESS", "data_mode": "SYNTHETIC",
+                    "records": [video], "record_count": 1,
+                    "coverage": {"provider_method": "search.list"}}
+
+        def unused_source_handler(_context):
+            return {"status": "SUCCESS", "data_mode": "SYNTHETIC",
+                    "records": [], "record_count": 0}
+
+        youtube_handler.__trendscout_data_mode__ = "SYNTHETIC"
+        unused_source_handler.__trendscout_data_mode__ = "SYNTHETIC"
+        handlers = {source: (youtube_handler if source == YOUTUBE_SOURCE_ID
+                             else unused_source_handler) for source in SOURCES}
+        self.admission.admit(
+            "youtube-sqlite-reopen-evidence-0001",
+            now=self.clock(),
+            request_metadata={"sources": [YOUTUBE_SOURCE_ID]},
+        )
+        worker = self.worker(handlers)
+        outcome = await worker.run_once("youtube-sqlite-writer")
+        self.assertEqual(outcome["state"], "COMPLETED")
+
+        reopened_admission = coordinator(self.path, self.config)
+        reopened_worker = DistributedFetchWorker(
+            reopened_admission,
+            handlers=handlers,
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+        )
+        reopened_fetch = DistributedPublicFetch(
+            reopened_admission,
+            reopened_worker,
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+        )
+        saved = reopened_fetch.status(outcome["job_id"], include_records=True)
+
+        self.assertEqual(saved["status"], "COMPLETED")
+        self.assertEqual(saved["sources"][0]["source_id"], YOUTUBE_SOURCE_ID)
+        self.assertEqual(saved["sources"][0]["records"][0]["provider_video_id"],
+                         "AbCdEf12345")
+        self.assertEqual(saved["sources"][0]["records"][0]["title"],
+                         "Offline evidence fixture")
+
     async def test_all_four_guarded_fixture_adapters_run_through_worker(self):
         self.gateways = []
         query_config = policy(
             enabled_sources=frozenset(SOURCES),
-            pools=self.config.pools,
+            pools={**self.config.pools, "youtube": PoolLimit(2, 5, 2, 5, 1)},
             lease_seconds=10, cooldown_seconds=0,
             plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
         )
@@ -419,13 +513,19 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 })
             return handle
 
-        def youtube_handler(_request):
+        youtube_calls = []
+
+        def youtube_handler(request):
             request_counts[YOUTUBE_SOURCE_ID] += 1
+            youtube_calls.append(request)
+            if len(youtube_calls) > 1:
+                return httpx.Response(500, json={"error": {"errors": [{"reason": "backendError"}]}})
             return httpx.Response(200, json={
                 "kind": "youtube#searchListResponse",
                 "items": [{"kind": "youtube#searchResult",
                            "id": {"kind": "youtube#video", "videoId": "AbCdEf12345"},
-                           "snippet": {"title": "synthetic video", "publishedAt": "2026-11-11T00:00:00Z"}}],
+                           "snippet": {"title": "synthetic video",
+                                       "publishedAt": "2026-11-11T00:00:00Z"}}],
             })
 
         for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID):
@@ -454,7 +554,11 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             query_collectors=collectors, wikimedia=wikimedia, plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
             observation_date=lambda: NOW.date(), shared_cache=cache,
-            resolve_cache_grant=cache_grant, utcnow=self.clock,
+            resolve_cache_grant=cache_grant,
+            resolve_provider_batch=lambda source_id, _now: (
+                {"allowed": True} if source_id == YOUTUBE_SOURCE_ID else None
+            ),
+            utcnow=self.clock,
         ).build()
         worker = DistributedFetchWorker(admission, handlers=registry,
                                         resolve_grant=self.grant, utcnow=self.clock)
@@ -466,6 +570,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(source_result["record_count"], 0)
         self.assertEqual(result["sources"][GOOGLE_SOURCE_ID]["delivery_state"], "CACHED")
         self.assertEqual(result["sources"][BING_SOURCE_ID]["delivery_state"], "FRESH")
+        self.assertEqual(result["sources"][YOUTUBE_SOURCE_ID]["delivery_state"], "FRESH")
         self.assertNotIn("raw_record", repr(result))
         first_request_counts = dict(request_counts)
 
@@ -474,7 +579,27 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["state"], "PARTIAL", repr(cached["sources"]))
         self.assertEqual(request_counts, first_request_counts)
         self.assertTrue(all(item.get("delivery_state") == "CACHED"
-                            for item in cached["sources"].values()))
+                            for item in cached["sources"].values()),
+                        repr({source: {"delivery_state": item.get("delivery_state"),
+                                       "status": item.get("status"),
+                                       "error_code": item.get("error_code")}
+                              for source, item in cached["sources"].items()}))
+        self.assertEqual(len(youtube_calls), 1)
+        self.assertIsNotNone(cached["sources"][YOUTUBE_SOURCE_ID]
+                             ["coverage"]["cache_delivery_at"])
+
+        self.clock.value += timedelta(seconds=601)
+        admission.admit("four-source-worker-stale-fallback-key", now=self.clock())
+        stale = await worker.run_once("stale-cache-worker")
+        self.assertEqual(stale["state"], "PARTIAL", repr(stale["sources"]))
+        youtube = stale["sources"][YOUTUBE_SOURCE_ID]
+        self.assertEqual(youtube["status"], "PARTIAL")
+        self.assertEqual(youtube["delivery_state"], "STALE_CACHE")
+        self.assertEqual(youtube["records"][0]["provider_video_id"], "AbCdEf12345")
+        self.assertEqual(youtube["coverage"]["source_fetched_at"],
+                         result["sources"][YOUTUBE_SOURCE_ID]["coverage"]["source_fetched_at"])
+        self.assertEqual(youtube["coverage"]["refresh_attempt_status"], "FAILED")
+        self.assertEqual(len(youtube_calls), 2)
 
     @staticmethod
     def _counted_wikimedia_response(request_counts):
