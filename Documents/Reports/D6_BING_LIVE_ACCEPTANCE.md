@@ -1,125 +1,129 @@
 # D6-BING LIVE + Source Center Fetch Budget — Acceptance Report
 
-**Status:** Partial implementation; D6-BING is not accepted as a live end-to-end feature.
+**Status:** Accepted for the local LIVE demo; one real Bing request and its cache-only replay were verified.
 **Assessment date:** 2026-11-16 (Asia/Ho_Chi_Minh)
-**Starting repository revision:** `0dd40f296f0ddf2693f44112e78ee914ef29f335`
-**Implementation commit:** `c4aff09e62e7005d0950b545841e901d930d82b6`
+**Repository:** `/mnt/Data/Mine/TrendScout`
+**Goal-start synchronized `origin/main`:** `96d0084f4e16d5d6166f751bedd46e7bd3cfc8d5`
+**Implementation commit:** `19c342f9530db50b7f701a86ea5aca160fd1cbee` (`feat(d6): add live bing verification`)
+**Report commit:** the commit containing this report; its hash is included in the final handoff.
 
-## Summary
+## Scope and synchronization
 
-This work adds a deterministic, one-candidate Bing verification plan contract, permits that registered dynamic context through the existing SerpApi pagination guard, exposes the provider-reported renewal date in sanitized account metadata, and adds browser-local default Fetch source preferences plus a read-only SerpApi quota panel to Source Center. Focused offline tests and browser layout checks pass.
+- Fetched `origin` at goal start; `HEAD` equaled `origin/main`, with no commit gap to merge. The user pushed implementation commit `19c342f` during this goal; this report commit remains local for the user to push with the rest of the pending work.
+- Read the repository instructions and inspected the source catalog, query plan, SerpApi client/pagination/account APIs, controlled HTTP gateway, Google and Bing handlers, public admission/quota state, local credential provider, collection persistence, capabilities API, dashboard modules, tests and the D6 Google acceptance report.
+- Completed D6-BING only. No D6-YOUTUBE, D7, agent-initiated push, deployment or billing activation.
+- Local acceptance data is in `~/.local/state/trendscout/collections-v1/collections.sqlite`; the separate paid-source quota/schedule state is in `~/.local/state/trendscout/normal-google-live-v1/state.sqlite`.
 
-The requested full workflow is not implemented or verified. The Bing plan is not wired to a persisted Google candidate query, Bing LIVE collector, durable Bing records, application API or Dashboard. The shared Google/Bing monthly allocation, protected reserve, cross-machine coordination, time slots, paid-source cache-first admission, and server-side per-source budgets are not enforced by this change. The sole approved Bing attempt was not made: the local database had no eligible Google candidate and this checkout is not the designated Windows paid-fetch host. No Bing provider evidence or new paid searches were produced.
+## Implementation
 
-## Repository and implementation inspected
+- Added `BingSavedCandidateHandler` and a deterministic plan that reads persisted LIVE Google Trends observations, prefers eligible Fashion/Home & Living signals, deduplicates normalized identities, skips recently verified candidates, and selects at most one candidate per Fetch.
+- The controlled Bing request uses SerpApi `engine=bing`, `q=<saved candidate>`, `mkt=en-US`, `first=1`, one page, bounded HTTPS transport, one attempt and no retry. Newly admitted Bing provider requests now set `no_cache=true`; an existing local verification is served from SQLite first and never reaches the gateway.
+- Validated and normalized organic result URLs, titles, snippets, ranks and timestamps. Bing evidence is attached to the original Google candidate under `provider_id=serpapi_bing` and `verification_mode=BING_SERP`; it does not create a fake Bing keyword observation or alter the Google observation timestamp or user decision.
+- Added persistent user-triggered refresh eligibility at **07:00, 15:00 and 23:00 Asia/Ho_Chi_Minh**, a ten-minute slot grace, at least eight hours between attempts, no catch-up, and a one-shot first-run acceptance exception. The paid-source schedules are independent.
+- Added one SerpApi account ceiling shared by Google and Bing, with Google/Bing allocations, daily caps, a six-search reserve, Account API preflight, persisted provider renewal-cycle reconciliation and fail-closed migration. Browser source selection is a preference; the server policy remains authoritative.
+- Both `./start.sh` and `start.ps1` start the same loopback web application. The launch scripts do not source credentials or initiate Fetch. `LocalCredentialProvider` reads `SERPAPI_API_KEY` from the repository-root `.env` file on Linux and Windows; `.env.example` contains only a placeholder. No secret was committed.
+- Added Source Center quota/schedule/latest Bing coverage display, source-only Fetch selection, bilingual detail rendering and honest local LIVE / cached delivery status. Added Data Quality snapshot timestamp persistence for sources whose evidence is stored outside ordinary keyword rows.
 
-Startup synchronization:
+## Official provider documentation checked 2026-11-16
 
-- Fetched `origin`; `HEAD` equaled `origin/main` at the supplied reference revision before changes, so no sync merge was required.
-- Read root `AGENTS.md` and `Frontend/AGENTS.md`, inspected the source catalog, query plan, LIVE gateway, SerpApi client/adapter/pagination/account and Google budget/runtime paths, source capability API and frontend Source Center modules, tests, and `Documents/Reports/D6_GOOGLE_LIVE_ACCEPTANCE.md`.
+- [SerpApi Bing Search API](https://serpapi.com/bing-search-api) documents `engine=bing`, `q`, the `mkt` market code, the `first` offset, organic results, and `no_cache=true` to force a new provider fetch instead of using SerpApi's one-hour cache.
+- [SerpApi Account API](https://serpapi.com/account-api) reports plan limit, month-to-date use, remaining searches, hourly use and renewal date. SerpApi documents Account API calls as free and not counted against search quota.
+- Microsoft announced that the [Bing Search APIs were retired on 2025-08-11](https://learn.microsoft.com/lifecycle/announcements/bing-search-api-retirement); no Bing News or unofficial-feed scraper was added.
+- Microsoft's [Ad Insight API](https://learn.microsoft.com/en-us/advertising/ad-insight-service/ad-insight-service-reference?view=bingads-13) can provide historical keyword performance and ideas. [Production API setup](https://learn.microsoft.com/en-us/advertising/guides/get-started?view=bingads-13) requires a Microsoft Advertising account, OAuth user access and a developer token. It remains a future option outside this goal's no-new-account/OAuth scope.
 
-Implementation files changed:
+## Shared SerpApi quota evidence
 
-- `Backend/app/sources/bing_search/verification_plan.py` — deterministic candidate selection contract limited to one saved LIVE Google Trends observation; normalized deduplication; rejects malformed/naive/future timestamps, non-Google records, and recently verified identities; retains source provenance and selection reason.
-- `Backend/app/sources/serpapi/pagination.py` — validates the registered dynamic Bing query context before pagination.
-- `Backend/app/sources/serpapi/account.py` — validates and exposes the provider's optional ISO renewal date in public quota metadata.
-- `Frontend/public/modules/capabilities.js`, `Frontend/public/app.js`, `Frontend/public/index.html`, styles and English/Vietnamese strings — Source Center default Fetch checkboxes saved in browser local storage and intersected with server-enabled sources; read-only provider status, usage, reserve, renewal, check timestamp and allocation fields. Bing allocation is displayed as unavailable because no Bing allocation ledger is implemented.
-- Focused Python, frontend and offline browser regressions cover these contracts and the visible controls.
+The account has a 250-search plan with provider-reported renewal date `2026-12-11`. Account usage is shared by Google and Bing.
 
-## SerpApi account and budget evidence
+| Evidence | Provider usage | Remaining | Timestamp |
+| --- | ---: | ---: | --- |
+| Account API preflight for the Bing attempt | 6 / 250 | 244 | `2026-11-16T06:14:13.418937Z` |
+| Read-only Account API follow-up | 7 / 250 | 243 | `2026-11-16T06:34:01.454291Z` |
 
-The official SerpApi Account API was read without issuing a search. Latest observed snapshot: **2026-11-16T02:20:35.116996Z**.
+The follow-up increased month-to-date provider use by exactly one search, matching the single Bing LIVE attempt. The read-only Account API itself did not use a search. At acceptance close, the persisted local ledger showed:
 
-| Provider-reported field | Snapshot |
-| --- | ---: |
-| Account status | Active (account response parsed successfully) |
-| Monthly plan limit | 250 searches |
-| Monthly remaining | 246 searches |
-| Total remaining | 246 searches |
-| Month-to-date usage | 4 searches |
-| Current-hour usage | 0 searches |
-| Hourly limit | 250 searches |
-| Provider-reported next renewal | 2026-12-11 |
-| Bing requests made by this goal | 0 |
-| SerpApi searches consumed by this goal | 0 |
+| Pool | Daily used / limit | Cycle used / limit | Remaining in cycle |
+| --- | ---: | ---: | ---: |
+| Shared SerpApi | 3 / 9 | 7 / 244 | 237 |
+| Google allocation | 2 / 6 | 6 / 122 | 116 |
+| Bing allocation | 1 / 3 | 1 / 122 | 121 |
+| Protected shared reserve | — | 6 | 6 protected |
 
-The prior Google acceptance report also described 4 used and 246 remaining, consistent with the provider snapshot. However, this Linux checkout has no `normal-google-live-v1/state.sqlite` reservation ledger, so current local Google reservation history cannot be read or reconciled here. The local collections DB has no Google or Bing keyword rows. Therefore account usage is provider-reported evidence; it does not prove the contents of either machine's local ledger.
+The account snapshot last persisted by the app is the pre-search `6/250` snapshot. After restart the UI marks it **STALE** rather than presenting it as current; the next admitted paid Fetch performs a fresh Account API preflight. Account use and the app ledger are not separate 250-search pools.
 
-The target 122 Google / 122 Bing / 6 shared reserve split remains a target only. This checkout does not enforce those allocations or report verifiable per-source usage/reservations. Given the account snapshot, the arithmetic ceiling after retaining six reserve searches is at most 240 new searches for the account, but that is not authorization, allocation policy, or a locally enforced available balance. Do not treat Google/Bing as separate 250-search pools. No billing was activated.
+**Cross-machine limit:** each computer has its own SQLite reservation state. Git synchronization does not create atomic quota coordination across the two machines. Keep one designated active paid-fetch host; do not interpret the local ledger as protection against a simultaneous request from another computer.
 
-The user authorized at most one new Bing paid-search attempt. That approval is not yet actionable on this checkout: the available SQLite dataset contains no saved Google/Bing candidate rows and no designated paid-fetch Windows host is connected. No retry or seed campaign was run. Since no eligible query/host was available, the approval remains unused.
+## Real Bing LIVE acceptance
 
-## Provider and discovery strategy
+Exactly one newly authorized Bing search was sent. No Google Trends request or retry was made for this Bing acceptance.
 
-The bounded contract selects from saved LIVE Google Trends observations and labels the Bing result as SERP verification evidence. SerpApi's Bing Search documentation supports the existing adapter request shape (`engine=bing`, `q`, `mkt=en-US`, `first`) and organic-result response. A SERP position or result count is not Bing search volume or proof of US customer demand.
+- Saved candidate: `fitness`, source `google_web_serp`, selection reason `PREFERRED_INDUSTRY_SIGNAL`.
+- Original Google observation: `2026-11-15T07:10:00Z`; unchanged after Bing verification.
+- Bing request: `q=fitness`, `mkt=en-US`, language `en-US`, first offset `1`, one page.
+- SerpApi provider-created time: `2026-11-16T06:14:13Z`.
+- Locally captured result time: `2026-11-16T06:14:19.466473Z`.
+- Delivery: `FRESH`; source status `SUCCESS`; provider reported 10 results, 10 accepted, 0 rejected; provider cache state recorded as `UNKNOWN`.
+- Source run/dataset: `ba4006f345a57853fad234bec790426e`; overall dataset `COMPLETED`.
+- The broad `fitness` results included Orlando-localized businesses. `mkt=en-US` is a market parameter, not proof of US customer interest. SERP rank and result count are not search volume or commercial demand.
 
-Current source documentation was checked on 2026-11-16:
+| Bing result position | Result | Canonical URL |
+| ---: | --- | --- |
+| 1 | LA Fitness, Orlando | <https://www.lafitness.com/Pages/ClubHome.aspx?clubid=1058> |
+| 2 | Planet Fitness, Orlando | <https://www.planetfitness.com/clubs/fl/orlando> |
+| 3 | Amped Fitness | <https://ampedfitness.com/> |
+| 4 | Fitness.com | <https://www.fitness.com/en> |
+| 5 | Crunch Fitness, East Colonial | <https://www.crunch.com/locations/east-colonial> |
+| 6 | Physical fitness, Wikipedia | <https://en.wikipedia.org/wiki/Physical_fitness> |
+| 7 | LA Fitness, Orlando East Colonial | <https://www.lafitness.com/Pages/clubhome.aspx?clubid=289> |
+| 8 | Anytime Fitness, Orlando | <https://www.anytimefitness.com/locations/orlando-florida-3285> |
+| 9 | CLUB4 Fitness, Orlando | <https://www.club4fitness.com/location/orlando/> |
+| 10 | Planet Fitness | <https://www.planetfitness.com/> |
 
-- [SerpApi Bing Search API](https://serpapi.com/bing-search-api)
-- [SerpApi Account API](https://serpapi.com/account-api)
-- [SerpApi Legal](https://serpapi.com/legal)
-- [Microsoft Bing Search APIs retirement notice](https://learn.microsoft.com/en-us/bing/search-apis/bing-web-search/overview) — Microsoft's Bing Search APIs were retired on 2025-08-11; no direct Microsoft Bing Search/News API integration was added.
-- [Microsoft Advertising Ad Insight reference](https://learn.microsoft.com/en-us/advertising/ad-insight-service/ad-insight-service-reference?view=bingads-13) and [OAuth quick start](https://learn.microsoft.com/en-us/advertising/guides/authentication-oauth-quick-start?view=bingads-13) — possible future keyword-statistics route, but it requires Microsoft Advertising access and OAuth/developer credentials and was outside this goal's constraints.
+## Cache-only replay
 
-No undocumented scraping or News feed ingestion was implemented. SerpApi provider access terms and retention conditions remain applicable to any later LIVE work; confirm the then-current terms before production use.
+A second Bing-only Fetch used the saved local result:
 
-## SQLite, API and Dashboard baseline
+- Source status `SUCCESS`, delivery `CACHED`, local cache state `FRESH` (under one hour).
+- `provider_request_count=0`; the account allocation remained Bing `1/122` and shared `7/244`.
+- Original `cache_fetched_at` remained `2026-11-16T06:14:19.466473Z`; no new provider timestamp was fabricated.
+- Source run/dataset: `0b46d09c4d33f434567a6eadb3ff6eba`; the overall dataset was `PARTIAL` because the Fetch selected only Bing, while the Bing source itself succeeded.
 
-Read-only inspection of `~/.local/state/trendscout/collections-v1/collections.sqlite` found:
+## SQLite, API, Dashboard and preservation
 
-- SQLite integrity check: `ok`.
-- 214 LIVE Wikimedia keywords, 21 collections and 13 dataset snapshots.
-- No saved Google or Bing keyword rows/candidates in this local DB.
-- No Bing archive-backed provider response was found in the inspected local data.
-- No application process was running during this inspection.
-- No database file, classification, research record or existing run was changed.
+- SQLite `PRAGMA integrity_check`: `ok`.
+- Before and after the two Bing Fetches: 583 LIVE Google rows and 1,035 LIVE Wikimedia rows (1,020 distinct normalized Wikimedia identities); no row counts changed.
+- No Bing keyword row was created. One existing Google candidate retains the Bing SERP evidence, including 10 results. Its Google `observed_at` stayed `2026-11-15T07:10:00Z`; no user decision was present or changed.
+- API keyword detail returned the Bing verification with provider identity, query, delivery, counts, timestamps and 10 result URLs. Dashboard Collections detail rendered all 10 results and the “rank is not search volume” limitation.
+- Source Center was verified in Vietnamese and English: Bing-only saved Fetch selection, shared/local quotas, reserve, stale provider snapshot, Bing query/count, cached delivery, provider cache uncertainty and next schedule. On a 500 CSS-pixel Chrome viewport, document width was 485 pixels with no horizontal overflow.
+- Run History displayed the LIVE and CACHED Bing runs separately. Data Quality showed the latest Bing source as successful and cached. The old cached dataset snapshot's aggregate `fetched_at` had been NULL even though its source manifest contained `cache_fetched_at`; that exact field was backfilled from the stored original timestamp without changing keyword rows, evidence or decisions. The implementation also persists valid source-level fetch timestamps for future snapshots.
+- The earlier Google acceptance document reports 603 Google and 1,219 Wikimedia observations, while this local LIVE database currently contains 583 Google and 1,035 Wikimedia rows. The host/database scope discrepancy is unresolved; the measured local counts above are the evidence for this acceptance.
 
-The earlier Google acceptance document reports 603 Google discovery records and the earlier Wikimedia baseline of 1,219 keyword records. Those numbers differ from this checkout's current SQLite contents (zero Google rows and 214 Wikimedia rows). The scope, host and/or DB may differ; the discrepancy is unresolved and this report does not overwrite either count or claim preservation/readback for the absent records.
+## Regression and review
 
-No real Bing-only, Google+Bing, or ALL-source Fetch was submitted. No Bing record was read back from SQLite or the API, and Dashboard run history, keyword detail, collection/classification, evidence links, and restart behavior were not verified for Bing. Source Center controls were verified in the offline browser harness only. Browser-local preference is not a server identity or authorization mechanism; server policy must continue to control paid access.
+- Focused backend regression covering shared admission, worker, LIVE gateway, cache, Google, Bing, credentials, source selection, migration and refresh schedules: **167 passed, 2 skipped**.
+- Additional Wikimedia, dashboard capabilities, settings and source catalog regressions: **30 passed**.
+- Frontend Node tests: **16 passed**.
+- Python compileall, `bash -n start.sh`, `git diff --check`: **passed**.
+- Focused Ruff lint for newly added Bing/schedule modules and tests: **passed**. A whole-repository Ruff scan reported 1,509 findings across the existing repository, including files outside this goal; no repository-wide clean lint claim is made.
+- Multi-perspective review covered code quality, boundaries, security and acceptance completeness. The review fixes include retaining the last account snapshot after restart, preserving Bing coverage on cached delivery, forcing provider refresh for newly admitted Bing attempts, and surfacing source timestamps in Data Quality.
 
-## Fetch/cache, scheduling and cross-machine limitations
+## Acceptance gates
 
-The existing SerpApi adapters and pagination tests exercise bounded request construction, result parsing, page handling, error classification and provenance. The present goal change does not connect Bing to the application's cache-first collection admission or prove that a Bing Fetch outside an eligible slot makes zero provider requests. It also does not implement the requested Asia/Ho_Chi_Minh 07:00/15:00/23:00 eligibility slots, eight-hour source cooldown, no-catch-up behavior, or per-source refresh state. Those conditions remain unverified.
-
-The two Windows computers' local SQLite databases cannot provide atomic cross-machine quota reservations. This work adds no coordination service. A designated active paid-fetch host is required until a safe shared coordination design is explicitly approved; this Linux checkout did not identify or connect that host. Preserve the six-search reserve and fail closed if account quota or coordination is uncertain.
-
-## Verification results
-
-All checks below were offline; there was no paid Bing request:
-
-- Bing saved-candidate contract: **3 passed**.
-- Google Trends/runtime/account tests: **19 passed**.
-- SerpApi adapter and offline transport tests: **23 passed**.
-- Frontend Node tests: **13 passed**.
-- Offline Chrome browser workspace: **PASS** at 320, 390, 768, 1024, 1440 and 1920 px; Source Center defaults and provider panel rendered. The harness explicitly did not submit Fetch.
-- Ruff, Python compileall, JavaScript syntax checks and `git diff --check`: **PASS**.
-
-These results do not establish a live Bing provider response or end-to-end SQLite/API/Dashboard acceptance.
-
-## Gate status
-
-Progress is based only on complete gate passes:
-
-| Gate | Weight | Status | Evidence / reason |
+| Gate | Weight | Status | Evidence |
 | --- | ---: | --- | --- |
-| G0 Git sync, baseline, scope | 8% | PASS | Synced to origin/main; inspected repo guidance and read-only local baseline. Count discrepancies recorded. |
-| G1 Bing bounded discovery contract | 12% | PARTIAL | Contract and offline tests exist, but candidate selection is not wired to persisted rows/runtime. No credit. |
-| G2 Shared Google+Bing quota policy | 18% | NOT PASS | Provider account snapshot is read-only; shared allocations/reserve and local usage enforcement are absent. |
-| G3 Source Center controls and cache | 12% | PARTIAL | Browser-local defaults and read-only quota panel render; server budget controls and cache-first Bing flow are not integrated. No credit. |
-| G4 Real Bing provider LIVE evidence | 16% | NOT PASS | No request, archive evidence, Bing result URLs or provider timestamps. |
-| G5 SQLite + real application flow | 16% | NOT PASS | No Bing collection worker or end-to-end Fetch/readback. |
-| G6 Focused regression / browser QA | 12% | PASS | Focused offline regressions and six-width browser harness passed. |
-| G7 Report and local commits | 6% | PASS after report commit | Implementation commit `c4aff09e62e7005d0950b545841e901d930d82b6`; report commit is recorded in the final handoff. |
+| G0 Git sync, baseline, scope | 8% | PASS | Synced to `origin/main`, inspected repository and recorded actual local DB baseline. |
+| G1 Bing bounded discovery contract | 12% | PASS | Saved-candidate selection, deterministic deduplication, one query/one page and preserved provenance. |
+| G2 Shared Google+Bing quota policy | 18% | PASS | Shared 244 ceiling, 122/122 source allocations, six reserve, persisted source usage and Account API reconciliation. Cross-machine limitation is explicitly documented. |
+| G3 Source Center controls and cache | 12% | PASS | Per-source selection, quota/schedule status and verified zero-request cached delivery in English/Vietnamese. |
+| G4 Real Bing provider LIVE evidence | 16% | PASS | One provider search; Account API use increased by exactly one; 10 organic results preserved with timestamps and URLs. |
+| G5 SQLite + real application flow | 16% | PASS | SQLite, API, Collections detail, Source Center, Run History and Data Quality verified; existing Google/Wikimedia counts and decisions preserved. |
+| G6 Focused regression / browser QA | 12% | PASS | 167+30 backend tests, 16 frontend tests, compile/shell/diff checks and responsive browser verification. |
+| G7 Report and local commits | 6% | PASS after this report commit | Implementation commit above; report commit is identified in the final handoff. |
 
-**Earned progress after G7: 26%.** D6-BING is not complete or accepted as LIVE.
+**Earned progress after G7: 100%.**
 
-## Remaining work and blockers
+## User-requested Bing test reset
 
-1. Connect the saved-candidate selector to actual persisted LIVE Google observations and add a Bing collector through the guarded SerpApi adapter, with explicit operator policy, single-attempt approval and source identity.
-2. Implement and migrate a shared provider-level quota policy that preserves prior Google reservations, enforces 122/122 allocations and six reserve, and records auditable local usage. Fail closed where safe migration or cross-machine control cannot be proven.
-3. Add scheduled-slot eligibility, per-source cooldown and cache-first SQLite delivery. Avoid autonomous paid scheduling.
-4. On the designated paid-fetch Windows host, verify credentials and policy, recover/check any existing archive, confirm an eligible persisted candidate and quota preflight, then—only with the still-valid explicit approval—perform at most one Bing request. Record original response metadata, organic evidence and URLs without treating SERP data as volume.
-5. Verify Bing-only and multi-source Fetch through API, SQLite, Dashboard, collections and restart; reconcile database host/scope against the earlier Google/Wikimedia acceptance counts.
+After reaching 100%, the user asked for the local Bing test to be reset so they can click Fetch themselves: first Bing-only click should force one new LIVE provider request, and the second should use the local cache. The reset is complete. It removed only this acceptance candidate's `bing_verification` and `bing_verification_history` and reset only the Bing refresh-schedule key to initial eligibility. It preserved the SerpApi quota ledger (Bing remains 1/3 daily and 1/122 cycle; shared usage remains 3/9 daily and 7/244 cycle), the Google candidate and observation, all other evidence, user decisions, Google/Wikimedia rows, and all dataset/fetch history. Post-reset SQLite integrity is `ok`. No agent-initiated provider request was made after acceptance. The adapter uses `no_cache=true` for the user's next admitted Bing attempt, so that first click can make a fresh provider request; the second click should then be served from local cache.
 
-No push, deployment, billing activation or secret-bearing change was made.
+The user pushed the implementation commit. The report commit is local; the agent did not push it, deploy, activate billing or commit a secret-bearing file.
