@@ -142,12 +142,17 @@ def _parse(value: str) -> datetime:
 class PublicAdmission:
     """Atomic coalescing, fencing and conservative shared quota accounting."""
 
-    def __init__(self, store: AtomicStateStore, policy: AdmissionPolicy, *, state_key: str):
+    def __init__(self, store: AtomicStateStore, policy: AdmissionPolicy, *, state_key: str,
+                 owner_manual_youtube_live: bool = False):
         if not callable(getattr(store, "transact", None)):
             raise TypeError("atomic state store required")
-        if not isinstance(policy, AdmissionPolicy) or not _OWNER.fullmatch(state_key):
+        if (not isinstance(policy, AdmissionPolicy) or not _OWNER.fullmatch(state_key)
+                or type(owner_manual_youtube_live) is not bool
+                or owner_manual_youtube_live and YOUTUBE_SOURCE_ID not in policy.enabled_sources):
             raise ValueError("validated server policy and state key required")
         self.store, self.policy, self.state_key = store, policy, state_key
+        # Runtime-only owner authorization; intentionally excluded from policy state/digest.
+        self.owner_manual_youtube_live = owner_manual_youtube_live
         self._pools = MappingProxyType(dict(policy.pools))
         self.policy_digest = self._policy_digest(policy)
 
@@ -1272,10 +1277,11 @@ class PublicAdmission:
                                 if allocation is not None else None)
             allocation_monthly = (quota.setdefault(allocation_keys[1], {"requests": 0, "cost": 0})
                                   if allocation is not None else None)
-            if (daily["requests"] >= limit.daily_requests
+            manual_youtube = self.owner_manual_youtube_live and source_id == YOUTUBE_SOURCE_ID
+            if (not manual_youtube and (daily["requests"] >= limit.daily_requests
                     or monthly["requests"] >= limit.monthly_requests
                     or daily["cost"] + limit.cost_per_attempt > limit.daily_cost_units
-                    or monthly["cost"] + limit.cost_per_attempt > limit.monthly_cost_units):
+                    or monthly["cost"] + limit.cost_per_attempt > limit.monthly_cost_units)):
                 raise AdmissionDenied("QUOTA_EXHAUSTED")
             if allocation is not None and (
                     allocation_daily["requests"] >= allocation.daily_requests

@@ -8,13 +8,32 @@ port="${TREND_SCOUT_DEMO_PORT:-8000}"
 if [[ "${1:-}" == "--synthetic" ]]; then
   shift
   if (($#)); then
-    printf '%s\n' 'Usage: bash start.sh [--synthetic]' >&2
+    printf '%s\n' 'Usage: bash start.sh [--synthetic] | bash start.sh [--youtube-owner-manual-live [--youtube-owner-force-fresh-test]]' >&2
     exit 2
   fi
   exec bash "$project_dir/demo.sh"
 fi
-if (($#)); then
-  printf '%s\n' 'Usage: bash start.sh [--synthetic]' >&2
+youtube_manual_live=false
+youtube_force_fresh_test=false
+while (($#)); do
+  case "$1" in
+    --youtube-owner-manual-live)
+      [[ "$youtube_manual_live" == false ]] || { printf '%s\n' 'Duplicate manual LIVE flag.' >&2; exit 2; }
+      youtube_manual_live=true
+      ;;
+    --youtube-owner-force-fresh-test)
+      [[ "$youtube_force_fresh_test" == false ]] || { printf '%s\n' 'Duplicate fresh-test flag.' >&2; exit 2; }
+      youtube_force_fresh_test=true
+      ;;
+    *)
+      printf '%s\n' 'Usage: bash start.sh [--synthetic] | bash start.sh [--youtube-owner-manual-live [--youtube-owner-force-fresh-test]]' >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+if [[ "$youtube_force_fresh_test" == true && "$youtube_manual_live" != true ]]; then
+  printf '%s\n' '--youtube-owner-force-fresh-test requires --youtube-owner-manual-live.' >&2
   exit 2
 fi
 if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
@@ -41,4 +60,12 @@ fi
 printf 'Starting the local multi-source LIVE web application on http://127.0.0.1:%s/dashboard/\n' "$port"
 printf '%s\n' 'Local only; one worker. Press Ctrl+C to stop.'
 cd "$project_dir/Backend"
+if [[ "$youtube_manual_live" == true ]]; then
+  if [[ "$youtube_force_fresh_test" == true ]]; then
+    exec env TREND_SCOUT_DEMO_PORT="$port" "$python_bin" -m scripts.run_google_live_local \
+      --port "$port" --youtube-owner-manual-live --youtube-owner-force-fresh-test
+  fi
+  exec env TREND_SCOUT_DEMO_PORT="$port" "$python_bin" -m scripts.run_google_live_local \
+    --port "$port" --youtube-owner-manual-live
+fi
 exec env TREND_SCOUT_DEMO_PORT="$port" "$python_bin" -m scripts.run_google_live_local --port "$port"

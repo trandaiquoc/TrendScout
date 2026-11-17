@@ -96,9 +96,9 @@ SOURCE_CAPABILITIES = (
         production_readiness="NOT_APPROVED",
         supported_data_modes=("LIVE",),
         known_limitations=(
-            "Live API access is disabled until owner approval, a server-side key, and the designated host are configured.",
+            "Live requests require owner approval, a server-side key, and the designated host; this runtime permits only owner-triggered local fetches.",
             "Search rank is not view count, search volume, trending rank, or product demand.",
-            "YouTube-derived metrics and keyword extraction remain disabled pending policy approval.",
+            "TrendScout keyword extraction and derived metrics remain disabled; search results are source evidence only.",
             "US regionCode indicates viewability, not the residence of viewers or creators.",
         ),
         credential_reference="YOUTUBE_API_KEY",

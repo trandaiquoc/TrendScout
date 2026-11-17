@@ -2,6 +2,8 @@
 
 import argparse
 import os
+import socket
+import sys
 from dataclasses import replace
 from functools import partial
 
@@ -37,14 +39,44 @@ def main(argv=None):
         help=("Preserve expired SQLite blobs and limit YouTube to one search query; "
               "the regular YouTube schedule and approval checks still apply."),
     )
+    parser.add_argument(
+        "--youtube-owner-manual-live", action="store_true",
+        help=("Enable Linux-only owner-triggered YouTube LIVE development; "
+              "normal schedule and internal YouTube caps are bypassed."),
+    )
+    parser.add_argument(
+        "--youtube-owner-force-fresh-test", action="store_true",
+        help=("Bypass YouTube cache once for the next selected Fetch; requires "
+              "--youtube-owner-manual-live."),
+    )
     arguments = parser.parse_args(argv)
     if not 1 <= arguments.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    # The local web demo enables Google discovery and one-candidate Bing
-    # verification. Both require user Fetch, a fresh Account API preflight,
-    # persistent source schedules and the shared provider/source budgets.
-    # Shell and PowerShell launchers only start this server-owned policy.
+    if arguments.youtube_owner_acceptance and arguments.youtube_owner_manual_live:
+        parser.error("choose either --youtube-owner-acceptance or --youtube-owner-manual-live")
+    if arguments.youtube_owner_force_fresh_test and not arguments.youtube_owner_manual_live:
+        parser.error("--youtube-owner-force-fresh-test requires --youtube-owner-manual-live")
+    if arguments.youtube_owner_manual_live:
+        if os.environ.get("VERCEL") or not sys.platform.startswith("linux"):
+            parser.error("--youtube-owner-manual-live is restricted to a local Linux operator")
+        host = socket.gethostname().strip()
+        if not host:
+            parser.error("could not determine the local host for YouTube authorization")
+    # Normal mode enables paid discovery and Bing verification through their
+    # existing account preflight. Owner manual YouTube mode suppresses all
+    # SerpApi preflight and configures only the local YouTube runtime boundary.
+    # Neither mode starts provider work until a user submits Fetch.
     google_settings = local_live_settings()
+    if arguments.youtube_owner_manual_live:
+        google_settings = replace(
+            google_settings, youtube_live_approved=True, youtube_live_host=host,
+        )
+        print(
+            f"OWNER_MANUAL_LIVE enabled for detected Linux host {host}; "
+            "YouTube requests remain user-triggered and one query per Fetch."
+        )
+        if arguments.youtube_owner_force_fresh_test:
+            print("One YouTube cache bypass is armed for the next selected Fetch.")
     settings = Settings.from_environment({
         "TREND_SCOUT_ENVIRONMENT": "local",
         "TREND_SCOUT_RUN_MODE": "live",
@@ -63,8 +95,12 @@ def main(argv=None):
             force_refresh_trends=True,
             allow_initial_google_acceptance=True,
             allow_initial_bing_acceptance=True,
-            preserve_expired_data=arguments.youtube_owner_acceptance,
-            youtube_max_queries=1 if arguments.youtube_owner_acceptance else 2,
+            preserve_expired_data=(arguments.youtube_owner_acceptance
+                                   or arguments.youtube_owner_manual_live),
+            youtube_max_queries=(1 if (arguments.youtube_owner_acceptance
+                                       or arguments.youtube_owner_manual_live) else 2),
+            youtube_manual_live=arguments.youtube_owner_manual_live,
+            youtube_force_fresh_test_once=arguments.youtube_owner_force_fresh_test,
         ),
     )
     run_normal_google_live(application, port=arguments.port)

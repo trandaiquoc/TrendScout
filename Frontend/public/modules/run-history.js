@@ -102,6 +102,14 @@ function renderRunHistoryDetail(item, errorMessage = null) {
       source.retainedRecords == null ? null : `${t('runs.source-retained')}: ${number(source.retainedRecords)}`,
       source.rejectedRecords == null ? null : `${t('runs.source-rejected')}: ${number(source.rejectedRecords)}`,
       source.omittedRecords == null ? null : `${t('runs.source-omitted')}: ${number(source.omittedRecords)}`,
+      source.deliveryState ? `${t('runs.source-delivery')}: ${t(`fetch.delivery.${source.deliveryState}`)}` : null,
+      source.sourceFetchedAt ? `${t('runs.source-observation-time')}: ${timestamp(source.sourceFetchedAt)}` : null,
+      source.cacheDeliveryAt ? `${t('runs.cache-delivery-time')}: ${timestamp(source.cacheDeliveryAt)}` : null,
+      source.providerMethod ? `${t('runs.provider-method')}: ${source.providerMethod}` : null,
+      source.query ? `${t('runs.source-query')}: ${source.query}` : null,
+      source.queryScopes.length ? `${t('runs.source-scope')}: ${source.queryScopes.join(', ')}` : null,
+      source.marketFilter ? `${t('runs.source-market')}: ${source.marketFilter}` : null,
+      source.languageFilter ? `${t('runs.source-language')}: ${source.languageFilter}` : null,
     ].filter(Boolean).join(' · ');
     return `${localizedSourceName(source.sourceId)}: ${counts || t('common.unavailable')}`;
   }).join(' | ') || t('common.unavailable');

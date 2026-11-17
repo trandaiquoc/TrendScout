@@ -34,6 +34,13 @@ test('uses provider coverage and preserves explicit zero counts', () => {
     googleProviderDataAt: null,
     googleFetchedAt: null,
     deliveryState: null,
+    sourceFetchedAt: null,
+    cacheDeliveryAt: null,
+    providerMethod: null,
+    query: null,
+    queryScopes: [],
+    marketFilter: null,
+    languageFilter: null,
   });
 });
 
@@ -79,6 +86,13 @@ test('keeps unavailable source coverage unknown and uses stored aggregate only a
     googleProviderDataAt: null,
     googleFetchedAt: null,
     deliveryState: null,
+    sourceFetchedAt: null,
+    cacheDeliveryAt: null,
+    providerMethod: null,
+    query: null,
+    queryScopes: [],
+    marketFilter: null,
+    languageFilter: null,
   });
 });
 
@@ -112,6 +126,60 @@ test('extracts Google discovery provenance without treating RSS records as verif
     googleProviderDataAt: '2026-11-15T02:00:00Z',
     googleFetchedAt: '2026-11-15T02:03:00Z',
     deliveryState: 'CACHED',
+    sourceFetchedAt: '2026-11-15T02:03:00Z',
+    cacheDeliveryAt: null,
+    providerMethod: null,
+    query: null,
+    queryScopes: [],
+    marketFilter: null,
+    languageFilter: null,
+  });
+});
+
+test('keeps YouTube provider count, storage omission, observation and cache delivery distinct', () => {
+  const result = extractRunSourceCoverage({
+    provider_record_count: 47,
+    source_manifest: [{
+      source_id: 'youtube_video_search',
+      status: 'PARTIAL',
+      data_mode: 'LIVE',
+      delivery_state: 'CACHED',
+      record_count: 47,
+      coverage: {
+        records_omitted_storage_limit: 3,
+        source_fetched_at: '2026-11-17T02:12:41.397682Z',
+        cache_delivery_at: '2026-11-17T02:16:52.963245Z',
+        provider_method: 'search.list',
+        query_scopes: ['beauty_personal_care'],
+        market_filter: 'US',
+        language_filter: 'en-US',
+        queries: [{ accepted: 50, original_query: 'beauty skincare cosmetics haircare trends' }],
+      },
+    }],
+  });
+
+  assert.equal(result.providerRecordCount, 50);
+  assert.deepEqual(result.sources[0], {
+    sourceId: 'youtube_video_search',
+    status: 'PARTIAL',
+    providerReturnedRecords: 50,
+    retainedRecords: 47,
+    rejectedRecords: null,
+    omittedRecords: 3,
+    googleDiscoveryMode: null,
+    googleCandidateCount: null,
+    googleDistinctKeywordCount: null,
+    googleVerifiedCount: null,
+    googleProviderDataAt: null,
+    googleFetchedAt: null,
+    deliveryState: 'CACHED',
+    sourceFetchedAt: '2026-11-17T02:12:41.397682Z',
+    cacheDeliveryAt: '2026-11-17T02:16:52.963245Z',
+    providerMethod: 'search.list',
+    query: 'beauty skincare cosmetics haircare trends',
+    queryScopes: ['beauty_personal_care'],
+    marketFilter: 'US',
+    languageFilter: 'en-US',
   });
 });
 

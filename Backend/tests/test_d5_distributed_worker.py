@@ -601,6 +601,73 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(youtube["coverage"]["refresh_attempt_status"], "FAILED")
         self.assertEqual(len(youtube_calls), 2)
 
+    async def test_manual_fresh_test_bypasses_cache_once_then_returns_to_cache_first(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+
+        def cache_grant(source_id, now):
+            return CacheGrant(
+                source_id, "manual-fresh-test-policy", now + timedelta(days=1),
+                max_fresh_seconds=600, max_stale_seconds=1200,
+                max_retention_seconds=1800, allowed=True,
+            )
+
+        def registry(*, force_fresh=False):
+            return D5SourceHandlers(
+                query_collectors={
+                    GOOGLE_SOURCE_ID: None,
+                    BING_SOURCE_ID: None,
+                    YOUTUBE_SOURCE_ID: None,
+                },
+                wikimedia=None, plan=DEFAULT_QUERY_PLAN,
+                limits=CollectionLimits(max_queries=1, max_pages_per_query=1,
+                                        max_requests=1),
+                shared_cache=cache, resolve_cache_grant=cache_grant,
+                unavailable_mode="LIVE", youtube_query_mode="OWNER_MANUAL_LIVE",
+                force_youtube_refresh_once=force_fresh, utcnow=self.clock,
+            )
+
+        first_calls = []
+
+        async def first_collect():
+            first_calls.append(self.clock())
+            return {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "records": [{"video_id": "video-original"}], "record_count": 1,
+                "coverage": {"source_fetched_at": NOW.isoformat()},
+            }
+
+        normal = registry()
+        first = await normal._with_cache(YOUTUBE_SOURCE_ID, None, first_collect)
+        self.assertEqual(first["delivery_state"], "FRESH")
+        self.assertEqual(len(first_calls), 1)
+
+        self.clock.value += timedelta(minutes=1)
+        forced_calls = []
+
+        async def forced_collect():
+            forced_calls.append(self.clock())
+            return {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "records": [{"video_id": "video-forced-refresh"}], "record_count": 1,
+                "coverage": {"source_fetched_at": NOW.isoformat()},
+            }
+
+        owner_manual = registry(force_fresh=True)
+        forced = await owner_manual._with_cache(
+            YOUTUBE_SOURCE_ID, None, forced_collect
+        )
+        self.assertEqual(forced["delivery_state"], "FRESH")
+        self.assertTrue(forced["coverage"]["owner_manual_fresh_test"])
+        self.assertEqual(len(forced_calls), 1)
+
+        self.clock.value += timedelta(minutes=1)
+        cached = await owner_manual._with_cache(
+            YOUTUBE_SOURCE_ID, None, forced_collect
+        )
+        self.assertEqual(cached["delivery_state"], "CACHED")
+        self.assertEqual(cached["records"][0]["video_id"], "video-forced-refresh")
+        self.assertEqual(len(forced_calls), 1)
+
     @staticmethod
     def _counted_wikimedia_response(request_counts):
         request_counts[WIKIMEDIA_SOURCE_ID] += 1

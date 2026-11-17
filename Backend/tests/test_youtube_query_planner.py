@@ -5,6 +5,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.sources.youtube.query_planner import (
+    NORMAL_DEMO,
+    OWNER_MANUAL_LIVE,
     YOUTUBE_QUERY_PLANNER_VERSION,
     select_youtube_query_scopes,
 )
@@ -19,7 +21,11 @@ class YouTubeQueryPlannerTests(unittest.TestCase):
         self.assertEqual(first, ("fashion", "home_living"))
         self.assertEqual(select_youtube_query_scopes(now=first_slot), first)
         self.assertEqual(len(first), 2)
-        self.assertEqual(YOUTUBE_QUERY_PLANNER_VERSION, "youtube-curated-slot-rotation-v1")
+        self.assertEqual(YOUTUBE_QUERY_PLANNER_VERSION,
+                         "youtube-curated-dual-mode-rotation-v2")
+        self.assertEqual(
+            select_youtube_query_scopes(now=first_slot, mode=NORMAL_DEMO), first
+        )
 
         next_slot = datetime(2026, 11, 16, 15, 5, tzinfo=LOCAL)
         rotated = select_youtube_query_scopes(now=next_slot)
@@ -47,6 +53,26 @@ class YouTubeQueryPlannerTests(unittest.TestCase):
             select_youtube_query_scopes(
                 now=datetime(2026, 11, 16, 7, 5, tzinfo=LOCAL), max_queries=3
             )
+
+    def test_owner_manual_selection_is_deterministic_at_real_unscheduled_times(self):
+        first = datetime(2026, 11, 17, 0, 41, tzinfo=LOCAL)
+        second = datetime(2026, 11, 17, 0, 42, tzinfo=LOCAL)
+        selected = select_youtube_query_scopes(
+            now=first, max_queries=1, mode=OWNER_MANUAL_LIVE
+        )
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected, select_youtube_query_scopes(
+            now=first, max_queries=1, mode=OWNER_MANUAL_LIVE
+        ))
+        self.assertIn(selected[0], {
+            "fashion", "home_living", "beauty_personal_care",
+            "travel_lifestyle", "technology",
+        })
+        self.assertNotEqual(selected, select_youtube_query_scopes(
+            now=second, max_queries=1, mode=OWNER_MANUAL_LIVE
+        ))
+        with self.assertRaisesRegex(ValueError, "scheduled slot"):
+            select_youtube_query_scopes(now=first, mode=NORMAL_DEMO)
 
 
 if __name__ == "__main__":

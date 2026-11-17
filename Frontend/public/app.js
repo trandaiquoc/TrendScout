@@ -252,14 +252,34 @@ function renderQualitySnapshot(snapshot) {
   if(!root)return;
   root.replaceChildren();
   if(!snapshot){root.append(element('p',t('phoenix.no-snapshot')));return;}
+  const sourceObservations=(Array.isArray(snapshot.source_manifest)?snapshot.source_manifest:[])
+    .map(source=>{
+      const coverage=source?.coverage && typeof source.coverage==='object' ? source.coverage : {};
+      return [coverage.source_fetched_at,coverage.fetched_at,coverage.provider_data_at,coverage.cache_fetched_at]
+        .find(value=>typeof value==='string'&&!Number.isNaN(Date.parse(value))) || null;
+    }).filter(Boolean).sort((a,b)=>Date.parse(b)-Date.parse(a));
+  const sourceObservationAt=sourceObservations[0] || null;
+  const fetchedAt=snapshot.fetched_at || sourceObservationAt;
+  const fetchedLabel=snapshot.fetched_at ? t('quality.fetched')
+    : sourceObservationAt ? t('quality.source-observation-time') : t('quality.fetched');
+  const qualityFlagKeys={
+    YOUTUBE_KEYWORD_EXTRACTION_DISABLED:'quality.flag.youtube-extraction-disabled',
+    youtube_video_search_PARTIAL:'quality.flag.youtube-partial',
+  };
+  const qualityNotes=Array.isArray(snapshot.quality_flags) ? snapshot.quality_flags.map(flag=>{
+    const key=qualityFlagKeys[flag];
+    return key ? t(key) : flag;
+  }) : [];
   const fields=[
     [t('runs.status'),localizedStatus('status.',snapshot.status)],
     [t('runs.mode'),localizedRunMode(snapshot.data_mode)],
-    [t('quality.fetched'),snapshot.fetched_at ? timestamp(snapshot.fetched_at) : t('common.unavailable')],
+    [fetchedLabel,fetchedAt ? timestamp(fetchedAt) : t('common.unavailable')],
     [t('runs.received'),snapshot.received_record_count == null ? t('common.unavailable') : number(snapshot.received_record_count)],
     [t('runs.retained'),snapshot.retained_keyword_count == null ? t('common.unavailable') : number(snapshot.retained_keyword_count)],
     [t('runs.rejected'),snapshot.rejected_record_count == null ? t('common.unavailable') : number(snapshot.rejected_record_count)],
-    [t('phoenix.quality-notes'),Array.isArray(snapshot.quality_flags) && snapshot.quality_flags.length ? t('runs.outcome.quality-notes',{count:number(snapshot.quality_flags.length)}) : t('runs.outcome.no-notes')],
+    [t('phoenix.quality-notes'),qualityNotes.length
+      ? `${t('runs.outcome.quality-notes',{count:number(qualityNotes.length)})} · ${qualityNotes.join(' · ')}`
+      : t('runs.outcome.no-notes')],
   ];
   for(const [label,value] of fields){const row=element('div');row.append(element('dt',label),element('dd',value));root.append(row);}
   const sources=Array.isArray(snapshot.source_manifest)?snapshot.source_manifest:[];
@@ -269,7 +289,14 @@ function renderQualitySnapshot(snapshot) {
     const key=`fetch.source-status.${status}`;
     const translated=t(key);
     const delivery=source.delivery_state==='FRESH'?t('phoenix.delivery-fresh'):source.delivery_state==='CACHED'?t('phoenix.delivery-cached'):null;
-    return [localizedSourceName(source.source_id),translated===key?t('source.status-unknown'):translated,delivery].filter(Boolean).join(' · ');
+    const coverage=source.coverage && typeof source.coverage==='object' ? source.coverage : {};
+    const sourceCount=Number.isSafeInteger(source.record_count)&&source.record_count>=0
+      ? `${number(source.record_count)} ${t('quality.source-record-count')}` : null;
+    const omitted=Number.isSafeInteger(coverage.records_omitted_storage_limit)
+      && coverage.records_omitted_storage_limit>0
+      ? `${number(coverage.records_omitted_storage_limit)} ${t('runs.source-omitted')}` : null;
+    return [localizedSourceName(source.source_id),translated===key?t('source.status-unknown'):translated,
+      sourceCount,omitted,delivery].filter(Boolean).join(' · ');
   });
   sourceRow.append(element('dt',t('phoenix.quality-sources')),element('dd',sourceValues.join(' · ') || t('phoenix.quality-source-unknown')));root.append(sourceRow);
 }

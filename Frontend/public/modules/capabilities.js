@@ -172,8 +172,11 @@ function renderYouTubeBudget(capabilities, translate) {
     : translate('common.unavailable');
   const time = (value, zone = 'Asia/Ho_Chi_Minh') =>
     scheduleTimestamp(value, zone) || translate('common.unavailable');
+  const manualMode = workflow.runtime_mode === 'OWNER_MANUAL_LIVE';
 
   capabilityRow(values, translate('sources.youtube-provider'), workflow.provider || 'YouTube Data API v3');
+  capabilityRow(values, translate('sources.youtube-runtime-mode'),
+    localizedStatus(workflow.runtime_mode || 'NOT_CONFIGURED', translate));
   capabilityRow(values, translate('sources.youtube-approval'),
     localizedStatus(workflow.approval_status || source.approval_status, translate));
   capabilityRow(values, translate('sources.youtube-policy-status'),
@@ -218,11 +221,12 @@ function renderYouTubeBudget(capabilities, translate) {
   capabilityRow(values, translate('sources.youtube-last-error'),
     saved.error_code || translate('common.unavailable'));
   capabilityRow(values, translate('source.refresh-schedule'),
-    Array.isArray(schedule.slots)
+    manualMode ? translate('source.refresh-owner-manual') : Array.isArray(schedule.slots)
       ? `${schedule.slots.join(' · ')} · ${schedule.timezone || 'Asia/Ho_Chi_Minh'}`
       : translate('common.unavailable'));
   capabilityRow(values, translate('source.refresh-next'),
-    time(schedule.next_eligible_at, schedule.timezone || 'Asia/Ho_Chi_Minh'));
+    manualMode ? translate('source.refresh-user-triggered')
+      : time(schedule.next_eligible_at, schedule.timezone || 'Asia/Ho_Chi_Minh'));
 }
 
 export function loadCapabilities(locale = 'vi') {

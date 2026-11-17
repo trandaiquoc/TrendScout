@@ -171,6 +171,55 @@ class PublicAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(AdmissionDenied, "ATTEMPT_ID_CONFLICT"):
             self.control.reserve_attempt(job, "worker", fence, **{**args, "source_id": BING_SOURCE_ID})
 
+    def test_owner_manual_youtube_bypasses_only_internal_caps_and_keeps_ledger(self):
+        config = policy(max_starts_per_window=10, cooldown_seconds=0)
+        regular = coordinator(self.path, config)
+        manual = PublicAdmission(
+            SqliteTestStore(self.path), config, state_key="public",
+            owner_manual_youtube_live=True,
+        )
+        self.assertEqual(manual.policy_digest, regular.policy_digest)
+
+        first_job = regular.admit("normal-youtube-fetch-key-0001", now=NOW,
+                                  request_metadata={"sources": [YOUTUBE_SOURCE_ID]})["job_id"]
+        first_fence = regular.claim(first_job, "worker", now=NOW)["fence"]
+        regular.reserve_attempt(
+            first_job, "worker", first_fence, source_id=YOUTUBE_SOURCE_ID,
+            attempt_id="normal-physical-attempt-0001", now=NOW,
+        )
+        with self.assertRaisesRegex(AdmissionDenied, "QUOTA_EXHAUSTED"):
+            regular.reserve_attempt(
+                first_job, "worker", first_fence, source_id=YOUTUBE_SOURCE_ID,
+                attempt_id="normal-physical-attempt-0002", now=NOW,
+            )
+        regular.settle_attempt(
+            first_job, "worker", first_fence,
+            attempt_id="normal-physical-attempt-0001", now=NOW,
+        )
+        regular.finish(first_job, "worker", first_fence, now=NOW)
+
+        for index in range(4):
+            now = NOW + timedelta(seconds=index + 1)
+            job_id = manual.admit(
+                f"manual-youtube-fetch-key-{index:04d}", now=now,
+                request_metadata={"sources": [YOUTUBE_SOURCE_ID]},
+            )["job_id"]
+            fence = manual.claim(job_id, f"manual-worker-{index}", now=now)["fence"]
+            attempt_id = f"manual-physical-attempt-{index:04d}"
+            manual.reserve_attempt(
+                job_id, f"manual-worker-{index}", fence, source_id=YOUTUBE_SOURCE_ID,
+                attempt_id=attempt_id, now=now,
+            )
+            manual.settle_attempt(
+                job_id, f"manual-worker-{index}", fence, attempt_id=attempt_id, now=now,
+            )
+            manual.finish(job_id, f"manual-worker-{index}", fence, now=now)
+
+        snapshot = manual.quota_snapshot("youtube", now=NOW + timedelta(seconds=5))
+        self.assertEqual(snapshot["daily"]["used"], 5)
+        self.assertEqual(snapshot["monthly"]["used"], 5)
+        self.assertEqual(snapshot["daily"]["remaining"], 0)
+
     def test_expired_lease_fences_old_worker_and_preserves_receipt(self):
         job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
         old = self.control.claim(job, "worker", now=NOW)["fence"]

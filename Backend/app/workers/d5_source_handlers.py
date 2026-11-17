@@ -98,6 +98,8 @@ class D5SourceHandlers:
                  max_wikimedia_date_attempts: int = 1,
                  include_wikimedia_transport_metrics: bool = False,
                  unavailable_mode: str | None = None,
+                 youtube_query_mode: str = "NORMAL_DEMO",
+                 force_youtube_refresh_once: bool = False,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if (set(query_collectors) != _QUERY_SOURCES
                 or unavailable_mode not in {None, "LIVE", "SYNTHETIC"}
@@ -132,6 +134,9 @@ class D5SourceHandlers:
                 or type(max_wikimedia_date_attempts) is not int
                 or not 1 <= max_wikimedia_date_attempts <= 3
                 or type(include_wikimedia_transport_metrics) is not bool
+                or youtube_query_mode not in {"NORMAL_DEMO", "OWNER_MANUAL_LIVE"}
+                or type(force_youtube_refresh_once) is not bool
+                or force_youtube_refresh_once and youtube_query_mode != "OWNER_MANUAL_LIVE"
                 or not callable(utcnow)):
             raise ValueError("fixed four-source collectors, plan and limits required")
         self.query_collectors = dict(query_collectors)
@@ -149,6 +154,8 @@ class D5SourceHandlers:
         self.max_wikimedia_date_attempts = max_wikimedia_date_attempts
         self.include_wikimedia_transport_metrics = include_wikimedia_transport_metrics
         self.unavailable_mode = unavailable_mode
+        self.youtube_query_mode = youtube_query_mode
+        self._youtube_force_fresh_once = force_youtube_refresh_once
         self.utcnow = utcnow
 
     def build(self) -> dict[str, Callable[[SourceWorkContext], object]]:
@@ -253,7 +260,9 @@ class D5SourceHandlers:
                     seed = seeds_by_scope.get(scope)
                     query_result.update({
                         "original_query": seed.query if seed else None,
-                        "query_source": "CURATED_SLOT_ROTATION",
+                        "query_source": ("CURATED_MANUAL_ROTATION"
+                                         if self.youtube_query_mode == "OWNER_MANUAL_LIVE"
+                                         else "CURATED_SLOT_ROTATION"),
                         "taxonomy_scope": scope,
                         "market_filter": self.plan.market,
                         "language_filter": self.plan.language,
@@ -320,8 +329,15 @@ class D5SourceHandlers:
         return cached_only
 
     async def _with_cache(self, source_id, context, collect, *, query_scope=None):
+        force_fresh = (source_id == YOUTUBE_SOURCE_ID
+                       and self._youtube_force_fresh_once)
+        if force_fresh:
+            # This local-launcher one-shot is consumed by the next user-triggered
+            # YouTube handler, even when admission later rejects the attempt.
+            self._youtube_force_fresh_once = False
         if self.shared_cache is None:
-            return await collect()
+            result = await collect()
+            return self._mark_owner_fresh_test(result) if force_fresh else result
         now = self.utcnow()
         batch_decision = None
         stale_fallback = None
@@ -343,30 +359,31 @@ class D5SourceHandlers:
                 parser_version=f"source-v{capability.capability_version}",
                 policy_version=grant.policy_version,
             )
-            cached = self.shared_cache.get(scope, grant=grant, now=now)
-            cached_status = cached.get("status")
-            if (cached_status in {"CACHED", "STALE"}
-                    and cached.get("origin") in {"SYNTHETIC", "LIVE"}):
-                payload = cached.get("payload")
-                if (not isinstance(payload, dict)
-                        or payload.get("data_mode") != cached.get("origin")
-                        or payload.get("delivery_state", "FRESH")
-                        not in {"FRESH", "CACHED", "STALE_CACHE"}):
-                    raise CacheUnavailable()
-                if cached_status == "CACHED":
-                    return self._cache_delivery(payload, "CACHED", now)
-                if source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None:
-                    try:
-                        batch_decision = self.resolve_provider_batch(source_id, now)
-                    except Exception:
-                        batch_decision = {"allowed": False,
-                                          "error_code": "REFRESH_POLICY_UNAVAILABLE"}
-                    if (not isinstance(batch_decision, dict)
-                            or batch_decision.get("allowed") is not True):
+            if not force_fresh:
+                cached = self.shared_cache.get(scope, grant=grant, now=now)
+                cached_status = cached.get("status")
+                if (cached_status in {"CACHED", "STALE"}
+                        and cached.get("origin") in {"SYNTHETIC", "LIVE"}):
+                    payload = cached.get("payload")
+                    if (not isinstance(payload, dict)
+                            or payload.get("data_mode") != cached.get("origin")
+                            or payload.get("delivery_state", "FRESH")
+                            not in {"FRESH", "CACHED", "STALE_CACHE"}):
+                        raise CacheUnavailable()
+                    if cached_status == "CACHED":
+                        return self._cache_delivery(payload, "CACHED", now)
+                    if source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None:
+                        try:
+                            batch_decision = self.resolve_provider_batch(source_id, now)
+                        except Exception:
+                            batch_decision = {"allowed": False,
+                                              "error_code": "REFRESH_POLICY_UNAVAILABLE"}
+                        if (not isinstance(batch_decision, dict)
+                                or batch_decision.get("allowed") is not True):
+                            return self._cache_delivery(payload, "STALE_CACHE", now)
+                    else:
                         return self._cache_delivery(payload, "STALE_CACHE", now)
-                else:
-                    return self._cache_delivery(payload, "STALE_CACHE", now)
-                stale_fallback = payload
+                    stale_fallback = payload
 
         if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
                 and batch_decision is None):
@@ -382,7 +399,9 @@ class D5SourceHandlers:
                                    if isinstance(decision, dict) else None)
                                    or "NOT_YET_ELIGIBLE",
                     "delivery_state": "NOT_ELIGIBLE",
-                    "coverage": {"refresh_eligible": False},
+                    "coverage": {"refresh_eligible": False,
+                                  **({"owner_manual_fresh_test": True}
+                                     if force_fresh else {})},
                 }
 
         try:
@@ -396,6 +415,8 @@ class D5SourceHandlers:
             }
         if not isinstance(result, dict):
             return result
+        if force_fresh:
+            result = self._mark_owner_fresh_test(result)
         if (stale_fallback is not None
                 and result.get("status") in {"FAILED", "UNAVAILABLE", "PARTIAL"}
                 and not result.get("records")):
@@ -436,6 +457,15 @@ class D5SourceHandlers:
                 if "CACHE_WRITE_FAILED" not in flags:
                     flags.append("CACHE_WRITE_FAILED")
         return result
+
+    @staticmethod
+    def _mark_owner_fresh_test(result):
+        if not isinstance(result, dict):
+            return result
+        coverage = result.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage["owner_manual_fresh_test"] = True
+        return {**result, "coverage": coverage}
 
     @staticmethod
     def _cache_delivery(payload, delivery_state, delivered_at):

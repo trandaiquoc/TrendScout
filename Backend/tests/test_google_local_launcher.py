@@ -34,6 +34,7 @@ class LocalWebLauncherTests(unittest.TestCase):
         self.assertNotIn("allow_initial_youtube_acceptance", composition.keywords)
         self.assertTrue(composition.keywords["preserve_expired_data"])
         self.assertEqual(composition.keywords["youtube_max_queries"], 1)
+        self.assertFalse(composition.keywords["youtube_manual_live"])
         run_app.assert_called_once_with(create_app.return_value, port=8123)
 
     def test_default_runtime_keeps_scheduled_youtube_limits(self):
@@ -46,6 +47,42 @@ class LocalWebLauncherTests(unittest.TestCase):
         self.assertNotIn("allow_initial_youtube_acceptance", composition.keywords)
         self.assertFalse(composition.keywords["preserve_expired_data"])
         self.assertEqual(composition.keywords["youtube_max_queries"], 2)
+        self.assertFalse(composition.keywords["youtube_manual_live"])
+
+    def test_owner_manual_live_designates_only_the_detected_linux_host(self):
+        with patch.dict(os.environ, {"VERCEL": ""}, clear=False), \
+             patch.object(local_launcher.socket, "gethostname", return_value="linux-owner"), \
+             patch.object(local_launcher, "create_normal_google_live_app", return_value=object()) as create_app, \
+             patch.object(local_launcher, "run_normal_google_live"):
+            local_launcher.main(["--youtube-owner-manual-live"])
+
+        composition = create_app.call_args.kwargs["composition_factory"]
+        self.assertIsInstance(composition, partial)
+        self.assertTrue(composition.keywords["youtube_manual_live"])
+        self.assertTrue(composition.keywords["preserve_expired_data"])
+        self.assertEqual(composition.keywords["youtube_max_queries"], 1)
+        self.assertFalse(composition.keywords["youtube_force_fresh_test_once"])
+        settings = composition.keywords["google_settings"]
+        self.assertTrue(settings.youtube_live_approved)
+        self.assertEqual(settings.youtube_live_host, "linux-owner")
+
+    def test_fresh_test_requires_manual_linux_mode_and_manual_mode_rejects_vercel(self):
+        with self.assertRaises(SystemExit):
+            local_launcher.main(["--youtube-owner-force-fresh-test"])
+
+        with patch.dict(os.environ, {"VERCEL": "1"}, clear=False), \
+             self.assertRaises(SystemExit):
+            local_launcher.main(["--youtube-owner-manual-live"])
+
+    def test_owner_manual_fresh_test_is_one_shot_composition_flag(self):
+        with patch.dict(os.environ, {"VERCEL": ""}, clear=False), \
+             patch.object(local_launcher, "create_normal_google_live_app", return_value=object()) as create_app, \
+             patch.object(local_launcher, "run_normal_google_live"):
+            local_launcher.main([
+                "--youtube-owner-manual-live", "--youtube-owner-force-fresh-test",
+            ])
+        composition = create_app.call_args.kwargs["composition_factory"]
+        self.assertTrue(composition.keywords["youtube_force_fresh_test_once"])
 
 
 if __name__ == "__main__":
