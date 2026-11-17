@@ -1609,7 +1609,7 @@ function renderRows(items) {
     button.setAttribute('aria-label', t('table.open-detail', {
       name: item.display_keyword || item.canonical_keyword || t('common.keyword'),
     }));
-    button.disabled = !state.dataRunId;
+    button.disabled = !state.dataRunId && !state.publicFetchDiscovery;
     if (button.disabled) button.title = t('table.detail-unavailable');
     button.addEventListener('click', () => openDetail(item.keyword_id || item.id));
     action.append(button);

@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from functools import partial
 from unittest.mock import patch
@@ -7,7 +8,7 @@ import scripts.run_google_live_local as local_launcher
 
 
 class LocalWebLauncherTests(unittest.TestCase):
-    def test_local_web_policy_ignores_environment_approval_switches(self):
+    def test_local_web_policy_uses_the_windows_source_profile(self):
         with patch.dict(os.environ, {
             "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
             "TREND_SCOUT_GOOGLE_SERP_APPROVED": "true",
@@ -19,7 +20,7 @@ class LocalWebLauncherTests(unittest.TestCase):
 
         self.assertTrue(settings.trends_approved)
         self.assertTrue(settings.account_api_approved)
-        self.assertFalse(settings.serp_approved)
+        self.assertTrue(settings.serp_approved)
         self.assertFalse(settings.rss_approved)
         self.assertTrue(settings.bing_approved)
         self.assertTrue(settings.policy_migration_approved)
@@ -49,6 +50,7 @@ class LocalWebLauncherTests(unittest.TestCase):
         self.assertEqual(composition.keywords["youtube_max_queries"], 2)
         self.assertFalse(composition.keywords["youtube_manual_live"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "OWNER_MANUAL_LIVE is Linux-only")
     def test_owner_manual_live_designates_only_the_detected_linux_host(self):
         with patch.dict(os.environ, {"VERCEL": ""}, clear=False), \
              patch.object(local_launcher.socket, "gethostname", return_value="linux-owner"), \
@@ -66,6 +68,7 @@ class LocalWebLauncherTests(unittest.TestCase):
         self.assertTrue(settings.youtube_live_approved)
         self.assertEqual(settings.youtube_live_host, "linux-owner")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "OWNER_MANUAL_LIVE is Linux-only")
     def test_fresh_test_requires_manual_linux_mode_and_manual_mode_rejects_vercel(self):
         with self.assertRaises(SystemExit):
             local_launcher.main(["--youtube-owner-force-fresh-test"])
@@ -74,6 +77,7 @@ class LocalWebLauncherTests(unittest.TestCase):
              self.assertRaises(SystemExit):
             local_launcher.main(["--youtube-owner-manual-live"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "OWNER_MANUAL_LIVE is Linux-only")
     def test_owner_manual_fresh_test_is_one_shot_composition_flag(self):
         with patch.dict(os.environ, {"VERCEL": ""}, clear=False), \
              patch.object(local_launcher, "create_normal_google_live_app", return_value=object()) as create_app, \
@@ -83,6 +87,11 @@ class LocalWebLauncherTests(unittest.TestCase):
             ])
         composition = create_app.call_args.kwargs["composition_factory"]
         self.assertTrue(composition.keywords["youtube_force_fresh_test_once"])
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows-only launcher guard")
+    def test_windows_rejects_owner_manual_live(self):
+        with self.assertRaises(SystemExit):
+            local_launcher.main(["--youtube-owner-manual-live"])
 
 
 if __name__ == "__main__":

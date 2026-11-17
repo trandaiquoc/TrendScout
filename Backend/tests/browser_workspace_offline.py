@@ -183,7 +183,7 @@ CHECK = r"""<script>
     check(document.querySelector('#metric-active-sources').textContent==='0','active source count comes from runtime capabilities');
     const wikimediaCard=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent.includes('wikimedia_pageviews'));
     check(Boolean(wikimediaCard),'runtime metadata includes Wikimedia');
-    check(wikimediaCard?.textContent.includes('\u0110\u00e3 x\u00e1c minh trong l\u1ea7n ch\u1ea1y LIVE local tr\u01b0\u1edbc \u0111\u00e2y'),'historical verification status is localized');
+    check(wikimediaCard?.textContent.includes('\u0110\u00e3 x\u00e1c nh\u1eadn b\u1eb1ng Fetch LIVE local th\u00e0nh c\u00f4ng'),'historical verification status is localized');
     check(wikimediaCard?.textContent.includes('Ch\u01b0a s\u1eb5n s\u00e0ng production'),'production readiness stays separate');
     check([...document.querySelectorAll('#source-registry-list .source-card')].filter(card=>!card.querySelector('h2')?.textContent.includes('wikimedia_pageviews')).every(card=>card.textContent.includes('Đã xác minh adapter ngoại tuyến')),'offline adapter states are reported from runtime metadata');
     const go=async name=>{
@@ -315,7 +315,7 @@ CHECK = r"""<script>
     check(document.activeElement===historyDetail,'opening run details moves focus to the detail region');
     check(historyDetail.textContent.includes('Dữ liệu một phần')&&historyDetail.textContent.includes('Lượt xem trang Wikimedia'),'run detail localizes source and status values: '+historyDetail.textContent);
     const runDetailLabels=[...historyDetail.querySelectorAll('dt')].map(label=>label.textContent);
-    check(runDetailLabels.includes('Bản ghi do nguồn báo cáo')&&runDetailLabels.includes('Khoảng thời gian quan sát')&&historyDetail.textContent.includes('20'),'run detail exposes the saved provider count and observation window');
+    check(runDetailLabels.includes('Bản ghi nhà cung cấp trả về')&&runDetailLabels.includes('Khoảng thời gian quan sát')&&historyDetail.textContent.includes('20'),'run detail exposes the saved provider count and observation window');
     check(historyDetail.textContent.includes('Dữ liệu mô phỏng')&&!historyDetail.textContent.includes('SYNTHETIC'),'run detail localizes the data mode');
     check(historyDetail.textContent.includes('Một hoặc nhiều nguồn chỉ trả về dữ liệu một phần')&&!historyDetail.textContent.includes('SOURCE_COVERAGE_PARTIAL')&&!historyDetail.textContent.includes('CENSORED_TOP_LIST')&&!historyDetail.textContent.includes('wikimedia_pageviews_top_per_country'),'run detail hides internal identifiers behind a user-facing explanation');
     applyLocale('en');
