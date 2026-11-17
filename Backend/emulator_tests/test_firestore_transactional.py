@@ -1,12 +1,16 @@
 """Real Firestore Emulator integration tests; runner must provide sandboxed host."""
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+# E402 is intentional: this standalone suite adds Backend/tests before importing
+# the app package and shared test fixtures from that directory.
+# ruff: noqa: E402
+
 import sys
 import threading
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 from google.api_core.exceptions import Aborted, ServiceUnavailable
@@ -16,9 +20,11 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
 sys.path.insert(0, str(BACKEND / "tests"))
 
-from app.datasets.manifest import build_offline_manifest
+from refresh_fixtures import strict_output
+
 from app.datasets.fake import digest
-from app.jobs.contracts import Policy, State, Conflict, DeadlineExceeded, LeaseLost
+from app.datasets.manifest import build_offline_manifest
+from app.jobs.contracts import Conflict, DeadlineExceeded, LeaseLost, Policy, State
 from app.jobs.firestore_transactional import (
     FirestoreTransactionalCoordinator,
     FirestoreTransactionalDatasetStore,
@@ -27,9 +33,7 @@ from app.jobs.firestore_transactional import (
 )
 from app.storage.firestore_emulator import create_guarded_emulator_client
 from app.storage_analysis.planning import Estimate
-from app.workers.safety import OfflineBudget
-from app.workers.safety import ErrorCode, RefreshError
-from refresh_fixtures import strict_output
+from app.workers.safety import ErrorCode, OfflineBudget, RefreshError
 
 
 class EmulatorClock:
