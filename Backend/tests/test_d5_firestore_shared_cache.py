@@ -11,6 +11,7 @@ from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
     source_capability,
 )
@@ -207,6 +208,41 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         other_scope = CacheScope(GOOGLE_SOURCE_ID, "serpapi_google", "other query", "a" * 64,
                                  "gl=us", "en", "7d", "v1", "policy-v1")
         self.assertEqual(cache_b.get(other_scope, grant=GRANT, now=NOW)["reason"], "CACHE_MISS")
+
+    def test_all_four_source_scopes_round_trip_without_cross_source_data(self):
+        writer = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=64)
+        reader = SharedCache(FirestoreAtomicStateStore(self.client),
+                             payload_blobs=FirestoreSnapshotBlobs(self.client),
+                             max_inline_bytes=64)
+        source_ids = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        scopes = {}
+        for source_id in source_ids:
+            capability = source_capability(source_id)
+            grant = CacheGrant(source_id, "four-source-policy", NOW + timedelta(days=1),
+                               max_fresh_seconds=600, max_stale_seconds=1200,
+                               max_retention_seconds=1800, allowed=True)
+            scope = CacheScope(
+                source_id=source_id, provider_id=capability.provider_id,
+                query=f"query:{source_id}", plan_fingerprint="a" * 64,
+                market="US", language="en", window="24h",
+                parser_version=f"source-v{capability.capability_version}",
+                policy_version=grant.policy_version,
+            )
+            scopes[source_id] = scope
+            writer.put(scope, grant=grant, origin="LIVE", payload={
+                "source_id": source_id, "status": "SUCCESS", "data_mode": "LIVE",
+                "records": [{"title": source_id, "detail": "x" * 256}], "record_count": 1,
+            }, fetched_at=NOW, now=NOW)
+
+        self.assertEqual(len({scope.key for scope in scopes.values()}), len(source_ids))
+        for source_id, scope in scopes.items():
+            result = reader.get(
+                scope, grant=CacheGrant(source_id, "four-source-policy", NOW + timedelta(days=1),
+                                        600, 1200, 1800, True),
+                now=NOW + timedelta(seconds=5),
+            )
+            self.assertEqual(result["status"], "CACHED")
+            self.assertEqual(result["payload"]["source_id"], source_id)
 
     def test_external_cache_missing_blob_is_unavailable(self):
         cache = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=32)
