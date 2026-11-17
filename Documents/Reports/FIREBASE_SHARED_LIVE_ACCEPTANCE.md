@@ -15,7 +15,7 @@ The percentage follows the weights in the Goal request. A `PASS` on a local dete
 | Gate | Weight | Status and evidence | Credit |
 | --- | ---: | --- | ---: |
 | G0 — Git and architecture audit | 10% | **PARTIAL.** Repository, Git, Firebase project/database metadata, rules, existing adapters, source-cache contracts, and runtime wiring were inspected. Firestore collection contents and server IAM could not be inspected with available read tools. | 8% |
-| G1 — Shared Firestore storage | 20% | **PASS — deterministic contract.** Added an injected Firestore snapshot adapter and optional external-payload support in `SharedCache`. The read/write, identity, expiry, duplicate, integrity, purge, missing-blob, large-payload, provenance/timestamp, scope-isolation, cross-instance, and atomic-visibility contracts pass against a transactional fake. | 20% |
+| G1 — Shared Firestore storage | 20% | **PASS — deterministic contract.** Added an injected Firestore snapshot adapter and optional external-payload support in `SharedCache`. The read/write, identity, expiry, duplicate, integrity, purge, missing-blob, large-payload, provenance/timestamp, scope-isolation across all four source IDs, cross-instance, and atomic-visibility contracts pass against a transactional fake. | 20% |
 | G2 — Distributed quota/coordination | 20% | **PARTIAL.** `PublicAdmission` uses the existing Firestore atomic-state port in a cross-instance fake test; a shared Google/Bing quota is enforced. No emulator-backed contention, real lease/fencing, or production transaction acceptance was possible. | 8% |
 | G3 — Cache and SQLite transition | 15% | **PARTIAL.** SQLite remains the runtime default. Existing cache, Wikimedia, Google, and distributed-worker regression tests pass; the Firestore adapter is opt-in and is not wired into a runtime composition. | 8% |
 | G4 — Cross-runtime acceptance | 15% | **BLOCKED.** No emulator or authenticated backend Firestore client was available. Windows 1/Windows 2/Linux/Vercel shared reads, restarts, and concurrent execution remain unverified. | 0% |
@@ -31,8 +31,10 @@ The 57% is a partial Goal state. It does not claim four-source shared LIVE is pr
 - Implementation commit: `0fe00e5b5fc0750c20abfc6dd961433b402fc4cf` — `Add bounded Firestore shared cache adapter`.
 - After committing the implementation, `git fetch origin` succeeded. `origin/main` remained `3dd80a534bc33152ecc7809831528f63caed2130`; local `main` was one commit ahead, with a clean worktree and no divergence.
 - Initial report commit: `8458f99c972712ca5ea3f22ac258005a0f6d74db` — `Document Firebase shared runtime handoff`.
+- Earlier report evidence commit: `aaeb98c40b8eca52d0d1a346ef25284b2c025e90` — `Record Firebase handoff sync evidence`.
 - Before that push, `git fetch origin` succeeded; `origin/main` was exactly `3dd80a534bc33152ecc7809831528f63caed2130`, local `main` was two commits ahead, `git diff --check origin/main...HEAD` passed, and the worktree was clean. A normal push moved `main` from `3dd80a5` to `8458f99`.
-- A post-push fetch confirmed `HEAD` and `origin/main` both equal `8458f99c972712ca5ea3f22ac258005a0f6d74db`; the worktree was clean. This report-only evidence update is committed and pushed as the final handoff step after another fetch confirms no remote divergence. Never force-push.
+- A post-push fetch confirmed `HEAD` and `origin/main` both equal `8458f99c972712ca5ea3f22ac258005a0f6d74db`; the worktree was clean at that checkpoint.
+- Follow-up contract test commit: `e16c0595917dfccba413cdf4934b1c72f93252a6` — `Test Firestore cache across four source scopes`. It verifies readback and non-collision for Wikimedia, Google, Bing, and YouTube cache scopes. This report revision records that evidence. The report/test commits were then checked against `origin/main` and pushed as a fast-forward; the resulting SHA and clean status are reported in the current session handoff. Never force-push.
 - Do not push `.env*`, owner tokens, API credentials, SQLite databases, WAL/SHM files, or local runtime data.
 
 ## Implementation
@@ -54,8 +56,8 @@ The 57% is a partial Goal state. It does not claim four-source shared LIVE is pr
 
 All checks below were run after the implementation changes:
 
-- `python -m unittest discover -s tests` — **938 tests PASS, 2 SKIPPED**.
-- `test_d5_firestore_shared_cache` — **8 tests PASS** after the final adapter changes.
+- `python -m unittest discover -s tests` — **939 tests PASS, 2 SKIPPED**.
+- `test_d5_firestore_shared_cache` — **9 tests PASS** after the final adapter changes.
 - Ruff on all changed Python files — **PASS**.
 - `git diff --check` — **PASS**.
 
