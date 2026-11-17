@@ -243,6 +243,7 @@ fi
 
 printf 'GOOGLE_METADATA_CHECK=START\n'
 "$PYTHON_COMMAND" - <<'PY'
+import errno
 import socket
 
 targets = (
@@ -250,18 +251,67 @@ targets = (
     (socket.AF_INET6, ("fd20:ce::254", 80, 0, 0)),
 )
 for family, address in targets:
-    try:
-        with socket.socket(family, socket.SOCK_STREAM) as probe:
-            probe.settimeout(1.0)
-            result = probe.connect_ex(address)
-    except OSError as exc:
-        result = exc.errno or -1
-    if result == 0:
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        try:
+            probe.connect(address)
+        except OSError as exc:
+            if exc.errno in (
+                errno.EAFNOSUPPORT,
+                errno.EADDRNOTAVAIL,
+                errno.ECONNREFUSED,
+                errno.EHOSTUNREACH,
+                errno.ENETUNREACH,
+                errno.ETIMEDOUT,
+            ):
+                print(
+                    f"GOOGLE_METADATA_ENDPOINT={address[0]}:80 BLOCKED "
+                    f"connect_errno={exc.errno}"
+                )
+                continue
+            raise SystemExit(
+                f"FAIL: Google metadata endpoint probe was inconclusive for "
+                f"{address[0]}:80 ({exc})"
+            ) from exc
+        try:
+            probe.sendall(
+                b"GET /computeMetadata/v1/instance/service-accounts/default/token HTTP/1.1\r\n"
+                b"Host: metadata.google.internal\r\n"
+                b"Metadata-Flavor: Google\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            response = bytearray()
+            while b"\r\n\r\n" not in response and len(response) < 8192:
+                chunk = probe.recv(1024)
+                if not chunk:
+                    break
+                response.extend(chunk)
+        except OSError as exc:
+            raise SystemExit(
+                f"FAIL: Google metadata endpoint probe was inconclusive for "
+                f"{address[0]}:80 ({exc})"
+            ) from exc
+    header_block = bytes(response).split(b"\r\n\r\n", 1)[0]
+    header_lines = header_block.split(b"\r\n")
+    if not header_lines or not header_lines[0].startswith(b"HTTP/"):
+        raise SystemExit(
+            f"FAIL: metadata endpoint {address[0]}:80 returned no valid HTTP headers"
+        )
+    headers = {}
+    for line in header_lines[1:]:
+        name, separator, value = line.partition(b":")
+        if separator:
+            headers[name.strip().lower()] = value.strip().lower()
+    if headers.get(b"metadata-flavor") == b"google":
         raise SystemExit(
             f"FAIL: Google metadata endpoint {address[0]}:80 is reachable; "
             "refusing to run dependency preparation with Cloud credentials available"
         )
-    print(f"GOOGLE_METADATA_ENDPOINT={address[0]}:80 BLOCKED connect_result={result}")
+    status_line = header_lines[0].decode("ascii", errors="replace")
+    print(
+        f"GOOGLE_METADATA_ENDPOINT={address[0]}:80 "
+        f"NOT_GOOGLE_METADATA status={status_line}"
+    )
 print("GOOGLE_METADATA_ACCESS=BLOCKED")
 PY
 
