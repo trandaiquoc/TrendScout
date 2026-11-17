@@ -34,7 +34,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 RUN_ROOT="$(mktemp -d /tmp/trendscout-firestore-acceptance.XXXXXXXX)"
 SAFE_HOME="$RUN_ROOT/home"
 SANDBOX_ETC="$RUN_ROOT/sandbox-etc"
-mkdir -p "$SAFE_HOME" "$RUN_ROOT/no-gcloud-config" "$SANDBOX_ETC/ssl/certs"
+mkdir -p "$SAFE_HOME" "$RUN_ROOT/tmp" "$RUN_ROOT/no-gcloud-config" "$SANDBOX_ETC/ssl/certs"
 : > "$RUN_ROOT/no-npm-user-config"
 : > "$RUN_ROOT/no-npm-global-config"
 chmod 600 "$RUN_ROOT/no-npm-user-config" "$RUN_ROOT/no-npm-global-config"
@@ -213,7 +213,7 @@ for p in /bin /sbin /lib /lib64; do
 done
 COMMON_ENV_ARGS=(
     --clearenv --setenv PATH "$SAFE_PATH"
-    --setenv HOME /work/home --setenv TMPDIR /tmp
+    --setenv HOME /work/home --setenv TMPDIR /work/tmp
     --setenv XDG_CONFIG_HOME /work/home/.config --setenv XDG_CACHE_HOME /work/home/.cache
     --setenv CLOUDSDK_CONFIG /work/no-gcloud-config --setenv CI 1
     --setenv FIRESTORE_ACCEPTANCE_DROP_PRIVILEGES "$DROP_PRIVILEGES"
