@@ -441,6 +441,107 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         self.assertEqual(after_reopen["status"], "CACHED")
         self.assertEqual(after_reopen["payload"], payload)
 
+    def test_firestore_cache_isolates_source_scopes_and_grants(self):
+        source_ids = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID)
+        scopes = {}
+        grants = {}
+        cache = create_firestore_shared_cache(self.client)
+        for source_id in source_ids:
+            capability = source_capability(source_id)
+            scope = CacheScope(
+                source_id=source_id,
+                provider_id=capability.provider_id,
+                query="same-query-for-source-isolation",
+                plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+                market=DEFAULT_QUERY_PLAN.market,
+                language=DEFAULT_QUERY_PLAN.language or "all",
+                window=DEFAULT_QUERY_PLAN.time_filter_rule,
+                parser_version="emulator-source-isolation-v1",
+                policy_version="emulator-source-isolation-v1",
+            )
+            grant = CacheGrant(
+                source_id,
+                "emulator-source-isolation-v1",
+                self.now + timedelta(days=1),
+                max_fresh_seconds=60,
+                max_stale_seconds=120,
+                max_retention_seconds=300,
+                allowed=True,
+            )
+            scopes[source_id] = scope
+            grants[source_id] = grant
+            self.state_keys.append(scope.key)
+            cache.put(
+                scope,
+                grant=grant,
+                origin="SYNTHETIC",
+                payload={
+                    "status": "SUCCESS",
+                    "data_mode": "SYNTHETIC",
+                    "source_id": source_id,
+                    "records": [{"source_id": source_id}],
+                    "record_count": 1,
+                },
+                fetched_at=self.now,
+                now=self.now,
+            )
+
+        self.assertNotEqual(scopes[WIKIMEDIA_SOURCE_ID].key, scopes[GOOGLE_SOURCE_ID].key)
+        for source_id in source_ids:
+            result = cache.get(scopes[source_id], grant=grants[source_id], now=self.now)
+            self.assertEqual(result["status"], "CACHED")
+            self.assertEqual(result["payload"]["source_id"], source_id)
+            other_source = next(value for value in source_ids if value != source_id)
+            denied = cache.get(scopes[source_id], grant=grants[other_source], now=self.now)
+            self.assertEqual(denied["status"], "UNAVAILABLE")
+            self.assertEqual(denied["reason"], "POLICY_UNAVAILABLE")
+            self.assertNotIn("payload", denied)
+
+    def test_firestore_cache_enforces_stale_and_retention_expiry(self):
+        capability = source_capability(WIKIMEDIA_SOURCE_ID)
+        scope = CacheScope(
+            source_id=WIKIMEDIA_SOURCE_ID,
+            provider_id=capability.provider_id,
+            query="emulator-cache-expiry",
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            market=DEFAULT_QUERY_PLAN.market,
+            language=DEFAULT_QUERY_PLAN.language or "all",
+            window=DEFAULT_QUERY_PLAN.time_filter_rule,
+            parser_version="emulator-cache-expiry-v1",
+            policy_version="emulator-cache-expiry-v1",
+        )
+        self.state_keys.append(scope.key)
+        grant = CacheGrant(
+            WIKIMEDIA_SOURCE_ID,
+            "emulator-cache-expiry-v1",
+            self.now + timedelta(seconds=20),
+            max_fresh_seconds=5,
+            max_stale_seconds=8,
+            max_retention_seconds=10,
+            allowed=True,
+        )
+        cache = create_firestore_shared_cache(self.client)
+        cache.put(
+            scope,
+            grant=grant,
+            origin="SYNTHETIC",
+            payload={"status": "SUCCESS", "data_mode": "SYNTHETIC", "records": []},
+            fetched_at=self.now,
+            now=self.now,
+        )
+
+        stale = cache.get(scope, grant=grant, now=self.now + timedelta(seconds=6))
+        self.assertEqual(stale["status"], "STALE")
+        expired = cache.get(scope, grant=grant, now=self.now + timedelta(seconds=11))
+        self.assertEqual(expired["status"], "EXPIRED")
+        self.assertEqual(expired["reason"], "RETENTION_EXPIRED")
+        self.assertEqual(
+            self.client.collection("_ts_d5_coordination").document(scope.key).get().to_dict(),
+            {},
+        )
+        miss = cache.get(scope, grant=grant, now=self.now + timedelta(seconds=11))
+        self.assertEqual((miss["status"], miss["reason"]), ("UNAVAILABLE", "CACHE_MISS"))
+
     def test_expired_blob_is_purged_with_its_chunks(self):
         blobs = FirestoreSnapshotBlobs(self.client)
         records = [{"fixture": f"purge-{self.suffix}"}]
