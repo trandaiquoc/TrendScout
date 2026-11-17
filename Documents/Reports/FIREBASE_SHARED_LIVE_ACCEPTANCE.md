@@ -14,13 +14,13 @@ The percentage follows the weights in the Goal request. A `PASS` on a local dete
 
 | Gate | Weight | Status and evidence | Credit |
 | --- | ---: | --- | ---: |
-| G0 — Git and architecture audit | 10% | **PARTIAL.** Repository, Git, Firebase project/database metadata, rules, existing adapters, source-cache contracts, and runtime wiring were inspected. Firestore collection contents and server IAM could not be inspected with available read tools. | 8% |
+| G0 — Git and architecture audit | 10% | **PARTIAL.** Repository, Git, Firebase project/database metadata, rules, existing adapters, source-cache contracts, and runtime wiring were inspected. Firestore collection contents and server IAM could not be inspected; the Firebase MCP has no document or IAM query tools and `gcloud` is unavailable on this machine. | 8% |
 | G1 — Shared Firestore storage | 20% | **PASS — deterministic contract.** Added an injected Firestore snapshot adapter, optional external-payload support in `SharedCache`, and an explicit factory that binds both stores to one supplied client. The read/write, identity, expiry, duplicate, integrity, purge, missing-blob, large-payload, provenance/timestamp, scope-isolation across all four source IDs, cross-instance, and atomic-visibility contracts pass against a transactional fake. | 20% |
 | G2 — Distributed quota/coordination | 20% | **PARTIAL.** `PublicAdmission` uses the existing Firestore atomic-state port in a cross-instance fake test; a shared Google/Bing quota is enforced. No emulator-backed contention, real lease/fencing, or production transaction acceptance was possible. | 8% |
 | G3 — Cache and SQLite transition | 15% | **PARTIAL.** SQLite remains the runtime default. Existing cache, Wikimedia, Google, and distributed-worker regression tests pass; the Firestore adapter is opt-in and is not wired into a runtime composition. | 8% |
 | G4 — Cross-runtime acceptance | 15% | **BLOCKED.** No emulator or authenticated backend Firestore client was available. Windows 1/Windows 2/Linux/Vercel shared reads, restarts, and concurrent execution remain unverified. | 0% |
 | G5 — Security and regression | 15% | **PARTIAL.** The full Backend suite, focused regression, Ruff, and diff checks pass. Firestore client rules deny reads and writes. Backend IAM, emulator security, and live Firestore behavior were not verified. | 8% |
-| G6 — Report and commits | 5% | **PASS.** Implementation and report commits were pushed by fast-forward; a post-push fetch confirmed `HEAD` and `origin/main` at `82e56219f608c503c92f54db7b8bd9f0149d210a`. This correction is report-only and is synced after a final fetch. | 5% |
+| G6 — Report and commits | 5% | **PASS.** Implementation and report commits were pushed by fast-forward; post-push fetches confirmed the local and remote refs matched. The latest confirmed SHA before this report correction is recorded below. | 5% |
 | **Total** | **100%** | **Current Goal progress** | **57%** |
 
 The 57% is a partial Goal state. It does not claim four-source shared LIVE is production-ready.
@@ -37,7 +37,8 @@ The 57% is a partial Goal state. It does not claim four-source shared LIVE is pr
 - Follow-up contract test commit: `e16c0595917dfccba413cdf4934b1c72f93252a6` — `Test Firestore cache across four source scopes`. It verifies readback and non-collision for Wikimedia, Google, Bing, and YouTube cache scopes. This report revision records that evidence. The report/test commits were then checked against `origin/main` and pushed as a fast-forward; the resulting SHA and clean status are reported in the current session handoff. Never force-push.
 - Explicit composition commit: `44d7006f404ea063922af0c6f0c09801140b41de` — `Add explicit Firestore cache composition`. It binds the atomic-state adapter and blob adapter to the same injected client; the full Backend test suite and Ruff passed after this change.
 - Before the latest push, `git fetch origin` showed a clean worktree with two local commits ahead and zero remote-only commits; `git diff --check origin/main...HEAD` passed. A fast-forward moved `main` from `ccd49fc` to `82e5621`. A post-push fetch confirmed `HEAD` and `origin/main` both equal `82e56219f608c503c92f54db7b8bd9f0149d210a`, with a clean worktree.
-- This revision is report-only. At edit time the worktree was clean at that synced SHA; fetch again and push this report commit only if the remote remains a fast-forward target. Never force-push.
+- A report-only correction commit, `3ba6ae2155037cc54746c19353c5f51b91e029c9`, was then pushed from `82e5621`; a post-push fetch confirmed `HEAD` and `origin/main` matched at `3ba6ae2155037cc54746c19353c5f51b91e029c9`, with a clean worktree.
+- This revision adds only the IAM-tool availability evidence. It is committed and fast-forward pushed after a fresh fetch confirmed zero remote-only commits; post-push `HEAD` and `origin/main` matched, with a clean worktree. Never force-push.
 - Do not push `.env*`, owner tokens, API credentials, SQLite databases, WAL/SHM files, or local runtime data.
 
 ## Implementation
