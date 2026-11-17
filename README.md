@@ -2,16 +2,16 @@
 
 Demo khám phá tín hiệu quan tâm qua Wikimedia Pageviews US/all-access. Backend Python 3.12 + FastAPI làm sạch, phân loại và tính điểm heuristic; dashboard hiển thị bằng chứng. Đây không phải xác suất, xu hướng mua sắm hoặc đo lường toàn bộ mạng xã hội.
 
-## Windows (môi trường phát triển chính)
+## Chạy trên Windows
 
-Cần Python native 3.12, Git, Node.js và Chrome. Giữ nguyên các bản Python khác; `setup.ps1` dùng Python Launcher `py -3.12`, tạo `Backend\.venv` và cài các dependency đã pin trong virtual environment. Có thể cài Python 3.12 qua `winget install --id Python.Python.3.12 --exact` nếu máy chưa có.
+Cần Python native 3.12. `setup.ps1` dùng Python Launcher `py -3.12`, tạo `Backend\.venv` và cài các dependency đã pin trong virtual environment. Có thể cài Python 3.12 qua `winget install --id Python.Python.3.12 --exact` nếu máy chưa có. Nếu PowerShell chặn script cục bộ, thiết lập một lần cho tài khoản hiện tại bằng `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 ```powershell
 .\setup.ps1
-.\start.ps1 -Synthetic
+.\start.ps1
 ```
 
-Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. Demo synthetic dùng fixture cục bộ và không gửi provider request. `start.ps1` không tạo `.env`, API key hoặc credential. Chế độ cloud tiêu chuẩn chỉ chạy khi `GOOGLE_CLOUD_PROJECT` và `TREND_SCOUT_OPERATOR_TOKEN` đã được chủ máy cấu hình tường minh trong environment; ADC cũng phải được thiết lập riêng. Khởi động không gửi provider request. Guarded local LIVE HTTP vẫn cần entrypoint cấp đủ approval/grant backend, `enabled=True`, một worker và các kiểm soát runtime; `start.ps1` không bật chế độ đó.
+Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. `start.ps1` luôn chạy Wikimedia LIVE trên loopback với một worker; không cần API key và không gửi request cho đến khi bấm Fetch. Cấu hình cổng bằng biến môi trường `TREND_SCOUT_DEMO_PORT` (mặc định `8000`). Multi-source Google/Bing LIVE và cloud runtime là các cấu hình riêng, không được `start.ps1` khởi chạy.
 
 Chạy offline regression, browser E2E và benchmark:
 
@@ -21,33 +21,20 @@ Chạy offline regression, browser E2E và benchmark:
 
 Script chạy D6.1B security tests trên Windows, toàn bộ unittest, golden tests với hai hash seed, `pip check`, JavaScript syntax, Chrome E2E và storage benchmark. Dùng Chrome cài trên máy; script không tải browser, cài package toàn cục hoặc gọi provider. Windows ACL được đọc và xác minh qua Windows security descriptor; DACL data được giới hạn cho user hiện tại, SYSTEM và Administrators. Quota database, WAL/SHM và process-lock dùng thư mục có ACL riêng dưới `%LOCALAPPDATA%\TrendScout`.
 
-## Linux: Wikimedia LIVE local demo
-
-Cần Python 3.12, `python3.12-venv`, và quyền truy cập mạng tới Wikimedia Pageviews. Cài dependencies một lần từ repository root, sau đó chạy:
-
-```bash
-bash setup.sh
-bash start.sh
-```
-
-Mở [http://127.0.0.1:8000/dashboard/](http://127.0.0.1:8000/dashboard/) và chọn **Fetch new data** để gửi một lượt Fetch giới hạn. Khởi động không gọi nhà cung cấp; Fetch mới gửi yêu cầu khi người dùng bấm nút. Chế độ mặc định dùng guarded normal Wikimedia LIVE, một worker, loopback và local storage. Không cần Firebase, Firestore, ADC, Google Cloud project, operator token hay Wikimedia API key.
-
-`bash setup.sh` cài FastEmbed vào `Backend/.venv`. Bộ sưu tập dùng model multilingual MiniLM chạy CPU cục bộ; model được cache ngoài repository tại `~/.cache/trendscout/fastembed` khi cần. Bộ sưu tập và keyword/evidence snapshot lưu riêng trong `~/.local/state/trendscout/collections-v1/collections.sqlite` và tồn tại sau khi khởi động lại. Nếu model chưa tải hoặc không khả dụng, Wikimedia Fetch vẫn chạy; phân nhóm AI sẽ hiển thị trạng thái không khả dụng. Tab **Collections / Bộ sưu tập** quản lý nhóm, từ khóa, gợi ý và chế độ tạo nhóm. Dữ liệu Fetch còn chịu giới hạn nguồn và lưu trữ; AI chỉ xét toàn bộ record sạch còn khả dụng, không chỉ 100 hàng hiển thị.
-
-`Ctrl+C` dừng tiến trình. Nếu cổng 8000 đang bận, giải phóng cổng hoặc chọn cổng khác bằng `TREND_SCOUT_DEMO_PORT=8123 bash start.sh`. Để chạy fixture ngoại tuyến thay thế, dùng `bash start.sh --synthetic`; dữ liệu đó được gắn nhãn SYNTHETIC và không gọi provider. Các script PowerShell và chế độ Windows không thay đổi.
-
-Chạy `bash Backend/scripts/verify_offline_readiness.sh` để kiểm tra Linux security gate gồm seccomp, syscall và giới hạn tài nguyên; kiểm tra đó không được mô phỏng trên Windows.
-
 ## Kiểm tra offline và nguồn
 
-```bash
-cd Backend
-python -m unittest discover -s tests -v
-python -m pip check
-node --check ../Frontend/public/app.js
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m pip check
+    node --check ..\Frontend\public\app.js
+} finally {
+    Pop-Location
+}
 ```
 
-`python -m scripts.wikimedia_trend_smoke` gọi Wikimedia thật chỉ đọc, không lưu Firestore; fixture trong test là synthetic. Các dữ liệu chỉ xuất hiện trong top và `views_ceil` xấp xỉ; ngày thiếu, lỗi và trang không lọt top không được chuyển thành 0. Nhóm fashion/home có thể rỗng. Rule phân loại và score chưa được đánh giá như ground truth.
+Từ thư mục `Backend`, `.\.venv\Scripts\python.exe -m scripts.wikimedia_trend_smoke` gọi Wikimedia thật chỉ đọc, không lưu Firestore; fixture trong test là synthetic. Các dữ liệu chỉ xuất hiện trong top và `views_ceil` xấp xỉ; ngày thiếu, lỗi và trang không lọt top không được chuyển thành 0. Nhóm fashion/home có thể rỗng. Rule phân loại và score chưa được đánh giá như ground truth.
 
 ## Lỗi thường gặp
 

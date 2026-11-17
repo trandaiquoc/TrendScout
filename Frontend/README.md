@@ -4,11 +4,11 @@ The dashboard is a browser-native HTML, CSS, and JavaScript workspace served by 
 
 ## Run locally
 
-From the repository root, `bash start.sh` starts the guarded normal Wikimedia LIVE composition on loopback with one worker and local storage. Open **http://127.0.0.1:8000/dashboard/** and select Fetch to contact Wikimedia. Startup itself does not make provider requests; no Firebase/Firestore account, ADC, project, operator token, or Wikimedia API key is needed. `bash start.sh --synthetic` starts the bounded fixture demo instead. Set `TREND_SCOUT_DEMO_PORT` to choose another port. See the [Backend README](../Backend/README.md) for dependencies and the runtime boundary.
+From the repository root, run `.\start.ps1` to start the Wikimedia LIVE composition on loopback with one worker and local storage. Open **http://127.0.0.1:8000/dashboard/** and select Fetch to contact Wikimedia. Startup itself does not make provider requests; no Firebase/Firestore account, ADC, project, operator token, or Wikimedia API key is needed. Set `TREND_SCOUT_DEMO_PORT` to choose another port. This launcher always selects LIVE; it does not select synthetic fixtures. See the [Backend README](../Backend/README.md) for dependencies and the runtime boundary.
 
 The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
-On Windows, start the app from PowerShell at the repository root with `.\start.ps1 -Port 8000`, then open **http://127.0.0.1:8000/dashboard/**. Startup does not fetch provider data. Choose **Collections / Bộ sưu tập** to search and manage saved keywords. **Chưa xếp vào Bộ sưu tập / Not in a Collection** is the place for eligible keywords that have not been organized. Search, sorting, filters and paging read the local database only. **Organize saved keywords again / Sắp xếp lại từ khóa từ dữ liệu đã lưu** uses evidence already saved. Create, edit, merge and delete operate on the local Collections database; merge and delete require confirmation.
+To use a different port, set `$env:TREND_SCOUT_DEMO_PORT = '8123'` before running `.\start.ps1`. Startup does not fetch provider data. Choose **Collections / Bộ sưu tập** to search and manage saved keywords. **Chưa xếp vào Bộ sưu tập / Not in a Collection** is the place for eligible keywords that have not been organized. Search, sorting, filters and paging read the local database only. **Organize saved keywords again / Sắp xếp lại từ khóa từ dữ liệu đã lưu** uses evidence already saved. Create, edit, merge and delete operate on the local Collections database; merge and delete require confirmation.
 
 Collection counts show keywords placed directly in a Collection; parent counts include unique keywords in subcollections. Missing counts display as unavailable, not zero. Keyword details keep source records, analysis results and data limitations collapsed until opened. Wikimedia pageviews are approximate observed pageviews; they do not measure search volume or purchase intent.
 
@@ -24,11 +24,11 @@ Collection counts show keywords placed directly in a Collection; parent counts i
 - **public/modules/theme.js** and **public/modules/i18n.js** manage display preferences.
 - **public/modules/i18n/vi.js** and **public/modules/i18n/en.js** are separate user-facing copy catalogs.
 
-The browser safely renders API values as text and only links to validated HTTPS Wikimedia-family hosts. Missing values remain distinct from zero. Run, keyword, and detail reads preserve API pagination and source evidence; stale, synthetic, partial, and failed runs remain labeled.
+The browser safely renders API values as text and only links to validated HTTPS Wikimedia-family hosts. Missing values remain distinct from zero. Run, keyword, and detail reads preserve API pagination and source evidence; stale, synthetic, partial, and failed runs remain labeled. Synthetic fixtures are not selected by the Windows launcher.
 
 ## Fetch and source readiness
 
-The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. In normal local LIVE mode, Fetch uses the bounded `POST /api/v1/fetches` contract and fixed Wikimedia adapter scope. In synthetic local mode, the same screen executes fixture data and labels it SYNTHETIC. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
+The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. The Windows launcher runs local LIVE mode; Fetch uses the bounded `POST /api/v1/fetches` contract and fixed Wikimedia adapter scope. Fixture-based synthetic behavior is separate from this launcher. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
 
 The Vercel application serves dashboard HTML, CSS, and JavaScript modules anonymously. Private `/api/runs/...` reads remain behind HTTP Basic and the configured Vercel OIDC/Firestore identity; a missing `TREND_SCOUT_READ_PASSWORD` blocks those private reads, not dashboard rendering. Vercel Deployment Protection is a separate platform gate and may still require authentication before a request reaches the application.
 
@@ -47,15 +47,8 @@ Local FastAPI serves the files under public/ at /dashboard/. The Vercel build ru
 
 ## Checks
 
-From the repository root:
+From the repository root, run:
 
-    bash Backend/scripts/verify_offline_readiness.sh
+    .\verify_offline_readiness.ps1
 
-This runs backend regressions, Golden seeds, JavaScript syntax checks, recursive Vercel asset parity, offline Chrome workspace/keyboard/mobile checks, synthetic pipeline integration, and bounded fake-storage workloads. It does not contact Wikimedia, YouTube, search providers, Firestore, or Vercel.
-
-The focused screenshot review can be repeated with Chrome installed:
-
-    cd Backend
-    .venv/bin/python scripts/seccomp_exec.py --allow-unix-sockets -- .venv/bin/python tests/browser_d2_visual_offline.py
-
-This creates compact WebP evidence under Documents/Reports/evidence/d2/. Those fixture screenshots show UI states only; they do not establish live source access, production abuse resistance, or market validity. See the [Backend README](../Backend/README.md) for API, legacy operator authorization, public Fetch limits, storage, and deployment constraints.
+This Windows-native script runs backend regressions, Golden seeds, JavaScript syntax checks, offline Chrome workspace/keyboard/mobile checks, synthetic pipeline integration, and bounded fake-storage workloads. It does not contact Wikimedia, YouTube, search providers, Firestore, or Vercel. See the [Backend README](../Backend/README.md) for API, legacy operator authorization, public Fetch limits, storage, and deployment constraints.

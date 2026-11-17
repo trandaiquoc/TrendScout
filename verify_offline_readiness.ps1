@@ -55,7 +55,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Storage benchmark failed.' }
     Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
 
-    Write-Output '[8/8] Windows-specific checks are complete; Linux seccomp remains a separate gate.'
+    Write-Output '[8/8] Windows checks are complete.'
 } finally {
     Remove-Item Env:PYTHONHASHSEED -ErrorAction SilentlyContinue
     Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue

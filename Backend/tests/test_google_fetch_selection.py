@@ -63,16 +63,19 @@ class _OfflineApprovals:
 
 
 class GoogleFetchSourceSelectionTests(unittest.IsolatedAsyncioTestCase):
-    def test_default_windows_launcher_starts_multi_source_web_profile(self):
+    def test_default_windows_launcher_always_starts_wikimedia_live_profile(self):
         root = Path(__file__).resolve().parents[2]
         windows_script = (root / "start.ps1").read_text(encoding="utf-8")
-        unix_script = (root / "start.sh").read_text(encoding="utf-8")
-        self.assertIn("scripts.run_google_live_local", windows_script)
-        self.assertIn("scripts.run_google_live_local", unix_script)
-        self.assertIn("s.bind((\"127.0.0.1\"", unix_script)
-        self.assertNotIn("connect_ex", unix_script)
-        self.assertNotIn("$GoogleLive", windows_script)
-        self.assertNotIn("TREND_SCOUT_GOOGLE_LOCAL_LIVE_APPROVED", windows_script)
+        wikimedia_entrypoint = (
+            root / "Backend" / "scripts" / "run_wikimedia_live_local.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts.run_wikimedia_live_local", windows_script)
+        self.assertNotIn("scripts.run_google_live_local", windows_script)
+        self.assertIn('"TREND_SCOUT_RUN_MODE": "live"', wikimedia_entrypoint)
+        self.assertIn("workers=1", wikimedia_entrypoint)
+        self.assertIn("TREND_SCOUT_DEMO_PORT", windows_script)
+        self.assertNotIn("--synthetic", windows_script)
+        self.assertNotIn("-Cloud", windows_script)
 
     async def _fetch(self, source_ids):
         with tempfile.TemporaryDirectory() as temporary:

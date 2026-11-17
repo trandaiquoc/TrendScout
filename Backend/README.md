@@ -2,26 +2,16 @@
 
 ## Native Windows (môi trường chính)
 
-Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `..\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.
+Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `.\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.
 
 ```powershell
 ..\setup.ps1
-..\start.ps1 -Synthetic
+..\start.ps1
 ```
 
-Demo synthetic nghe loopback, dùng fixture, không gọi provider, và dừng bằng Ctrl+C. Chế độ cloud tiêu chuẩn `..\start.ps1` cần environment `GOOGLE_CLOUD_PROJECT`, `TREND_SCOUT_OPERATOR_TOKEN` do chủ máy cấu hình và ADC; startup không fetch provider. Setup không tạo file `.env` hoặc API keys. `LocalCredentialProvider` đọc `.env` ở repository root trên cả Linux và Windows; Windows vẫn hỗ trợ `%LOCALAPPDATA%\TrendScout\.env` cũ nếu file root chưa tồn tại.
+Windows `start.ps1` luôn khởi chạy Wikimedia LIVE trên loopback với một worker. Khởi động không tải dữ liệu; chọn Fetch trong dashboard mới gửi request tới Wikimedia. Không cần Firebase, SerpApi key, Google Cloud project, operator token hoặc ADC. Cổng mặc định là 8000; có thể đặt `TREND_SCOUT_DEMO_PORT` trong environment. Nếu Windows chặn script cục bộ, thiết lập một lần cho tài khoản hiện tại bằng `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. Setup không tạo file `.env` hoặc API keys. `LocalCredentialProvider` đọc `.env` ở repository root; Windows vẫn hỗ trợ `%LOCALAPPDATA%\TrendScout\.env` cũ nếu file root chưa tồn tại.
 
 Chạy `..\verify_offline_readiness.ps1` để thực hiện D6.1B focused tests, toàn bộ unittest, cả hai golden hash seed, `pip check`, JavaScript syntax, Chrome browser E2E và storage benchmark. File lock dùng byte-range lock Windows qua `msvcrt`, tự nhả khi process kết thúc. Kiểm tra ACL xác minh owner SID và DACL bằng Windows security APIs; cho phép user hiện tại, SYSTEM, Administrators và owner-rights ACE. Reparse point, ACL không đọc được hoặc ACE cấp quyền cho principal khác bị từ chối. SQLite quota ledger nằm dưới `%LOCALAPPDATA%\TrendScout\local\d6-smoke`; database, WAL/SHM và process lock thừa hưởng ACL riêng của thư mục đó.
-
-## Linux: guarded normal Wikimedia LIVE local runtime
-
-From the repository root, run `bash setup.sh` once, then `bash start.sh`. It binds only to `127.0.0.1`, uses one worker and the local multi-source LIVE composition, and defaults to port 8000. Startup does not call a provider; choose configured sources in Source Center and click Fetch. No Firebase/Firestore, ADC, Google Cloud project, operator token, or Wikimedia API key is required for the local composition. `bash setup.sh` installs FastEmbed in `Backend/.venv`; first local inference may download the multilingual MiniLM model into `~/.cache/trendscout/fastembed`. Persistent user Collections and retained keyword evidence use the separate `~/.local/state/trendscout/collections-v1/collections.sqlite` namespace, outside the D6 quota ledger. `bash start.sh --synthetic` runs the fixture demo. Set `TREND_SCOUT_DEMO_PORT` to use another port. A busy port exits with an actionable message; the foreground process exits cleanly on Ctrl+C.
-
-This runtime is an explicitly guarded local demo, not a cloud deployment or multi-host service. Its local state may be lost when the process stops. The legacy Firestore and operator-token paths documented below remain separate from this entrypoint.
-
-## Linux (tương thích và bảo mật phụ)
-
-Giữ các script `.sh` và chạy `bash scripts/verify_offline_readiness.sh` từ `Backend/`. Linux là nơi chạy seccomp, libseccomp, resource limits và syscall isolation; không bỏ hoặc giả lập các gate này trên Windows. Xem báo cáo D6 để biết trạng thái gate từng hệ điều hành.
 
 ## D4 — Google/Bing SERP ngoại tuyến
 
@@ -29,32 +19,17 @@ Giữ các script `.sh` và chạy `bash scripts/verify_offline_readiness.sh` t�
 
 Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; không được dùng để mở public live Fetch. Cả hai source vẫn disabled, chưa cấu hình, chưa phê duyệt hoặc xác minh live; chúng không được thêm vào registry/Public Fetch. [Capability matrix](../Documents/Design/DEMO_ONLINE_SOURCE_CAPABILITIES.md), [inventory](../Documents/Design/US_PLATFORM_SOURCE_INVENTORY.md), [D5 blueprint](../Documents/Design/D5_FOUR_SOURCE_LIVE_INTEGRATION_BLUEPRINT.md).
 
-Để cài đặt và khởi động toàn bộ hệ thống từ root, ưu tiên `./setup.sh` (một lần) và `./start.sh`; xem [README chính](../README.md). Các lệnh dưới đây là cách thiết lập/chạy thủ công.
+Để cài đặt và khởi động từ Windows PowerShell tại repository root, chạy `.\setup.ps1` một lần rồi `.\start.ps1`; xem [README chính](../README.md). `start.ps1` luôn chạy Wikimedia LIVE; các runtime legacy bên dưới tách biệt với launcher này.
 
-Repository còn có legacy Firestore-backed run API riêng. `bash start.sh` không dùng API hay credential path đó. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
-
-## Thiết lập trên Ubuntu
-
-Cần Python 3.12 và gói venv tương ứng. Nếu `python3.12 -m venv` báo thiếu `ensurepip`, cài `python3.12-venv` từ kho Ubuntu đã cấu hình (ví dụ `sudo apt install python3.12-venv`). Nếu bản Ubuntu không có Python 3.12, cài Python 3.12 và gói venv tương thích từ nguồn phù hợp.
-
-Từ `Backend/`:
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-Terminal khác: `curl -i http://127.0.0.1:8000/api/health`. Kết quả dự kiến HTTP 200 và `{"status":"ok"}`; endpoint chỉ kiểm tra backend phản hồi, không kiểm tra Firestore hoặc Wikimedia. `TREND_SCOUT_APP_NAME` là biến môi trường tùy chọn cho tiêu đề FastAPI.
+Repository còn có legacy Firestore-backed run API riêng. Nó không được `start.ps1` khởi chạy. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
 
 ## Firestore và ADC
 
 Đối với project đã có và database `(default)`:
 
-```bash
+```powershell
 gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
+$env:GOOGLE_CLOUD_PROJECT = 'trendscout-192e4'
 ```
 
 `FirestoreStorage.from_environment()` đọc project từ `GOOGLE_CLOUD_PROJECT`, khởi tạo Firebase Admin SDK qua Application Default Credentials (ADC) và dùng database `(default)`. Không cần nhúng credential vào mã. Trên môi trường chạy khác dùng danh tính service account và ADC thích hợp; nếu dùng file credential, lưu ngoài repository. Không commit hoặc gửi nội dung credential. `.gitignore` chặn các tên phổ biến, không thể nhận diện mọi tên file key tùy ý.
@@ -88,16 +63,26 @@ Các field là thiết kế dự kiến cho bước tiếp theo; repository hi�
 
 ## Kiểm thử
 
-```bash
-python -m unittest discover -s tests -v
-python -m pip check
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m pip check
+} finally {
+    Pop-Location
+}
 ```
 
 Các test dùng fake và mock, không gọi cloud. Để kiểm tra live thủ công sau khi xác nhận project/ADC, chạy từ `Backend/`:
 
-```bash
-export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
-python -m scripts.firestore_smoke
+```powershell
+$env:GOOGLE_CLOUD_PROJECT = 'trendscout-192e4'
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m scripts.firestore_smoke
+} finally {
+    Pop-Location
+}
 ```
 
 Script chỉ chấp nhận project này, database `(default)` và không cho phép cấu hình emulator. Script tạo một document tên ngẫu nhiên trong `analysis_runs`, đọc/cập nhật, sau đó xóa chính document đó và kiểm tra lại. Nếu bị gián đoạn hoặc lỗi mạng sau khi gửi create, kiểm tra document `step3-smoke-*` được in trong log hoặc Console trước khi dọn; không xóa dữ liệu khác. Kiểm thử live có sử dụng quota Firestore hiện hành. Không cần bật billing cho thao tác trong free quota; tự xác nhận quota và cấu hình thực tế trước mỗi lần chạy.
@@ -113,9 +98,14 @@ Script chỉ chấp nhận project này, database `(default)` và không cho ph�
 
 Adapter `app/adapters/wikimedia.py` gọi danh sách `US/all-access` không có query lọc chủ đề/ngôn ngữ. Mặc định bắt đầu từ hôm qua theo UTC, thử lùi tối đa 7 ngày khi gặp 404, rồi lấy 7 ngày lịch trước ngày phân tích. Request gửi tuần tự trong từng adapter; không chạy nhiều adapter song song để vượt chính sách nguồn. Lỗi khác 404 khi tìm ngày mới nhất làm dừng tìm kiếm, không âm thầm dùng ngày cũ. Lịch sử có thể thiếu; tổng số request gồm cả retry. Không tự ghi Firestore.
 
-```bash
-python -m scripts.wikimedia_smoke
-python -m unittest discover -s tests -v
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m scripts.wikimedia_smoke
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+} finally {
+    Pop-Location
+}
 ```
 
 `WIKIMEDIA_USER_AGENT` là biến tùy chọn; mặc định `TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)` theo project thực tế. Khi vận hành bởi bên khác, đặt User-Agent có tên, version và URL liên hệ thực tế. Theo [Wikimedia access policy](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/access-policy.html), gửi tuần tự và tự nhận diện; [404 có thể do dữ liệu chưa tải hoặc không có dữ liệu](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/documentation/troubleshooting.html). Đối chiếu ngày 09/11/2026.
@@ -140,9 +130,14 @@ Kết quả gồm các observation hợp lệ và danh sách bản ghi bị lo�
 
 Để chạy kiểm thử và báo cáo live chỉ đọc:
 
-```bash
-python -m unittest discover -s tests -v
-python -m scripts.wikimedia_cleaning_smoke
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m scripts.wikimedia_cleaning_smoke
+} finally {
+    Pop-Location
+}
 ```
 
 Lượt smoke gọi lại API thật, do Bước 4 không lưu response; dữ liệu và ngày khả dụng có thể thay đổi. Source `404` được báo riêng, không coi là một snapshot rỗng hay views bằng 0. Lệnh in ví dụ được giữ/bị loại nhưng không lưu dữ liệu; khi cần audit lâu dài phải thiết kế lưu run ở bước sau.
@@ -164,9 +159,14 @@ Một title có thể có cả `fashion` và `home_goods`; `other` và `unclassi
 
 `filter_keywords(results, category)` hỗ trợ `all`, `fashion`, `home_goods`, `other`, `unclassified`; `all` giữ toàn bộ kết quả. Nhóm rỗng trả `NO_MATCHES_IN_ANALYZED_DATA`, chỉ phản ánh tập đã phân tích; caller phải báo riêng nếu nguồn không có dữ liệu. Không có dashboard hoặc API tìm kiếm ở bước này.
 
-```bash
-python -m unittest discover -s tests -v
-python -m scripts.wikimedia_keywords_smoke
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m scripts.wikimedia_keywords_smoke
+} finally {
+    Pop-Location
+}
 ```
 
 Script smoke gọi lại Wikimedia, làm sạch rồi phân loại; in số observation và số entity riêng cùng ví dụ, không ghi Firestore. Một entity có thể có nhiều observation theo ngày; số nhóm có thể chồng lấn khi có nhiều nhãn. Nếu nguồn trả thiếu ngày hoặc lỗi, số liệu chỉ phản ánh các snapshot lấy được.
@@ -181,39 +181,41 @@ Script smoke gọi lại Wikimedia, làm sạch rồi phân loại; in số obse
 - `EMERGING` nếu ratio >= 1.5 và score >= 50; `FALLING` nếu ratio < 0.75; các trường hợp hợp lệ còn lại là `STABLE`. Nếu không đủ dữ liệu hợp lệ, score/ratio là `None` và status `INSUFFICIENT_DATA`.
 - Kết quả lưu các ngày quan sát và giá trị baseline, ngày thiếu cùng lý do, score components, version `wikimedia-trend-v0.1`, source scope, link và quality flags. `CENSORED_TOP_LIST`, `VIEWS_APPROXIMATE`, `INCOMPLETE_BASELINE_COVERAGE` phản ánh giới hạn nguồn. Median có điều kiện theo các ngày lọt top nên có thể lệch. Chấm điểm không phải xác suất hay bằng chứng trend social hoặc nhu cầu mua hàng.
 
-```bash
-python -m unittest discover -s tests -v
-python -m scripts.wikimedia_trend_smoke
+```powershell
+Push-Location Backend
+try {
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m scripts.wikimedia_trend_smoke
+} finally {
+    Pop-Location
+}
 ```
 
 Smoke gọi lại API thật, tính sau cleaning và classification; so sánh top 10 score với top 10 lượt xem trong nhóm có thể tính score, đồng thời in top volume toàn bộ gồm cả mục thiếu baseline. Xếp hạng score theo score giảm, ratio giảm, views giảm, rồi project/title; volume theo views giảm, project/title. Không lưu Firestore hay cung cấp API kết quả. Namespace bản địa hóa có thể còn lọt qua cleaning và ảnh hưởng score/mẫu số; cần kiểm tra trước khi diễn giải kết quả.
 
 ## Bước 8 — API run thủ công
 
-API điều phối adapter → cleaning → keyword → scoring → storage. Chạy trên **một máy Ubuntu**; các process trên cùng máy phải dùng chung `TREND_SCOUT_LOCK_PATH`. Khóa `flock` và cooldown ngăn các run đồng thời trên cùng host; đây không phải khóa phân tán và chưa hỗ trợ chạy trên nhiều host/container. Không dùng cấu hình này để triển khai nhiều instance.
+API điều phối adapter → cleaning → keyword → scoring → storage. Runtime legacy này chỉ được cấu hình cho **một máy**; các process trên cùng máy phải dùng chung `TREND_SCOUT_LOCK_PATH`. Khóa cục bộ và cooldown ngăn các run đồng thời trên cùng host; đây không phải khóa phân tán và chưa hỗ trợ nhiều host/container. Không dùng cấu hình này để triển khai nhiều instance.
 
-Cấu hình trước khi khởi động (ADC đã đăng nhập bằng `gcloud auth application-default login`):
+Cấu hình trong Windows PowerShell trước khi khởi động runtime legacy (ADC đã đăng nhập bằng `gcloud auth application-default login`). Chạy từ thư mục `Backend`:
 
-```bash
-export GOOGLE_CLOUD_PROJECT="trendscout-192e4"
-# Tạo token ngẫu nhiên trong shell; không ghi vào repository hoặc gửi qua chat.
-export TREND_SCOUT_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+```powershell
+$env:GOOGLE_CLOUD_PROJECT = 'trendscout-192e4'
+$env:TREND_SCOUT_OPERATOR_TOKEN = & .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+& .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Giữ token trong shell của người vận hành, tối thiểu 24 ký tự. Nếu thiếu token, POST bị vô hiệu hóa; GET không yêu cầu token. Mặc định server bind localhost; nếu cho phép truy cập qua mạng cần bổ sung TLS, kiểm soát mạng và quản lý token trước. `TREND_SCOUT_RUN_COOLDOWN_SECONDS` mặc định 60; `TREND_SCOUT_LOCK_PATH` mặc định `~/.cache/trendscout/manual-run.lock`. Không xóa file khóa khi server đang hoạt động; mọi process phải cùng một đường dẫn. Nếu worker bị gián đoạn, lần khởi động tiếp theo đánh dấu run dang dở `ABORTED` khi lấy được khóa và kết nối storage.
+Giữ token trong environment của shell vận hành, tối thiểu 24 ký tự. Nếu thiếu token, POST bị vô hiệu hóa; GET không yêu cầu token. Mặc định server bind localhost; nếu cho phép truy cập qua mạng cần bổ sung TLS, kiểm soát mạng và quản lý token trước. `TREND_SCOUT_RUN_COOLDOWN_SECONDS` mặc định 60; `TREND_SCOUT_LOCK_PATH` mặc định nằm dưới thư mục home của tài khoản. Không xóa file khóa khi server đang hoạt động; mọi process phải cùng một đường dẫn. Nếu worker bị gián đoạn, lần khởi động tiếp theo đánh dấu run dang dở `ABORTED` khi lấy được khóa và kết nối storage.
 
-Ở terminal có token trong môi trường:
+Ở một cửa sổ PowerShell khác, gửi request bằng token trong environment:
 
-```bash
-curl -sS -X POST http://127.0.0.1:8000/api/runs \
-  -H "Authorization: Bearer $TREND_SCOUT_OPERATOR_TOKEN"
-# Ví dụ response: {"run_id":"...", "status":"QUEUED"}
-export TREND_SCOUT_RUN_ID="<run_id từ response>"
-curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID"
-curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords?category=all&sort=score&limit=10&offset=0"
-curl -sS -G "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords" --data-urlencode 'q=fashion' --data-urlencode 'category=unclassified'
-curl -sS "http://127.0.0.1:8000/api/runs/$TREND_SCOUT_RUN_ID/keywords/<keyword_id>"
+```powershell
+$headers = @{ Authorization = "Bearer $env:TREND_SCOUT_OPERATOR_TOKEN" }
+$run = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/runs' -Headers $headers
+$env:TREND_SCOUT_RUN_ID = $run.run_id
+Invoke-RestMethod "http://127.0.0.1:8000/api/runs/$env:TREND_SCOUT_RUN_ID"
+Invoke-RestMethod "http://127.0.0.1:8000/api/runs/$env:TREND_SCOUT_RUN_ID/keywords?category=all&sort=score&limit=10&offset=0"
+Invoke-RestMethod "http://127.0.0.1:8000/api/runs/$env:TREND_SCOUT_RUN_ID/keywords?q=fashion&category=unclassified"
 ```
 
 POST chỉ chạy thủ công; đang chạy trả 409, cooldown trả 429, sai token trả 401. Trạng thái gồm `QUEUED`, `FETCHING`, `NORMALIZING`, `ANALYZING`, `PERSISTING`, `COMPLETED`, `PARTIAL`, `FAILED`, `ABORTED`. `COMPLETED` chỉ được ghi sau khi các document cần thiết được lưu; `PARTIAL` có thể là lịch sử nguồn thiếu hoặc lỗi giữa lúc lưu. Nếu chưa lưu đủ keyword, API kết quả trả 409. Nếu Firestore không thể ghi cả trạng thái lỗi, marker trên host cho phép đánh dấu `ABORTED` khi phục hồi; không có cam kết phục hồi khi file khóa bị xóa hoặc host mất dữ liệu.
@@ -238,11 +240,11 @@ FastAPI phục vụ giao diện tại `http://127.0.0.1:8000/dashboard/` cùng o
 
 ### D5: demo local không cần tài khoản
 
-Chạy `bash demo.sh` tại thư mục gốc, sau đó mở `http://127.0.0.1:8000/dashboard/` và nhấn Fetch. Nếu cổng 8000 đã dùng, chọn cổng khác bằng `TREND_SCOUT_DEMO_PORT=18765 bash demo.sh`. Ứng dụng bind loopback, public admission/queue/checkpoint dùng SQLite tạm và legacy run data dùng `FakeStorage`; mọi fixture được gắn `SYNTHETIC`, dữ liệu mất khi dừng. Không cần Firebase, Firestore, API key hay token. Public Fetch đi qua admission, queue, worker và discovery cho cả bốn source IDs, nhưng handlers chỉ trả fixture offline (không gọi Wikimedia, SerpApi hay YouTube). Kết quả được gắn `SYNTHETIC`, source delivery `FRESH`, và candidate snapshot là `INSUFFICIENT_EVIDENCE`; không cộng rank với lượt xem hoặc tuyên bố trend thật. Public Fetch trả tối đa 100 candidates từ tối đa 10.000 observations; tìm kiếm/bộ lọc trên dashboard chỉ áp dụng phần kết quả được trả. `bash start.sh` là runtime cloud cũ và cần cấu hình project/token riêng; nó không còn mặc định một cloud project. Không triển khai demo local ra Internet hoặc coi SQLite local là kiểm soát phân tán production.
+Fixture-based synthetic Fetch là phạm vi kiểm thử tách biệt; `start.ps1` không chọn chế độ này và luôn chạy Wikimedia LIVE. Trong fixture profile, public admission/queue/checkpoint dùng SQLite tạm và legacy run data dùng `FakeStorage`; mọi fixture được gắn `SYNTHETIC`, dữ liệu mất khi dừng. Public Fetch đi qua admission, queue, worker và discovery cho cả bốn source IDs, nhưng handlers chỉ trả fixture (không gọi Wikimedia, SerpApi hay YouTube). Kết quả được gắn `SYNTHETIC`, source delivery `FRESH`, và candidate snapshot là `INSUFFICIENT_EVIDENCE`; không cộng rank với lượt xem hoặc tuyên bố trend thật. Public Fetch trả tối đa 100 candidates từ tối đa 10.000 observations; tìm kiếm/bộ lọc trên dashboard chỉ áp dụng phần kết quả được trả. Không triển khai runtime local ra Internet hoặc coi SQLite local là kiểm soát phân tán production.
 
 ### D5: demo-first Fetch và production gate riêng
 
-`DEMO_ACCEPTANCE=100%` được xác minh cho dashboard local với one-click Fetch, bốn handler fixture cố định gắn nhãn `SYNTHETIC`, keyword discovery/search/filter/detail, UI regression và demo-scope security. Chạy bằng `bash demo.sh`; không cần tài khoản, API key, Firebase/Firestore hoặc dịch vụ trả phí và không gọi provider thật. Demo local không phải production deployment.
+`DEMO_ACCEPTANCE=100%` là kết quả kiểm thử lịch sử cho dashboard với one-click Fetch, bốn handler fixture cố định gắn nhãn `SYNTHETIC`, keyword discovery/search/filter/detail, UI regression và demo-scope security. Đây không phải profile mà `start.ps1` khởi chạy và không phải production deployment.
 
 `app/sources/live_gateway.py` và `guarded_collector.py` có boundary riêng cho Google/Bing qua SerpApi và YouTube; `D5SourceHandlers` nối ba collector này cùng Wikimedia fixed-date gateway vào fenced worker, synthetic-only cache và `DistributedPublicFetch`. `create_app` chỉ cho phép facade injection trong local/test synthetic mode với feature flag bật tường minh và đủ bốn handler SYNTHETIC; route legacy `POST /api/runs` vẫn yêu cầu Bearer token. `LocalSQLiteAtomicStateStore` là backing file-based thật cho local/test synthetic mode; API integration đi qua shared admission, fenced worker, bốn MockTransport adapters và cache. Offline tests xác minh multi-process admission/quota, idempotency, lease/fencing, cache và tối đa một execution cho một job. `SourceCheckpointJournal` ghi response receipt trước khi settle attempt; crash/recovery tests cho cả bốn source tiếp tục từ receipt đã commit mà không gửi lại provider request. Local quota ledger prune bucket UTC đã qua trong transaction, giữ unknown/malformed/future state để fail closed. Trusted maintenance có thể gọi `PublicAdmission.prune_expired()` kể cả khi Fetch disabled để xóa checkpoint hết hạn và receipt/job metadata theo TTL; lịch chạy production và global shared-cache sweep chưa được cấu hình.
 
@@ -254,7 +256,7 @@ Public Fetch mặc định tắt qua `TREND_SCOUT_PUBLIC_FETCH_ENABLED=false`. L
 
 Các giới hạn này chỉ xác nhận luồng synthetic trong môi trường local/test cô lập. Chúng **không** bảo vệ giữa nhiều host/container độc lập, không chống bot phân tán qua quota bền vững và không đủ để mở public live Fetch. Origin/Host/Fetch Metadata là tín hiệu chống lạm dụng trình duyệt, không xác thực client; client HTTP trực tiếp vẫn gọi được endpoint nếu deployment bật. Vì vậy production/Vercel, Wikimedia live, YouTube, Google Search, Bing Search và mọi provider tính phí đều bị khóa. Không có yêu cầu hoặc thao tác Firestore trong D3A.
 
-Chạy kiểm chứng synthetic offline bằng `bash Backend/scripts/verify_offline_readiness.sh`. Test tạo app với fixture adapter và fake storage; không cần bật flag trong shell, gọi provider thật, Firestore hoặc emulator. Public live chỉ được xem xét sau khi có phê duyệt riêng và xác minh distributed rate/concurrency/idempotency, durable quota/cost budgets, bot/abuse controls, monitoring và provider approvals.
+Chạy bộ kiểm chứng Windows bằng `.\verify_offline_readiness.ps1` từ repository root. Các test fixture dùng adapter giả lập và fake storage; chúng không gọi provider thật, Firestore hoặc emulator. Public live chỉ được xem xét sau khi có phê duyệt riêng và xác minh distributed rate/concurrency/idempotency, durable quota/cost budgets, bot/abuse controls, monitoring và provider approvals.
 
 ### D6.1B: guarded local LIVE HTTP runtime (offline implementation)
 
@@ -285,14 +287,13 @@ Boundary của adapter D3B đọc credential server-side theo tên `YOUTUBE_API_
 
 Query plan đăng ký vẫn có 14 seed, nhưng D6 live planner chỉ chọn tối đa hai scope curated cho mỗi slot đủ điều kiện. Cursor được gắn với query/plan/filter/cutoff context; page cap, request budget, retry wait, deadline, cancellation, malformed body, quota và rate-limit có stop/error state riêng. Request/response body không được lưu. D6 chỉ dùng raw video evidence; keyword extraction và derived metrics YouTube tiếp tục bị tắt khi chưa được duyệt.
 
-Chạy adapter contract tests riêng:
+Chạy adapter contract tests trong PowerShell từ repository root:
 
-```bash
-cd Backend
-.venv/bin/python -m unittest discover -s tests -p 'test_youtube_adapter.py' -v
+```powershell
+.\Backend\.venv\Scripts\python.exe -m unittest discover -s Backend\tests -p 'test_youtube_adapter.py' -v
 ```
 
-Các kiểm tra tích hợp/regression offline nằm trong `bash Backend/scripts/verify_offline_readiness.sh`. Tham khảo [báo cáo D3B](../Documents/Reports/BAO_CAO_DEMO_D3B.md) và [source capability matrix](../Documents/Design/DEMO_ONLINE_SOURCE_CAPABILITIES.md). Tài liệu Google được đối chiếu ngày 11/11/2026; quota của project thật và quyền dùng/lưu dữ liệu chưa được xác minh hoặc phê duyệt.
+Các kiểm tra tích hợp/regression nằm trong `.\verify_offline_readiness.ps1` từ repository root. Tham khảo [báo cáo D3B](../Documents/Reports/BAO_CAO_DEMO_D3B.md) và [source capability matrix](../Documents/Design/DEMO_ONLINE_SOURCE_CAPABILITIES.md). Tài liệu Google được đối chiếu ngày 11/11/2026; quota của project thật và quyền dùng/lưu dữ liệu chưa được xác minh hoặc phê duyệt.
 
 ### Ngân sách kiểm thử Bước 10
 
@@ -302,12 +303,12 @@ Trước khi ghi bucket, backend ước lượng số document writes (snapshot 
 
 **Trạng thái code:** hotfix mới chỉ được kiểm tra offline; chưa xác minh deployment Vercel mới. Deployment `dpl_EZbtefvf2PqprB7bgrUtnJTStTMH` đã được kiểm tra ở trạng thái READY nhưng runtime trả HTTP 500 cho `/`, `/dashboard/` và `/api/health`; runtime log báo thiếu `fastapi`. Build log chọn `pyproject.toml`, trước hotfix file này không khai báo runtime dependencies, còn `requirements.txt` không được cài. Bản sửa khai báo toàn bộ runtime package đang pin trong `[project].dependencies`; `requirements.txt` chuyển tiếp về project metadata để chỉ có một danh sách pin. `requires-python` giới hạn deployment ở Python 3.12. Tài liệu Vercel xác nhận Python runtime đọc dependencies và khoảng phiên bản interpreter từ các trường này ([Python runtime](https://vercel.com/docs/functions/runtimes/python), [FastAPI trên Vercel](https://vercel.com/docs/frameworks/backend/fastapi); đã kiểm tra 11/11/2026).
 
-`./start.sh` local không đổi. Trên Vercel (`VERCEL=1`), ứng dụng vẫn chỉ đọc: không tạo `RunService`/`HostRunLock`, không recovery run và không chạy pipeline. GET `/` redirect sang `/dashboard/`; HTML, CSS, JavaScript modules, `/api/health` và `/api/v1/capabilities` công khai ở tầng ứng dụng. GET `/api/runs/{run_id}` và các route kết quả vẫn riêng tư, cần HTTP Basic (`viewer` cùng `TREND_SCOUT_READ_PASSWORD` dài ít nhất 32 ký tự). Nếu thiếu secret này, đọc run bị chặn với 503; dashboard công khai không phụ thuộc vào nó. Đọc run thành công còn cần Vercel OIDC/Firestore identity được cấu hình. Ứng dụng không mở rộng quyền Firestore. POST `/api/runs` và POST `/api/v1/fetches` trả 405. Không đưa operator token vào demo online.
+Windows `start.ps1` khởi chạy Wikimedia LIVE local. Trên Vercel (`VERCEL=1`), ứng dụng vẫn chỉ đọc: không tạo `RunService`/`HostRunLock`, không recovery run và không chạy pipeline. GET `/` redirect sang `/dashboard/`; HTML, CSS, JavaScript modules, `/api/health` và `/api/v1/capabilities` công khai ở tầng ứng dụng. GET `/api/runs/{run_id}` và các route kết quả vẫn riêng tư, cần HTTP Basic (`viewer` cùng `TREND_SCOUT_READ_PASSWORD` dài ít nhất 32 ký tự). Nếu thiếu secret này, đọc run bị chặn với 503; dashboard công khai không phụ thuộc vào nó. Đọc run thành công còn cần Vercel OIDC/Firestore identity được cấu hình. Ứng dụng không mở rộng quyền Firestore. POST `/api/runs` và POST `/api/v1/fetches` trả 405. Không đưa operator token vào demo online.
 
 Theo thông tin đã xác minh, Vercel project đang bật Deployment Protection `all_except_custom_domains`, lần kiểm tra không trả về Production environment variables nào, và domain `trend-scout-mu.vercel.app` đã verified. Hotfix không thay đổi Deployment Protection. Cơ chế bảo vệ ở nền tảng có thể chặn request trước khi tới FastAPI; cần kiểm tra riêng hành vi route anonymous trên deployment/domain mới. Chưa được kết luận dashboard truy cập công khai cho đến khi bước kiểm tra đó đạt.
 
 1. Vercel project setup remains Root Directory `Backend`, Framework Preset FastAPI, with **Include source files outside of the Root Directory in the Build Step** enabled. Keep `Backend/vercel.json`'s existing build command and `app.main:app` entrypoint. The build command packages every non-hidden asset under `Frontend/public` into `app/dashboard_assets.py`, including nested ES modules; do not move the dashboard to a CDN path outside the application's route boundary. Runtime dependencies come from `Backend/pyproject.toml`; local setup through `requirements.txt` installs the same project dependencies. Python is constrained to 3.12.
-2. Chỉ thực hiện nếu cần private run reads. Bật Secure Backend Access / OIDC cho Vercel project, chọn team issuer. Trong Google Cloud project hiện hữu tạo Workload Identity Pool và OIDC provider theo [hướng dẫn Vercel](https://vercel.com/docs/oidc/gcp); cấu hình issuer, allowed audience đúng với token Vercel, attribute mapping và **attribute condition giới hạn chính xác team, project `trend-scout` và environment production**. Xác minh các claim thực tế theo [OIDC reference](https://vercel.com/docs/oidc/reference); không cấp quyền cho toàn bộ Vercel hoặc toàn pool. Không dùng key JSON, ADC Ubuntu hoặc service-account key. Cấu hình này không cần thiết để hiển thị dashboard công khai.
+2. Chỉ thực hiện nếu cần private run reads. Bật Secure Backend Access / OIDC cho Vercel project, chọn team issuer. Trong Google Cloud project hiện hữu tạo Workload Identity Pool và OIDC provider theo [hướng dẫn Vercel](https://vercel.com/docs/oidc/gcp); cấu hình issuer, allowed audience đúng với token Vercel, attribute mapping và **attribute condition giới hạn chính xác team, project `trend-scout` và environment production**. Xác minh các claim thực tế theo [OIDC reference](https://vercel.com/docs/oidc/reference); không cấp quyền cho toàn bộ Vercel hoặc toàn pool. Không dùng key JSON hoặc service-account key. Cấu hình này không cần thiết để hiển thị dashboard công khai.
 3. Chỉ thực hiện nếu cần private run reads. Cấp trực tiếp cho principal/principalSet đã giới hạn của pool role Firestore chỉ đọc `roles/datastore.viewer` ở project `trendscout-192e4` theo [Firestore IAM](https://cloud.google.com/firestore/native/docs/security/iam). Role này có phạm vi rộng hơn các collection demo: xem chính xác quyền và dùng project demo riêng nếu cần cô lập dữ liệu. Không cấp Editor, Owner hoặc Datastore User. Admin SDK/server dùng IAM, không dựa vào Firestore Security Rules. Không thay đổi billing. Các bước IAM là thao tác quản trị cần thực hiện riêng; chưa được kiểm chứng live.
 4. Chỉ khi cần mở private run reads, cấu hình có chủ đích `GOOGLE_CLOUD_PROJECT`, `GOOGLE_WIF_AUDIENCE` (resource name dạng `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER`) và `TREND_SCOUT_READ_PASSWORD` trong Production. Không cần `TREND_SCOUT_READ_PASSWORD` để render dashboard hoặc đọc capability. `VERCEL` và OIDC request header do Vercel cung cấp; không tự điền hoặc lưu OIDC token. Không dùng ADC hay service-account key. Tránh cấp WIF cho preview nếu không cần.
 5. Sau deploy mới: trước hết kiểm tra Deployment Protection/domain riêng, rồi xác nhận `/` trả redirect, dashboard HTML/CSS/JS và capability tải được không cần app password, còn run GET bị chặn khi không có app password và POST `/api/runs` + POST `/api/v1/fetches` trả 405. Nếu private reads được cấu hình, kiểm tra bằng một run ID đã biết và xác nhận OIDC/IAM chỉ cho phép đọc. 503 cho thấy private read chưa cấu hình hoặc Firestore không truy cập được. Không coi local tests/build log là xác minh production; đọc logs mà không chia sẻ token. Đọc qua Vercel có thể tiêu tốn Firestore reads.
@@ -316,9 +317,9 @@ Theo thông tin đã xác minh, Vercel project đang bật Deployment Protection
 
 ## Local Google Trends Fetch (D6)
 
-The local defaults in `start.sh` and `start.ps1` launch the same web application on loopback port 8000. The launchers only start the server; they do not approve a source or submit a Fetch. The web Fetch control is the only action that starts collection.
+Windows `start.ps1` launches the Wikimedia LIVE profile and does not require a SerpApi ledger. The separate Google/Bing LIVE composition described here is not started by `start.ps1`; the dashboard Fetch control is the user action that starts source collection in a configured runtime.
 
-This local profile enables Google Trends Trending Now, its free SerpApi Account API preflight, and selective Bing Search verification from one saved Google Trends candidate. Google SERP and Google RSS remain disabled in this profile. Bing and Google share the same SerpApi account ledger; Bing is capped at one candidate and one page per eligible user Fetch. Both `start.sh` and `start.ps1` launch the same Python runtime; Python reads `SERPAPI_API_KEY` directly from `.env` at the repository root. The launch scripts do not source `.env`, so the same file works with either launcher. `Backend/.env` is not read.
+The separate Google/Bing composition enables Google Trends Trending Now, its free SerpApi Account API preflight, and selective Bing Search verification from one saved Google Trends candidate. Google SERP and Google RSS remain disabled in this profile. Bing and Google share the same SerpApi account ledger; Bing is capped at one candidate and one page per eligible user Fetch. Python reads `SERPAPI_API_KEY` directly from `.env` at the repository root; `Backend/.env` is not read. This profile is separate from the Windows Wikimedia LIVE launcher.
 
 Create the local file from the non-secret template and enter the recipient's own SerpApi key:
 
@@ -326,7 +327,7 @@ Create the local file from the non-secret template and enter the recipient's own
 SERPAPI_API_KEY=your_serpapi_key
 ```
 
-Quoted values and a UTF-8 BOM are accepted; shell syntax such as `export`, variable expansion and inline comments is not used. On Linux, keep the file private with `chmod 600 .env`. On Windows, the `.env` file DACL must allow only the current owner, SYSTEM and local Administrators; a typical command from PowerShell is `icacls .env /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):F" "*S-1-5-18:F" "*S-1-5-32-544:F"`. The old `%LOCALAPPDATA%\TrendScout\.env` location remains a fallback for existing Windows installs. `.env` is ignored by Git; share it only through the credential handoff channel you use for that recipient, never commit or paste the key into frontend configuration.
+Quoted values and a UTF-8 BOM are accepted; shell expansion and inline comments are not used. On Windows, the `.env` file DACL must allow only the current owner, SYSTEM and local Administrators; a typical command from PowerShell is `icacls .env /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):F" "*S-1-5-18:F" "*S-1-5-32-544:F"`. The old `%LOCALAPPDATA%\TrendScout\.env` location remains a fallback for existing Windows installs. `.env` is ignored by Git; share it only through the credential handoff channel you use for that recipient, never commit or paste the key into frontend configuration.
 
 Paid Google and Bing refreshes use the server-persisted, user-triggered schedule **07:00, 15:00 and 23:00 Asia/Ho_Chi_Minh**. Each source attempt must be at least eight hours apart, and a missed slot is not replayed. A fresh local cache is delivered without a provider request. A stale or missing cache can refresh only after a manual Fetch in an eligible slot. On a host with no history for a source, one explicit first-run acceptance exception allows that source to be verified by a manual Fetch; subsequent attempts follow the regular slots. Newly admitted Google Trends and Bing Search requests use SerpApi `no_cache=true` so provider-side cached results are not mistaken for newly fetched data. Startup and background processing do not fetch provider data.
 
@@ -338,12 +339,10 @@ The lower-level `GoogleLiveSettings` environment switches still apply to directl
 
 ## D6 — YouTube Data API v3
 
-D6 adds the official YouTube `search.list` source to the normal local LIVE Fetch pipeline, with bounded `videos.list` support. In normal mode it remains disabled unless the owner enables it in the server process environment and designates exactly one host. Standard `start.sh` and `start.ps1` do not set those approval flags or trigger Fetch. The separately documented Linux-only `--youtube-owner-manual-live` command sets approval and the detected host for that process only; it is not exposed by an HTTP request or enabled on Vercel. The dashboard user selects YouTube and clicks Fetch; schedule, cache, admission and quota checks remain server-owned.
+D6 adds the official YouTube `search.list` source to the normal local LIVE Fetch pipeline, with bounded `videos.list` support. It remains disabled unless the owner enables it in the server process environment and designates exactly one host. Windows `start.ps1` runs the Wikimedia LIVE profile and does not enable YouTube or trigger Fetch at startup. The dashboard user selects an available source and clicks Fetch; schedule, cache, admission and quota checks remain server-owned.
 
 Put `YOUTUBE_API_KEY` in the private project-root `.env` file described above. The credential provider reads that file; the launcher does not source it. The owner-approved Privacy Policy and Terms are published, and their approval is versioned in source code. Only `TREND_SCOUT_YOUTUBE_LIVE_APPROVED` and `TREND_SCOUT_YOUTUBE_LIVE_HOST` remain runtime settings; keep LIVE approval off and the host undesignated until the project owner has verified the Google Cloud API/quota and the intended host. The dashboard requires an explicit user agreement to the current policy version before YouTube Fetch. Project/API-key setup does not itself require a published Privacy Policy; YouTube Developer Policies require it before users access API-backed features. A key being present does not prove the API is enabled or that the project has the documented default quota.
 
 The selected host value must match `socket.gethostname()` on the one machine allowed to send provider requests. Do not copy that host designation to a second machine: local SQLite ledgers do not coordinate quota across hosts. Other hosts may only read their own persisted cache. Current acceptance status and exact owner-side blockers are recorded in [D6 YouTube acceptance](../Documents/Reports/D6_YOUTUBE_LIVE_ACCEPTANCE.md) and [the policy review](../Documents/Reports/evidence/youtube-audit/POLICY_REVIEW_AND_OWNER_DECISIONS.md).
 
 Internal ceilings are six `search.list` calls per America/Los_Angeles provider day and 200 per UTC calendar month; the separate `videos.list` pool is six units per provider day and 200 per UTC month. These are application limits, not the Google Cloud project's quota. Provider quota remains `UNKNOWN` until Cloud Console evidence is reviewed. The default `NORMAL_DEMO` runtime is manual-only at 07:00, 15:00 and 23:00 Asia/Ho_Chi_Minh, with a ten-minute slot grace and at least eight hours between attempts. Fresh cache is delivered without a provider request; expired YouTube cache entries are removed by the focused cleanup path. YouTube records remain source evidence and do not enter keyword extraction, collection scoring or composite trend metrics.
-
-For owner-authorized D6 development on Linux, run `bash start.sh --youtube-owner-manual-live`. This explicit local command detects and designates that process's actual host, keeps the normal demo policy digest and durable per-method usage ledger, and permits one bounded `search.list` query per user Fetch at any real time without the normal YouTube schedule, spacing or internal daily/monthly admission ceilings. It does not schedule requests, add a Fetch body option, or enable this path on Vercel; API-key presence, YouTube approval, host match, user policy consent, durable reservation, bounded concurrency and provider quota still apply. A deliberate one-time fresh test can use `bash start.sh --youtube-owner-manual-live --youtube-owner-force-fresh-test`; it bypasses the saved YouTube cache for only the next selected YouTube Fetch and records that choice in source coverage. Stop that process after development; `bash start.sh` launches `NORMAL_DEMO` by default. This local SQLite ledger is not a cross-machine lock.

@@ -1,10 +1,20 @@
 param(
-    [int]$Port = 8000,
-    [switch]$Cloud
+    [int]$Port = 0
 )
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
 $ErrorActionPreference = 'Continue'
+if (-not $PSBoundParameters.ContainsKey('Port')) {
+    if ($env:TREND_SCOUT_DEMO_PORT) {
+        $environmentPort = 0
+        if (-not [int]::TryParse($env:TREND_SCOUT_DEMO_PORT, [ref]$environmentPort)) {
+            throw 'TREND_SCOUT_DEMO_PORT must be an integer from 1 to 65535.'
+        }
+        $Port = $environmentPort
+    } else {
+        $Port = 8000
+    }
+}
 if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root 'Backend'
@@ -23,19 +33,9 @@ if ($LASTEXITCODE -ne 0) {
 
 Push-Location $backend
 try {
-    if ($Cloud) {
-        if (-not $env:GOOGLE_CLOUD_PROJECT) { throw 'Set GOOGLE_CLOUD_PROJECT before selecting -Cloud.' }
-        if (-not $env:TREND_SCOUT_OPERATOR_TOKEN -or $env:TREND_SCOUT_OPERATOR_TOKEN.Length -lt 24) {
-            throw 'Set TREND_SCOUT_OPERATOR_TOKEN (at least 24 characters) before selecting -Cloud.'
-        }
-        Write-Output "Starting the explicit cloud-backed runtime at http://127.0.0.1:$Port/"
-        Write-Output 'No provider Fetch runs at startup. One worker; press Ctrl+C to stop.'
-        & $venvPython -m uvicorn app.main:app --host 127.0.0.1 --port $Port --workers 1
-    } else {
-        Write-Output "Starting the local multi-source LIVE web application at http://127.0.0.1:$Port/dashboard/"
-        Write-Output 'Local only, one worker, no automatic Fetch. Press Ctrl+C to stop.'
-        & $venvPython -m scripts.run_google_live_local --port $Port
-    }
+    Write-Output "Starting the local Wikimedia LIVE application at http://127.0.0.1:$Port/dashboard/"
+    Write-Output 'Loopback only, one worker. Provider requests start only when Fetch is selected.'
+    & $venvPython -m scripts.run_wikimedia_live_local --port $Port
     if ($LASTEXITCODE -ne 0) { throw "TrendScout runtime exited with code $LASTEXITCODE." }
 } finally {
     Pop-Location
