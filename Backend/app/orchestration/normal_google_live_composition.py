@@ -237,9 +237,8 @@ async def normal_google_live_composition(*, user_agent,
         owner_manual_youtube_live=youtube_manual_live,
     )
     existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
-    if config.paid_bing_approved:
-        if not existing_state:
-            raise ValueError("Bing LIVE requires an existing Google SerpApi ledger to migrate")
+    # First launch has no quota state to migrate; any populated ledger must
+    # still match one of the explicit migration paths below.
     if existing_state and existing_state.get("policy_digest") != admission.policy_digest:
         def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
             return normal_google_live_policy(

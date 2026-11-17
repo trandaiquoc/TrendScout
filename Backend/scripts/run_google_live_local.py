@@ -14,11 +14,11 @@ from app.settings import Settings
 
 
 def local_live_settings():
-    """Return the fixed local-web source policy; launch scripts pass no approvals."""
+    """Return the normal Windows local LIVE source policy."""
     return replace(
         GoogleLiveSettings.from_environment(),
         trends_approved=True,
-        serp_approved=False,
+        serp_approved=True,
         rss_approved=False,
         bing_approved=True,
         policy_migration_approved=True,

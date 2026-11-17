@@ -63,16 +63,20 @@ class _OfflineApprovals:
 
 
 class GoogleFetchSourceSelectionTests(unittest.IsolatedAsyncioTestCase):
-    def test_default_windows_launcher_always_starts_wikimedia_live_profile(self):
+    def test_default_windows_launcher_starts_normal_multisource_live_profile(self):
         root = Path(__file__).resolve().parents[2]
         windows_script = (root / "start.ps1").read_text(encoding="utf-8")
-        wikimedia_entrypoint = (
-            root / "Backend" / "scripts" / "run_wikimedia_live_local.py"
+        google_entrypoint = (
+            root / "Backend" / "scripts" / "run_google_live_local.py"
         ).read_text(encoding="utf-8")
-        self.assertIn("scripts.run_wikimedia_live_local", windows_script)
-        self.assertNotIn("scripts.run_google_live_local", windows_script)
-        self.assertIn('"TREND_SCOUT_RUN_MODE": "live"', wikimedia_entrypoint)
-        self.assertIn("workers=1", wikimedia_entrypoint)
+        self.assertIn("scripts.run_google_live_local", windows_script)
+        self.assertNotIn("scripts.run_wikimedia_live_local", windows_script)
+        self.assertIn("trends_approved=True", google_entrypoint)
+        self.assertIn("serp_approved=True", google_entrypoint)
+        self.assertIn("bing_approved=True", google_entrypoint)
+        self.assertIn("workers=1", google_entrypoint)
+        self.assertIn("TREND_SCOUT_YOUTUBE_LIVE_APPROVED", windows_script)
+        self.assertIn("TREND_SCOUT_YOUTUBE_LIVE_HOST", windows_script)
         self.assertIn("TREND_SCOUT_DEMO_PORT", windows_script)
         self.assertNotIn("--synthetic", windows_script)
         self.assertNotIn("-Cloud", windows_script)

@@ -11,7 +11,7 @@ Cần Python native 3.12. `setup.ps1` dùng Python Launcher `py -3.12`, tạo `B
 .\start.ps1
 ```
 
-Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. `start.ps1` luôn chạy Wikimedia LIVE trên loopback với một worker; không cần API key và không gửi request cho đến khi bấm Fetch. Cấu hình cổng bằng biến môi trường `TREND_SCOUT_DEMO_PORT` (mặc định `8000`). Multi-source Google/Bing LIVE và cloud runtime là các cấu hình riêng, không được `start.ps1` khởi chạy.
+Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. `start.ps1` chạy profile LIVE đa nguồn trên loopback với một worker: Wikimedia, Google Trends/Google Search, Bing Search và YouTube Search. Google/Bing cần `SERPAPI_API_KEY`, YouTube cần `YOUTUBE_API_KEY` trong `.env` ở thư mục gốc. Khởi động không gửi request tới provider; việc thu thập chỉ bắt đầu khi bạn chọn Fetch. Quota, lịch YouTube và đồng ý chính sách YouTube trong dashboard vẫn được áp dụng. Đặt `TREND_SCOUT_DEMO_PORT` để đổi cổng (mặc định `8000`).
 
 Chạy offline regression, browser E2E và benchmark:
 

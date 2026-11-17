@@ -31,12 +31,34 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Backend/.venv is missing required runtime packages or is not Python 3.12. Run .\setup.ps1.'
 }
 
-Push-Location $backend
+$youtubeHost = (& $venvPython -c 'import socket; print(socket.gethostname())').Trim()
+if ($LASTEXITCODE -ne 0 -or -not $youtubeHost) {
+    throw 'Could not identify this Windows machine for the local YouTube LIVE runtime.'
+}
+$previousYoutubeApproval = $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED
+$previousYoutubeHost = $env:TREND_SCOUT_YOUTUBE_LIVE_HOST
+$env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED = 'true'
+$env:TREND_SCOUT_YOUTUBE_LIVE_HOST = $youtubeHost
+
 try {
-    Write-Output "Starting the local Wikimedia LIVE application at http://127.0.0.1:$Port/dashboard/"
-    Write-Output 'Loopback only, one worker. Provider requests start only when Fetch is selected.'
-    & $venvPython -m scripts.run_wikimedia_live_local --port $Port
-    if ($LASTEXITCODE -ne 0) { throw "TrendScout runtime exited with code $LASTEXITCODE." }
+    Push-Location $backend
+    try {
+        Write-Output "Starting the local multi-source LIVE application at http://127.0.0.1:$Port/dashboard/"
+        Write-Output 'Loopback only, one worker. Provider requests start only when Fetch is selected.'
+        & $venvPython -m scripts.run_google_live_local --port $Port
+        if ($LASTEXITCODE -ne 0) { throw "TrendScout runtime exited with code $LASTEXITCODE." }
+    } finally {
+        Pop-Location
+    }
 } finally {
-    Pop-Location
+    if ($null -eq $previousYoutubeApproval) {
+        Remove-Item Env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED -ErrorAction SilentlyContinue
+    } else {
+        $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED = $previousYoutubeApproval
+    }
+    if ($null -eq $previousYoutubeHost) {
+        Remove-Item Env:TREND_SCOUT_YOUTUBE_LIVE_HOST -ErrorAction SilentlyContinue
+    } else {
+        $env:TREND_SCOUT_YOUTUBE_LIVE_HOST = $previousYoutubeHost
+    }
 }

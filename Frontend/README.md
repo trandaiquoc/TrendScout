@@ -4,7 +4,7 @@ The dashboard is a browser-native HTML, CSS, and JavaScript workspace served by 
 
 ## Run locally
 
-From the repository root, run `.\start.ps1` to start the Wikimedia LIVE composition on loopback with one worker and local storage. Open **http://127.0.0.1:8000/dashboard/** and select Fetch to contact Wikimedia. Startup itself does not make provider requests; no Firebase/Firestore account, ADC, project, operator token, or Wikimedia API key is needed. Set `TREND_SCOUT_DEMO_PORT` to choose another port. This launcher always selects LIVE; it does not select synthetic fixtures. See the [Backend README](../Backend/README.md) for dependencies and the runtime boundary.
+From the repository root, run `..\start.ps1` to start the normal multi-source LIVE composition on loopback with one worker and local storage. It makes Wikimedia, Google Trends/Google Search, Bing Search and YouTube Search available when their credentials are configured. Google/Bing use `SERPAPI_API_KEY`; YouTube uses `YOUTUBE_API_KEY` from the root `.env` file. Startup does not contact providers; collection starts only after Fetch is selected. Server-owned quotas, the YouTube schedule and policy consent remain in force. Set `TREND_SCOUT_DEMO_PORT` to choose another port. This launcher selects LIVE, not synthetic fixtures. See the [Backend README](../Backend/README.md) for dependencies and the runtime boundary.
 
 The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
@@ -28,7 +28,7 @@ The browser safely renders API values as text and only links to validated HTTPS 
 
 ## Fetch and source readiness
 
-The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. The Windows launcher runs local LIVE mode; Fetch uses the bounded `POST /api/v1/fetches` contract and fixed Wikimedia adapter scope. Fixture-based synthetic behavior is separate from this launcher. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
+The dashboard has no login, logout, registration, account, or credential entry flow. It reads `GET /api/v1/capabilities` anonymously. The Windows launcher runs local multi-source LIVE mode; Fetch uses the bounded `POST /api/v1/fetches` contract and backend-selected source scope. Fixture-based synthetic behavior is separate from this launcher. The browser creates an idempotency key in memory, does not retry POST automatically, and never stores or sends operator/provider credentials.
 
 The Vercel application serves dashboard HTML, CSS, and JavaScript modules anonymously. Private `/api/runs/...` reads remain behind HTTP Basic and the configured Vercel OIDC/Firestore identity; a missing `TREND_SCOUT_READ_PASSWORD` blocks those private reads, not dashboard rendering. Vercel Deployment Protection is a separate platform gate and may still require authentication before a request reaches the application.
 
@@ -37,7 +37,7 @@ The legacy `POST /api/runs` route remains separate and still requires its operat
 Source status is deliberately limited to runtime capability and returned source evidence:
 
 - **Wikimedia Pageviews:** normal local LIVE composition is available; individual Fetch requests can fail or return partial/cached data. The dashboard distinguishes LIVE from cached delivery.
-- **YouTube, Google Search, and Bing Search:** adapters are tested with offline fixtures. Live credentials, approval and live connectivity are not verified.
+- **YouTube, Google Search, and Bing Search:** the Windows LIVE profile enables these when the corresponding credentials are present and runtime gates pass. Capability readiness does not verify that a provider will accept a request; quota, schedule, consent and provider errors can still prevent or limit a Fetch.
 
 Capability data distinguishes adapter implementation from approval, configuration, live verification, and source limitations. No cross-source data is combined. Local search/filter operates only on the API-returned candidate subset (maximum 100); the dashboard identifies this bound when extraction returns more candidates. Weekly refresh, AI usage, and product research screens disclose their unconfigured or illustrative state.
 
