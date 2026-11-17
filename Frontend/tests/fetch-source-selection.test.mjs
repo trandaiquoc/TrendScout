@@ -5,7 +5,7 @@ import { liveFetchMessageKey, PublicFetchController } from '../public/modules/fe
 
 const COMPLETED_ID = 'a'.repeat(32);
 
-async function activateWithSources(sourceIds) {
+async function activateWithSources(sourceIds, { youtubePolicyVersion = null } = {}) {
   const requests = [];
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (path, options = {}) => {
@@ -31,6 +31,7 @@ async function activateWithSources(sourceIds) {
       onTerminal: () => {},
       locale: () => 'en',
       sourceIds: () => sourceIds,
+      youtubePolicyVersion: () => youtubePolicyVersion,
     });
     await controller.activate();
     return requests;
@@ -120,6 +121,22 @@ test('posts Google and Wikimedia together when both are selected', async () => {
   const requests = await activateWithSources(sources);
 
   assert.deepEqual(JSON.parse(requests[0].body), { sources });
+});
+
+test('submits all four selected sources with current YouTube policy consent', async () => {
+  const sources = [
+    'wikimedia_pageviews_top_per_country',
+    'google_web_serp',
+    'bing_web_serp',
+    'youtube_video_search',
+  ];
+  const requests = await activateWithSources(sources, {
+    youtubePolicyVersion: 'd6-youtube-v2',
+  });
+
+  assert.deepEqual(JSON.parse(requests[0].body), { sources });
+  assert.equal(requests[0].headers['X-YouTube-Policy-Version'], 'd6-youtube-v2');
+  assert.equal(requests[1].headers['X-YouTube-Policy-Version'], 'd6-youtube-v2');
 });
 
 test('omits source selection when the UI leaves the default all-sources choice', async () => {

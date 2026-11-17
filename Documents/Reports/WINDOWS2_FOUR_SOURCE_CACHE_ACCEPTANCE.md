@@ -37,17 +37,17 @@ SQLite integrity checks for the local collections database and normal Google LIV
 ## Verification completed
 
 - Backend: `python -m unittest discover -s tests -v` — **930 passed, 2 skipped**. The two skips are Linux-only launcher compatibility cases on Windows. The Firestore emulator integration suite was not run; its existing waiver remains in force and is not counted as a pass.
-- Frontend: `node --test tests/*.test.mjs` — **21 passed**.
+- Frontend: `node --test tests/*.test.mjs` — **22 passed**.
 - Ruff check on all changed Python files — passed.
 - PowerShell parser check for `start.ps1` — passed.
 - `git diff --check` — passed before commit.
-- Focused regression coverage includes fresh/stale/missing/expired/invalid cache behavior, zero-request cache delivery, SQLite reopen persistence, unavailable-source manifest/diagnostics, and the Windows host/default/Vercel manual-mode guards.
+- Focused regression coverage includes fresh/stale/missing/expired/invalid cache behavior, zero-request cache delivery, SQLite reopen persistence, unavailable-source manifest/diagnostics, the Windows host/default/Vercel manual-mode guards, and a frontend assertion that all four selected source IDs and the current YouTube policy version are submitted together.
 
 ## Live runtime state and remaining acceptance
 
 The existing server on `127.0.0.1:8000` remains in NORMAL_DEMO. The guarded owner manual runtime was started separately on loopback `127.0.0.1:8001`; its capability response reported `OWNER_MANUAL_LIVE`, `d6-youtube-v2` approved, designated host, and server-side YouTube key presence. Startup logs show no provider request. No YouTube search request has been made by this agent, so no genuine Windows YouTube cache has yet been created and no YouTube quota has been consumed by this run.
 
-Browser interaction remains pending. The user requested a hidden Chrome workflow and asked the agent not to control the Windows desktop. The available Chrome/Computer Use connector failed with `native pipe unavailable`; the plugin directory search did not find a Chrome DevTools MCP connector, and the available headless browser modules were not usable. No login, policy-consent click, or Fetch UI action was attempted after that instruction. The manual server is idle and awaits owner interaction.
+Browser interaction remains pending. The user requested a hidden Chrome workflow and asked the agent not to control the Windows desktop. Although the owner reported Chrome MCP connected on port 9223, this session still exposes no Chrome DevTools MCP tool; the browser provider reports `browser access host unavailable`, `127.0.0.1:9223` has no listener, and the shell cannot resolve the suggested `chrome` hostname. The plugin directory search did not find a Chrome DevTools MCP connector, and available headless browser modules were not usable. No login, policy-consent click, or Fetch UI action was attempted after that instruction. The manual server is idle and awaits owner interaction.
 
 The official Chrome DevTools MCP documentation supports attaching to a running Chrome through a configurable `--browser-url`, including a custom loopback port such as `http://127.0.0.1:9223`. This requires the owner to start Chrome with remote debugging enabled. Upstream warns that any local application able to reach that debugging port can control the browser; use a separate Chrome profile and keep the listener on loopback. No Chrome launch flags or MCP configuration were changed here. See [Chrome DevTools MCP connection guidance](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/advanced-usage.md) and [Chrome DevTools configuration](https://developer.chrome.com/docs/devtools/agents/get-started/configuration/), accessed 17 Nov 2026.
 
