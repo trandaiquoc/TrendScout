@@ -1,0 +1,98 @@
+name: Firestore emulator acceptance
+
+on:
+  push:
+    branches:
+      - codex/firebase-shared-live-acceptance
+    paths:
+      - .github/workflows/firestore-emulator-acceptance.yml
+      - Backend/app/jobs/firestore_transactional.py
+      - Backend/app/jobs/public_admission.py
+      - Backend/app/jobs/shared_cache.py
+      - Backend/app/orchestration/firestore_shared_live_composition.py
+      - Backend/app/storage/firestore*.py
+      - Backend/emulator_tests/**
+      - Backend/scripts/probe_firestore_emulator_network.py
+      - Backend/scripts/seccomp_exec.py
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/firestore-emulator-acceptance.yml
+      - Backend/app/jobs/firestore_transactional.py
+      - Backend/app/jobs/public_admission.py
+      - Backend/app/jobs/shared_cache.py
+      - Backend/app/orchestration/firestore_shared_live_composition.py
+      - Backend/app/storage/firestore*.py
+      - Backend/emulator_tests/**
+      - Backend/scripts/probe_firestore_emulator_network.py
+      - Backend/scripts/seccomp_exec.py
+
+permissions: {}
+
+concurrency:
+  group: firestore-emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firestore-emulator:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      TREND_SCOUT_SOURCE_REF: ${{ github.ref }}
+      TREND_SCOUT_SOURCE_SHA: ${{ github.sha }}
+      FIRESTORE_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}
+      GOOGLE_APPLICATION_CREDENTIALS: ''
+      GCLOUD_PROJECT: ''
+      CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ''
+      FIREBASE_TOKEN: ''
+    steps:
+      - name: Check out the exact triggering revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Node.js for the pinned Firebase CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Install isolated runner prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            bubblewrap iproute2 libseccomp2 openjdk-21-jre-headless \
+            python3.12 python3.12-venv ca-certificates
+
+      - name: Verify checked-out source and runner prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          actual="$(git rev-parse HEAD)"
+          printf 'GITHUB_SHA=%s\nCHECKED_OUT_SHA=%s\n' "$GITHUB_SHA" "$actual"
+          [[ "$actual" == "$GITHUB_SHA" ]]
+          printf 'BUBBLEWRAP=%s\n' "$(bwrap --version)"
+          printf 'PYTHON=%s\n' "$(python3.12 --version)"
+          printf 'JAVA=%s\n' "$(java -version 2>&1 | head -n 1)"
+          printf 'NODE=%s\n' "$(node --version)"
+          printf 'NPM=%s\n' "$(npm --version)"
+
+      - name: Run guarded Firestore Emulator integration suites
+        shell: bash
+        run: bash Backend/emulator_tests/run_cloud_shell_acceptance.sh
+
+      - name: Upload full acceptance log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firestore-emulator-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trendscout-firestore-acceptance-*.log
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
 # Copy-paste runner for guarded Firestore Emulator acceptance in Cloud Shell.
 set -Eeuo pipefail
-EXPECTED_MAIN="281bd7d7610489f778ddb1618d56491c22eeb1f0"
 REPOSITORY="https://github.com/trandaiquoc/TrendScout.git"
 SYNTHETIC_PROJECT="demo-trendscout-p3s1"
 FIREBASE_TOOLS_VERSION="15.34.2"
+SOURCE_REF="${TREND_SCOUT_SOURCE_REF:-${GITHUB_REF:-refs/heads/main}}"
+EXPECTED_SOURCE_SHA="${TREND_SCOUT_SOURCE_SHA:-${GITHUB_SHA:-}}"
 STAGE=initialization
+
+if { [[ "$SOURCE_REF" != refs/heads/* ]] && [[ ! "$SOURCE_REF" =~ ^refs/pull/[0-9]+/merge$ ]]; } \
+    || [[ "$SOURCE_REF" == *[!A-Za-z0-9._/-]* || "$SOURCE_REF" == *".."* || "$SOURCE_REF" == *"//"* ]]; then
+    printf 'FAIL: source ref must be a valid branch or GitHub pull-request merge ref: %s\n' "$SOURCE_REF" >&2
+    exit 2
+fi
+if [[ -n "$EXPECTED_SOURCE_SHA" && ! "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'FAIL: TREND_SCOUT_SOURCE_SHA/GITHUB_SHA must be a full 40-character commit SHA.\n' >&2
+    exit 2
+fi
 
 if [[ -z "$HOME" || ! -d "$HOME" ]]; then
     printf 'FAIL: HOME must name the Cloud Shell user directory.\n' >&2
     exit 2
 fi
-LOG_FILE="$HOME/trendscout-firestore-acceptance-$(date -u +%Y%m%dT%H%M%SZ).log"
+LOG_DIR="${FIRESTORE_ACCEPTANCE_LOG_DIR:-$HOME}"
+if [[ ! -d "$LOG_DIR" || ! -w "$LOG_DIR" ]]; then
+    printf 'FAIL: acceptance log directory must exist and be writable: %s\n' "$LOG_DIR" >&2
+    exit 2
+fi
+LOG_FILE="$LOG_DIR/trendscout-firestore-acceptance-$(date -u +%Y%m%dT%H%M%SZ).log"
 touch "$LOG_FILE"
 chmod 600 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -22,7 +38,7 @@ mkdir -p "$SAFE_HOME" "$RUN_ROOT/no-gcloud-config" "$SANDBOX_ETC/ssl/certs"
 
 finish() {
     local result=$?
-    trap - EXIT ERR
+    trap - EXIT ERR INT TERM HUP
     if (( result == 0 )); then printf '\nRESULT=PASS\n'
     else printf '\nRESULT=FAIL stage=%s exit=%s\n' "$STAGE" "$result"; fi
     printf 'LOG_FILE=%s\n' "$LOG_FILE"
@@ -34,6 +50,8 @@ finish() {
 }
 trap finish EXIT
 trap 'result=$?; printf "ERROR stage=%s line=%s exit=%s\n" "$STAGE" "$LINENO" "$result"; exit "$result"' ERR
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 require_command() {
     local name="$1" path
@@ -54,8 +72,8 @@ STAGE=checking-tools
 BWRAP_COMMAND="$(require_command bwrap)"
 GIT_COMMAND="$(require_command git)"
 PYTHON_COMMAND="$(require_command python3.12)"
-NODE_COMMAND="$(require_command node)"
-NPM_COMMAND="$(require_command npm)"
+NODE_HOST_COMMAND="$(require_command node)"
+NPM_HOST_COMMAND="$(require_command npm)"
 JAVA_COMMAND="$(require_command java)"
 READLINK_COMMAND="$(require_command readlink)"
 SHA256_COMMAND="$(require_command sha256sum)"
@@ -64,26 +82,65 @@ IP_COMMAND="$(require_command ip)"
 BWRAP_REAL="$(real_path "$BWRAP_COMMAND")"
 GIT_REAL="$(real_path "$GIT_COMMAND")"
 PYTHON_REAL="$(real_path "$PYTHON_COMMAND")"
-NODE_REAL="$(real_path "$NODE_COMMAND")"
-NPM_REAL="$(real_path "$NPM_COMMAND")"
+NODE_REAL="$(real_path "$NODE_HOST_COMMAND")"
+NPM_REAL="$(real_path "$NPM_HOST_COMMAND")"
 JAVA_REAL="$(real_path "$JAVA_COMMAND")"
 IP_REAL="$(real_path "$IP_COMMAND")"
 SHA256_REAL="$(real_path "$SHA256_COMMAND")"
 JAVA_HOME="$(dirname "$(dirname "$JAVA_REAL")")"
 for p in "$BWRAP_REAL" "$GIT_REAL" "$PYTHON_REAL" "$NODE_REAL" "$NPM_REAL" "$JAVA_REAL" "$IP_REAL" "$SHA256_REAL" "$JAVA_HOME"; do
+    if [[ "$p" == "$NODE_REAL" || "$p" == "$NPM_REAL" ]]; then
+        continue
+    fi
     if ! is_system_path "$p"; then
         printf 'FAIL: refusing to expose runtime outside mounted system paths: %s\n' "$p" >&2
-        printf 'Use system-installed Python 3.12, Node/npm, Java 21, Bubblewrap, and iproute2.\n' >&2
+        printf 'Use system-installed Python 3.12, Java 21, Bubblewrap, and iproute2.\n' >&2
         exit 3
     fi
 done
+
+NODE_BIND_ARGS=()
+if is_system_path "$NODE_REAL"; then
+    if ! is_system_path "$NPM_REAL"; then
+        printf 'FAIL: system Node requires npm from a mounted system path: %s\n' "$NPM_REAL" >&2
+        exit 3
+    fi
+    NODE_COMMAND="$NODE_REAL"
+    NPM_COMMAND="$NPM_REAL"
+    NODE_BIN_PATH="$(dirname "$NODE_REAL")"
+else
+    TOOL_CACHE_REAL=""
+    if [[ -n "${RUNNER_TOOL_CACHE:-}" && -d "$RUNNER_TOOL_CACHE" ]]; then
+        TOOL_CACHE_REAL="$(real_path "$RUNNER_TOOL_CACHE")"
+    fi
+    if [[ -z "$TOOL_CACHE_REAL" || "$NODE_REAL" != "$TOOL_CACHE_REAL"/* ]]; then
+        printf 'FAIL: refusing Node outside mounted system paths and the GitHub tool cache: %s\n' "$NODE_REAL" >&2
+        exit 3
+    fi
+    TOOL_CACHE_RELATIVE="${NODE_REAL#"$TOOL_CACHE_REAL"/}"
+    IFS=/ read -r TOOL_NAME TOOL_VERSION TOOL_ARCH _ <<< "$TOOL_CACHE_RELATIVE"
+    if [[ -z "$TOOL_NAME" || -z "$TOOL_VERSION" || -z "$TOOL_ARCH" ]]; then
+        printf 'FAIL: cannot identify Node package root in runner tool cache: %s\n' "$NODE_REAL" >&2
+        exit 3
+    fi
+    NODE_PACKAGE_ROOT="$(real_path "$TOOL_CACHE_REAL/$TOOL_NAME/$TOOL_VERSION/$TOOL_ARCH")"
+    if [[ "$NODE_REAL" != "$NODE_PACKAGE_ROOT"/* || ! -x "$NODE_PACKAGE_ROOT/bin/node" || ! -x "$NODE_PACKAGE_ROOT/bin/npm" ]]; then
+        printf 'FAIL: Node/npm package paths are not confined to one tool-cache package: %s\n' "$NODE_PACKAGE_ROOT" >&2
+        exit 3
+    fi
+    NODE_COMMAND=/runtime/node/bin/node
+    NPM_COMMAND=/runtime/node/bin/npm
+    NODE_BIN_PATH=/runtime/node/bin
+    NODE_BIND_ARGS+=(--dir /runtime --dir /runtime/node --ro-bind "$NODE_PACKAGE_ROOT" /runtime/node)
+    printf 'NODE_TOOL_CACHE_PACKAGE=%s\n' "$NODE_PACKAGE_ROOT"
+fi
 BWRAP_VERSION="$("$BWRAP_REAL" --version)"
 printf 'BWRAP_VERSION=%s\n' "$BWRAP_VERSION"
 if [[ "$BWRAP_VERSION" != *"0.9.0"* ]]; then
     printf 'FAIL: expected Bubblewrap 0.9.0, found %s\n' "$BWRAP_VERSION" >&2
     exit 3
 fi
-SAFE_PATH="$(dirname "$PYTHON_REAL"):$(dirname "$NODE_REAL"):$(dirname "$NPM_REAL"):$(dirname "$JAVA_REAL"):$(dirname "$IP_REAL"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SAFE_PATH="$(dirname "$PYTHON_REAL"):$NODE_BIN_PATH:$(dirname "$JAVA_REAL"):$(dirname "$IP_REAL"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Minimal /etc: no host home, /root, /run, gcloud config, or ADC is mounted.
 "$CP_COMMAND" --dereference /etc/resolv.conf "$SANDBOX_ETC/resolv.conf"
@@ -119,6 +176,7 @@ BASE_ARGS=(
     --proc /proc --dev /dev --tmpfs /tmp
     --dir /work --bind "$RUN_ROOT" /work
 )
+BASE_ARGS+=("${NODE_BIND_ARGS[@]}")
 for p in /bin /sbin /lib /lib64; do
     if [[ -L "$p" ]]; then BASE_ARGS+=(--symlink "$(readlink "$p")" "$p")
     elif [[ -d "$p" ]]; then BASE_ARGS+=(--ro-bind "$p" "$p"); fi
@@ -153,13 +211,35 @@ if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number
 fi
 
 printf 'SOURCE_FETCH=START\n'
-"$GIT_COMMAND" clone --depth 1 --branch main --single-branch "$REPOSITORY" /work/repo
-source_commit="$("$GIT_COMMAND" -C /work/repo rev-parse HEAD)"
-printf 'SOURCE_COMMIT=%s\n' "$source_commit"
-if [[ "$source_commit" != "$EXPECTED_MAIN" ]]; then
-    printf 'FAIL: origin/main changed; expected=%s actual=%s\n' "$EXPECTED_MAIN" "$source_commit" >&2
+mkdir -p /work/repo
+"$GIT_COMMAND" -C /work/repo init --quiet
+"$GIT_COMMAND" -C /work/repo remote add origin "$REPOSITORY"
+if [[ -z "$EXPECTED_SOURCE_SHA" ]]; then
+    remote_line="$("$GIT_COMMAND" ls-remote --exit-code --refs "$REPOSITORY" "$SOURCE_REF")"
+    read -r EXPECTED_SOURCE_SHA resolved_ref <<< "$remote_line"
+    if [[ "$resolved_ref" != "$SOURCE_REF" || ! "$EXPECTED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'FAIL: could not resolve one immutable source SHA for %s\n' "$SOURCE_REF" >&2
+        exit 13
+    fi
+fi
+printf 'SOURCE_REF=%s\n' "$SOURCE_REF"
+printf 'EXPECTED_SOURCE_COMMIT=%s\n' "$EXPECTED_SOURCE_SHA"
+"$GIT_COMMAND" -C /work/repo fetch --quiet --depth=1 origin "$SOURCE_REF"
+fetched_commit="$("$GIT_COMMAND" -C /work/repo rev-parse FETCH_HEAD)"
+if [[ "$fetched_commit" != "$EXPECTED_SOURCE_SHA" ]]; then
+    printf 'FAIL: source ref changed or did not match the verified commit; expected=%s fetched=%s\n' \
+        "$EXPECTED_SOURCE_SHA" "$fetched_commit" >&2
     exit 13
 fi
+"$GIT_COMMAND" -C /work/repo checkout --quiet --detach "$fetched_commit"
+source_commit="$("$GIT_COMMAND" -C /work/repo rev-parse HEAD)"
+if [[ "$source_commit" != "$EXPECTED_SOURCE_SHA" ]]; then
+    printf 'FAIL: checked-out source revision mismatch; expected=%s actual=%s\n' \
+        "$EXPECTED_SOURCE_SHA" "$source_commit" >&2
+    exit 13
+fi
+printf 'SOURCE_COMMIT=%s\n' "$source_commit"
+printf 'SOURCE_COMMIT_VERIFICATION=PASS\n'
 
 cd /work/repo/Backend
 "$PYTHON_COMMAND" -m venv /work/venv
@@ -240,9 +320,11 @@ STAGE="isolated preparation; network for Git, PyPI, npm, and emulator download o
 printf '\nSTAGE=%s\n' "$STAGE"
 if ! "$BWRAP_REAL" "${BASE_ARGS[@]}" "${COMMON_ENV_ARGS[@]}" \
     --setenv PYTHON_COMMAND "$PYTHON_REAL" --setenv JAVA_COMMAND "$JAVA_REAL" \
-    --setenv NPM_COMMAND "$NPM_REAL" --setenv GIT_COMMAND "$GIT_REAL" \
+    --setenv NODE_COMMAND "$NODE_COMMAND" --setenv NPM_COMMAND "$NPM_COMMAND" \
+    --setenv GIT_COMMAND "$GIT_REAL" \
     --setenv SHA256_COMMAND "$SHA256_REAL" --setenv REPOSITORY "$REPOSITORY" \
-    --setenv EXPECTED_MAIN "$EXPECTED_MAIN" --setenv FIREBASE_TOOLS_VERSION "$FIREBASE_TOOLS_VERSION" \
+    --setenv SOURCE_REF "$SOURCE_REF" --setenv EXPECTED_SOURCE_SHA "$EXPECTED_SOURCE_SHA" \
+    --setenv FIREBASE_TOOLS_VERSION "$FIREBASE_TOOLS_VERSION" \
     --setenv SYNTHETIC_PROJECT "$SYNTHETIC_PROJECT" \
     --chdir /work /bin/bash /work/prepare.sh; then
     printf 'Preparation failed; see the log for the failing command.\n' >&2
