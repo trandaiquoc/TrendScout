@@ -22,7 +22,7 @@ if [[ -z "$HOME" || ! -d "$HOME" ]]; then
     printf 'FAIL: HOME must name the Cloud Shell user directory.\n' >&2
     exit 2
 fi
-LOG_DIR="${FIRESTORE_ACCEPTANCE_LOG_DIR:-$HOME}"
+LOG_DIR="${FIRESTORE_ACCEPTANCE_LOG_DIR:-${RUNNER_TEMP:-$HOME}}"
 if [[ ! -d "$LOG_DIR" || ! -w "$LOG_DIR" ]]; then
     printf 'FAIL: acceptance log directory must exist and be writable: %s\n' "$LOG_DIR" >&2
     exit 2

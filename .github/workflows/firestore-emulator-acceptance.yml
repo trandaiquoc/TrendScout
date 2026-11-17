@@ -44,7 +44,6 @@ jobs:
     env:
       TREND_SCOUT_SOURCE_REF: ${{ github.ref }}
       TREND_SCOUT_SOURCE_SHA: ${{ github.sha }}
-      FIRESTORE_ACCEPTANCE_LOG_DIR: ${{ runner.temp }}
       GOOGLE_APPLICATION_CREDENTIALS: ''
       GCLOUD_PROJECT: ''
       CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ''
