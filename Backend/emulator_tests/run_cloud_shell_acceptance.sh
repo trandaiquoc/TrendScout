@@ -145,9 +145,12 @@ printf 'PYTHON_VERSION=%s\n' "$python_version"
 java_info="$("$JAVA_COMMAND" -version 2>&1 | head -n 1)"
 printf 'JAVA_VERSION=%s\n' "$java_info"
 [[ "$java_info" == *'21.'* || "$java_info" == *'version "21"'* ]] || { printf 'FAIL: Java 21 required\n' >&2; exit 11; }
-node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
-printf 'NODE_MAJOR=%s\n' "$node_major"
-(( node_major >= 18 )) || { printf 'FAIL: Node.js 18 or newer required\n' >&2; exit 12; }
+node_version="$(node -p 'process.versions.node')"
+printf 'NODE_VERSION=%s\n' "$node_version"
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22 ? 0 : 1);'; then
+    printf 'FAIL: Firebase CLI requires Node.js 20.19+ or 22.12+ (or a later major release)\n' >&2
+    exit 12
+fi
 
 printf 'SOURCE_FETCH=START\n'
 "$GIT_COMMAND" clone --depth 1 --branch main --single-branch "$REPOSITORY" /work/repo
