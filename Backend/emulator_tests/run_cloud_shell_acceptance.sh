@@ -175,7 +175,35 @@ SAFE_PATH="$(dirname "$PYTHON_REAL"):$NODE_BIN_PATH:$(dirname "$JAVA_REAL"):$(di
 # Minimal /etc: no host home, /root, /run, gcloud config, or ADC is mounted.
 "$CP_COMMAND" --dereference /etc/resolv.conf "$SANDBOX_ETC/resolv.conf"
 "$CP_COMMAND" --dereference /etc/ssl/certs/ca-certificates.crt "$SANDBOX_ETC/ssl/certs/ca-certificates.crt"
+if [[ -d /etc/ssl/certs/java ]]; then
+    "$CP_COMMAND" -RL /etc/ssl/certs/java "$SANDBOX_ETC/ssl/certs"
+fi
 if [[ -r /etc/ssl/openssl.cnf ]]; then "$CP_COMMAND" --dereference /etc/ssl/openssl.cnf "$SANDBOX_ETC/ssl/openssl.cnf"; fi
+JAVA_SECURITY_CONFIG="$(real_path "$JAVA_HOME/conf/security/java.security")"
+if [[ "$JAVA_SECURITY_CONFIG" == /etc/* ]]; then
+    JAVA_SECURITY_RELATIVE="${JAVA_SECURITY_CONFIG#/etc/}"
+    if [[ "$JAVA_SECURITY_RELATIVE" != */security/java.security ]]; then
+        printf 'FAIL: Java security config resolves to an unsupported /etc path: %s\n' "$JAVA_SECURITY_CONFIG" >&2
+        exit 3
+    fi
+    JAVA_ETC_CONFIG_RELATIVE="${JAVA_SECURITY_RELATIVE%/security/java.security}"
+    JAVA_ETC_CONFIG_DIR="/etc/$JAVA_ETC_CONFIG_RELATIVE"
+    JAVA_ETC_CONFIG_PARENT="$SANDBOX_ETC/$(dirname "$JAVA_ETC_CONFIG_RELATIVE")"
+    if [[ ! -r "$JAVA_ETC_CONFIG_DIR/security/java.security" ]]; then
+        printf 'FAIL: Java security config directory is unreadable: %s\n' "$JAVA_ETC_CONFIG_DIR" >&2
+        exit 3
+    fi
+    mkdir -p "$JAVA_ETC_CONFIG_PARENT"
+    "$CP_COMMAND" -RL "$JAVA_ETC_CONFIG_DIR" "$JAVA_ETC_CONFIG_PARENT"
+    printf 'JAVA_SECURITY_CONFIG=/etc/%s/security/java.security (copied into isolated /etc)\n' \
+        "$JAVA_ETC_CONFIG_RELATIVE"
+else
+    [[ -r "$JAVA_HOME/conf/security/java.security" ]] || {
+        printf 'FAIL: Java security config is missing: %s/conf/security/java.security\n' "$JAVA_HOME" >&2
+        exit 3
+    }
+    printf 'JAVA_SECURITY_CONFIG=%s/conf/security/java.security (inside read-only Java runtime)\n' "$JAVA_HOME"
+fi
 ln -sfn certs/ca-certificates.crt "$SANDBOX_ETC/ssl/cert.pem"
 cat > "$SANDBOX_ETC/hosts" <<'EOF'
 127.0.0.1 localhost metadata.google.internal metadata
