@@ -360,7 +360,10 @@ printf 'FIREBASE_CLI_VERSION=%s\n' "$cli_version"
 [[ "$cli_version" == "$FIREBASE_TOOLS_VERSION" ]] || { printf 'FAIL: Firebase CLI version mismatch\n' >&2; exit 14; }
 
 cd /work/repo/Backend/emulator_tests
-"$FIREBASE_BIN" --project "$SYNTHETIC_PROJECT" setup:emulators:firestore
+if ! "$FIREBASE_BIN" --debug --project "$SYNTHETIC_PROJECT" setup:emulators:firestore; then
+    printf 'FAIL: Firestore Emulator artifact preparation failed; see Firebase CLI debug output above.\n' >&2
+    exit 15
+fi
 jar_path="$(find /work/home/.cache/firebase/emulators -maxdepth 1 -type f -name 'cloud-firestore-emulator*.jar' -print -quit)"
 [[ -n "$jar_path" && -f "$jar_path" ]] || { printf 'FAIL: Firestore Emulator JAR missing\n' >&2; exit 15; }
 printf 'FIRESTORE_EMULATOR_JAR=%s\n' "$jar_path"
