@@ -20,7 +20,7 @@ The percentage follows the weights in the Goal request. A `PASS` on a local dete
 | G3 — Cache and SQLite transition | 15% | **PARTIAL.** SQLite remains the runtime default. Added an explicit Firestore shared LIVE composition for admission, cache blobs, worker, and fetch facade; local composition tests pass and the NORMAL_DEMO plus SQLite Wikimedia regressions pass. Emulator-backed cache/storage acceptance remains unverified. | 12% |
 | G4 — Cross-runtime acceptance | 15% | **BLOCKED.** The emulator acceptance now includes a child Python process reading the same synthetic cache through the source-handler path after the writer client closes, with a zero-provider-call assertion. This suite is authored but unrun; cross-machine Windows 1/Windows 2/Linux/Vercel reads, restarts, and concurrent execution remain unverified. | 0% |
 | G5 ? Security and regression | 15% | **PARTIAL.** Ten focused read-only/authentication tests and Ruff pass. Tests cover claim/config rejection, mocked STS-to-service-account impersonation, denied Firestore access, no ADC fallback, and read-only route protections. Real Google token exchange, IAM least privilege, emulator rules, and the existing emulator safety gate remain unverified. | 10% |
-| G6 ? Report and commits | 5% | **PASS.** The WIF implementation/tests/docs and this report update are committed locally in focused commits. origin/main remains unchanged; no push was made. | 5% |
+| G6 ? Report and commits | 5% | **PASS.** The WIF implementation/tests/docs, emulator-test import-lint cleanup, and this report update are committed locally in focused commits. origin/main remains unchanged; no push was made. | 5% |
 | **Total** | **100%** | **Current Goal progress** | **63%** |
 
 The 63% is a partial Goal state. It does not claim four-source shared LIVE is production-ready.
@@ -40,11 +40,11 @@ This checkpoint supersedes the earlier Windows 1 notes below that described the 
 
 ### Git reconciliation and workflow review
 
-- The required git fetch origin, git status, git diff, and git log -1 --oneline completed before edits. The worktree was clean, the diff was empty, and git log -1 reported 284615c Test Firestore cache across separate process.
+- At the start of this continuation, reran git fetch origin, git status, git diff, and git log -1 --oneline before edits: HEAD was 8ee16668e14bc8aef723bb6e24af2b66e6ce4ef3, origin/main was 284615c583d8d82dce897a82020b0514d6076a7e, the worktree was clean, and divergence was 0/3.
 - On the original 61% resume, local HEAD and origin/main matched at 284615c583d8d82dce897a82020b0514d6076a7e; f94d377, c2c463a, and 284615c were already upstream. This continuation began from local report checkpoint 6ad0f9a while origin/main remained 284615c. No merge, reset, duplicate commit, or overwrite was needed.
 - The only repository workflow is .github/workflows/publish-policy-pages.yml. It is manual workflow_dispatch, requires owner_approved=true, and builds/deploys GitHub Pages policy files; it is not a Linux Firestore test workflow. No workflow was dispatched.
 - Read-only GitHub status for 284615c includes a successful Vercel context. This confirms a linked Vercel check exists; no push or deployment was started.
-- Prior report-only commit 6ad0f9a and implementation commit eca1378 are local. At the final pre-commit recheck, origin/main remained 284615c and the branch was ahead by two commits; this report update is committed separately below. No push was made.
+- Local continuation commits are 6ad0f9a (checkpoint report), eca1378 (WIF implementation), 8ee1666 (WIF evidence), and 5589e32 (emulator-test import lint). Before this report update, HEAD was 5589e32, origin/main remained 284615c, the worktree was clean, and the branch was ahead by four commits. This report update is committed separately. No push was made.
 
 ### Isolated Linux runner and emulator status
 
@@ -53,6 +53,7 @@ This checkpoint supersedes the earlier Windows 1 notes below that described the 
 - No connected Google IAM/Firestore inspection tool or GitHub workflow-dispatch tool is available. The existing GitHub workflow is not a test runner.
 - Vercel Sandbox APIs are exposed, but there is no pre-existing sandbox. Creating one would start Vercel-hosted compute, with metered CPU/memory and sandbox creation usage; it was excluded under the owner's no-Vercel/no-billing constraints. No sandbox was created. See [Vercel Sandbox](https://vercel.com/docs/sandbox) and [Vercel pricing](https://vercel.com/pricing).
 - Consequently, Backend/emulator_tests/test_firestore_transactional.py and Backend/emulator_tests/test_firestore_shared_runtime.py were **NOT RUN** on this resume. The fixtures and authored cases do not count as executed evidence. Both suites remain blocked until a permitted isolated Linux runner is supplied with Java, Firebase Emulator, Python 3.12, bwrap, and loopback-only emulator networking. The emulator safety guard was not weakened or bypassed.
+- Static-only checks in this continuation: Python 3.12 AST parsing passes for both emulator Python files, and Ruff passes on Backend/emulator_tests after import-order cleanup in test_firestore_transactional.py (5589e32). These checks do not execute the emulator, transactions, namespace guard, or Firestore and add no functional acceptance credit.
 
 ### Owner-reported WIF configuration and verification state
 
