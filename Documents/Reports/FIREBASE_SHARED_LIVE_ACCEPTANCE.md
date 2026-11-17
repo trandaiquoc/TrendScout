@@ -20,7 +20,7 @@ The percentage follows the weights in the Goal request. A `PASS` on a local dete
 | G3 — Cache and SQLite transition | 15% | **PARTIAL.** SQLite remains the runtime default. Existing cache, Wikimedia, Google, and distributed-worker regression tests pass; the Firestore adapter is opt-in and is not wired into a runtime composition. | 8% |
 | G4 — Cross-runtime acceptance | 15% | **BLOCKED.** No emulator or authenticated backend Firestore client was available. Windows 1/Windows 2/Linux/Vercel shared reads, restarts, and concurrent execution remain unverified. | 0% |
 | G5 — Security and regression | 15% | **PARTIAL.** The full Backend suite, focused regression, Ruff, and diff checks pass. Firestore client rules deny reads and writes. Backend IAM, emulator security, and live Firestore behavior were not verified. | 8% |
-| G6 — Report and commits | 5% | **PASS for the local handoff.** The implementation and this report are focused commits. A separate pre-push fetch must still confirm that `origin/main` has not changed before the authorized non-force push. | 5% |
+| G6 — Report and commits | 5% | **PASS.** The implementation and report commits were pushed by fast-forward; a post-push fetch confirmed the remote SHA. This report-only evidence update is the only follow-up commit. | 5% |
 | **Total** | **100%** | **Current Goal progress** | **57%** |
 
 The 57% is a partial Goal state. It does not claim four-source shared LIVE is production-ready.
@@ -30,14 +30,16 @@ The 57% is a partial Goal state. It does not claim four-source shared LIVE is pr
 - Initial `HEAD` and `origin/main` matched at `3dd80a534bc33152ecc7809831528f63caed2130`; the worktree was clean.
 - Implementation commit: `0fe00e5b5fc0750c20abfc6dd961433b402fc4cf` — `Add bounded Firestore shared cache adapter`.
 - After committing the implementation, `git fetch origin` succeeded. `origin/main` remained `3dd80a534bc33152ecc7809831528f63caed2130`; local `main` was one commit ahead, with a clean worktree and no divergence.
-- The report is committed separately. Before pushing, fetch again and compare both SHAs. Push only if the report and implementation are the only local commits ahead, the worktree is clean, and the remote remains a fast-forward target. Never force-push.
+- Initial report commit: `8458f99c972712ca5ea3f22ac258005a0f6d74db` — `Document Firebase shared runtime handoff`.
+- Before that push, `git fetch origin` succeeded; `origin/main` was exactly `3dd80a534bc33152ecc7809831528f63caed2130`, local `main` was two commits ahead, `git diff --check origin/main...HEAD` passed, and the worktree was clean. A normal push moved `main` from `3dd80a5` to `8458f99`.
+- A post-push fetch confirmed `HEAD` and `origin/main` both equal `8458f99c972712ca5ea3f22ac258005a0f6d74db`; the worktree was clean. This report-only evidence update is committed and pushed as the final handoff step after another fetch confirms no remote divergence. Never force-push.
 - Do not push `.env*`, owner tokens, API credentials, SQLite databases, WAL/SHM files, or local runtime data.
 
 ## Implementation
 
 ### Added
 
-- `Backend/app/storage/firestore_snapshot_blobs.py` adds `FirestoreSnapshotBlobs`, which accepts an explicitly injected Firestore client and creates no credentials or client itself. It stores canonical finite JSON lists under content-addressed manifest/chunk paths. Each raw chunk is at most 196,608 bytes; all chunks and their manifest are published in one bounded transaction. Reads verify the manifest, reference metadata, every chunk, total byte count, record count, and SHA-256 digest. Expired reads fail closed; `purge_expired` removes an expired manifest and its chunks atomically.
+- `Backend/app/storage/firestore_snapshot_blobs.py` adds `FirestoreSnapshotBlobs`, which accepts an explicitly injected Firestore client and creates no credentials or client itself. It stores bounded finite JSON lists under content-addressed manifest/chunk paths. Each raw chunk is at most 196,608 bytes; all chunks and their manifest are published in one bounded transaction. Reads verify the manifest, reference metadata, every chunk, total byte count, record count, and SHA-256 digest. Expired reads fail closed; `purge_expired` removes an expired manifest and its chunks atomically.
 - `SharedCache` now optionally accepts a payload blob store and inline-byte limit. Existing inline schema-1 cache records and default SQLite behavior are unchanged. Oversized opted-in records use schema 2 with an external blob reference; the cache record is committed only after the blob write succeeds. Blob reads happen outside the atomic state callback, so transaction retries do not repeat external reads. A cache hit returns the original origin and fetched timestamp and does not call a provider.
 - `Backend/tests/test_d5_firestore_shared_cache.py` exercises the injected adapter, cache contract, a YouTube cache-first handler, and the existing shared quota ledger with a deterministic transactional Firestore double.
 
