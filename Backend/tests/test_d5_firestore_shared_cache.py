@@ -18,6 +18,7 @@ from app.sources.catalog import (
 from app.sources.guarded_collector import CollectionLimits
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
+from app.storage.firestore_shared_cache import create_firestore_shared_cache
 from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
 from app.workers.d5_source_handlers import D5SourceHandlers
 
@@ -180,15 +181,13 @@ class FirestoreSharedCacheTests(unittest.TestCase):
                          [{"title": "current"}])
 
     def test_large_cache_is_cross_instance_and_cache_hit_needs_no_provider_call(self):
-        cache_a = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=256)
+        cache_a = create_firestore_shared_cache(self.client, max_inline_bytes=256)
         payload = {"status": "SUCCESS", "data_mode": "LIVE", "record_count": 1,
                    "records": [{"title": "linen pants", "description": "x" * 300_000}]}
         cache_a.put(SCOPE, grant=GRANT, origin="LIVE", payload=payload,
                     fetched_at=NOW, now=NOW)
 
-        cache_b = SharedCache(FirestoreAtomicStateStore(self.client),
-                              payload_blobs=FirestoreSnapshotBlobs(self.client),
-                              max_inline_bytes=256)
+        cache_b = create_firestore_shared_cache(self.client, max_inline_bytes=256)
         provider_requests = []
         cached = cache_b.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=5))
         if cached["status"] not in {"CACHED", "STALE"}:
@@ -210,10 +209,8 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual(cache_b.get(other_scope, grant=GRANT, now=NOW)["reason"], "CACHE_MISS")
 
     def test_all_four_source_scopes_round_trip_without_cross_source_data(self):
-        writer = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=64)
-        reader = SharedCache(FirestoreAtomicStateStore(self.client),
-                             payload_blobs=FirestoreSnapshotBlobs(self.client),
-                             max_inline_bytes=64)
+        writer = create_firestore_shared_cache(self.client, max_inline_bytes=64)
+        reader = create_firestore_shared_cache(self.client, max_inline_bytes=64)
         source_ids = (WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)
         scopes = {}
         for source_id in source_ids:
@@ -273,13 +270,11 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         )
         payload = {"status": "SUCCESS", "data_mode": "LIVE", "records": [],
                    "record_count": 0, "coverage": {"provider_request_count": 1}}
-        writer = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=32)
+        writer = create_firestore_shared_cache(self.client, max_inline_bytes=32)
         writer.put(scope, grant=cache_grant, origin="LIVE", payload=payload,
                    fetched_at=NOW, now=NOW)
 
-        cache = SharedCache(FirestoreAtomicStateStore(self.client),
-                             payload_blobs=FirestoreSnapshotBlobs(self.client),
-                             max_inline_bytes=32)
+        cache = create_firestore_shared_cache(self.client, max_inline_bytes=32)
         provider_calls = []
 
         async def provider():
