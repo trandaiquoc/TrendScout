@@ -203,7 +203,7 @@ BASE_ARGS=(
     --die-with-parent --new-session --unshare-pid
     --ro-bind /usr /usr
     --ro-bind "$SANDBOX_ETC" /etc
-    --proc /proc --dev /dev --tmpfs /tmp
+    --proc /proc --dev /dev --dir /tmp --bind "$RUN_ROOT/tmp" /tmp
     --dir /work --bind "$RUN_ROOT" /work
 )
 BASE_ARGS+=("${NODE_BIND_ARGS[@]}")
@@ -213,7 +213,7 @@ for p in /bin /sbin /lib /lib64; do
 done
 COMMON_ENV_ARGS=(
     --clearenv --setenv PATH "$SAFE_PATH"
-    --setenv HOME /work/home --setenv TMPDIR /work/tmp
+    --setenv HOME /work/home --setenv TMPDIR /tmp
     --setenv XDG_CONFIG_HOME /work/home/.config --setenv XDG_CACHE_HOME /work/home/.cache
     --setenv CLOUDSDK_CONFIG /work/no-gcloud-config --setenv CI 1
     --setenv FIRESTORE_ACCEPTANCE_DROP_PRIVILEGES "$DROP_PRIVILEGES"
@@ -451,11 +451,20 @@ printf 'SECCOMP_PROBE=START\n'
     /work/venv/bin/python /work/repo/Backend/scripts/probe_firestore_emulator_network.py
 printf 'SECCOMP_PROBE=PASS\n'
 printf 'EMULATOR_TESTS=START project=demo-trendscout-p3s1 database=(default)\n'
-/work/node/node_modules/.bin/firebase \
+if ! /work/node/node_modules/.bin/firebase \
     --project demo-trendscout-p3s1 \
     --config /work/repo/Backend/emulator_tests/firebase.json \
     emulators:exec --only firestore --log-verbosity INFO \
-    'bash /work/run_emulator_tests.sh'
+    'bash /work/run_emulator_tests.sh'; then
+    printf 'FAIL: Firebase Emulator or integration suites failed; relevant debug output follows.\n' >&2
+    for debug_log in /work/repo/Backend/emulator_tests/*debug.log; do
+        if [[ -f "$debug_log" ]]; then
+            printf 'BEGIN_DEBUG_LOG=%s\n' "$debug_log" >&2
+            tail -n 160 "$debug_log" >&2 || true
+        fi
+    done
+    exit 31
+fi
 printf 'EMULATOR_TESTS=PASS\n'
 ISOLATED
 chmod 700 "$RUN_ROOT/run_isolated.sh"
