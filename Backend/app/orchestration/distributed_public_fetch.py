@@ -224,18 +224,27 @@ class DistributedPublicFetch:
                 if result["status"] != "UNAVAILABLE":
                     modes.add(result["data_mode"])
                 delivery_state = result.get("delivery_state")
-                if result["status"] in {"FAILED", "UNAVAILABLE"}:
-                    delivery_state = None
-                elif delivery_state not in {"FRESH", "CACHED", "STALE_CACHE"}:
+                if delivery_state not in {"FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE"}:
                     delivery_state = "FRESH"
+                    if result["status"] in {"FAILED", "UNAVAILABLE"}:
+                        delivery_state = None
+                coverage = result.get("coverage")
+                coverage = coverage if isinstance(coverage, dict) else {}
+                request_count = result.get("provider_request_count")
+                if type(request_count) is not int or request_count < 0:
+                    request_count = coverage.get("provider_request_count")
+                if type(request_count) is not int or request_count < 0:
+                    request_count = None
                 source_results.append({
                     "source_id": source_id,
                     "status": result["status"],
-                    **({"data_mode": result["data_mode"]} if result["status"] != "UNAVAILABLE" else {}),
+                    **({"data_mode": result["data_mode"]}
+                       if result.get("data_mode") in {"LIVE", "SYNTHETIC"} else {}),
                     "delivery_state": delivery_state,
                     "record_count": result["record_count"],
                     "records": result["records"],
-                    "coverage": result.get("coverage"),
+                    "coverage": coverage,
+                    "provider_request_count": request_count,
                     "error_code": result.get("error_code"),
                     "retry_after_seconds": result.get("retry_after_seconds"),
                     "quality_flags": result.get("quality_flags", []),

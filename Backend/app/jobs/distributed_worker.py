@@ -204,7 +204,7 @@ class DistributedFetchWorker:
             return value
         allowed = {"status", "data_mode", "delivery_state", "records", "record_count",
                    "error_code", "retry_after_seconds", "coverage", "quality_flags",
-                   "transport_diagnostic"}
+                   "transport_diagnostic", "provider_request_count"}
         if set(value) - allowed:
             raise ValueError("source result contains an unsupported field")
         value = dict(value)
@@ -212,15 +212,23 @@ class DistributedFetchWorker:
             # Delivery freshness describes returned observations. A failed or
             # unavailable source has no fresh delivery, even if an adapter's
             # generic default filled that field in.
-            value["delivery_state"] = None
+            if not (value["status"] == "UNAVAILABLE"
+                    and value.get("delivery_state") == "NOT_ELIGIBLE"):
+                value["delivery_state"] = None
         elif value.get("delivery_state") is None:
             value["delivery_state"] = "FRESH"
         if value.get("data_mode") != expected_mode:
             raise ValueError("source result provenance mismatch")
-        if (value.get("delivery_state") not in {"FRESH", "CACHED", "STALE_CACHE", None}
+        if (value.get("delivery_state") not in {
+                    "FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE", None,
+                }
                 or value["status"] not in {"FAILED", "UNAVAILABLE"}
                 and value.get("delivery_state") is None):
             raise ValueError("invalid result delivery state")
+        if "provider_request_count" in value and (
+                type(value["provider_request_count"]) is not int
+                or value["provider_request_count"] < 0):
+            raise ValueError("invalid provider request count")
         records = value.get("records")
         if not isinstance(records, list) or len(records) > 5000 or any(
             not isinstance(record, dict) for record in records

@@ -69,6 +69,18 @@ from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
 from app.workers.d5_source_handlers import D5SourceHandlers
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
+WINDOWS2_OWNER_HOST = "DESKTOP-ICECOET"
+
+
+def owner_manual_runtime_supported(platform_name, host_name):
+    """Keep the explicit owner path local to Linux or the designated Windows 2 host."""
+    if not isinstance(platform_name, str) or not isinstance(host_name, str):
+        return False
+    return (platform_name.startswith("linux")
+            or (platform_name.startswith("win")
+                and host_name.strip().casefold() == WINDOWS2_OWNER_HOST.casefold()))
+
+
 _MAX_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _MAX_CANDIDATE_HISTORY = 5_000
 
@@ -207,10 +219,11 @@ async def normal_google_live_composition(*, user_agent,
 
     if youtube_manual_live:
         runtime_host = socket.gethostname().strip()
-        if (not sys.platform.startswith("linux") or not config.youtube_approval_configured
+        if (not owner_manual_runtime_supported(sys.platform, runtime_host)
+                or not config.youtube_approval_configured
                 or not config.youtube_live_host
                 or runtime_host.casefold() != config.youtube_live_host.casefold()):
-            raise ValueError("owner manual YouTube LIVE requires Linux and its designated host")
+            raise ValueError("owner manual YouTube LIVE requires an approved local owner host")
 
     directory = Path(state_directory) if state_directory is not None else (
         Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
@@ -628,13 +641,23 @@ async def normal_google_live_composition(*, user_agent,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
                 )
                 if slot is None:
-                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
+                    schedule = schedule_metadata(
+                        store, YOUTUBE_REFRESH_STATE_KEY, now,
+                        error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    )
+                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE",
+                            "next_eligible_at": schedule.get("next_eligible_at")}
                 reserved = reserve_source_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
                 )
                 if reserved is None:
-                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
+                    schedule = schedule_metadata(
+                        store, YOUTUBE_REFRESH_STATE_KEY, now,
+                        error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    )
+                    return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE",
+                            "next_eligible_at": schedule.get("next_eligible_at")}
             except AdmissionDenied as error:
                 return {"allowed": False, "error_code": error.code}
             return {"allowed": True, "slot": reserved}

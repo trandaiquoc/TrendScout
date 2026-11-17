@@ -841,6 +841,86 @@ const FETCH_SOURCE_LABELS = {
   bing_web_serp: 'fetch.source.bing',
   youtube_video_search: 'fetch.source.youtube',
 };
+const FETCH_SOURCE_IDS = Object.keys(FETCH_SOURCE_LABELS);
+
+function renderFetchSourceOutcomes(fetchStatus) {
+  if (!fetchStatus || typeof fetchStatus !== 'object') return null;
+  const selected = Array.isArray(fetchStatus.selected_sources)
+    ? fetchStatus.selected_sources
+    : Array.isArray(fetchStatus.sources)
+      && fetchStatus.sources.every((source) => typeof source === 'string')
+      ? fetchStatus.sources : [];
+  const outcomes = new Map((Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [])
+    .filter((source) => source && typeof source === 'object')
+    .map((source) => [source.source_id, source]));
+  if (!selected.length && !outcomes.size) return null;
+  const list = document.createElement('ul');
+  list.className = 'fetch-source-outcomes';
+  for (const sourceId of FETCH_SOURCE_IDS) {
+    const source = outcomes.get(sourceId);
+    const isSelected = selected.includes(sourceId);
+    const coverage = source?.coverage && typeof source.coverage === 'object'
+      ? source.coverage : {};
+    const statusKey = `fetch.source-status.${source?.status || ''}`;
+    const errorKey = `fetch.source-error.${source?.error_code || ''}`;
+    const fields = [t(isSelected ? 'fetch.source-selected' : 'fetch.source-not-selected')];
+    if (source) {
+      fields.push(t(statusKey) !== statusKey ? t(statusKey) : source.status);
+      if (typeof source.data_mode === 'string') fields.push(source.data_mode);
+      if (source.delivery_state) {
+        const deliveryKey = `fetch.delivery.${source.delivery_state}`;
+        fields.push(t(deliveryKey) !== deliveryKey ? t(deliveryKey) : source.delivery_state);
+      }
+      const requestCount = Number.isInteger(source.provider_request_count)
+        ? source.provider_request_count : coverage.provider_request_count;
+      if (Number.isInteger(requestCount) && requestCount >= 0) {
+        fields.push(t('fetch.source-request-count', { count: number(requestCount) }));
+      }
+      const observedAt = coverage.source_fetched_at || coverage.fetched_at
+        || coverage.provider_data_at || coverage.cache_fetched_at;
+      if (typeof observedAt === 'string') {
+        fields.push(t('fetch.source-observation-time', { time: timestamp(observedAt) }));
+      }
+      if (typeof coverage.cache_delivery_at === 'string') {
+        fields.push(t('fetch.source-cache-delivery-time', {
+          time: timestamp(coverage.cache_delivery_at),
+        }));
+      }
+      const freshness = coverage.cache_freshness;
+      if (typeof freshness === 'string') {
+        const freshnessKey = `fetch.delivery.${freshness}`;
+        fields.push(t('fetch.source-freshness', {
+          state: t(freshnessKey) !== freshnessKey ? t(freshnessKey) : freshness,
+        }));
+      }
+      if (typeof coverage.next_eligible_at === 'string') {
+        fields.push(t('fetch.source-next-refresh', {
+          time: timestamp(coverage.next_eligible_at),
+        }));
+      }
+      if (source.error_code) {
+        fields.push(t(errorKey) !== errorKey ? t(errorKey) : source.error_code);
+      }
+      const googleSummary = googleFetchSummary(source);
+      if (googleSummary) fields.push(googleSummary);
+      if (Number.isInteger(source.retry_after_seconds)) {
+        fields.push(t('fetch.retry-after', { seconds: source.retry_after_seconds }));
+      }
+    } else if (isSelected) {
+      fields.push(t('fetch.source-no-outcome'));
+    }
+    const row = document.createElement('li');
+    row.className = `fetch-source-outcome${source?.delivery_state === 'STALE_CACHE'
+      ? ' fetch-source-outcome--stale' : ''}`;
+    const name = document.createElement('strong');
+    name.textContent = t(FETCH_SOURCE_LABELS[sourceId]);
+    const details = document.createElement('span');
+    details.textContent = fields.join(' · ');
+    row.append(name, details);
+    list.append(row);
+  }
+  return list;
+}
 
 function renderFetchPresentation() {
   const presentation = state.fetchPresentation;
@@ -889,37 +969,14 @@ function renderFetchPresentation() {
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
       : state.fetchReady ? t(liveDemo ? 'fetch.live-ready' : 'fetch.ready') : t(blockKey);
   status.hidden = !isActionState;
-  const sourceSummary = Array.isArray(presentation.fetch?.sources)
-    ? presentation.fetch.sources
-      .filter((source) => source && typeof source === 'object')
-      .map((source) => {
-        const sourceKey = FETCH_SOURCE_LABELS[source.source_id];
-        const sourceLabel = sourceKey ? t(sourceKey) : source.source_id;
-        const visibleStatus = source.error_code === 'RATE_LIMITED' ? 'RATE_LIMITED' : source.status;
-        const statusKey = `fetch.source-status.${visibleStatus}`;
-        const sourceStatus = source.status && t(statusKey) !== statusKey
-          ? t(statusKey) : source.status;
-        const errorKey = `fetch.source-error.${source.error_code}`;
-        const sourceError = source.error_code && t(errorKey) !== errorKey
-          ? t(errorKey) : '';
-        const delivery = ['SUCCESS', 'PARTIAL'].includes(source.status)
-          ? source.delivery_state : null;
-        return [sourceLabel, sourceStatus, source.data_mode, delivery, sourceError,
-          googleFetchSummary(source),
-          Number.isInteger(source.retry_after_seconds)
-            ? t('fetch.retry-after', { seconds: source.retry_after_seconds }) : '']
-          .filter((value) => typeof value === 'string' && value).join(' · ');
-      })
-      .join(' | ')
-    : '';
   status.replaceChildren();
   if (isActionState) {
     const message = document.createElement('p');
-    message.textContent = [
-      t(liveDemo ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey),
-      sourceSummary ? t('fetch.source-summary', { sources: sourceSummary }) : '',
-    ].filter(Boolean).join(' ');
+    message.textContent = t(liveDemo
+      ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey);
     status.append(message);
+    const sourceOutcomes = renderFetchSourceOutcomes(presentation.fetch);
+    if (sourceOutcomes) status.append(sourceOutcomes);
     renderYouTubeFetchEvidence(status, presentation.fetch);
   }
 }

@@ -116,6 +116,11 @@ body { font-size:14px; letter-spacing:-.01em; }
 .fetch-card-top { display:flex; align-items:center; justify-content:space-between; }
 .fetch-mode-mark { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; background:var(--accent-soft); color:var(--accent-strong); font-weight:800; }
 .fetch-help,.fetch-status { margin:0; font-size:11px; line-height:1.5; }
+.fetch-source-outcomes { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
+.fetch-source-outcome { display:grid; gap:2px; padding:8px 10px; border:1px solid var(--line); border-radius:9px; background:var(--surface-soft); color:var(--muted); overflow-wrap:anywhere; }
+.fetch-source-outcome strong { color:var(--ink-strong); font-size:11px; }
+.fetch-source-outcome span { font-size:10px; line-height:1.55; }
+.fetch-source-outcome--stale { border-inline-start:3px solid var(--amber); background:var(--amber-soft); }
 .youtube-fetch-evidence { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
 .youtube-evidence-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .youtube-fetch-evidence h2 { margin:0; color:var(--ink); font-size:13px; }

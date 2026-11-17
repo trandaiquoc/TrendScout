@@ -150,7 +150,7 @@ def _saved_source_activity(request):
                     _merge_saved_bing_evidence(latest[source_id], source)
                 continue
             status = source.get("status")
-            status = status if status in {"SUCCESS", "PARTIAL", "FAILED"} else "UNKNOWN"
+            status = status if status in {"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"} else "UNKNOWN"
             record_count = source.get("record_count")
             activity = {
                 "status": status,
@@ -161,7 +161,7 @@ def _saved_source_activity(request):
                 "observation_end": row["observation_end"],
             }
             delivery_state = source.get("delivery_state")
-            if delivery_state in {"FRESH", "CACHED", "STALE_CACHE"}:
+            if delivery_state in {"FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE"}:
                 activity["delivery_state"] = delivery_state
             error_code = source.get("error_code")
             if (source_id == "youtube_video_search" and isinstance(error_code, str)
@@ -238,9 +238,15 @@ def _saved_source_activity(request):
                         if isinstance(value, str) and 0 < len(value) <= 128:
                             summary[key] = value
                     for key in ("query_plan_version", "provider_request_count",
+                                "cached_provider_request_count",
                                 "records_omitted_storage_limit"):
                         value = coverage.get(key)
                         if type(value) is int and value >= 0:
+                            summary[key] = value
+                    for key in ("cache_freshness", "cache_status", "cache_reason",
+                                "next_eligible_at"):
+                        value = coverage.get(key)
+                        if isinstance(value, str) and len(value) <= 128:
                             summary[key] = value
                     summary["source_fetched_at"] = _safe_utc_timestamp(
                         coverage.get("source_fetched_at")

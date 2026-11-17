@@ -55,6 +55,17 @@ class SharedCacheTests(unittest.TestCase):
         self.assertEqual(self.cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=30))["reason"], "RETENTION_EXPIRED")
         self.assertEqual(self.cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=31))["reason"], "CACHE_MISS")
 
+    def test_cache_hit_survives_sqlite_store_reopen(self):
+        self.put(origin="LIVE", payload={"status": "SUCCESS", "data_mode": "LIVE",
+                                          "records": [], "record_count": 0})
+
+        reopened = SharedCache(SqliteTestStore(self.path))
+        cached = reopened.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=5))
+
+        self.assertEqual(cached["status"], "CACHED")
+        self.assertEqual(cached["origin"], "LIVE")
+        self.assertEqual(cached["payload"]["data_mode"], "LIVE")
+
     def test_new_policy_cannot_extend_old_retention(self):
         self.put()
         longer = replace(GRANT, max_fresh_seconds=100, max_stale_seconds=200,

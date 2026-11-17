@@ -216,6 +216,14 @@ function renderYouTubeBudget(capabilities, translate) {
   capabilityRow(values, translate('sources.youtube-last-delivery'),
     saved.delivery_state ? translate(`fetch.delivery.${saved.delivery_state}`)
       : translate('common.unavailable'));
+  capabilityRow(values, translate('sources.youtube-last-request-count'),
+    saved.youtube_coverage && Number.isInteger(saved.youtube_coverage.provider_request_count)
+      ? formatCount(saved.youtube_coverage.provider_request_count)
+      : translate('common.unavailable'));
+  capabilityRow(values, translate('sources.youtube-cache-status'),
+    saved.youtube_coverage?.cache_freshness
+      ? translate(`fetch.delivery.${saved.youtube_coverage.cache_freshness}`)
+      : saved.youtube_coverage?.cache_status || translate('common.unavailable'));
   capabilityRow(values, translate('sources.youtube-result-count'),
     formatCount(saved.last_successful_observation_record_count ?? saved.record_count));
   capabilityRow(values, translate('sources.youtube-last-error'),

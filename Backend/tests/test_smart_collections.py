@@ -90,6 +90,86 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(manifest[0]["record_count"], 1)
         self.assertEqual(manifest[0]["received_record_count"], 1)
 
+    def test_live_unavailable_source_is_preserved_in_run_history_manifest(self):
+        live_store = CollectionStore(Path(self.temp.name) / "unavailable-live-collections.sqlite",
+                                     data_mode_scope="LIVE")
+        service = CollectionService(live_store)
+        source = {
+            "source_id": "youtube_video_search",
+            "status": "UNAVAILABLE",
+            "data_mode": "LIVE",
+            "delivery_state": "NOT_ELIGIBLE",
+            "record_count": 0,
+            "records": [],
+            "error_code": "NO_CACHE_AVAILABLE",
+            "provider_request_count": 0,
+            "coverage": {
+                "provider_request_count": 0,
+                "cache_status": "UNAVAILABLE",
+                "cache_reason": "CACHE_MISS",
+                "next_eligible_at": "2026-11-17T08:00:00+00:00",
+            },
+        }
+
+        service._process_fetch("live-unavailable-youtube-manifest", [source])
+
+        with live_store.connect() as db:
+            row = db.execute(
+                "SELECT data_mode,source_manifest FROM dataset_snapshots "
+                "WHERE dataset_id='live-unavailable-youtube-manifest'"
+            ).fetchone()
+        self.assertEqual(row["data_mode"], "LIVE")
+        manifest = json.loads(row["source_manifest"])
+        self.assertEqual(len(manifest), 1)
+        self.assertEqual(manifest[0]["status"], "UNAVAILABLE")
+        self.assertEqual(manifest[0]["error_code"], "NO_CACHE_AVAILABLE")
+        self.assertEqual(manifest[0]["delivery_state"], "NOT_ELIGIBLE")
+        self.assertEqual(manifest[0]["coverage"]["next_eligible_at"],
+                         "2026-11-17T08:00:00+00:00")
+
+    def test_source_center_keeps_unavailable_error_without_losing_prior_observation(self):
+        from types import SimpleNamespace
+
+        from app.api.capabilities import _saved_source_activity
+
+        prior = {
+            "source_id": "youtube_video_search", "status": "SUCCESS",
+            "data_mode": "LIVE", "delivery_state": "FRESH", "record_count": 1,
+            "records": [{
+                "provider_video_id": "AbCdEf12345",
+                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                "title": "Existing observation", "data_mode": "LIVE",
+                "fetched_at": "2026-11-16T00:00:00+00:00",
+            }],
+            "coverage": {"provider_method": "search.list",
+                         "provider_request_count": 1,
+                         "source_fetched_at": "2026-11-16T00:00:00+00:00"},
+        }
+        unavailable = {
+            "source_id": "youtube_video_search", "status": "UNAVAILABLE",
+            "data_mode": "LIVE", "delivery_state": "NOT_ELIGIBLE", "record_count": 0,
+            "records": [], "error_code": "NO_CACHE_AVAILABLE",
+            "provider_request_count": 0,
+            "coverage": {"provider_request_count": 0, "cache_status": "UNAVAILABLE",
+                         "cache_reason": "CACHE_MISS",
+                         "next_eligible_at": "2026-11-17T08:00:00+00:00"},
+        }
+        self.service._process_fetch("youtube-activity-prior", [prior])
+        self.service._process_fetch("youtube-activity-unavailable", [unavailable])
+        request = SimpleNamespace(app=SimpleNamespace(
+            state=SimpleNamespace(collection_service=self.service)
+        ))
+
+        activity = _saved_source_activity(request)["youtube_video_search"]
+
+        self.assertEqual(activity["status"], "UNAVAILABLE")
+        self.assertEqual(activity["error_code"], "NO_CACHE_AVAILABLE")
+        self.assertEqual(activity["delivery_state"], "NOT_ELIGIBLE")
+        self.assertEqual(activity["last_successful_observation_at"],
+                         "2026-11-16T00:00:00+00:00")
+        self.assertEqual(activity["youtube_coverage"]["next_eligible_at"],
+                         "2026-11-17T08:00:00+00:00")
+
     def test_youtube_capability_keeps_observation_and_cache_delivery_times_separate(self):
         from types import SimpleNamespace
 

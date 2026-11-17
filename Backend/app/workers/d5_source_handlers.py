@@ -341,6 +341,7 @@ class D5SourceHandlers:
         now = self.utcnow()
         batch_decision = None
         stale_fallback = None
+        cache_lookup = None
         try:
             grant = self.resolve_cache_grant(source_id, now)
         except Exception:
@@ -361,6 +362,7 @@ class D5SourceHandlers:
             )
             if not force_fresh:
                 cached = self.shared_cache.get(scope, grant=grant, now=now)
+                cache_lookup = cached
                 cached_status = cached.get("status")
                 if (cached_status in {"CACHED", "STALE"}
                         and cached.get("origin") in {"SYNTHETIC", "LIVE"}):
@@ -371,7 +373,9 @@ class D5SourceHandlers:
                             not in {"FRESH", "CACHED", "STALE_CACHE"}):
                         raise CacheUnavailable()
                     if cached_status == "CACHED":
-                        return self._cache_delivery(payload, "CACHED", now)
+                        return self._cache_delivery(
+                            payload, "CACHED", now, cache_fetched_at=cached.get("fetched_at"),
+                        )
                     if source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None:
                         try:
                             batch_decision = self.resolve_provider_batch(source_id, now)
@@ -380,10 +384,19 @@ class D5SourceHandlers:
                                               "error_code": "REFRESH_POLICY_UNAVAILABLE"}
                         if (not isinstance(batch_decision, dict)
                                 or batch_decision.get("allowed") is not True):
-                            return self._cache_delivery(payload, "STALE_CACHE", now)
+                            return self._cache_delivery(
+                                payload, "STALE_CACHE", now,
+                                cache_fetched_at=cached.get("fetched_at"),
+                                next_eligible_at=(batch_decision.get("next_eligible_at")
+                                                  if isinstance(batch_decision, dict) else None),
+                                refresh_eligible=False,
+                            )
                     else:
-                        return self._cache_delivery(payload, "STALE_CACHE", now)
-                    stale_fallback = payload
+                        return self._cache_delivery(
+                            payload, "STALE_CACHE", now,
+                            cache_fetched_at=cached.get("fetched_at"),
+                        )
+                    stale_fallback = (payload, cached.get("fetched_at"))
 
         if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
                 and batch_decision is None):
@@ -392,26 +405,54 @@ class D5SourceHandlers:
             except Exception:
                 decision = {"allowed": False, "error_code": "REFRESH_POLICY_UNAVAILABLE"}
             if not isinstance(decision, dict) or decision.get("allowed") is not True:
+                cache_reason = (cache_lookup.get("reason")
+                                if isinstance(cache_lookup, dict) else None)
+                cache_error = {
+                    "CACHE_MISS": "NO_CACHE_AVAILABLE",
+                    "RETENTION_EXPIRED": "CACHE_EXPIRED",
+                    "STALE_WINDOW_EXPIRED": "CACHE_EXPIRED",
+                    "INVALID_CACHE_RECORD": "CACHE_INVALID",
+                    "INVALID_CACHE_TIME": "CACHE_INVALID",
+                    "POLICY_UNAVAILABLE": "CACHE_POLICY_UNAVAILABLE",
+                    "POLICY_REVOKED": "CACHE_POLICY_REVOKED",
+                }.get(cache_reason)
+                error_code = decision.get("error_code") if isinstance(decision, dict) else None
+                if error_code == "NOT_YET_ELIGIBLE" and cache_error:
+                    error_code = cache_error
+                cache_coverage = {
+                    "refresh_eligible": False,
+                    "provider_request_count": 0,
+                    "cache_status": cache_lookup.get("status")
+                        if isinstance(cache_lookup, dict) else "UNAVAILABLE",
+                    "cache_reason": cache_reason or "CACHE_LOOKUP_UNAVAILABLE",
+                }
+                provider_request_count = 0
+                next_eligible_at = (decision.get("next_eligible_at")
+                                    if isinstance(decision, dict) else None)
+                if isinstance(next_eligible_at, str):
+                    cache_coverage["next_eligible_at"] = next_eligible_at
                 return {
                     "status": "UNAVAILABLE", "data_mode": "LIVE", "records": [],
                     "record_count": 0,
-                    "error_code": (decision.get("error_code")
-                                   if isinstance(decision, dict) else None)
-                                   or "NOT_YET_ELIGIBLE",
+                    "error_code": error_code or "NOT_YET_ELIGIBLE",
                     "delivery_state": "NOT_ELIGIBLE",
-                    "coverage": {"refresh_eligible": False,
+                    "provider_request_count": provider_request_count,
+                    "coverage": {**cache_coverage,
                                   **({"owner_manual_fresh_test": True}
                                      if force_fresh else {})},
                 }
 
         try:
             result = await collect()
-        except Exception:
+        except Exception as exc:
             if stale_fallback is None:
                 raise
+            error_code = getattr(exc, "code", "SOURCE_REFRESH_FAILED")
+            if not isinstance(error_code, str) or not re.fullmatch(r"[A-Z0-9_]{1,64}", error_code):
+                error_code = "SOURCE_REFRESH_FAILED"
             result = {
                 "status": "FAILED", "data_mode": "LIVE", "records": [],
-                "record_count": 0, "error_code": "SOURCE_REFRESH_FAILED",
+                "record_count": 0, "error_code": error_code,
             }
         if not isinstance(result, dict):
             return result
@@ -420,7 +461,11 @@ class D5SourceHandlers:
         if (stale_fallback is not None
                 and result.get("status") in {"FAILED", "UNAVAILABLE", "PARTIAL"}
                 and not result.get("records")):
-            fallback = self._cache_delivery(stale_fallback, "STALE_CACHE", now)
+            fallback_payload, cached_fetched_at = stale_fallback
+            fallback = self._cache_delivery(
+                fallback_payload, "STALE_CACHE", now,
+                cache_fetched_at=cached_fetched_at,
+            )
             error_code = result.get("error_code")
             if not isinstance(error_code, str) or not re.fullmatch(r"[A-Z0-9_]{1,64}", error_code):
                 error_code = "SOURCE_REFRESH_FAILED"
@@ -430,7 +475,13 @@ class D5SourceHandlers:
                 "refresh_attempt_status": result.get("status"),
                 "refresh_error_code": error_code,
                 "refresh_attempted_at": now.isoformat(),
+                "provider_request_count": self._provider_request_count(result),
             })
+            request_count = self._provider_request_count(result)
+            if type(request_count) is int:
+                fallback["provider_request_count"] = request_count
+            else:
+                fallback.pop("provider_request_count", None)
             return fallback
         result.setdefault("delivery_state", "FRESH")
         negative_day_cache = (result.get("status") == "UNAVAILABLE"
@@ -468,12 +519,39 @@ class D5SourceHandlers:
         return {**result, "coverage": coverage}
 
     @staticmethod
-    def _cache_delivery(payload, delivery_state, delivered_at):
+    def _cache_delivery(payload, delivery_state, delivered_at, *, cache_fetched_at=None,
+                        next_eligible_at=None, refresh_eligible=None):
         """Return cached evidence with its original observation time and this delivery time."""
         coverage = payload.get("coverage")
         coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        originating_count = coverage.get("provider_request_count")
+        if type(originating_count) is not int or originating_count < 0:
+            originating_count = payload.get("provider_request_count")
+        if type(originating_count) is int and originating_count >= 0:
+            coverage["cached_provider_request_count"] = originating_count
+        coverage["provider_request_count"] = 0
         coverage["cache_delivery_at"] = delivered_at.astimezone(timezone.utc).isoformat()
-        return {**payload, "delivery_state": delivery_state, "coverage": coverage}
+        if isinstance(cache_fetched_at, str):
+            coverage["cache_fetched_at"] = cache_fetched_at
+        if isinstance(next_eligible_at, str):
+            coverage["next_eligible_at"] = next_eligible_at
+        if type(refresh_eligible) is bool:
+            coverage["refresh_eligible"] = refresh_eligible
+        coverage["cache_freshness"] = delivery_state
+        return {**payload, "delivery_state": delivery_state, "coverage": coverage,
+                "provider_request_count": 0}
+
+    @staticmethod
+    def _provider_request_count(result):
+        coverage = result.get("coverage") if isinstance(result, dict) else None
+        for value in (
+            coverage.get("provider_request_count") if isinstance(coverage, dict) else None,
+            coverage.get("attempted_calls") if isinstance(coverage, dict) else None,
+            result.get("provider_request_count") if isinstance(result, dict) else None,
+        ):
+            if type(value) is int and value >= 0:
+                return value
+        return None
 
     async def _wikimedia_handler(self, context: SourceWorkContext, observation_date=None):
         context.heartbeat()

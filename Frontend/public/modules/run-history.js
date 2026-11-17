@@ -97,14 +97,21 @@ function renderRunHistoryDetail(item, errorMessage = null) {
     return `${localizedSourceName(source.source_id)}: ${status}`;
   }).join(' · ') || t('common.unavailable');
   const sourceCoverageSummary=coverage.sources.map(source=>{
+    const sourceErrorKey = `fetch.source-error.${source.errorCode}`;
+    const sourceError = source.errorCode
+      ? (t(sourceErrorKey) === sourceErrorKey ? source.errorCode : t(sourceErrorKey)) : null;
     const counts=[
       source.providerReturnedRecords == null ? null : `${t('runs.provider-records')}: ${number(source.providerReturnedRecords)}`,
       source.retainedRecords == null ? null : `${t('runs.source-retained')}: ${number(source.retainedRecords)}`,
       source.rejectedRecords == null ? null : `${t('runs.source-rejected')}: ${number(source.rejectedRecords)}`,
       source.omittedRecords == null ? null : `${t('runs.source-omitted')}: ${number(source.omittedRecords)}`,
+      source.providerRequestCount == null ? null : `${t('runs.source-provider-requests')}: ${number(source.providerRequestCount)}`,
       source.deliveryState ? `${t('runs.source-delivery')}: ${t(`fetch.delivery.${source.deliveryState}`)}` : null,
+      source.cacheFreshness ? `${t('fetch.source-freshness', { state: t(`fetch.delivery.${source.cacheFreshness}`) })}` : null,
       source.sourceFetchedAt ? `${t('runs.source-observation-time')}: ${timestamp(source.sourceFetchedAt)}` : null,
       source.cacheDeliveryAt ? `${t('runs.cache-delivery-time')}: ${timestamp(source.cacheDeliveryAt)}` : null,
+      source.nextEligibleAt ? `${t('runs.source-next-refresh')}: ${timestamp(source.nextEligibleAt)}` : null,
+      sourceError ? `${t('runs.source-error')}: ${sourceError}` : null,
       source.providerMethod ? `${t('runs.provider-method')}: ${source.providerMethod}` : null,
       source.query ? `${t('runs.source-query')}: ${source.query}` : null,
       source.queryScopes.length ? `${t('runs.source-scope')}: ${source.queryScopes.join(', ')}` : null,

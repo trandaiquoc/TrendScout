@@ -1,5 +1,6 @@
 param(
-    [int]$Port = 0
+    [int]$Port = 0,
+    [switch]$YoutubeOwnerManualLive
 )
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
@@ -35,6 +36,16 @@ $youtubeHost = (& $venvPython -c 'import socket; print(socket.gethostname())').T
 if ($LASTEXITCODE -ne 0 -or -not $youtubeHost) {
     throw 'Could not identify this Windows machine for the local YouTube LIVE runtime.'
 }
+$launcherArguments = @('--port', [string]$Port)
+if ($YoutubeOwnerManualLive) {
+    if ($env:VERCEL) {
+        throw 'Owner manual YouTube LIVE is restricted to local Windows 2 development.'
+    }
+    if ($youtubeHost -ine 'DESKTOP-ICECOET') {
+        throw 'Owner manual YouTube LIVE is authorized only on DESKTOP-ICECOET.'
+    }
+    $launcherArguments += '--youtube-owner-manual-live'
+}
 $previousYoutubeApproval = $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED
 $previousYoutubeHost = $env:TREND_SCOUT_YOUTUBE_LIVE_HOST
 $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED = 'true'
@@ -45,7 +56,7 @@ try {
     try {
         Write-Output "Starting the local multi-source LIVE application at http://127.0.0.1:$Port/dashboard/"
         Write-Output 'Loopback only, one worker. Provider requests start only when Fetch is selected.'
-        & $venvPython -m scripts.run_google_live_local --port $Port
+        & $venvPython -m scripts.run_google_live_local @launcherArguments
         if ($LASTEXITCODE -ne 0) { throw "TrendScout runtime exited with code $LASTEXITCODE." }
     } finally {
         Pop-Location

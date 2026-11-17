@@ -9,7 +9,10 @@ from functools import partial
 
 from app.google_live_settings import GoogleLiveSettings
 from app.main import create_normal_google_live_app, run_normal_google_live
-from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.orchestration.normal_google_live_composition import (
+    normal_google_live_composition,
+    owner_manual_runtime_supported,
+)
 from app.settings import Settings
 
 
@@ -41,7 +44,8 @@ def main(argv=None):
     )
     parser.add_argument(
         "--youtube-owner-manual-live", action="store_true",
-        help=("Enable Linux-only owner-triggered YouTube LIVE development; "
+        help=("Enable explicit owner-triggered YouTube LIVE development on the "
+              "designated local Linux or Windows 2 host; "
               "normal schedule and internal YouTube caps are bypassed."),
     )
     parser.add_argument(
@@ -57,11 +61,13 @@ def main(argv=None):
     if arguments.youtube_owner_force_fresh_test and not arguments.youtube_owner_manual_live:
         parser.error("--youtube-owner-force-fresh-test requires --youtube-owner-manual-live")
     if arguments.youtube_owner_manual_live:
-        if os.environ.get("VERCEL") or not sys.platform.startswith("linux"):
-            parser.error("--youtube-owner-manual-live is restricted to a local Linux operator")
+        if os.environ.get("VERCEL"):
+            parser.error("--youtube-owner-manual-live is restricted to local development")
         host = socket.gethostname().strip()
         if not host:
             parser.error("could not determine the local host for YouTube authorization")
+        if not owner_manual_runtime_supported(sys.platform, host):
+            parser.error("--youtube-owner-manual-live is restricted to an approved owner host")
     # Normal mode enables paid discovery and Bing verification through their
     # existing account preflight. Owner manual YouTube mode suppresses all
     # SerpApi preflight and configures only the local YouTube runtime boundary.
@@ -72,7 +78,7 @@ def main(argv=None):
             google_settings, youtube_live_approved=True, youtube_live_host=host,
         )
         print(
-            f"OWNER_MANUAL_LIVE enabled for detected Linux host {host}; "
+            f"OWNER_MANUAL_LIVE enabled for detected local owner host {host}; "
             "YouTube requests remain user-triggered and one query per Fetch."
         )
         if arguments.youtube_owner_force_fresh_test:

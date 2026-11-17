@@ -194,3 +194,33 @@ test('does not label a failed source as fresh or cached delivery', () => {
 
   assert.equal(result.sources[0].deliveryState, null);
 });
+
+test('preserves unavailable YouTube diagnostics and stale cache delivery', () => {
+  const result = extractRunSourceCoverage({ source_manifest: [{
+    source_id: 'youtube_video_search',
+    status: 'UNAVAILABLE',
+    data_mode: 'LIVE',
+    delivery_state: 'NOT_ELIGIBLE',
+    error_code: 'NO_CACHE_AVAILABLE',
+    provider_request_count: 0,
+    coverage: {
+      provider_request_count: 0,
+      next_eligible_at: '2026-11-17T08:00:00Z',
+      cache_status: 'UNAVAILABLE',
+      cache_reason: 'CACHE_MISS',
+    },
+  }, {
+    source_id: 'google_web_serp',
+    status: 'PARTIAL',
+    delivery_state: 'STALE_CACHE',
+    record_count: 4,
+    coverage: { provider_request_count: 0, cache_freshness: 'STALE_CACHE' },
+  }] });
+
+  assert.equal(result.sources[0].deliveryState, 'NOT_ELIGIBLE');
+  assert.equal(result.sources[0].errorCode, 'NO_CACHE_AVAILABLE');
+  assert.equal(result.sources[0].providerRequestCount, 0);
+  assert.equal(result.sources[0].nextEligibleAt, '2026-11-17T08:00:00Z');
+  assert.equal(result.sources[1].deliveryState, 'STALE_CACHE');
+  assert.equal(result.sources[1].cacheFreshness, 'STALE_CACHE');
+});

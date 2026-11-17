@@ -19,7 +19,7 @@ export function extractRunSourceCoverage(item) {
     const acceptedQueries = sourceId === 'youtube_video_search' && Array.isArray(coverage.queries)
       ? coverage.queries.map(query => count(query?.accepted)).filter(value => value !== null)
       : [];
-    return {
+    const sourceCoverage = {
       sourceId,
       status: typeof source?.status === 'string' ? source.status : 'UNKNOWN',
       providerReturnedRecords: firstCount(
@@ -52,8 +52,9 @@ export function extractRunSourceCoverage(item) {
         && typeof coverage.provider_data_at === 'string' ? coverage.provider_data_at : null,
       googleFetchedAt: sourceId === 'google_web_serp'
         && typeof coverage.fetched_at === 'string' ? coverage.fetched_at : null,
-      deliveryState: ['SUCCESS', 'PARTIAL'].includes(source?.status)
-        && ['FRESH', 'CACHED'].includes(source?.delivery_state)
+      deliveryState: (['SUCCESS', 'PARTIAL'].includes(source?.status)
+        && ['FRESH', 'CACHED', 'STALE_CACHE'].includes(source?.delivery_state)
+        || source?.status === 'UNAVAILABLE' && source?.delivery_state === 'NOT_ELIGIBLE')
         ? source.delivery_state : null,
       sourceFetchedAt: [coverage.source_fetched_at, coverage.fetched_at,
         coverage.provider_data_at, coverage.cache_fetched_at]
@@ -70,6 +71,20 @@ export function extractRunSourceCoverage(item) {
       marketFilter: typeof coverage.market_filter === 'string' ? coverage.market_filter : null,
       languageFilter: typeof coverage.language_filter === 'string' ? coverage.language_filter : null,
     };
+    if (typeof source?.error_code === 'string') sourceCoverage.errorCode = source.error_code;
+    const providerRequestCount = firstCount(
+      source?.provider_request_count,
+      coverage.provider_request_count,
+    );
+    if (providerRequestCount !== null) sourceCoverage.providerRequestCount = providerRequestCount;
+    if (typeof coverage.next_eligible_at === 'string'
+        && !Number.isNaN(Date.parse(coverage.next_eligible_at))) {
+      sourceCoverage.nextEligibleAt = coverage.next_eligible_at;
+    }
+    if (typeof coverage.cache_freshness === 'string') {
+      sourceCoverage.cacheFreshness = coverage.cache_freshness;
+    }
+    return sourceCoverage;
   });
 
   const providerCounts = sources.map(source => source.providerReturnedRecords);

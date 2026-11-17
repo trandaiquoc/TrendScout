@@ -17,7 +17,7 @@ from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker, SourceWorkContext
 from app.jobs.public_admission import AdmissionDenied, PoolLimit
-from app.jobs.shared_cache import CacheGrant, SharedCache
+from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
 from app.sources.catalog import (
@@ -25,6 +25,7 @@ from app.sources.catalog import (
     GOOGLE_SOURCE_ID,
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
+    source_capability,
 )
 from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
 from app.sources.live_gateway import LivePageGateway
@@ -587,6 +588,10 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(youtube_calls), 1)
         self.assertIsNotNone(cached["sources"][YOUTUBE_SOURCE_ID]
                              ["coverage"]["cache_delivery_at"])
+        self.assertEqual(cached["sources"][YOUTUBE_SOURCE_ID]
+                         ["coverage"]["provider_request_count"], 0)
+        self.assertEqual(cached["sources"][YOUTUBE_SOURCE_ID]
+                         ["coverage"]["cached_provider_request_count"], 1)
 
         self.clock.value += timedelta(seconds=601)
         admission.admit("four-source-worker-stale-fallback-key", now=self.clock())
@@ -599,6 +604,8 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(youtube["coverage"]["source_fetched_at"],
                          result["sources"][YOUTUBE_SOURCE_ID]["coverage"]["source_fetched_at"])
         self.assertEqual(youtube["coverage"]["refresh_attempt_status"], "FAILED")
+        self.assertEqual(youtube["coverage"]["provider_request_count"], 1)
+        self.assertEqual(youtube["provider_request_count"], 1)
         self.assertEqual(len(youtube_calls), 2)
 
     async def test_manual_fresh_test_bypasses_cache_once_then_returns_to_cache_first(self):
@@ -668,6 +675,110 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["records"][0]["video_id"], "video-forced-refresh")
         self.assertEqual(len(forced_calls), 1)
 
+    def youtube_cache_only_handler(self, cache):
+        capability = source_capability(YOUTUBE_SOURCE_ID)
+        scope = CacheScope(
+            source_id=YOUTUBE_SOURCE_ID,
+            provider_id=capability.provider_id,
+            query=DEFAULT_QUERY_PLAN.fingerprint,
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            market=DEFAULT_QUERY_PLAN.market,
+            language=DEFAULT_QUERY_PLAN.language or "all",
+            window=DEFAULT_QUERY_PLAN.time_filter_rule,
+            parser_version=f"source-v{capability.capability_version}",
+            policy_version="fixture-cache-policy-v1",
+        )
+
+        def cache_grant(source_id, now):
+            return CacheGrant(source_id, "fixture-cache-policy-v1", now + timedelta(days=1),
+                              max_fresh_seconds=10, max_stale_seconds=60,
+                              max_retention_seconds=120, allowed=True)
+
+        handlers = D5SourceHandlers(
+            query_collectors={GOOGLE_SOURCE_ID: None, BING_SOURCE_ID: None,
+                              YOUTUBE_SOURCE_ID: None},
+            wikimedia=None, plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+            shared_cache=cache, resolve_cache_grant=cache_grant,
+            resolve_provider_batch=lambda _source, _now: {
+                "allowed": False, "error_code": "NOT_YET_ELIGIBLE",
+                "next_eligible_at": "2026-11-17T08:00:00+00:00",
+            },
+            unavailable_mode="LIVE", utcnow=self.clock,
+        ).build()
+        return handlers[YOUTUBE_SOURCE_ID], scope, cache_grant
+
+    async def test_youtube_fresh_cache_is_returned_before_schedule_with_zero_requests(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+        handler, scope, cache_grant = self.youtube_cache_only_handler(cache)
+        fetched_at = self.clock() - timedelta(seconds=5)
+        cache.put(scope, grant=cache_grant(YOUTUBE_SOURCE_ID, fetched_at), origin="LIVE",
+                  payload={"status": "SUCCESS", "data_mode": "LIVE", "records": [],
+                           "record_count": 0, "coverage": {
+                               "provider_method": "search.list",
+                               "provider_request_count": 1,
+                               "source_fetched_at": fetched_at.isoformat(),
+                           }}, fetched_at=fetched_at, now=fetched_at)
+
+        result = await handler(None)
+
+        self.assertEqual((result["status"], result["data_mode"], result["delivery_state"]),
+                         ("SUCCESS", "LIVE", "CACHED"))
+        self.assertEqual(result["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["cached_provider_request_count"], 1)
+        self.assertEqual(result["coverage"]["source_fetched_at"], fetched_at.isoformat())
+        self.assertIsNotNone(result["coverage"]["cache_delivery_at"])
+
+    async def test_youtube_stale_cache_is_delivered_outside_schedule(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+        handler, scope, cache_grant = self.youtube_cache_only_handler(cache)
+        fetched_at = self.clock() - timedelta(seconds=30)
+        cache.put(scope, grant=cache_grant(YOUTUBE_SOURCE_ID, fetched_at), origin="LIVE",
+                  payload={"status": "SUCCESS", "data_mode": "LIVE", "records": [],
+                           "record_count": 0, "coverage": {
+                               "provider_method": "search.list",
+                               "source_fetched_at": fetched_at.isoformat(),
+                           }}, fetched_at=fetched_at, now=fetched_at)
+
+        result = await handler(None)
+
+        self.assertEqual((result["status"], result["data_mode"], result["delivery_state"]),
+                         ("SUCCESS", "LIVE", "STALE_CACHE"))
+        self.assertEqual(result["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["cache_freshness"], "STALE_CACHE")
+        self.assertEqual(result["coverage"]["next_eligible_at"],
+                         "2026-11-17T08:00:00+00:00")
+        self.assertEqual(result["coverage"]["source_fetched_at"], fetched_at.isoformat())
+
+    async def test_youtube_missing_expired_and_invalid_cache_are_distinguished(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+        handler, scope, cache_grant = self.youtube_cache_only_handler(cache)
+        missing = await handler(None)
+        self.assertEqual((missing["status"], missing["error_code"]),
+                         ("UNAVAILABLE", "NO_CACHE_AVAILABLE"))
+        self.assertEqual(missing["coverage"]["provider_request_count"], 0)
+        self.assertEqual(missing["coverage"]["next_eligible_at"],
+                         "2026-11-17T08:00:00+00:00")
+
+        expired_at = self.clock() - timedelta(minutes=5)
+        expiring_grant = CacheGrant(
+            YOUTUBE_SOURCE_ID, "fixture-cache-policy-v1", self.clock() + timedelta(days=1),
+            max_fresh_seconds=10, max_stale_seconds=20,
+            max_retention_seconds=30, allowed=True,
+        )
+        cache.put(scope, grant=expiring_grant, origin="LIVE",
+                  payload={"status": "SUCCESS", "data_mode": "LIVE", "records": [],
+                           "record_count": 0}, fetched_at=expired_at, now=expired_at)
+        expired = await handler(None)
+        self.assertEqual(expired["error_code"], "CACHE_EXPIRED")
+        self.assertEqual(expired["coverage"]["cache_reason"], "RETENTION_EXPIRED")
+
+        cache.store.transact(scope.key, lambda record: ({**record, "schema": 999}, None))
+        invalid = await handler(None)
+        self.assertEqual(invalid["error_code"], "CACHE_INVALID")
+        self.assertEqual(invalid["coverage"]["cache_reason"], "INVALID_CACHE_RECORD")
+
     @staticmethod
     def _counted_wikimedia_response(request_counts):
         request_counts[WIKIMEDIA_SOURCE_ID] += 1
@@ -696,6 +807,43 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row["source_id"] for row in status["sources"]}, set(SOURCES))
         self.assertTrue(all(row["delivery_state"] == "FRESH" for row in status["sources"]))
         self.assertTrue(all(row["records"] for row in status["sources"]))
+
+    async def test_public_status_keeps_unavailable_source_mode_and_diagnostics(self):
+        handlers = {}
+        for source in SOURCES:
+            if source == YOUTUBE_SOURCE_ID:
+                def handler(_context):
+                    return {"status": "UNAVAILABLE", "data_mode": "SYNTHETIC",
+                            "records": [], "record_count": 0,
+                            "delivery_state": "NOT_ELIGIBLE",
+                            "provider_request_count": 0,
+                            "error_code": "NO_CACHE_AVAILABLE",
+                            "coverage": {"provider_request_count": 0,
+                                         "next_eligible_at": "2026-11-17T08:00:00+00:00"}}
+            else:
+                def handler(_context):
+                    return self.source_result()
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+            handlers[source] = handler
+        worker = self.worker(handlers)
+        public = DistributedPublicFetch(self.admission, worker,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        accepted = public.submit(
+            "unavailable-source-diagnostic-key",
+            source_ids=[YOUTUBE_SOURCE_ID],
+        )
+        await public.run_once("unavailable-source-worker")
+
+        result = public.status(accepted["job_id"], include_records=True)
+        youtube = result["sources"][0]
+        self.assertEqual(result["selected_sources"], [YOUTUBE_SOURCE_ID])
+        self.assertEqual(youtube["status"], "UNAVAILABLE")
+        self.assertEqual(youtube["data_mode"], "SYNTHETIC")
+        self.assertEqual(youtube["delivery_state"], "NOT_ELIGIBLE")
+        self.assertEqual(youtube["provider_request_count"], 0)
+        self.assertEqual(youtube["error_code"], "NO_CACHE_AVAILABLE")
+        self.assertEqual(youtube["coverage"]["next_eligible_at"],
+                         "2026-11-17T08:00:00+00:00")
 
     async def test_public_poll_budget_is_shared_and_atomic(self):
         config = policy(
