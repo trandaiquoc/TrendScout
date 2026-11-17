@@ -6,13 +6,12 @@ from unittest.mock import patch
 
 from google.auth.credentials import AnonymousCredentials
 
+from app.jobs.firestore_transactional import FirestoreTransactionalCoordinator
 from app.storage.firestore_emulator import (
     EmulatorConfigurationError,
     GuardedFirestoreEmulatorClient,
     create_guarded_emulator_client,
 )
-from app.jobs.firestore_transactional import FirestoreTransactionalCoordinator
-
 
 PROJECT = "demo-trendscout-p3s1"
 HOST = "127.0.0.1:8080"
@@ -113,6 +112,31 @@ class FirestoreEmulatorGuardTests(TestCase):
                 with patch("app.storage.firestore_emulator._assert_network_namespace_isolated"):
                     with self.assertRaises(EmulatorConfigurationError):
                         create_guarded_emulator_client()
+
+    def test_unexpected_json_schema_fails_closed_with_safe_shape_diagnostic(self):
+        with self.environment():
+            response = SimpleNamespace(
+                status=200,
+                getheader=lambda name: "application/json" if name == "Content-Type" else None,
+                read=lambda: b'{"documents": {}}',
+            )
+            connection = SimpleNamespace(
+                request=lambda *args, **kwargs: None,
+                getresponse=lambda: response,
+                close=lambda: None,
+            )
+            with patch(
+                "app.storage.firestore_emulator.http.client.HTTPConnection",
+                return_value=connection,
+            ):
+                with patch("app.storage.firestore_emulator._assert_network_namespace_isolated"):
+                    with patch("app.storage.firestore_emulator.firestore.Client") as client:
+                        with self.assertRaisesRegex(
+                            EmulatorConfigurationError,
+                            "documents_type=dict",
+                        ):
+                            create_guarded_emulator_client()
+            client.assert_not_called()
 
     def test_client_is_explicit_project_and_anonymous_no_adc(self):
         with self.environment():

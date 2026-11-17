@@ -6,15 +6,14 @@ factory is intentionally separate from the application's normal composition.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import http.client
 import json
 import os
 import re
+from dataclasses import dataclass
 
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import firestore
-
 
 SYNTHETIC_PROJECT_ID = "demo-trendscout-p3s1"
 _HOST_RE = re.compile(r"^(127\.0\.0\.1):([0-9]{1,5})$")
@@ -118,7 +117,16 @@ def _probe_firestore_emulator(target: EmulatorTarget) -> None:
         if response.status != 200 or content_type != "application/json":
             raise EmulatorConfigurationError("loopback listener did not identify as Firestore Emulator")
         if not isinstance(body, dict) or not isinstance(body.get("documents"), list):
-            raise EmulatorConfigurationError("Firestore Emulator probe response had an unexpected schema")
+            if isinstance(body, dict):
+                shape = (
+                    f"top_level_keys={sorted(body)[:8]!r}, "
+                    f"documents_type={type(body.get('documents')).__name__}"
+                )
+            else:
+                shape = f"body_type={type(body).__name__}"
+            raise EmulatorConfigurationError(
+                f"Firestore Emulator probe response had an unexpected schema ({shape})"
+            )
     except EmulatorConfigurationError:
         raise
     except (OSError, ValueError, json.JSONDecodeError) as exc:
