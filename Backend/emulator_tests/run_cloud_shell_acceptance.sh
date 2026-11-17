@@ -35,6 +35,9 @@ RUN_ROOT="$(mktemp -d /tmp/trendscout-firestore-acceptance.XXXXXXXX)"
 SAFE_HOME="$RUN_ROOT/home"
 SANDBOX_ETC="$RUN_ROOT/sandbox-etc"
 mkdir -p "$SAFE_HOME" "$RUN_ROOT/no-gcloud-config" "$SANDBOX_ETC/ssl/certs"
+: > "$RUN_ROOT/no-npm-user-config"
+: > "$RUN_ROOT/no-npm-global-config"
+chmod 600 "$RUN_ROOT/no-npm-user-config" "$RUN_ROOT/no-npm-global-config"
 
 finish() {
     local result=$?
@@ -219,7 +222,8 @@ COMMON_ENV_ARGS=(
     --setenv SETPRIV_COMMAND "$SETPRIV_REAL"
     --setenv PYTHONNOUSERSITE 1 --setenv PYTHONDONTWRITEBYTECODE 1
     --setenv JAVA_HOME "$JAVA_HOME" --setenv FIREBASE_CLI_DISABLE_TELEMETRY 1
-    --setenv NPM_CONFIG_USERCONFIG /dev/null --setenv NPM_CONFIG_GLOBALCONFIG /dev/null
+    --setenv NPM_CONFIG_USERCONFIG /work/no-npm-user-config
+    --setenv NPM_CONFIG_GLOBALCONFIG /work/no-npm-global-config
     --setenv NPM_CONFIG_UPDATE_NOTIFIER false --setenv PIP_CONFIG_FILE /dev/null
     --setenv GIT_CONFIG_NOSYSTEM 1 --setenv GIT_CONFIG_GLOBAL /dev/null
     --setenv GIT_TERMINAL_PROMPT 0
@@ -349,7 +353,7 @@ printf 'SOURCE_COMMIT_VERIFICATION=PASS\n'
 cd /work/repo/Backend
 "$PYTHON_COMMAND" -m venv /work/venv
 /work/venv/bin/python -m pip --isolated install --disable-pip-version-check --no-cache-dir --index-url https://pypi.org/simple -r requirements.txt
-"$NPM_COMMAND" --userconfig=/dev/null --globalconfig=/dev/null --prefix=/work/node install --no-audit --no-fund --registry=https://registry.npmjs.org "firebase-tools@$FIREBASE_TOOLS_VERSION"
+"$NPM_COMMAND" --userconfig=/work/no-npm-user-config --globalconfig=/work/no-npm-global-config --prefix=/work/node install --no-audit --no-fund --registry=https://registry.npmjs.org "firebase-tools@$FIREBASE_TOOLS_VERSION"
 FIREBASE_BIN=/work/node/node_modules/.bin/firebase
 cli_version="$("$FIREBASE_BIN" --version)"
 printf 'FIREBASE_CLI_VERSION=%s\n' "$cli_version"
