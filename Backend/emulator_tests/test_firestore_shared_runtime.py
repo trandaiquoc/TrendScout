@@ -3,7 +3,9 @@
 import asyncio
 import http.client
 import json
+import subprocess
 import sys
+import textwrap
 import threading
 import unittest
 import uuid
@@ -265,7 +267,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         self.assertEqual(quota["daily"]["used"], 1)
         self.assertTrue(commit_ack_lost["value"])
 
-    def test_synthetic_cache_hit_survives_client_reopen_without_provider_request(self):
+    def test_synthetic_cache_hit_survives_client_and_process_reopen_without_provider_request(self):
         capability = source_capability(WIKIMEDIA_SOURCE_ID)
         scope = CacheScope(
             source_id=WIKIMEDIA_SOURCE_ID,
@@ -305,6 +307,103 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
             now=self.now,
         )
         self.close_client(self.client)
+
+        child_check = textwrap.dedent(
+            """
+            import asyncio
+            import json
+            import sys
+            from datetime import datetime
+            from app.jobs.shared_cache import CacheGrant
+            from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
+            from app.sources.guarded_collector import CollectionLimits
+            from app.sources.query_plan import DEFAULT_QUERY_PLAN
+            from app.storage.firestore_emulator import create_guarded_emulator_client
+            from app.storage.firestore_shared_cache import create_firestore_shared_cache
+            from app.workers.d5_source_handlers import D5SourceHandlers
+
+            values = json.loads(sys.argv[1])
+            grant_data = values["grant"]
+            grant_data["expires_at"] = datetime.fromisoformat(grant_data["expires_at"])
+            grant = CacheGrant(**grant_data)
+            now = datetime.fromisoformat(values["now"])
+            client = create_guarded_emulator_client()
+            provider_calls = []
+
+            async def provider():
+                provider_calls.append("called")
+                return {
+                    "status": "UNAVAILABLE",
+                    "data_mode": "SYNTHETIC",
+                    "records": [],
+                    "record_count": 0,
+                }
+
+            try:
+                cache = create_firestore_shared_cache(client, max_inline_bytes=256)
+                handlers = D5SourceHandlers(
+                    query_collectors={
+                        GOOGLE_SOURCE_ID: None,
+                        BING_SOURCE_ID: None,
+                        YOUTUBE_SOURCE_ID: None,
+                    },
+                    wikimedia=None,
+                    plan=DEFAULT_QUERY_PLAN,
+                    limits=CollectionLimits(
+                        max_queries=1,
+                        max_pages_per_query=1,
+                        max_requests=1,
+                    ),
+                    shared_cache=cache,
+                    resolve_cache_grant=lambda _source_id, _now: grant,
+                    unavailable_mode="LIVE",
+                    utcnow=lambda: now,
+                )
+                result = asyncio.run(
+                    handlers._with_cache(WIKIMEDIA_SOURCE_ID, None, provider)
+                )
+                assert result["delivery_state"] == "CACHED", result
+                assert result["provider_request_count"] == 0, result
+                assert provider_calls == [], provider_calls
+                assert len(result["records"]) == 1, result
+                assert len(result["records"][0]["text"]) == 350_000, result
+                print(json.dumps({
+                    "delivery_state": result["delivery_state"],
+                    "provider_request_count": result["provider_request_count"],
+                    "provider_calls": len(provider_calls),
+                }))
+            finally:
+                client.close()
+            """
+        )
+        child_arguments = {
+            "grant": {
+                "source_id": grant.source_id,
+                "policy_version": grant.policy_version,
+                "expires_at": grant.expires_at.isoformat(),
+                "max_fresh_seconds": grant.max_fresh_seconds,
+                "max_stale_seconds": grant.max_stale_seconds,
+                "max_retention_seconds": grant.max_retention_seconds,
+                "allowed": grant.allowed,
+            },
+            "now": (self.now + timedelta(seconds=5)).isoformat(),
+        }
+        child = subprocess.run(
+            [sys.executable, "-c", child_check, json.dumps(child_arguments)],
+            cwd=BACKEND,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(
+            json.loads(child.stdout),
+            {
+                "delivery_state": "CACHED",
+                "provider_request_count": 0,
+                "provider_calls": 0,
+            },
+        )
 
         reader_client = self.new_client()
         reader = create_firestore_shared_cache(reader_client, max_inline_bytes=256)
