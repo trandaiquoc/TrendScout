@@ -48,6 +48,7 @@ jobs:
       GCLOUD_PROJECT: ''
       CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ''
       FIREBASE_TOKEN: ''
+      FIRESTORE_ACCEPTANCE_BWRAP_SUDO: '1'
     steps:
       - name: Check out the exact triggering revision
         uses: actions/checkout@v7
@@ -69,6 +70,11 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             bubblewrap iproute2 libseccomp2 openjdk-21-jre-headless \
             python3.12 python3.12-venv ca-certificates
+          java_21="$(dpkg -L openjdk-21-jre-headless | grep -E '^/usr/lib/jvm/java-21-[^/]*/bin/java$')"
+          java_21_home="${java_21%/bin/java}"
+          [[ -x "$java_21" && -d "$java_21_home" ]]
+          printf '%s/bin\n' "$java_21_home" >> "$GITHUB_PATH"
+          printf 'JAVA_HOME=%s\n' "$java_21_home" >> "$GITHUB_ENV"
 
       - name: Verify checked-out source and runner prerequisites
         shell: bash
@@ -79,7 +85,9 @@ jobs:
           [[ "$actual" == "$GITHUB_SHA" ]]
           printf 'BUBBLEWRAP=%s\n' "$(bwrap --version)"
           printf 'PYTHON=%s\n' "$(python3.12 --version)"
-          printf 'JAVA=%s\n' "$(java -version 2>&1 | head -n 1)"
+          java_version="$(java -version 2>&1 | head -n 1)"
+          [[ "$java_version" == *'21.'* ]]
+          printf 'JAVA=%s\n' "$java_version"
           printf 'NODE=%s\n' "$(node --version)"
           printf 'NPM=%s\n' "$(npm --version)"
 

@@ -99,6 +99,33 @@ for p in "$BWRAP_REAL" "$GIT_REAL" "$PYTHON_REAL" "$NODE_REAL" "$NPM_REAL" "$JAV
     fi
 done
 
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+DROP_PRIVILEGES=0
+BWRAP_RUN=("$BWRAP_REAL")
+SETPRIV_REAL=""
+case "${FIRESTORE_ACCEPTANCE_BWRAP_SUDO:-0}" in
+    0) printf 'BWRAP_PRIVILEGE_MODE=unprivileged\n' ;;
+    1)
+        SUDO_COMMAND="$(require_command sudo)"
+        SETPRIV_COMMAND="$(require_command setpriv)"
+        SUDO_REAL="$(real_path "$SUDO_COMMAND")"
+        SETPRIV_REAL="$(real_path "$SETPRIV_COMMAND")"
+        if ! is_system_path "$SUDO_REAL" || ! is_system_path "$SETPRIV_REAL"; then
+            printf 'FAIL: sudo and setpriv must resolve within mounted system paths.\n' >&2
+            exit 3
+        fi
+        BWRAP_RUN=("$SUDO_REAL" -n "$BWRAP_REAL")
+        DROP_PRIVILEGES=1
+        printf 'BWRAP_PRIVILEGE_MODE=sudo; sandbox payloads drop to uid=%s gid=%s\n' \
+            "$HOST_UID" "$HOST_GID"
+        ;;
+    *)
+        printf 'FAIL: FIRESTORE_ACCEPTANCE_BWRAP_SUDO must be 0 or 1.\n' >&2
+        exit 3
+        ;;
+esac
+
 NODE_BIND_ARGS=()
 if is_system_path "$NODE_REAL"; then
     if ! is_system_path "$NPM_REAL"; then
@@ -134,7 +161,7 @@ else
     NODE_BIND_ARGS+=(--dir /runtime --dir /runtime/node --ro-bind "$NODE_PACKAGE_ROOT" /runtime/node)
     printf 'NODE_TOOL_CACHE_PACKAGE=%s\n' "$NODE_PACKAGE_ROOT"
 fi
-BWRAP_VERSION="$("$BWRAP_REAL" --version)"
+BWRAP_VERSION="$("${BWRAP_RUN[@]}" --version)"
 printf 'BWRAP_VERSION=%s\n' "$BWRAP_VERSION"
 if [[ "$BWRAP_VERSION" != *"0.9.0"* ]]; then
     printf 'FAIL: expected Bubblewrap 0.9.0, found %s\n' "$BWRAP_VERSION" >&2
@@ -148,7 +175,7 @@ SAFE_PATH="$(dirname "$PYTHON_REAL"):$NODE_BIN_PATH:$(dirname "$JAVA_REAL"):$(di
 if [[ -r /etc/ssl/openssl.cnf ]]; then "$CP_COMMAND" --dereference /etc/ssl/openssl.cnf "$SANDBOX_ETC/ssl/openssl.cnf"; fi
 ln -sfn certs/ca-certificates.crt "$SANDBOX_ETC/ssl/cert.pem"
 cat > "$SANDBOX_ETC/hosts" <<'EOF'
-127.0.0.1 localhost
+127.0.0.1 localhost metadata.google.internal metadata
 ::1 localhost ip6-localhost
 EOF
 cat > "$SANDBOX_ETC/nsswitch.conf" <<'EOF'
@@ -161,11 +188,11 @@ protocols: files
 EOF
 cat > "$SANDBOX_ETC/passwd" <<EOF
 root:x:0:0:root:/work/home:/bin/bash
-sandbox:x:$(id -u):$(id -g):sandbox:/work/home:/bin/bash
+sandbox:x:$HOST_UID:$HOST_GID:sandbox:/work/home:/bin/bash
 EOF
 cat > "$SANDBOX_ETC/group" <<EOF
 root:x:0:
-sandbox:x:$(id -g):
+sandbox:x:$HOST_GID:
 EOF
 printf 'NAME="TrendScout isolated acceptance"\nID=linux\n' > "$SANDBOX_ETC/os-release"
 
@@ -186,6 +213,10 @@ COMMON_ENV_ARGS=(
     --setenv HOME /work/home --setenv TMPDIR /tmp
     --setenv XDG_CONFIG_HOME /work/home/.config --setenv XDG_CACHE_HOME /work/home/.cache
     --setenv CLOUDSDK_CONFIG /work/no-gcloud-config --setenv CI 1
+    --setenv FIRESTORE_ACCEPTANCE_DROP_PRIVILEGES "$DROP_PRIVILEGES"
+    --setenv FIRESTORE_ACCEPTANCE_HOST_UID "$HOST_UID"
+    --setenv FIRESTORE_ACCEPTANCE_HOST_GID "$HOST_GID"
+    --setenv SETPRIV_COMMAND "$SETPRIV_REAL"
     --setenv PYTHONNOUSERSITE 1 --setenv PYTHONDONTWRITEBYTECODE 1
     --setenv JAVA_HOME "$JAVA_HOME" --setenv FIREBASE_CLI_DISABLE_TELEMETRY 1
     --setenv NPM_CONFIG_USERCONFIG /dev/null --setenv NPM_CONFIG_GLOBALCONFIG /dev/null
@@ -209,6 +240,30 @@ if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number
     printf 'FAIL: Firebase CLI requires Node.js 20.19+ or 22.12+ (or a later major release)\n' >&2
     exit 12
 fi
+
+printf 'GOOGLE_METADATA_CHECK=START\n'
+"$PYTHON_COMMAND" - <<'PY'
+import socket
+
+targets = (
+    (socket.AF_INET, ("169.254.169.254", 80)),
+    (socket.AF_INET6, ("fd20:ce::254", 80, 0, 0)),
+)
+for family, address in targets:
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1.0)
+            result = probe.connect_ex(address)
+    except OSError as exc:
+        result = exc.errno or -1
+    if result == 0:
+        raise SystemExit(
+            f"FAIL: Google metadata endpoint {address[0]}:80 is reachable; "
+            "refusing to run dependency preparation with Cloud credentials available"
+        )
+    print(f"GOOGLE_METADATA_ENDPOINT={address[0]}:80 BLOCKED connect_result={result}")
+print("GOOGLE_METADATA_ACCESS=BLOCKED")
+PY
 
 printf 'SOURCE_FETCH=START\n'
 mkdir -p /work/repo
@@ -279,7 +334,39 @@ cat > "$RUN_ROOT/run_isolated.sh" <<'ISOLATED'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 cd /work/repo/Backend/emulator_tests
-ip link set lo up
+if [[ "${FIRESTORE_ACCEPTANCE_DROP_PRIVILEGES:-0}" == 1 && "${1:-}" != "unprivileged" ]]; then
+    ip link set lo up
+    exec "$SETPRIV_COMMAND" \
+        --reuid "$FIRESTORE_ACCEPTANCE_HOST_UID" \
+        --regid "$FIRESTORE_ACCEPTANCE_HOST_GID" \
+        --clear-groups --bounding-set=-all --no-new-privs \
+        /bin/bash /work/run_isolated.sh unprivileged
+fi
+if [[ "${1:-}" != "unprivileged" ]]; then ip link set lo up; fi
+if [[ "${FIRESTORE_ACCEPTANCE_DROP_PRIVILEGES:-0}" == 1 ]]; then
+    sandbox_uid="$(id -u)"
+    sandbox_gid="$(id -g)"
+    if [[ "$sandbox_uid" != "$FIRESTORE_ACCEPTANCE_HOST_UID" \
+        || "$sandbox_gid" != "$FIRESTORE_ACCEPTANCE_HOST_GID" ]]; then
+        printf 'FAIL: sandbox did not drop to the runner uid/gid.\n' >&2
+        exit 22
+    fi
+    /work/venv/bin/python - <<'PY'
+from pathlib import Path
+
+status = dict(
+    line.split(":", 1)
+    for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines()
+    if ":" in line
+)
+for key in ("CapEff", "CapPrm", "CapInh", "CapBnd"):
+    if status.get(key, "").strip(" \t") != "0000000000000000":
+        raise SystemExit(f"sandbox retained capabilities in {key}")
+if status.get("NoNewPrivs", "").strip() != "1":
+    raise SystemExit("sandbox does not have no_new_privs enabled")
+print("SANDBOX_CREDENTIALS=runner uid; capabilities=none; no_new_privs=1")
+PY
+fi
 /work/venv/bin/python - <<'PY'
 import errno
 import socket
@@ -318,7 +405,14 @@ chmod 700 "$RUN_ROOT/run_isolated.sh"
 
 STAGE="isolated preparation; network for Git, PyPI, npm, and emulator download only"
 printf '\nSTAGE=%s\n' "$STAGE"
-if ! "$BWRAP_REAL" "${BASE_ARGS[@]}" "${COMMON_ENV_ARGS[@]}" \
+PREPARE_COMMAND=(/bin/bash /work/prepare.sh)
+if (( DROP_PRIVILEGES )); then
+    PREPARE_COMMAND=(
+        "$SETPRIV_REAL" --reuid "$HOST_UID" --regid "$HOST_GID"
+        --clear-groups --bounding-set=-all --no-new-privs /bin/bash /work/prepare.sh
+    )
+fi
+if ! "${BWRAP_RUN[@]}" "${BASE_ARGS[@]}" "${COMMON_ENV_ARGS[@]}" \
     --setenv PYTHON_COMMAND "$PYTHON_REAL" --setenv JAVA_COMMAND "$JAVA_REAL" \
     --setenv NODE_COMMAND "$NODE_COMMAND" --setenv NPM_COMMAND "$NPM_COMMAND" \
     --setenv GIT_COMMAND "$GIT_REAL" \
@@ -326,14 +420,14 @@ if ! "$BWRAP_REAL" "${BASE_ARGS[@]}" "${COMMON_ENV_ARGS[@]}" \
     --setenv SOURCE_REF "$SOURCE_REF" --setenv EXPECTED_SOURCE_SHA "$EXPECTED_SOURCE_SHA" \
     --setenv FIREBASE_TOOLS_VERSION "$FIREBASE_TOOLS_VERSION" \
     --setenv SYNTHETIC_PROJECT "$SYNTHETIC_PROJECT" \
-    --chdir /work /bin/bash /work/prepare.sh; then
+    --chdir /work "${PREPARE_COMMAND[@]}"; then
     printf 'Preparation failed; see the log for the failing command.\n' >&2
     exit 20
 fi
 
 STAGE="loopback-only emulator and integration tests"
 printf '\nSTAGE=%s\n' "$STAGE"
-if ! "$BWRAP_REAL" "${BASE_ARGS[@]}" --unshare-net "${COMMON_ENV_ARGS[@]}" \
+if ! "${BWRAP_RUN[@]}" "${BASE_ARGS[@]}" --unshare-net "${COMMON_ENV_ARGS[@]}" \
     --chdir /work /bin/bash /work/run_isolated.sh; then
     printf 'Isolated emulator acceptance failed; see the test trace in the log.\n' >&2
     exit 21
