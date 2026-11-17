@@ -116,10 +116,20 @@ class CacheGrant:
 
 
 class SharedCache:
-    def __init__(self, store: AtomicStateStore):
+    def __init__(self, store: AtomicStateStore, *, payload_blobs=None,
+                 max_inline_bytes: int | None = None):
         if not callable(getattr(store, "transact", None)):
             raise TypeError("atomic state store required")
+        if payload_blobs is not None and not all(
+                callable(getattr(payload_blobs, method, None)) for method in ("put", "get")):
+            raise TypeError("payload blob store must support durable reads and writes")
+        if max_inline_bytes is None:
+            max_inline_bytes = _MAX_BYTES if payload_blobs is None else 500_000
+        if type(max_inline_bytes) is not int or not 1 <= max_inline_bytes <= _MAX_BYTES:
+            raise ValueError("cache inline payload limit is invalid")
         self.store = store
+        self.payload_blobs = payload_blobs
+        self.max_inline_bytes = max_inline_bytes
 
     @staticmethod
     def _authorized(scope: CacheScope, grant: CacheGrant | None, now: datetime) -> bool:
@@ -149,11 +159,25 @@ class SharedCache:
                            _utc(grant.expires_at))
         if now >= retain_until or now >= stale_until:
             raise ValueError("cache entry already expired")
-        record = {"schema": 1, "scope_hash": scope.key, "origin": origin,
-                  "payload": json.loads(encoded), "fetched_at": fetched_at.isoformat(),
+        external = len(encoded) > self.max_inline_bytes
+        if external and self.payload_blobs is None:
+            raise ValueError("cache payload exceeds inline storage budget")
+        payload_ref = None
+        if external:
+            payload_ref = self.payload_blobs.put(
+                [json.loads(encoded)], now=now, retain_until=retain_until
+            )
+            if not self._valid_payload_reference(payload_ref):
+                raise ValueError("cache blob store returned an invalid reference")
+        record = {"schema": 2 if external else 1, "scope_hash": scope.key, "origin": origin,
+                  "fetched_at": fetched_at.isoformat(),
                   "fresh_until": min(fresh_until, retain_until).isoformat(),
                   "stale_until": min(stale_until, retain_until).isoformat(),
                   "retain_until": retain_until.isoformat(), "last_checked_at": now.isoformat()}
+        if external:
+            record.update(payload_storage="EXTERNAL_RECORDS", payload_ref=payload_ref)
+        else:
+            record["payload"] = json.loads(encoded)
         def op(old):
             # A late old result cannot overwrite a newer observation.
             if old:
@@ -180,7 +204,8 @@ class SharedCache:
         def op(record):
             if not record:
                 return {}, {"status": "UNAVAILABLE", "reason": "CACHE_MISS"}
-            if record.get("schema") != 1 or record.get("scope_hash") != scope.key:
+            if (type(record.get("schema")) is not int or record["schema"] not in {1, 2}
+                    or record.get("scope_hash") != scope.key):
                 return record, {"status": "REJECTED", "reason": "INVALID_CACHE_RECORD"}
             try:
                 fetched = _utc(datetime.fromisoformat(record["fetched_at"]))
@@ -188,9 +213,17 @@ class SharedCache:
                 stale = _utc(datetime.fromisoformat(record["stale_until"]))
                 fresh = _utc(datetime.fromisoformat(record["fresh_until"]))
                 checked = _utc(datetime.fromisoformat(record["last_checked_at"]))
-                if record["origin"] not in {"LIVE", "SYNTHETIC"} or not isinstance(record["payload"], dict):
+                if record["origin"] not in {"LIVE", "SYNTHETIC"}:
                     raise ValueError("invalid cached payload")
-                _safe_payload(record["payload"])
+                if record["schema"] == 1:
+                    if "payload_ref" in record or not isinstance(record.get("payload"), dict):
+                        raise ValueError("invalid inline cached payload")
+                    _safe_payload(record["payload"])
+                elif (self.payload_blobs is None
+                      or record.get("payload_storage") != "EXTERNAL_RECORDS"
+                      or "payload" in record or not self._valid_payload_reference(
+                          record.get("payload_ref"))):
+                    raise ValueError("invalid external cached payload")
             except (KeyError, TypeError, ValueError):
                 return record, {"status": "REJECTED", "reason": "INVALID_CACHE_RECORD"}
             if not fetched <= fresh <= stale <= retention or fetched > now or now < checked:
@@ -218,11 +251,38 @@ class SharedCache:
                           retain_until=restricted_retention.isoformat())
             if now >= restricted_stale:
                 return record, {"status": "EXPIRED", "reason": "STALE_WINDOW_EXPIRED"}
-            return record, {"status": "CACHED" if now < restricted_fresh else "STALE",
-                            "origin": record["origin"], "fetched_at": record["fetched_at"],
-                            "payload": record["payload"],
-                            "retain_until": restricted_retention.isoformat()}
-        return self.store.transact(scope.key, op)
+            result = {"status": "CACHED" if now < restricted_fresh else "STALE",
+                      "origin": record["origin"], "fetched_at": record["fetched_at"],
+                      "retain_until": restricted_retention.isoformat()}
+            if record["schema"] == 1:
+                result["payload"] = record["payload"]
+            else:
+                result["_payload_ref"] = record["payload_ref"]
+            return record, result
+        result = self.store.transact(scope.key, op)
+        payload_ref = result.pop("_payload_ref", None)
+        if payload_ref is not None:
+            try:
+                records = self.payload_blobs.get(payload_ref, now=now)
+                if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+                    raise ValueError("cache payload blob shape is invalid")
+                _safe_payload(records[0])
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                return {"status": "UNAVAILABLE", "reason": "CACHE_BLOB_UNAVAILABLE"}
+            result["payload"] = records[0]
+        return result
+
+    @staticmethod
+    def _valid_payload_reference(reference) -> bool:
+        return bool(
+            isinstance(reference, dict)
+            and isinstance(reference.get("digest"), str)
+            and _HASH.fullmatch(reference["digest"])
+            and type(reference.get("raw_bytes")) is int
+            and 0 <= reference["raw_bytes"] <= _MAX_BYTES + 16
+            and type(reference.get("item_count")) is int
+            and reference["item_count"] == 1
+        )
 
     def delete(self, scope: CacheScope) -> None:
         if not isinstance(scope, CacheScope):
