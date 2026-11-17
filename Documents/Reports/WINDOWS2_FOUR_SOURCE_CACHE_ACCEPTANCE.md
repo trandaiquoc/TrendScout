@@ -1,6 +1,6 @@
 # TrendScout — Windows 2 YouTube Cache-First and Four-Source Correction
 
-**Status: implementation committed; live Windows acceptance is pending.** This report records verified work for the post-D6 correction. It does not change or replace the completed D6 acceptance result.
+**Status: Windows 2 LIVE, cache persistence, four-source and isolated headless browser acceptance complete.** This report records verified work for the post-D6 correction. It does not change or replace the completed D6 acceptance result.
 
 ## Scope and baseline
 
@@ -43,19 +43,59 @@ SQLite integrity checks for the local collections database and normal Google LIV
 - `git diff --check` — passed before commit.
 - Focused regression coverage includes fresh/stale/missing/expired/invalid cache behavior, zero-request cache delivery, SQLite reopen persistence, unavailable-source manifest/diagnostics, the Windows host/default/Vercel manual-mode guards, and a frontend assertion that all four selected source IDs and the current YouTube policy version are submitted together.
 
-## Live runtime state and remaining acceptance
+## Windows 2 acceptance evidence - 17 Nov 2026
 
-At the first runtime capture, NORMAL_DEMO was listening on port 8000. On the resumed MCP check, no listener was present on ports 8000, 8001, or 9223; a direct `GET http://127.0.0.1:8000/dashboard/` failed with `Unable to connect to the remote server`. The guarded owner manual runtime was started separately on loopback `127.0.0.1:8001`; its capability response reported `OWNER_MANUAL_LIVE`, `d6-youtube-v2` approved, designated host, and server-side YouTube key presence. Startup logs show no provider request. No YouTube search request has been made by this agent, so no genuine Windows YouTube cache has yet been created and no YouTube quota has been consumed by this run.
+The prior implementation and regression work remain unchanged. This update closes the live runtime and browser acceptance gates using the authorized Windows 2 owner runtime. No database reset, push, deployment, Firebase migration, or D7 work was performed. D6 remains complete at 100%.
 
-Browser interaction remains pending. The user requested a hidden Chrome workflow and asked the agent not to control the Windows desktop. Although the owner reported Chrome MCP connected on port 9223, this session still exposes no Chrome DevTools MCP tool; the browser provider reports `browser access host unavailable`, `127.0.0.1:9223` has no listener, and the shell cannot resolve the suggested `chrome` hostname. The plugin directory search did not find a Chrome DevTools MCP connector, and available headless browser modules were not usable. The actual `cua.listBrowsers()` call failed with `The browser access host is unavailable`; no screenshot or JavaScript console could be captured. The user asked not to control the desktop or personal Chrome, so no login, policy-consent click, or Fetch UI action was attempted. No YouTube or SerpAPI quota was consumed. The owner manual server was shut down cleanly after the browser-access failures; no provider call occurred. Restart it with `start.ps1 -Port 8001 -YoutubeOwnerManualLive` after the Chrome MCP is available.
+### A-C. YouTube LIVE/FRESH and durable SQLite evidence
 
-The official Chrome DevTools MCP documentation supports attaching to a running Chrome through a configurable `--browser-url`, including a custom loopback port such as `http://127.0.0.1:9223`. This requires the owner to start Chrome with remote debugging enabled. Upstream warns that any local application able to reach that debugging port can control the browser; use a separate Chrome profile and keep the listener on loopback. No Chrome launch flags or MCP configuration were changed here. See [Chrome DevTools MCP connection guidance](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/advanced-usage.md) and [Chrome DevTools configuration](https://developer.chrome.com/docs/devtools/agents/get-started/configuration/), accessed 17 Nov 2026.
+- Started the guarded `OWNER_MANUAL_LIVE` runtime on loopback port 8001. Its capability response showed the approved `d6-youtube-v2` policy, designated Windows 2 host, and configured server-side key. Startup made no provider request.
+- In the isolated Chrome DevTools browser context, selected YouTube Search only and submitted one user-triggered Fetch. Run ID: `e2c1602c4f207b87e4a5e34a45b96cf0`.
+- The result was `PARTIAL`, `LIVE`, `FRESH`, through YouTube Data API v3 `search.list`, with exactly one provider request. The provider returned 50 accepted results; 47 unique records were retained and 3 were explicitly omitted by the configured storage limit. No records were rejected. Only the first page was requested; the continuation token was saved without another request.
+- The recorded query was `technology software gadgets electronics trends`, scope `technology`, market filter `US`, language filter `en-US`. These filters do not establish US authorship, audience, or demand.
+- After the owner runtime stopped, read-only checks of `C:\Users\tdquo\.local\state\trendscout\normal-google-live-v1\state.sqlite` returned `PRAGMA integrity_check = ok`. The scoped cache row `84bf085bbe80496f193cf354c00c0a758bf83dae768efd8deb70e9777fae7fa8` contains `origin=LIVE`, `data_mode=LIVE`, `delivery_state=FRESH`, `status=PARTIAL`, and 47 records. All 47 IDs are distinct and valid 11-character YouTube IDs; all 47 canonical watch URLs match their stored IDs. The fetch job and source checkpoint are durable in the same SQLite state database.
+- `OWNER_MANUAL_LIVE` was stopped cleanly before starting `NORMAL_DEMO`.
 
-Consequently, these gates remain unverified: one real YouTube-only `search.list` response and SQLite persistence; Source Center/Run History/Data Quality evidence for that response; two NORMAL_DEMO cache-only reads across application restarts with unchanged provider usage and observation time; a combined four-source Fetch; and responsive/light-dark/English-Vietnamese browser QA. No claim of LIVE/CACHED YouTube data is made.
+### D-F. NORMAL_DEMO restart and zero-request cache reads
 
-The official YouTube documentation accessed 17 Nov 2026 describes a default `search.list` bucket of 100 calls/day, with each call costing one quota unit, and documents `regionCode` and `relevanceLanguage`. Project-specific quota is unknown until checked in Google Cloud Console; no billing was enabled. The adapter is configured for `regionCode=US` and `relevanceLanguage=en`. These provider settings do not establish US authorship, audience, or demand.
+- First NORMAL_DEMO restart: run `d91afd4fc6b1b4b3cb8edeb59085fe2e` returned 47 records as `PARTIAL / LIVE / CACHED`, with `provider_request_count=0`. It preserved the original observation time `2026-11-17T08:59:12.469794Z`; cache delivery was `2026-11-17T09:02:41.782268Z`.
+- Second NORMAL_DEMO restart: run `c1d26bc8187efd256ec90e1c19d70bb0` again returned 47 records as `PARTIAL / LIVE / CACHED`, with `provider_request_count=0` and the same source observation time. Cache delivery was `2026-11-17T09:03:43.668450Z`.
+- The YouTube application ledger remained at one `search.list` request: 1/6 daily and 1/200 monthly after both restart reads. The last provider request timestamp stayed at the original LIVE request. No cache read made another YouTube call.
+
+### G-H. Combined four-source Fetch, Run History, Data Quality, and quotas
+
+The required combined Fetch completed outside the configured refresh window as run `3e08feafb3e907b676b550c8a25d91c7`. The selected source IDs were Wikimedia Pageviews, Google Search, Bing Search, and YouTube Search. The saved run and dataset both report `PARTIAL`, `LIVE`, with 1,490 records received, 1,368 keywords retained, 74 rejected records, and 9 quality notes.
+
+| Source | Result | Evidence |
+| --- | --- | --- |
+| Bing Search | `SUCCESS / LIVE / CACHED` | 1 retained record; 0 provider requests; prior observation 14:26 ICT |
+| Google Search | `PARTIAL / LIVE / CACHED` | 442 retained candidates; stale cache and `NOT_YET_ELIGIBLE`; 0 Trending Now calls; two candidate verification checks were blocked by admission |
+| Wikimedia Pageviews | `SUCCESS / LIVE / CACHED` | 1,000 retained records; 0 provider requests; observation date 2026-11-15 |
+| YouTube Search | `PARTIAL / LIVE / CACHED` | 50 provider results in the originating cache; 47 retained, 3 omitted; 0 requests in this combined run |
+
+Run History details show all four per-source statuses, cache delivery, source observation times, counts, and the same run ID. Data Quality was reloaded after the combined run; its latest saved snapshot points to this same dataset and reports all four source statuses plus the matching 1,490 / 1,368 / 74 totals.
+
+The Source Center showed YouTube at 1/6 daily and 1/200 monthly application requests, with provider quota still `UNKNOWN`. SerpApi local ledgers were unchanged by the combined Fetch: 7/9 daily and 15/244 monthly overall; Google 6/6 daily and Bing 1/3 daily. Source coverage shows no Google Trending Now request, no Bing request, and no paid SerpApi search request in this run. Two Google candidate verification checks were blocked by local admission (`serp_admission_blocked_count=2`).
+
+The provider-account quota snapshot refreshed during the combined run at `2026-11-17T09:05:02Z` and showed 15/250 monthly searches, with 235 remaining and renewal on 2026-12-11. The previously stored provider snapshot was 14 and stale; the local monthly ledger was already 15 before and after this run. The snapshot update is recorded as refreshed telemetry and is not attributed to this Fetch as a new search. No additional local SerpApi allocation was consumed.
+
+### I. Isolated headless Chrome DevTools browser QA
+
+- A real `mcp__chrome_devtools__list_pages` call succeeded, confirming the Chrome DevTools MCP connection. The dashboard was opened in the isolated `trendscout-dashboard-verification` context using HeadlessChrome 157; no personal Chrome session or Windows desktop was controlled.
+- Inspected the Overview, Source Center, Run History, and Data Quality routes. Verified the displayed source statuses, cache/request counts, quota panels, combined run detail, and quality totals. Theme and language toggles had already passed in the earlier browser QA; this continuation reused that evidence.
+- At a 390 x 844 mobile viewport, `scrollWidth` and `clientWidth` both measured 390. Captured and saved the Run History viewport and full-page Data Quality screenshot:
+  - [Run History - four-source run](windows-evidence/windows2-four-source-run-history-mobile-390.png)
+  - [Data Quality - combined dataset](windows-evidence/windows2-four-source-data-quality-mobile-390.png)
+- After reload, the JavaScript console contained no runtime exceptions. Chromium reported two non-fatal form/accessibility issues (missing autocomplete; a form field without an id/name). An earlier initial page load also requested `/favicon.ico`, which returned 404 `LOCAL_ROUTE_NOT_ALLOWED`; subsequent reload console output contained only the two issue warnings.
+- Visual QA notes: long quality-note text wraps into a tall column at 390 px but does not create horizontal overflow. The Run History Google coverage detail contains a mis-encoded separator. The supplemental Data Quality timing panel still says collection time unavailable and "No run to assess yet," while the latest-data snapshot above it accurately reports the combined run and its source statuses. These UI observations are recorded; no unrelated UI refactor was made.
+
+### Completion and remaining limits
+
+All remaining Windows 2 acceptance gates A-J are complete. Existing implementation/regression commits and passing evidence were reused: backend 930 passed / 2 skipped, frontend 22 passed, Ruff passed, and PowerShell parser validation passed. No tests were rerun for this documentation-and-evidence-only update.
+
+The Google Cloud project-specific YouTube quota remains unknown; the authorized run used one `search.list` call. The adapter's `US` market and `en-US` language filters do not prove where creators or viewers are located. YouTube records remain source evidence only and are not converted into keyword volume. The official YouTube quota references were checked 17 Nov 2026; provider limits can change:
 
 - [YouTube Data API quota calculator](https://developers.google.com/youtube/data/determine_quota_cost?hl=en)
-- [YouTube Data API `search.list` reference](https://developers.google.com/youtube/data/reference/rest/v3/search/list?hl=en)
+- [YouTube Data API `search.list` reference](https://developers.google.com/youtube/v3/docs/search/list?hl=en)
 
-To finish live acceptance, use the owner's browser session to complete policy consent and one YouTube-only Fetch against `http://127.0.0.1:8001/dashboard/`, then verify the persisted cache and NORMAL_DEMO readbacks, run the combined four-source Fetch without an unnecessary SerpAPI call, complete browser QA, and update this report with observed evidence before the final local documentation commit.
+Before this report update, `git fetch origin` completed; local `main` was clean at `2c1308b57550c591a76679a99fc9cdc7c5d38d45`, one commit ahead of `origin/main` at `39b92351e8547e38e270138f9dd624961ea0ad34`. There was no incoming commit to synchronize, and nothing was pushed. This report and its two screenshots are the only additional acceptance artifacts.
