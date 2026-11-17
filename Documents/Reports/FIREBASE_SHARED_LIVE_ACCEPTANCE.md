@@ -44,8 +44,8 @@ The 61% is a partial Goal state. It does not claim four-source shared LIVE is pr
 ### Windows 1 continuation state
 
 - The required fetch completed before edits. At the start, local `main` and `origin/main` both equaled `1f2009a19b09530a30eca3f1a591ee355de2dedb`; they had zero commits of divergence.
-- The continuation changes are committed locally after targeted verification. They have not been pushed; `origin/main` remains at `1f2009a19b09530a30eca3f1a591ee355de2dedb`.
-- No force-push was used. A push is intentionally deferred because it may start the Vercel status check, which the owner prohibited.
+- Windows 1 implementation commit: `f94d377b693cab2816d9bdeb0a36a91773025bc5` — `Add explicit Firestore shared LIVE runtime`, parent `1f2009a19b09530a30eca3f1a591ee355de2dedb`. Immediately after that commit, a fresh fetch confirmed local `main` was one commit ahead of `origin/main` and the worktree was clean.
+- This report correction is also committed locally; no continuation commit was pushed. The last fresh fetch left `origin/main` at `1f2009a19b09530a30eca3f1a591ee355de2dedb`. No force-push was used. A push is intentionally deferred because it may start the Vercel status check, which the owner prohibited.
 
 - Initial `HEAD` and `origin/main` matched at `3dd80a534bc33152ecc7809831528f63caed2130`; the worktree was clean.
 - Implementation commit: `0fe00e5b5fc0750c20abfc6dd961433b402fc4cf` — `Add bounded Firestore shared cache adapter`.
@@ -58,7 +58,7 @@ The 61% is a partial Goal state. It does not claim four-source shared LIVE is pr
 - Explicit composition commit: `44d7006f404ea063922af0c6f0c09801140b41de` — `Add explicit Firestore cache composition`. It binds the atomic-state adapter and blob adapter to the same injected client; the full Backend test suite and Ruff passed after this change.
 - Before the latest push, `git fetch origin` showed a clean worktree with two local commits ahead and zero remote-only commits; `git diff --check origin/main...HEAD` passed. A fast-forward moved `main` from `ccd49fc` to `82e5621`. A post-push fetch confirmed `HEAD` and `origin/main` both equal `82e56219f608c503c92f54db7b8bd9f0149d210a`, with a clean worktree.
 - A report-only correction commit, `3ba6ae2155037cc54746c19353c5f51b91e029c9`, was then pushed from `82e5621`; a post-push fetch confirmed `HEAD` and `origin/main` matched at `3ba6ae2155037cc54746c19353c5f51b91e029c9`, with a clean worktree.
-- This revision adds only the IAM-tool availability evidence. It is committed and fast-forward pushed after a fresh fetch confirmed zero remote-only commits; post-push `HEAD` and `origin/main` matched, with a clean worktree. Never force-push.
+- At the earlier Windows 2 checkpoint, an IAM-tool availability note was committed and fast-forward pushed; that historical post-push `HEAD` and `origin/main` matched at `3ba6ae2155037cc54746c19353c5f51b91e029c9`, with a clean worktree.
 - Do not push `.env*`, owner tokens, API credentials, SQLite databases, WAL/SHM files, or local runtime data.
 
 ## Implementation
@@ -117,7 +117,7 @@ Official references consulted on 2026-11-17: [Firestore quotas and limits](https
 - **Reusable candidate, not production wired:** `FirestoreAtomicStateStore` provides bounded one-document serializable transforms (700,000-byte JSON ceiling) with ambiguous-commit handling. The new blob adapter uses an injected Firestore client. These paths need emulator and real service-identity acceptance before runtime use.
 - **Emulator guarded:** `app/jobs/firestore_transactional.py` implements transactional job leases, fencing, shard staging, and dataset pointer publication, but its coordinator requires the guarded synthetic Firestore Emulator client. Its emulator tests were not run in this phase.
 - **Legacy/unsafe as a shared-LIVE switch:** `app/storage/firestore.py` constructs Firebase Admin clients from project/ADC for the older run API; it is not the current NORMAL_DEMO composition. Do not treat it as the shared cache/quota backend.
-- **Missing:** A production Firestore runtime composition, backend service identity and least-privilege IAM, a bounded lifecycle for global admission state, real transaction contention/recovery tests, and cross-runtime acceptance.
+- **Still unaccepted or unwired:** The new Firestore composition is opt-in and not connected to a production/default runtime. Backend service identity and least-privilege IAM, a bounded lifecycle for global admission state, real transaction contention/recovery evidence, and cross-runtime acceptance remain open.
 
 ## Runtime and emulator blockers
 
