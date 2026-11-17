@@ -2,9 +2,24 @@
 
 **Reviewed:** 17 November 2026
 
-**Status:** 91% complete. The Linux `trandaiquoc` runtime completed genuine YouTube LIVE/FRESH acceptance, cache-only delivery before and after restart, SQLite verification, and real-browser QA. Manual mode is stopped and NORMAL_DEMO remains the default. G2 is partial because this Linux session could not independently inspect whether Windows `QUOC` is inactive; this report does not claim that Windows has stopped or claim 100%. Vercel remains intentionally read-only.
+**Status:** 100% complete for the authorized D6 final handoff. The owner confirmed that the former Linux host `QUOC` was shut down and converted to Windows 2, that no Linux LIVE runtime remains, and that `OWNER_MANUAL_LIVE` stopped after Linux acceptance. The current verified Windows hostname is `DESKTOP-ICECOET`. The prior Linux SQLite/quota ledger was not found in the inspected Windows paths, so historical provider and cache evidence remains recorded in this report. Provider quota remains `UNKNOWN`; empty Windows state is not treated as zero historical usage.
 
-## Gate status
+## Current final handoff gate status
+
+| Gate | Weight | Status | Evidence |
+|---|---:|---|---|
+| G0 — Repository synchronization | 8% | PASS | `git fetch origin` completed with the pre-change `HEAD` equal to `origin/main` at `b8c289b97f9a5d2fd67c43eee3a298d4f04c84a7`. The Windows code/test commit and report commit are local; no push occurred. |
+| G1 — YouTube API contract | 12% | PASS | The focused YouTube suite passed 52 tests on Windows. The original Linux acceptance still documents two genuine bounded `search.list` responses, canonical video records and provider timestamps. No provider call was repeated for this handoff. |
+| G2 — Quota governance | 18% | PASS | The owner confirmed that the former Linux runtime is stopped and the accepted D6 runtime has moved to Windows 2. A local process scan found no matching TrendScout/Python/Uvicorn worker. The `OWNER_MANUAL_LIVE` path remains Linux-only and its Windows rejection test passed. Provider quota remains `UNKNOWN`, and the old usage ledger is not available in the inspected Windows state. |
+| G3 — Schedule, cache and Source Center | 12% | PASS | Windows code and focused tests confirm the default YouTube query mode remains `NORMAL_DEMO`, with schedule and cache guards intact. The app was not launched; no startup Fetch or provider traffic occurred. |
+| G4 — Genuine YouTube LIVE evidence | 16% | PASS | The retained Linux evidence records two genuine `search.list` requests, 50 accepted provider records, 47 stored records, 3 size-cap omissions and two `LIVE/CACHED` deliveries including after restart. This evidence was preserved without another provider request. |
+| G5 — SQLite and application flow | 16% | PASS | The prior Linux SQLite/application evidence remains documented. Current Windows Google, Wikimedia and Collections databases pass `integrity_check`; their contents do not include the old Linux YouTube records or quota history. This absence is recorded without fabricating a migration. |
+| G6 — Regression and browser QA | 12% | PASS | Focused backend regressions: 150 passed, 3 Linux-only tests skipped; frontend Node tests: 20 passed; all 14 public JavaScript files passed syntax checks; five offline Chrome E2E suites passed. The Firestore emulator waiver remains in force and is not counted as a pass. |
+| G7 — Report and commits | 6% | PASS | The code/test fix and this report update are separate local commits. No push, deployment, state reset, data deletion, paid service change or D7 work occurred. |
+
+**Weighted handoff progress: 100%.** G2 completion relies on the owner's confirmation that the Linux runtime stopped and the accepted D6 handoff moved to Windows 2. Provider quota remains unknown, and the prior Linux state is preserved here as report evidence rather than represented as migrated Windows data.
+
+## Historical gate status — prior Linux-session snapshot
 
 | Gate | Weight | Status | Evidence |
 |---|---:|---|---|
@@ -19,7 +34,7 @@
 
 **Weighted gate progress: 91%.** G2 contributes 9/18 because the single-host requirement cannot be fully verified without access to Windows `QUOC`; all other weighted gates pass. G4 is complete with genuine provider evidence. The goal remains incomplete until Windows inactivity is independently established. The local manual process has been stopped, and actual usage history is preserved.
 
-> Sections below describing the 16 November preflight, earlier browser checks and Windows acceptance are retained as historical records. The latest dated Linux update at the end supersedes earlier statements about the active host, provider-call count, cache state, current browser evidence and progress.
+> The detailed sections below preserve earlier Linux and Windows sessions as historical evidence. The latest dated section at the end of this report is the current Windows 2 handoff snapshot; it supersedes earlier claims about the current host, app/database state and overall progress. The genuine Linux provider and cache records remain the evidence for the accepted provider calls.
 
 ## Public policy publication, verified 16 November 2026
 
@@ -211,3 +226,28 @@ No other owner quota approval is requested; the existing two-request authorizati
 - Real Linux browser QA covered dashboard, Source Center, YouTube-only selection, cancellation before submission, acceptance and persisted policy version, LIVE/FRESH, LIVE/CACHED, Run History, Data Quality, local quota metrics and provider quota UNKNOWN. Vietnamese/English, light/dark, keyboard skip-navigation and 390×844 mobile layout were checked; the mobile page had no horizontal overflow. The actual Fetch used the accepted agreement.
 - Focused validation: **185 backend tests passed** across planner, admission/quota, worker/cache, launcher, composition, local LIVE HTTP, policy consent, source adapters and provider allocation contracts; **20 frontend Node tests passed**. Ruff, JavaScript syntax checks and `git diff --check` passed. NORMAL_DEMO scheduling/default and the explicit manual fresh behavior are covered by tests. The Google/Bing and Wikimedia focused regressions passed; Wikimedia was 18/18. The Firestore emulator suite was not run under the existing explicit waiver, so its 16 setup failures are not counted as passes. No full repository suite is claimed.
 - The focused implementation commit is `3be11d7e4a20cb4c3154224b5818351f3ab7edfe` (`fix(youtube): add owner manual live mode`). The report is committed separately. No push, deploy, policy republish, billing change, state reset, or D7 work occurred.
+
+## Windows 2 final handoff update — 17 November 2026
+
+### Host, ownership and runtime state
+
+- `socket.gethostname()` on the current Windows machine returned `DESKTOP-ICECOET`. The owner confirmed that the former Linux host `QUOC` was powered down and converted to Windows 2, that no Linux LIVE runtime remains, and that Linux `OWNER_MANUAL_LIVE` stopped after the original acceptance. No remote inspection of the former host was attempted; the cross-host status here is based on that owner confirmation.
+- The local process scan found no matching TrendScout, Python or Uvicorn process. Before any launch, process-scope `TREND_SCOUT_YOUTUBE_LIVE_APPROVED` and `TREND_SCOUT_YOUTUBE_LIVE_HOST` were absent. `start.ps1` derives the current Windows hostname and scopes those values to the explicitly launched process, restoring the prior values when it exits. This handoff did not invoke `start.ps1` or start a server.
+- The default YouTube query mode remains `NORMAL_DEMO` with its scheduled/cache controls. `OWNER_MANUAL_LIVE` remains Linux-only; the Windows launcher guard rejects that mode. No automatic YouTube startup Fetch occurred, and no YouTube or SerpApi provider request was made during this handoff.
+- Vercel was left read-only. No deployment, push, database migration, reset, deletion or D7 work was performed.
+
+### Credentials and local data inspection
+
+- The credential resolver reported only `YOUTUBE_API_KEY=PRESENT` and `SERPAPI_API_KEY=PRESENT`. Credential values and `.env` contents were never printed or added to this report. Provider quota remains `UNKNOWN`.
+- The Windows state directory contains `normal-google-live-v1/state.sqlite` (20 KiB; integrity `ok`; five `atomic_state` rows, including an empty `normal-youtube-search-schedule-v1` object; zero snapshot blobs) and `normal-wikimedia-live-v1/state.sqlite` (20 KiB; integrity `ok`; one empty state object; zero snapshot blobs). The schedule object contains no old quota usage or accepted YouTube evidence.
+- `%LOCALAPPDATA%\TrendScout\collections-v1\collections.sqlite` is 167,936 bytes and passes `integrity_check`. It has 18 tables; only `settings` has a row. `fetch_jobs`, `dataset_snapshots`, `keywords` and the other data tables are empty. The known `local\d6-smoke` and user-profile `collections-v1` paths were absent.
+- No prior Linux YouTube database/quota ledger or matching `.bak`/`.backup` file was found in the inspected user state, `%LOCALAPPDATA%\TrendScout` or repository/document roots. This is limited to those inspected locations; the old Linux records remain supported by the historical report sections above. The empty Windows state is not evidence that historical provider usage was zero.
+- Ordinary read-only SQLite opens caused SQLite to leave zero-byte `-wal` and 32 KiB `-shm` sidecars beside the Google and Collections databases. Later immutable read-only checks left them unchanged; they remain in place. No SQL writes, migrations, resets or deletions were run.
+
+### Windows verification and local code change
+
+- Backend focused tests: **150 passed, 3 skipped** (the skips are Linux-only `OWNER_MANUAL_LIVE` cases). This included 52 YouTube tests, the Windows launcher guard, credential/policy checks, local LIVE composition and routes, Fetch, Google, workspace UI, source catalog and read-only Vercel checks. `pip check` reported no broken requirements.
+- Frontend Node tests: **20 passed**. All **14** `Frontend/public/**/*.js` files passed `node --check`.
+- Five offline Chrome suites passed: workspace at 320/390/768/1024/1440/1920 px, keyboard accessibility, pipeline, public Fetch and distributed synthetic Fetch. The distributed Fetch-to-keyword-detail flow was rerun after the final assertion cleanup. These suites used synthetic/offline data and made no provider calls.
+- Firestore emulator tests were not run under the explicit waiver and are not counted as passing; no full backend suite is claimed. The local app was not started, because the handoff did not need a runtime launch or provider preflight.
+- Code/test changes are committed locally as `99353827b5b01ac04bbf419826442a24bd603014` (`fix(d6): align Windows handoff checks and evidence details`). The public Fetch candidate-detail action now opens without a persisted run ID, and stale policy/launcher/browser assertions now match the published `d6-youtube-v2` policy and current Windows behavior. The report is committed separately after this update. No push was made.
