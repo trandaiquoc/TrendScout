@@ -25,6 +25,13 @@ The percentage follows the weights in the Goal request. A `PASS` on a local dete
 
 The 57% is a partial Goal state. It does not claim four-source shared LIVE is production-ready.
 
+## Windows 2 pause checkpoint
+
+- The owner requested that work stop here and resume later from home. This is a **pause**, not Goal completion; progress remains 57% and the multi-session Goal stays available for Windows 1 continuation.
+- At the checkpoint before this report-only commit, local `HEAD` and `origin/main` both equaled `b9d979c9f99d2dabc770697a89da7203683cefc0`; `git status` was clean.
+- The Backend suite is at 939 PASS / 2 SKIPPED; the 9 focused Firestore cache tests and Ruff passed after the implementation changes. No provider requests or production Firestore writes were made.
+- Resume by fetching `origin/main`, reading this report, then continuing with the guarded emulator and backend IAM/runtime verification. Do not repeat the deterministic adapter tests unless code changes.
+
 ## Git state and commits
 
 - Initial `HEAD` and `origin/main` matched at `3dd80a534bc33152ecc7809831528f63caed2130`; the worktree was clean.
