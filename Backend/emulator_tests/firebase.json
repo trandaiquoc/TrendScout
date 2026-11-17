@@ -1,0 +1,12 @@
+{
+  "firestore": {
+    "rules": "firestore.deny_all.rules",
+    "port": 8080
+  },
+  "emulators": {
+    "singleProjectMode": true,
+    "ui": {
+      "enabled": false
+    }
+  }
+}

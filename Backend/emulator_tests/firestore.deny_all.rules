@@ -1,0 +1,15 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // The emulator guard makes one unauthenticated list probe to this empty
+    // synthetic collection before it returns its guarded server client.
+    match /ts3_emulator_guard_probe/{document=**} {
+      allow get, list: if true;
+    }
+
+    // This test-only rules file does not claim to reproduce production rules.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -67,14 +67,17 @@ class DistributedPublicFetch:
     def __init__(self, admission: PublicAdmission, worker: DistributedFetchWorker, *,
                  resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
                  local_live=False, normal_wikimedia_live=False, normal_google_live=False,
-                 resolve_processing_grants=None, provider_retry_after_seconds=None):
+                 firestore_shared_live=False, resolve_processing_grants=None,
+                 provider_retry_after_seconds=None):
         if (not isinstance(admission, PublicAdmission)
                 or not isinstance(worker, DistributedFetchWorker)
                 or worker.admission.policy_digest != admission.policy_digest
                 or not callable(resolve_grant) or not callable(utcnow)
                 or type(local_live) is not bool or type(normal_wikimedia_live) is not bool
                 or type(normal_google_live) is not bool
-                or sum((local_live, normal_wikimedia_live, normal_google_live)) > 1
+                or type(firestore_shared_live) is not bool
+                or sum((local_live, normal_wikimedia_live, normal_google_live,
+                        firestore_shared_live)) > 1
                 or (provider_retry_after_seconds is not None
                     and not callable(provider_retry_after_seconds))):
             raise ValueError("matching admission, worker and grant resolver required")
@@ -85,6 +88,7 @@ class DistributedPublicFetch:
         self.local_live = local_live
         self.normal_wikimedia_live = normal_wikimedia_live
         self.normal_google_live = normal_google_live
+        self.firestore_shared_live = firestore_shared_live
         # Results larger than the inline checkpoint budget are stored by the
         # worker's journal in its durable snapshot blob store. Reads must use
         # that same journal so terminal status can restore the full result.
@@ -156,6 +160,22 @@ class DistributedPublicFetch:
                     or admission.policy != replace(local_smoke_policy(), enabled=True)
                     or not callable(resolve_processing_grants)):
                 raise ValueError("local live demo requires bounded local policy and processing grants")
+            self.data_mode = "LIVE"
+        elif firestore_shared_live:
+            from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
+            from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
+
+            snapshot_blobs = worker.journal.snapshot_blobs
+            if (declared_modes != {"LIVE"}
+                    or worker.admission is not admission
+                    or type(admission.store) is not FirestoreAtomicStateStore
+                    or type(snapshot_blobs) is not FirestoreSnapshotBlobs
+                    or admission.store._client is not snapshot_blobs._client
+                    or getattr(admission.store._client, "_database", None) != "(default)"
+                    or not callable(resolve_processing_grants)):
+                raise ValueError(
+                    "Firestore shared LIVE requires matching Firestore state, blobs, and processing grants"
+                )
             self.data_mode = "LIVE"
         else:
             if declared_modes != {"SYNTHETIC"} or resolve_processing_grants is not None:
