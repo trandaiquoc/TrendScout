@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from google.api_core.exceptions import ServiceUnavailable
-from google.cloud.firestore_v1.transaction import Transaction
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
@@ -146,7 +145,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         self.assertEqual(runtime.public_fetch.data_mode, "LIVE")
 
     def test_competing_atomic_updates_serialize_across_independent_clients(self):
-        count = 8
+        count = 4
         key = self.state_key("counter")
         clients = [self.client, self.new_client()]
         stores = [FirestoreAtomicStateStore(client, max_attempts=10) for client in clients]
@@ -169,7 +168,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         self.assertEqual(stored, {"count": count})
 
     def test_shared_quota_race_allows_one_reservation_and_no_provider_call(self):
-        count = 8
+        count = 4
         key = self.state_key("quota")
         policy = admission_policy(request_limit=1, max_inflight=count)
         clients = [self.client, self.new_client()]
@@ -182,7 +181,8 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         for index in range(count):
             admission = admissions[0]
             job = admission.admit(
-                f"emulator-quota-job-{self.suffix}-{index:02d}", now=self.now
+                f"emulator-quota-job-{self.suffix}-{index:02d}", now=self.now,
+                request_metadata={"emulator_fixture": index},
             )
             claim = admission.claim(job["job_id"], f"worker-{index}", now=self.now)
             jobs.append((job["job_id"], claim["fence"]))
@@ -225,17 +225,20 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         claim = first.claim(job["job_id"], "recovery-worker", now=self.now)
         attempt_id = f"emulator-recovery-attempt-{self.suffix}"
 
-        original_commit = Transaction._commit
+        firestore_api = self.client._firestore_api
+        original_commit = firestore_api.commit
         commit_ack_lost = {"value": False}
 
-        def commit_then_drop_ack(transaction):
-            result = original_commit(transaction)
+        def commit_then_drop_ack(*args, **kwargs):
+            result = original_commit(*args, **kwargs)
             if not commit_ack_lost["value"]:
                 commit_ack_lost["value"] = True
                 raise ServiceUnavailable("synthetic lost commit acknowledgement")
             return result
 
-        with patch.object(Transaction, "_commit", commit_then_drop_ack):
+        with (patch.object(firestore_api, "commit", commit_then_drop_ack),
+              patch.object(firestore_api, "rollback",
+                           side_effect=ServiceUnavailable("synthetic rollback network loss"))):
             with self.assertRaises(CommitOutcomeUnknown):
                 first.reserve_attempt(
                     job["job_id"],

@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from google.api_core.exceptions import Aborted, ServiceUnavailable
-from google.cloud.firestore_v1.transaction import Transaction
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
@@ -139,6 +138,7 @@ class FirestoreTransactionalEmulatorTests(unittest.TestCase):
                 job = self.jobs.transition(job_id, owner, job.fencing, job.revision, state)
         output = strict_output({"shards": {"fixture-v1": {"items": ["synthetic"]}}, "quality_ok": True})
         metadata = dict(output["manifest_input"], occurrence_id=job.identity["occurrence_id"])
+        metadata["config_version"] = job.identity["config_version"]
         self.datasets.draft(dataset_id, self.resource, job_id, owner, job.fencing, job.revision, token, metadata)
         for shard_id, shard in output["shards"].items():
             self.datasets.put_shard(dataset_id, self.resource, job_id, owner, job.fencing,
@@ -224,14 +224,21 @@ class FirestoreTransactionalEmulatorTests(unittest.TestCase):
 
     def test_sdk_callback_retry_does_not_double_charge_budget(self):
         self.create_job()
-        original = Transaction._commit
+        firestore_api = self.client._firestore_api
+        original = firestore_api.commit
         attempts = {"count": 0}
-        def abort_first_commit(transaction):
+        def abort_first_commit(*args, **kwargs):
             attempts["count"] += 1
             if attempts["count"] == 1:
+                request = kwargs["request"]
+                firestore_api.rollback(
+                    request={"database": request["database"],
+                             "transaction": request["transaction"]},
+                    metadata=self.client._rpc_metadata,
+                )
                 raise Aborted("synthetic transaction contention")
-            return original(transaction)
-        with patch.object(Transaction, "_commit", abort_first_commit):
+            return original(*args, **kwargs)
+        with patch.object(firestore_api, "commit", abort_first_commit):
             claimed = self.jobs.claim(self.job_id, "retry-worker")
         self.assertEqual(attempts["count"], 2)
         self.assertEqual(claimed.refresh_budget.reads, 3)
@@ -292,15 +299,18 @@ class FirestoreTransactionalEmulatorTests(unittest.TestCase):
     def test_resource_claim_lost_ack_recovers_durable_fence(self):
         self.create_job()
         claimed = self.jobs.claim(self.job_id, "worker")
-        original = Transaction._commit
+        firestore_api = self.client._firestore_api
+        original = firestore_api.commit
         raised = {"value": False}
-        def commit_then_drop_ack(transaction):
-            result = original(transaction)
+        def commit_then_drop_ack(*args, **kwargs):
+            result = original(*args, **kwargs)
             if not raised["value"]:
                 raised["value"] = True
                 raise ServiceUnavailable("synthetic lost lease acknowledgement")
             return result
-        with patch.object(Transaction, "_commit", commit_then_drop_ack):
+        with (patch.object(firestore_api, "commit", commit_then_drop_ack),
+              patch.object(firestore_api, "rollback",
+                           side_effect=ServiceUnavailable("synthetic rollback network loss"))):
             with self.assertRaises(TransactionOutcomeUnknown):
                 self.datasets.claim_resource(self.resource, self.job_id, "worker",
                                              claimed.fencing, claimed.revision)
@@ -456,15 +466,18 @@ class FirestoreTransactionalEmulatorTests(unittest.TestCase):
     def test_commit_acknowledgement_loss_is_recoverable_by_receipt(self):
         self.create_job()
         ready, token = self.prepare_ready_dataset(f"dataset-lost-ack-{self.suffix}")
-        original = Transaction._commit
+        firestore_api = self.client._firestore_api
+        original = firestore_api.commit
         raised = {"value": False}
-        def commit_then_drop_ack(transaction):
-            result = original(transaction)
+        def commit_then_drop_ack(*args, **kwargs):
+            result = original(*args, **kwargs)
             if not raised["value"]:
                 raised["value"] = True
                 raise ServiceUnavailable("synthetic lost acknowledgement")
             return result
-        with patch.object(Transaction, "_commit", commit_then_drop_ack):
+        with (patch.object(firestore_api, "commit", commit_then_drop_ack),
+              patch.object(firestore_api, "rollback",
+                           side_effect=ServiceUnavailable("synthetic rollback network loss"))):
             with self.assertRaises(TransactionOutcomeUnknown):
                 self.datasets.publish(f"dataset-lost-ack-{self.suffix}", self.resource,
                                       ready.job_id, "worker", ready.fencing, ready.revision,
