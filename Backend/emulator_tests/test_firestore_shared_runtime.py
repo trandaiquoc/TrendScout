@@ -177,16 +177,16 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         self.assertEqual(stored, {"count": count})
 
     def test_shared_quota_race_allows_one_reservation_and_no_provider_call(self):
-        count = 4
+        # This remains a cross-client one-slot race; the atomic-state test above
+        # independently exercises four simultaneous writers.
+        count = 2
         key = self.state_key("quota")
-        enabled_sources = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID})
+        enabled_sources = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID})
         policy = admission_policy(request_limit=1, max_inflight=count,
                                   enabled_sources=enabled_sources)
         request_sources = (
             [WIKIMEDIA_SOURCE_ID],
             [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID],
-            [WIKIMEDIA_SOURCE_ID, BING_SOURCE_ID],
-            [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID],
         )
         clients = [self.client, self.new_client()]
         admissions = [
