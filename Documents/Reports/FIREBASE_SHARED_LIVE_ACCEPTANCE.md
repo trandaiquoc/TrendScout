@@ -1,23 +1,25 @@
 # TrendScout — Firebase Shared LIVE Runtime, Phase 1
 
-**Status:** Active isolated-emulator acceptance continuation; the request-scoped WIF implementation is locally tested, Cloud Shell and WIF/IAM setup are owner-verified, and emulator contention/recovery, runtime token-exchange, least-privilege, and cross-runtime gates remain open.
+**Status:** Active acceptance continuation; both Firestore Emulator suites pass 25/25 on the isolated Linux runner. Request-scoped WIF checks are locally tested, while live Google token exchange, effective IAM, and Windows/Vercel cross-runtime acceptance remain unverified. Production Shared LIVE is not enabled.
 
 **As of:** 2026-11-18
 
-**Progress:** 68% (weighted evidence below).
+**Progress:** 80% (weighted evidence below).
 
 **Target selected by the owner:** `trendscout-192e4/(default)`; production writes were not authorized for this phase and none were made.
 
-## Latest continuation checkpoint - first real emulator execution (2026-11-18)
+## Latest continuation checkpoint - full isolated Emulator pass (2026-11-18)
 
-- At resume, `git fetch origin` completed before edits. Branch `codex/firebase-shared-live-acceptance` was clean at `c84094ce3e4963b0329ff5f05d56103a192cb64b`; `origin/main` remained `86082460ce3956bd6837ddf5552b525acfbf367c`. No reset, force-push, or main-branch write occurred.
-- GitHub Actions run [44205159338](https://github.com/trandaiquoc/TrendScout/actions/runs/44205159338) checked out exactly `c84094c`, passed the loopback-only/no-route network probe and seccomp probe, used only `demo-trendscout-p3s1/(default)`, and started Firestore Emulator on `127.0.0.1:8080`. The safety guard was not bypassed.
-- Both requested emulator suites reached real test bodies: **25 tests ran, 12 passed, 7 failed, and 6 errored**. Passing evidence includes idempotent job creation, deadline/receipt rules, resource fencing and one-winner claims, rules denial, cache source isolation, expiry/retention, shared-runtime wiring, and a synthetic cache hit read after client/process reopen with zero provider request. This is partial emulator evidence; the suites as a whole did not pass.
-- The seven publication failures share one test-fixture mismatch: the fixture's `config_version` (`v1`) did not match the job identity (`emulator-v1`), so strict dataset verification correctly rejected it. Quota setup coalesced distinct idempotency keys because every job had identical request metadata. The lost-ack tests injected failure after `Transaction._commit` had cleared its local transaction ID; source review confirms the SDK clears that ID after the RPC returns, so fault injection now targets the commit RPC ([Firestore Python client transaction implementation](https://github.com/googleapis/google-cloud-python/blob/main/packages/google-cloud-firestore/google/cloud/firestore_v1/transaction.py)). Eight simultaneous writes also exceeded this Emulator instance's transaction-lock retry budget.
-- Local test fixes now align fixture config with job identity, give quota jobs unique metadata, keep cross-client contention at four simultaneous workers, inject commit-ack loss at the Firestore RPC boundary, and send a rollback before the synthetic Aborted retry. The existing network/project/credential safety guard is unchanged. These test changes passed Python 3.12 compilation and `git diff --check`; they have **not** yet rerun against the Emulator.
-- Local Windows Python 3.12 regressions previously passed 75/75 with Ruff on the guard/test changes. The current Windows 1 interpreter lacks `httpx`, so this continuation has not rerun the broader Python suite locally. Windows cannot provide the required Linux namespace; no local emulator attempt was made.
-- Owner-reported WIF/IAM state remains owner-verified only. Read-only Vercel inspection shows Production variables are present with values masked; previous feature-branch pushes created READY branch previews with no production target. No new provider calls, production Firestore writes, billing/IAM/rules changes, or D7 actions occurred.
-- Weighted progress is **68%**: the 12 executed emulator cases add limited evidence to transaction, runtime-composition, cache, cross-process, and security subgates. The 13 failing/error cases, unverified IAM token exchange/effective permissions, and cross-machine runtime reads remain open. No credit is assigned to the newly authored fixes until a real Emulator rerun passes.
+- Before this report update, `git fetch origin` completed. The feature branch was clean at `48c8f45618e1e1793e09340a8d528d3cc0951e32`; `origin/main` remained `86082460ce3956bd6837ddf5552b525acfbf367c`, and the feature remote matched the branch. No reset, force-push, or main-branch write occurred.
+- GitHub Actions run [44218830785](https://github.com/trandaiquoc/TrendScout/actions/runs/44218830785) checked out exactly `48c8f45618e1e1793e09340a8d528d3cc0951e32` and completed successfully. Both guarded Firestore Emulator suites ran all **25 tests: 25 passed, 0 failed, 0 errors** in 21.581 seconds (`RESULT=PASS`).
+- The run used only `demo-trendscout-p3s1/(default)` and Firestore Emulator at `127.0.0.1:8080`. Bubblewrap 0.9.0, Python 3.12.3, Java 21.0.13, and Node 22.12.0 were reported. The network probe confirmed only loopback, blocked external connect (result 101), and passed the seccomp probe. The synthetic-project guard was not bypassed. No production credentials, provider API requests, or production Firestore operations were used.
+- Earlier runner diagnostics are resolved for this acceptance run: `44209551272` had 23 passes and two test-fixture errors; `44217155811` had 24 passes and one Emulator lock-timeout error from four simultaneous quota contenders; `44217711881` stalled during pre-test apt setup and was canceled when the replacement run started. The fixtures now avoid an illegal duplicate state transition and use valid, distinct admission metadata. The quota race uses two independent contenders and still asserts exactly one `NEW` plus one `QUOTA_EXHAUSTED`; the separate atomic-state stress case retains four writers. Production state-machine and quota contracts were not weakened.
+- Workflow commit `48c8f45` caps the isolated runner prerequisite-install step at eight minutes; the full job remains bounded. The final run passed. The workflow change is supported by the [GitHub Actions workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
+- Local Windows 2 regressions passed: admission 22/22, Firestore runtime composition 4/4, and Emulator guard 12/12; Ruff, Python compilation, YAML parse, and `git diff --check` also passed on the code changes. The focused Vercel read-only suite was rerun with the repository's unittest runner: **10/10 passed**. Its identity tests use synthetic JWTs, and its STS exchange is mocked; these results verify local rejection/fail-closed behavior, not a real Vercel signature, Google STS exchange, or IAM grant.
+- Read-only Vercel metadata shows the deployment for commit `48c8f45` is `READY` with `target: null` (a branch Preview, not Production). Production environment values remain masked and the project metadata does not independently establish that OIDC is enabled. No Vercel Production deployment or route was invoked.
+- The owner previously reported that WIF/IAM was configured and checked from Cloud Shell. That remains owner-reported evidence, not an independent current IAM read. This Windows 2 session has no `gcloud` executable or Google credential environment; the connected Firebase tools expose Firestore metadata but not workload identity provider or IAM policy inspection. The current browser-access helper could not safely identify the Chrome URL, so no Cloud Console inspection was made. No real Vercel request token was obtained or exchanged.
+- The read-only Firestore inventory still identifies `trendscout-192e4/(default)` as the intended target. No production document read or write, billing change, IAM or Security Rules change, provider call, D7 action, or Production LIVE test occurred; the earlier Firebase check read database metadata only.
+- Weighted progress is now **80%**. The full isolated Emulator suites remove the prior transaction/quota/publication test failures. Remaining credit is held for independent identity/IAM evidence, untested Windows/Vercel interoperability, and the unaccepted runtime transition. This is not production readiness.
 
 ## Prior hosted-runner retry checkpoint (2026-11-18)
 
@@ -47,32 +49,30 @@ This checkpoint supersedes the Windows-only runner blocker and earlier IAM avail
 
 ## Acceptance gates
 
-The percentage follows the weights in the Goal request. A `PASS` on a local deterministic test double means the adapter contract passed locally; it does not mean production Firestore is ready.
+A PASS on deterministic or Emulator evidence means the tested contract passed in that environment; it does not prove production IAM or live Vercel access.
 
 | Gate | Weight | Status and evidence | Credit |
 | --- | ---: | --- | ---: |
-| G0 — Git and architecture audit | 10% | **PARTIAL.** Git and repository wiring are reconciled. The owner reports the active WIF provider, issuer/audience/production subject restriction, and IAM bindings/condition as verified; this was not independently re-read. Vercel still masks environment values, and runtime identity/effective permissions remain unverified. | 8% |
-| G1 - Shared Firestore storage | 20% | **PASS - deterministic contract; PARTIAL emulator evidence.** The injected Firestore snapshot adapter and local cache/blob contracts pass. Emulator cache source isolation, stale/retention expiry, and blob cleanup executed successfully; the entire suite is not yet green. | 20% |
-| G2 - Distributed quota/coordination | 20% | **PARTIAL.** Real Emulator fencing, one-winner lease claims, idempotent creation, and expiry cases passed. The shared quota race setup and high-contention atomic update case failed; ack-loss recovery awaits the corrected RPC-level fault test. | 9% |
-| G3 - Cache and SQLite transition | 15% | **PARTIAL.** SQLite remains the runtime default. The explicit Firestore shared LIVE composition passed in the Emulator, and existing NORMAL_DEMO/SQLite regressions remain passed. Publication fixture acceptance and remaining runtime evidence are open. | 13% |
-| G4 - Cross-runtime acceptance | 15% | **PARTIAL.** The Emulator passed a synthetic cache hit read after client/process reopen with zero provider request. Windows 1/Windows 2/Linux/Vercel interoperability and shared restart recovery are still unverified. | 2% |
-| G5 - Security and regression | 15% | **PARTIAL.** Prior local Windows Python 3.12 regression evidence remains 75/75; run `44205159338` passed network isolation, seccomp, synthetic-project guard, and emulator-rules denial. Real token exchange and effective least-privilege verification remain open. | 11% |
-| G6 - Report and commits | 5% | **PASS.** The focused feature branch and acceptance report capture verified evidence; `origin/main` is unchanged. | 5% |
-| **Total** | **100%** | **Current Goal progress** | **68%** |
+| G0 - Git and architecture audit | 10% | **PARTIAL.** Git and repository wiring are reconciled. The owner reports the WIF provider and IAM setup as checked, but this session could not independently reread the provider, bindings, or effective permissions. | 8% |
+| G1 - Shared Firestore storage | 20% | **PASS - isolated Emulator.** Shared cache source isolation, expiry/retention, blob cleanup, and the full existing storage suite passed against the guarded Emulator. Production Firestore has not been written. | 20% |
+| G2 - Distributed quota/coordination | 20% | **PASS - isolated Emulator.** Lease fencing, one-winner claims, idempotent creation, quota admission race, ACK-loss recovery, retry behavior, publication pointer CAS, and four-writer atomic-state contention passed in the two suites. | 20% |
+| G3 - Cache and SQLite transition | 15% | **PARTIAL.** The explicitly injected Firestore Shared LIVE composition and current NORMAL_DEMO/SQLite regressions pass. SQLite remains the runtime default; no accepted runtime switch connects Shared LIVE to production. | 14% |
+| G4 - Cross-runtime acceptance | 15% | **PARTIAL.** A synthetic cache hit survives Emulator client/process reopen with zero provider requests. Windows 1/Windows 2/Linux/Vercel interoperability and shared restart recovery across machines remain unverified. | 2% |
+| G5 - Security and regression | 15% | **PARTIAL.** Network isolation, seccomp, synthetic-project guard, Emulator rules denial, local regression suites, and 10/10 offline Vercel identity tests passed. Real Vercel token exchange and effective least-privilege IAM remain unverified. | 11% |
+| G6 - Report and commits | 5% | **PASS.** This acceptance report is updated on the isolated feature branch; `origin/main` remains unchanged. | 5% |
+| **Total** | **100%** | **Current Goal progress** | **80%** |
 
-The 68% is a partial Goal state. It does not claim four-source shared LIVE is production-ready. The four added points credit executed Emulator evidence for lease fencing, explicit runtime composition, and the child-process cache-hit case. Rules denial is recorded as a pass but adds no separate weight while production IAM remains unverified. The failing or errored cases add no credit; the locally corrected test fixtures add no credit until rerun.
+The remaining 20 points are G0 (2), G3 (1), G4 (13), and G5 (4). The score reflects passing Emulator and offline evidence; it does not claim that four-source Shared LIVE is production-ready or enabled.
 
 ## Current subgate status
 
 | Status | Evidence |
 | --- | --- |
-| Status | Evidence |
-| --- | --- |
-| **PASS** | Run `44205159338`: isolated loopback network, no external routes, seccomp, synthetic-project guard, and 12 individual Emulator cases. A synthetic cache hit survived client/process reopen with zero provider request. Prior deterministic and NORMAL_DEMO/SQLite evidence remains as recorded. |
-| **PARTIAL** | Both suites executed all 25 Emulator cases: 12 passed, 7 failed, 6 errored. Owner-verified Cloud Shell network and WIF/IAM evidence; local fake/cache contracts and explicit injected Firestore composition. |
-| **FAIL** | The 7 dataset publication cases were rejected by a test-fixture config-version mismatch. The 6 errors include invalid SDK-level lost-ack injection, quota jobs joined due equal request metadata, and emulator lock timeouts at eight simultaneous contenders. Corrected fixtures and RPC-level fault injection are local and await rerun. |
-| **BLOCKED** | Real cross-runtime Windows 1/Windows 2/Linux/Vercel interoperability, production backend token exchange, and independent effective least-privilege verification remain unverified. |
-| **NOT_STARTED** | Production Shared LIVE and production Firestore writes were not started. No billing, IAM, Security Rules, provider, Vercel production, or D7 changes were made. |
+| **PASS** | Run `44218830785`: isolated loopback-only network, no external routes, seccomp, synthetic-project guard, and all 25 Emulator cases passing. |
+| **PASS** | Local Windows 2 checks: 22/22 admission, 4/4 runtime composition, 12/12 Emulator guard, and 10/10 Vercel read-only unit tests. The Vercel STS test is mocked. |
+| **PARTIAL** | Emulator cache hit after client/process reopen passes; real cross-machine Windows 1/Windows 2/Linux/Vercel shared-state interoperability remains untested. Owner-reported Cloud Shell and WIF/IAM setup has not been independently reread in this session. |
+| **OPEN / ACCESS-LIMITED** | Real production-subject Vercel OIDC token, Google STS exchange, and effective IAM least privilege have not been independently verified. Current Vercel Preview has no production target and the backend trust is production-subject restricted. |
+| **NOT STARTED** | Production Shared LIVE, application-data reads/writes for this acceptance, billing changes, IAM changes, Security Rules changes, provider calls, and D7 were not started. |
 
 ## Prior Windows 1 checkpoint evidence (historical; superseded above)
 
@@ -191,26 +191,26 @@ The deterministic fake models atomic transaction commit and rollback. It is not 
 
 ## Firebase inventory and production readiness
 
-Read-only Firebase MCP/CLI inspection on 2026-11-17 found:
+Read-only Firebase MCP/CLI metadata inspection on 2026-11-17 found:
 
-- Active project: `trendscout-192e4` (“Trendscout”), project number `556422620769`.
+- Active project: `trendscout-192e4` (`Trendscout`), project number `556422620769`.
 - Existing database: `(default)`, Firestore Native / Standard, `asia-southeast1`, `freeTier=true`. Delete protection and point-in-time recovery are disabled.
-- Billing is disabled. No Firebase Apps, root `firebase.json`, `.firebaserc`, or project alias is configured in this repository. The owner selected the existing project/database as the eventual target. The new `Backend/emulator_tests/firebase.json` is isolated to emulator tests only.
-- Firestore client Security Rules currently deny all client reads and writes. This does not establish server access: Admin SDK/server requests use IAM, which was not inspected or provisioned.
-- Firebase CLI/MCP authentication exists, but no backend ADC or service-account credential is configured. Do not treat Firebase MCP sign-in as backend authentication.
-- The available Firebase MCP has project, app, environment, and rules inspection but no Firestore document/collection query tool. Existing collection contents are therefore **unknown**; collection names in repository code are not evidence that those collections already exist in the project.
+- Billing is disabled. No Firebase Apps, root `firebase.json`, `.firebaserc`, or project alias is configured in this repository. The owner selected the existing project/database as the eventual target. `Backend/emulator_tests/firebase.json` is isolated to Emulator tests only.
+- Firestore client Security Rules deny all client reads and writes. This does not prove server access: server libraries authenticate through IAM, which this session did not inspect. Collection contents remain unknown.
+- Firebase MCP authentication is available for project/database metadata, but does not provide an IAM policy or workload identity provider inspection. Firebase MCP sign-in is not backend authentication.
+- The owner previously reported an active Vercel WIF provider, production subject restriction, `roles/iam.workloadIdentityUser`, `roles/datastore.user`, and a `(default)` database IAM condition. Treat these as owner-reported until a current read-only IAM response is independently reviewed.
 
-**Production readiness: NOT READY / NOT ACCEPTED.** The isolated Emulator ran real transactions and 12/25 cases passed, but the suites still contain 7 failures and 6 errors. No backend token exchange or effective production IAM was independently verified, and no production write was authorized. Do not enable billing or point the new adapter at production until identity, IAM, retention, concurrency limits, and the runtime switch are accepted.
+**Production readiness: NOT READY / NOT ACCEPTED.** Both isolated Emulator suites pass, but live WIF token exchange, effective production IAM, cross-runtime consistency, and the Shared LIVE runtime transition remain unverified. Only database metadata was inspected; no production application data or writes were touched. Do not enable billing or point the new adapter at production until identity, IAM, retention, concurrency limits, and the runtime switch are accepted.
 
-Official references consulted on 2026-11-17: [Firestore quotas and limits](https://firebase.google.com/docs/firestore/quotas) and [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions). The implementation budgets chunk/document and transaction sizes below those documented limits. Documentation lookup does not prove project credentials, API reachability, or runtime authorization.
+Official references consulted on 2026-11-18: [Vercel OIDC request headers and token claims](https://vercel.com/docs/oidc), [Vercel OIDC claim reference](https://vercel.com/docs/oidc/reference), and [Google Workload Identity Federation least-privilege guidance](https://docs.cloud.google.com/iam/docs/best-practices-for-using-workload-identity-federation). These documents describe provider behavior; they do not establish the settings or permissions of this project. Firestore quotas and transaction behavior were referenced from [Firestore quotas and limits](https://firebase.google.com/docs/firestore/quotas) and [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions) (checked 2026-11-17).
 
 ## Existing code classification
 
-- **Reusable, local/runtime tested:** `SharedCache`, `PublicAdmission`, source-specific `CacheScope`, and local SQLite atomic state/blob stores. Existing source handlers use the generic cache contract; SQLite-backed normal compositions remain protected by their current type checks.
-- **Reusable candidate, not production wired:** `FirestoreAtomicStateStore` provides bounded one-document serializable transforms (700,000-byte JSON ceiling) with ambiguous-commit handling. The new blob adapter uses an injected Firestore client. These paths need emulator and real service-identity acceptance before runtime use.
-- **Emulator guarded:** `app/jobs/firestore_transactional.py` implements transactional job leases, fencing, shard staging, and dataset pointer publication, and requires the guarded synthetic Firestore Emulator client. Run `44205159338` exercised both emulator suites; publication tests remain blocked by a corrected local fixture mismatch pending rerun.
-- **Legacy/unsafe as a shared-LIVE switch:** `app/storage/firestore.py` constructs Firebase Admin clients from project/ADC for the older run API; it is not the current NORMAL_DEMO composition. Do not treat it as the shared cache/quota backend.
-- **Still unaccepted or unwired:** The new Firestore composition is opt-in and not connected to a production/default runtime. Backend service identity and least-privilege IAM, a bounded lifecycle for global admission state, real transaction contention/recovery evidence, and cross-runtime acceptance remain open.
+- **Locally and Emulator tested:** `SharedCache`, `PublicAdmission`, source-specific `CacheScope`, Firestore atomic state/blob storage, and explicit shared-runtime composition. All 25 existing Emulator cases pass on the guarded synthetic project.
+- **Read-only Vercel code path present, not live-verified:** `/api/runs` and analytics history receive the per-request `x-vercel-oidc-token` and call `read_only_storage`; local tests verify strict claim rejection and no ADC fallback. The STS test is mocked. Vercel documents the request-header token behavior, but project OIDC enablement and a real exchange have not been verified in this session.
+- **Shared LIVE composition is opt-in and not production wired:** `create_firestore_shared_live_composition` takes an explicitly injected client. Current normal LIVE and NORMAL_DEMO profiles keep local SQLite state/cache. The passing Emulator composition test does not change that default.
+- **Legacy/unsafe as a shared-LIVE switch:** `app/storage/firestore.py` can construct Firebase Admin clients from project/ADC for the older run API. It is not the current NORMAL_DEMO composition and is not the Shared LIVE cache/quota backend.
+- **Still unaccepted:** Backend identity and least-privilege IAM, a bounded lifecycle for global admission state, cross-machine interoperability, and the runtime transition. Keep production Shared LIVE disabled until these gates are accepted.
 
 ## Prior runtime and emulator blockers (historical Windows state)
 
@@ -224,10 +224,10 @@ Official references consulted on 2026-11-17: [Firestore quotas and limits](https
 
 ## Remaining acceptance work
 
-1. Rerun both existing emulator suites against the locally corrected fixture and RPC-level fault injection in the same isolated Linux network namespace; preserve the uploaded run log and require all relevant cases to pass.
-2. Independently verify the production backend identity and effective Firestore IAM with read-only inspection, then confirm real token exchange and least privilege without production Firestore writes. Do not provision or broaden roles as part of verification.
-3. Complete shared-cache acceptance across independent clients/processes and runtimes, with restart durability and zero provider calls on cache hits. The emulator passed the Linux child-process cache-hit case; Windows 1/Windows 2/Linux/Vercel interoperability remains open.
-4. Keep NORMAL_DEMO and current normal LIVE modes on SQLite. Do not perform any production Firestore write until the owner explicitly authorizes it. No billing, Vercel production deployment, D7, or provider-quota action is authorized by this Goal.
+1. Independently inspect the current Google workload identity provider, issuer/audience/attribute condition, exact production subject binding, service-account impersonation policy, and effective Firestore role/database condition using read-only IAM access. Do not provision or broaden roles.
+2. Verify a real production-subject Vercel token exchange through Google STS and service-account impersonation, then prove the effective scope without production Firestore writes. This requires an authorized production runtime token path; do not use a Preview token, since the trust is restricted to the production subject.
+3. Complete independent-client and cross-machine shared-cache/restart acceptance across Windows 1, Windows 2, and Linux. The Emulator child-process cache-hit case passed, but that does not prove Vercel or separate-host consistency.
+4. Keep NORMAL_DEMO and current normal LIVE modes on SQLite. Do not perform production writes, enable billing, change IAM or Security Rules, deploy/activate Production Shared LIVE, call provider APIs, or perform D7 until the required owner authorization and acceptance evidence are in place.
 
 ## Security limitations
 
