@@ -253,6 +253,21 @@ Official references consulted on 2026-11-18: [Vercel OIDC request headers and to
 3. Complete independent-client and cross-machine shared-cache/restart acceptance across Windows 1, Windows 2, and Linux. The Emulator child-process cache-hit case passed, but that does not prove Vercel or separate-host consistency.
 4. Keep NORMAL_DEMO and current normal LIVE modes on SQLite. Do not perform production writes, enable billing, change IAM or Security Rules, deploy/activate Production Shared LIVE, call provider APIs, or perform D7 until the required owner authorization and acceptance evidence are in place.
 
+## Cross-runtime non-production procedure (prepared; not executed)
+
+The guarded Emulator suites and `Backend/emulator_tests/run_cloud_shell_acceptance.sh` are the repeatable synthetic harness; their latest hosted run passed 25/25 on the loopback-only Emulator. They cover independent clients, shared quota/fencing, client/process reopen, cache hits without provider requests, and expiry. They do not prove separate-host or Vercel consistency. The current composition accepts the production project or the guarded synthetic Emulator, and the Firebase inventory available in this session exposed no separate staging database. No external Firestore write target is available for this acceptance.
+
+When the owner identifies an existing dedicated non-production project/database, use this sequence before any synthetic write:
+
+1. Read its project ID, database ID, billing state, region, quotas, and current IAM. Confirm the project is not `trendscout-192e4`, the database and credentials are already provisioned, and the owner accepts the bounded test cost. Do not create a project/database, enable billing, or reuse production.
+2. Confirm that Windows 1, Windows 2, and Linux have separate clients against that exact project/database. Vercel must have a separate non-production identity/provider; the current production-subject WIF provider cannot establish Preview access. The current composition's project allowlist must explicitly support the selected non-production project before a live client can be injected; fail closed otherwise.
+3. Allocate a unique run ID and state key for each attempt. Inject a synthetic-only handler with an invocation counter and no HTTP/provider client. Record the selected project/database, runtime, run ID, timestamps, and expected retention in the test log; keep provider credentials out of the test environment.
+4. Have runtime A create one synthetic cache entry. Through independent runtime B, request the same source/query scope and assert a cache hit with unchanged origin/fetched-at metadata and zero handler/provider invocations. Check that both clients observe the same admission/quota state.
+5. Race independent clients for one bounded synthetic fetch and assert exactly one lease/claim wins. Pause the winner, let its lease expire, and verify a stale worker cannot publish after a replacement claim. Restart each process/client and verify idempotent recovery without a second synthetic handler invocation.
+6. Use a short test-only retention interval. Verify expired data is unavailable, purge only the run-owned namespace, then confirm unrelated state is unchanged. Check request counters and runtime logs for zero provider calls.
+
+Until those prerequisites exist and all runtimes pass, G4 remains **PARTIAL**. Emulator success must not be relabeled as cross-machine acceptance, and no test should write synthetic data into production Firestore.
+
 ## Security limitations
 
 - Never store provider keys, access tokens, raw provider responses, or secrets in the cache. `SharedCache` validates payload fields before externalizing them; the adapter itself is a storage boundary and does not create an auth policy.
