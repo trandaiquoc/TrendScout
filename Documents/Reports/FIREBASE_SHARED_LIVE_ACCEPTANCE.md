@@ -1,14 +1,36 @@
 # TrendScout — Firebase Shared LIVE Runtime, Phase 1
 
-**Status:** Active acceptance continuation; both Firestore Emulator suites pass 25/25 on the isolated Linux runner. Request-scoped WIF checks are locally tested, while live Google token exchange, effective IAM, and Windows/Vercel cross-runtime acceptance remain unverified. Production Shared LIVE is not enabled.
+**Status:** Active acceptance continuation; both Firestore Emulator suites pass 25/25 on the isolated Linux runner. The local cache/SQLite transition contracts now pass, while live Google token exchange, effective IAM, and Windows/Vercel cross-runtime acceptance remain unverified. Production Shared LIVE is not enabled.
 
 **As of:** 2026-11-18
 
-**Progress:** 80% (weighted evidence below).
+**Progress:** 81% (weighted evidence below).
 
 **Target selected by the owner:** `trendscout-192e4/(default)`; production writes were not authorized for this phase and none were made.
 
-## Latest continuation checkpoint - full isolated Emulator pass (2026-11-18)
+## Windows 2 continuation checkpoint - G3 transition checks and IAM handoff (2026-11-18)
+
+- At the start of this continuation, `git fetch origin` completed. The clean feature branch was `codex/firebase-shared-live-acceptance` at `c078d983335e52a4d138d1074df8f6b5a20d8f10`; `origin/codex/firebase-shared-live-acceptance` matched, `origin/main` was `86082460ce3956bd6837ddf5552b525acfbf367c`, and the branch was 16 ahead / 0 behind. No reset, force-push, or main-branch write occurred.
+- Added two focused offline assertions to `Backend/tests/test_firestore_runtime_composition.py`: handlers receive the exact Firestore-backed `SharedCache` owned by the composition, and requesting Firestore Shared LIVE with a local SQLite state store fails closed. The tests use a fake client and a temporary synthetic test SQLite file; they perform no Firestore or provider operation.
+- Verification passed on the repository Python 3.12 virtual environment: runtime composition **5/5**, current composition regressions **6/6**, local SQLite LIVE regressions **3/3**, Ruff check, Ruff format check, and `git diff --check`. An initial direct-module invocation of the latter suites failed to import their sibling fixtures; rerunning with unittest discovery passed. A system-Python run also failed before test collection because that interpreter lacked `tzdata`; no dependency was installed.
+- This continuation changes tests and this report only; application/runtime code is unchanged. The prior run `44218830785` remains the latest guarded Firestore Emulator evidence at 25/25 on app-code SHA `48c8f45618e1e1793e09340a8d528d3cc0951e32`; it was not rerun.
+- G3 is now **PASS (15/15)**: the explicit Firestore composition shares one client and one cache with handlers, rejects a SQLite fallback in Shared LIVE, and preserves existing NORMAL_DEMO/SQLite behavior. G3 passing does not change the runtime default or enable production Shared LIVE. Weighted progress is **81%**; only G0 (2), G4 (13), and G5 (4) remain incomplete.
+- The Firebase connector still exposes only `trendscout-192e4/(default)` in its project/database inventory; this does not prove that no other GCP project exists. No dedicated non-production Firestore database is currently available through the connected inventory, so real cross-machine acceptance remains blocked.
+- Both pages in the connected Chrome DevTools browser redirect to Google sign-in, and no IAM read was made. An initial local Chrome window launch and a later attempt to start a separate Chrome profile on remote debugging port `9223` were rejected by the Windows command-execution policy. No sign-in, token, or IAM policy was accessed. The missing item is an authenticated read-only IAM access path; this session did not observe a specific denied IAM permission.
+- Minimum read-only permissions for the planned inspection are `iam.workloadIdentityPools.get`, `iam.workloadIdentityPoolProviders.get`, `iam.serviceAccounts.getIamPolicy`, and `resourcemanager.projects.getIamPolicy`. To inventory service-account keys without reading key material, also grant `iam.serviceAccountKeys.list`. These permission names follow [Google's workload identity pool/provider access requirements](https://docs.cloud.google.com/iam/docs/manage-workload-identity-pools-providers), [provider get method](https://docs.cloud.google.com/iam/docs/reference/rest/v1beta/projects.locations.workloadIdentityPools.providers/get), [service-account policy method](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/getIamPolicy), [project policy method](https://docs.cloud.google.com/resource-manager/reference/rest/v3/projects/getIamPolicy), and [service-account key list method](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts.keys/list). This list describes what the read-only checks require; it does not assert which permissions the owner's account currently lacks.
+- Read-only Cloud Shell commands for an authenticated IAM inspection:
+
+  ```sh
+  gcloud iam workload-identity-pools describe trendscout-vercel --location=global --project=trendscout-192e4
+  gcloud iam workload-identity-pools providers describe vercel-production --workload-identity-pool=trendscout-vercel --location=global --project=trendscout-192e4
+  gcloud iam service-accounts get-iam-policy trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com --project=trendscout-192e4
+  gcloud projects get-iam-policy trendscout-192e4
+  gcloud iam service-accounts keys list --iam-account=trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com --project=trendscout-192e4 --format='table(name.basename(),keyType,disabled,validAfterTime,validBeforeTime)'
+  ```
+
+  These commands only read provider configuration, IAM policies, and key metadata. Review the provider's active state, exact issuer/audience/mapping/production subject condition; the service-account WIF binding; the project role and `(default)` database condition; and whether broad project roles or user-managed keys exist. Do not paste tokens, key contents, or complete unredacted policies into chat.
+
+## Prior continuation checkpoint - full isolated Emulator pass (2026-11-18)
 
 - Before this report update, `git fetch origin` completed. The feature branch was clean at `48c8f45618e1e1793e09340a8d528d3cc0951e32`; `origin/main` remained `86082460ce3956bd6837ddf5552b525acfbf367c`, and the feature remote matched the branch. No reset, force-push, or main-branch write occurred.
 - GitHub Actions run [44218830785](https://github.com/trandaiquoc/TrendScout/actions/runs/44218830785) checked out exactly `48c8f45618e1e1793e09340a8d528d3cc0951e32` and completed successfully. Both guarded Firestore Emulator suites ran all **25 tests: 25 passed, 0 failed, 0 errors** in 21.581 seconds (`RESULT=PASS`).
@@ -56,23 +78,25 @@ A PASS on deterministic or Emulator evidence means the tested contract passed in
 | G0 - Git and architecture audit | 10% | **PARTIAL.** Git and repository wiring are reconciled. The owner reports the WIF provider and IAM setup as checked, but this session could not independently reread the provider, bindings, or effective permissions. | 8% |
 | G1 - Shared Firestore storage | 20% | **PASS - isolated Emulator.** Shared cache source isolation, expiry/retention, blob cleanup, and the full existing storage suite passed against the guarded Emulator. Production Firestore has not been written. | 20% |
 | G2 - Distributed quota/coordination | 20% | **PASS - isolated Emulator.** Lease fencing, one-winner claims, idempotent creation, quota admission race, ACK-loss recovery, retry behavior, publication pointer CAS, and four-writer atomic-state contention passed in the two suites. | 20% |
-| G3 - Cache and SQLite transition | 15% | **PARTIAL.** The explicitly injected Firestore Shared LIVE composition and current NORMAL_DEMO/SQLite regressions pass. SQLite remains the runtime default; no accepted runtime switch connects Shared LIVE to production. | 14% |
+| G3 - Cache and SQLite transition | 15% | **PASS - local/offline plus existing Emulator evidence.** The same injected client backs Firestore state/blobs/quota/cache, handlers receive that exact cache, Shared LIVE rejects SQLite state, and current NORMAL_DEMO/SQLite regressions pass. SQLite remains the runtime default; production Shared LIVE is not enabled. | 15% |
 | G4 - Cross-runtime acceptance | 15% | **PARTIAL.** A synthetic cache hit survives Emulator client/process reopen with zero provider requests. Windows 1/Windows 2/Linux/Vercel interoperability and shared restart recovery across machines remain unverified. | 2% |
 | G5 - Security and regression | 15% | **PARTIAL.** Network isolation, seccomp, synthetic-project guard, Emulator rules denial, local regression suites, and 10/10 offline Vercel identity tests passed. Real Vercel token exchange and effective least-privilege IAM remain unverified. | 11% |
 | G6 - Report and commits | 5% | **PASS.** This acceptance report is updated on the isolated feature branch; `origin/main` remains unchanged. | 5% |
-| **Total** | **100%** | **Current Goal progress** | **80%** |
+| **Total** | **100%** | **Current Goal progress** | **81%** |
 
-The remaining 20 points are G0 (2), G3 (1), G4 (13), and G5 (4). The score reflects passing Emulator and offline evidence; it does not claim that four-source Shared LIVE is production-ready or enabled.
+The remaining 19 points are G0 (2), G4 (13), and G5 (4). The score reflects passing Emulator and offline evidence; it does not claim that four-source Shared LIVE is production-ready or enabled.
 
 ## Current subgate status
 
 | Status | Evidence |
 | --- | --- |
 | **PASS** | Run `44218830785`: isolated loopback-only network, no external routes, seccomp, synthetic-project guard, and all 25 Emulator cases passing. |
-| **PASS** | Local Windows 2 checks: 22/22 admission, 4/4 runtime composition, 12/12 Emulator guard, and 10/10 Vercel read-only unit tests. The Vercel STS test is mocked. |
+| **PASS** | Local Windows 2 checks: 22/22 admission, 5/5 runtime composition, 12/12 Emulator guard, 10/10 Vercel read-only unit tests, 6/6 composition regressions, and 3/3 local LIVE composition regressions. The Vercel STS test is mocked. |
 | **PARTIAL** | Emulator cache hit after client/process reopen passes; real cross-machine Windows 1/Windows 2/Linux/Vercel shared-state interoperability remains untested. Owner-reported Cloud Shell and WIF/IAM setup has not been independently reread in this session. |
 | **OPEN / ACCESS-LIMITED** | Real production-subject Vercel OIDC token, Google STS exchange, and effective IAM least privilege have not been independently verified. Current Vercel Preview has no production target and the backend trust is production-subject restricted. |
 | **NOT STARTED** | Production Shared LIVE, application-data reads/writes for this acceptance, billing changes, IAM changes, Security Rules changes, provider calls, and D7 were not started. |
+
+The IAM permission list above covers direct reads of the pool, provider, service-account policy, project policy, and (optionally) service-account key metadata. Project IAM policy output alone does not establish inherited folder/organization grants. To inspect inherited policy, Google documents `resourcemanager.folders.getIamPolicy` and `resourcemanager.organizations.getIamPolicy` on the relevant ancestors; alternatively, Cloud Asset Policy Analyzer needs `cloudasset.assets.analyzeIamPolicy`, `cloudasset.assets.searchAllIamPolicies`, and `cloudasset.assets.searchAllResources` (plus `iam.roles.get` for custom roles and `serviceusage.services.use` for CLI use). See [inherited IAM policy access](https://docs.cloud.google.com/iam/docs/resource-hierarchy-access-control) and [Policy Analyzer permissions](https://docs.cloud.google.com/asset-inventory/docs/roles-permissions). These additional read-only permissions have not been granted or checked in this session.
 
 ## Prior Windows 1 checkpoint evidence (historical; superseded above)
 
