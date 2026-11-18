@@ -138,12 +138,38 @@ class FirestoreEmulatorGuardTests(TestCase):
                             create_guarded_emulator_client()
             client.assert_not_called()
 
+    def test_nonempty_guard_probe_collection_fails_before_sdk_client_creation(self):
+        with self.environment():
+            response = SimpleNamespace(
+                status=200,
+                getheader=lambda name: "application/json" if name == "Content-Type" else None,
+                read=lambda: b'{"documents": [{"name": "unexpected"}]}',
+            )
+            connection = SimpleNamespace(
+                request=lambda *args, **kwargs: None,
+                getresponse=lambda: response,
+                close=lambda: None,
+            )
+            with patch(
+                "app.storage.firestore_emulator.http.client.HTTPConnection",
+                return_value=connection,
+            ):
+                with patch("app.storage.firestore_emulator._assert_network_namespace_isolated"):
+                    with patch("app.storage.firestore_emulator.firestore.Client") as client:
+                        with self.assertRaisesRegex(
+                            EmulatorConfigurationError,
+                            "guard probe collection must be empty",
+                        ):
+                            create_guarded_emulator_client()
+            client.assert_not_called()
+
     def test_client_is_explicit_project_and_anonymous_no_adc(self):
         with self.environment():
             response = SimpleNamespace(
                 status=200,
                 getheader=lambda name: "application/json" if name == "Content-Type" else None,
-                read=lambda: b'{"documents": []}',
+                # ProtoJSON omits the empty repeated documents field.
+                read=lambda: b'{}',
             )
             connection = SimpleNamespace(
                 request=lambda *args, **kwargs: None,

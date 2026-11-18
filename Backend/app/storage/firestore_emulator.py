@@ -116,17 +116,27 @@ def _probe_firestore_emulator(target: EmulatorTarget) -> None:
         body = json.loads(response.read())
         if response.status != 200 or content_type != "application/json":
             raise EmulatorConfigurationError("loopback listener did not identify as Firestore Emulator")
-        if not isinstance(body, dict) or not isinstance(body.get("documents"), list):
-            if isinstance(body, dict):
-                shape = (
-                    f"top_level_keys={sorted(body)[:8]!r}, "
-                    f"documents_type={type(body.get('documents')).__name__}"
-                )
-            else:
-                shape = f"body_type={type(body).__name__}"
+        if not isinstance(body, dict):
+            raise EmulatorConfigurationError(
+                "Firestore Emulator probe response had an unexpected schema "
+                f"(body_type={type(body).__name__})"
+            )
+        allowed_fields = {"documents", "nextPageToken"}
+        unknown_fields = sorted(set(body) - allowed_fields)
+        # Firestore's protobuf JSON omits the default empty repeated documents field.
+        documents = body.get("documents", [])
+        next_page_token = body.get("nextPageToken", "")
+        if unknown_fields or not isinstance(documents, list) or not isinstance(next_page_token, str):
+            shape = (
+                f"top_level_keys={sorted(body)[:8]!r}, "
+                f"documents_type={type(documents).__name__}, "
+                f"next_page_token_type={type(next_page_token).__name__}"
+            )
             raise EmulatorConfigurationError(
                 f"Firestore Emulator probe response had an unexpected schema ({shape})"
             )
+        if documents:
+            raise EmulatorConfigurationError("Firestore Emulator guard probe collection must be empty")
     except EmulatorConfigurationError:
         raise
     except (OSError, ValueError, json.JSONDecodeError) as exc:
