@@ -28,6 +28,14 @@
 - Chrome 9223 still redirects to Google sign-in, so no fresh IAM/WIF Console read was possible in this refresh. No specific IAM permission denial was observed. No IAM or Rules policy was modified; no Production token or application data was accessed; billing, logging and paid resources remain unchanged.
 - No additional acceptance credit is awarded. G0 remains 8/10, G1 20/20, G2 20/20, G3 15/15, G4 2/15, G5 12/15 and G6 5/5, for **82%**. Emulator and SQLite acceptance were not rerun because application and test code did not change.
 
+## Windows 2 cross-runtime harness hardening (2026-11-18)
+
+- On resume, `git fetch origin` confirmed local and remote feature HEAD `f7e729244e441c59e25d9e563a86ac727c9fca2b`, `origin/main` `86082460ce3956bd6837ddf5552b525acfbf367c`, and a clean worktree. The feature branch was 31 commits ahead / 0 behind `origin/main`.
+- Read-only Firebase inventory returned one accessible project, `trendscout-192e4`, and one database, `projects/trendscout-192e4/databases/(default)` (Standard, `asia-southeast1`, free-tier eligible). No approved staging database was found in this inventory; a separate non-Firebase GCP project is outside its visibility. Chrome 9223 still shows Google sign-in, so no fresh Console IAM/WIF inspection was possible; no specific permission denial was observed.
+- The multi-host probe previously lacked a hard production project denylist and derived host fingerprints only from Linux files. It now rejects both the TrendScout production project ID and project number before constructing a Firestore client, rejects a `FIRESTORE_EMULATOR_HOST` override so the cloud probe cannot bypass the guarded Emulator path, hashes Windows `MachineGuid` and Linux `machine-id`, and installs Windows-compatible worker shutdown handlers. Raw machine identifiers are not logged or stored.
+- Focused `test_d5_multihost_gate_probe.py` passed **13/13**, including production-target rejection, Emulator-override rejection, the Windows fingerprint/signal branches, and a real local Windows fingerprint-shape check. Ruff passed on the two Python files and `git diff --check` passed. The focused harness test uses a temporary local SQLite store for its offline coordination case; the full SQLite acceptance and passing Emulator suites were not rerun.
+- These changes improve the harness safety and Windows operability; they do not demonstrate shared Firestore behavior across machines. No staging writes, Production data operations, IAM changes, Production token operations, billing changes, full SQLite acceptance rerun, or Emulator suite rerun occurred. **G4 remains 2/15 and total progress remains 82%.**
+
 ## Previous continuation results (2026-11-18)
 
 - At the start of this continuation, `codex/firebase-shared-live-acceptance` and its remote were synchronized at `1ca30cd0d8ceeb481ec8fcee5f896330021cb1a3`; `origin/main` was `86082460ce3956bd6837ddf5552b525acfbf367c`, and the worktree was clean.

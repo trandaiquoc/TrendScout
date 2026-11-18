@@ -1,8 +1,11 @@
 """Offline checks for the explicit opt-in two-host gate harness."""
 
 import asyncio
+import hashlib
 import multiprocessing
+import sys
 import tempfile
+import types
 import unittest
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -191,6 +194,94 @@ class MultiHostProbeTests(unittest.TestCase):
                         argv.extend(("--idempotency-key", "multi-host-probe-key"))
                     multihost_gate_probe.main(argv)
         build_store.assert_not_called()
+
+    def test_cloud_harness_rejects_production_project_id_and_number_before_store(self):
+        with patch.object(multihost_gate_probe, "_store") as build_store:
+            for project_id in ("trendscout-192e4", "556422620769"):
+                with self.subTest(project_id=project_id), self.assertRaisesRegex(
+                    SystemExit, "production project"
+                ):
+                    multihost_gate_probe.main([
+                        "--project-id", project_id,
+                        "--confirm-nonproduction-project", project_id,
+                        "--acknowledge-nonproduction-writes",
+                        "--run-id", "a1b2c3d4", "quota-start",
+                    ])
+        build_store.assert_not_called()
+
+    def test_cloud_harness_rejects_emulator_override_before_store(self):
+        with (patch.dict("os.environ", {"FIRESTORE_EMULATOR_HOST": "127.0.0.1:8080"}),
+              patch.object(multihost_gate_probe, "_store") as build_store,
+              self.assertRaisesRegex(SystemExit, "Emulator override")):
+            multihost_gate_probe.main([
+                "--project-id", "approved-stage",
+                "--confirm-nonproduction-project", "approved-stage",
+                "--acknowledge-nonproduction-writes",
+                "--run-id", "a1b2c3d4", "quota-start",
+            ])
+        build_store.assert_not_called()
+
+    def test_windows_machine_fingerprint_hashes_registry_machine_guid(self):
+        class RegistryKey:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_key(root, path):
+            self.assertEqual(root, "HKLM")
+            self.assertEqual(path, r"SOFTWARE\Microsoft\Cryptography")
+            return RegistryKey()
+
+        def query_value(key, name):
+            self.assertEqual(name, "MachineGuid")
+            return "synthetic-machine-guid", 1
+
+        fake_winreg = types.SimpleNamespace(
+            HKEY_LOCAL_MACHINE="HKLM",
+            OpenKey=open_key,
+            QueryValueEx=query_value,
+        )
+        expected = hashlib.sha256(b"synthetic-machine-guid").hexdigest()
+        with (patch.object(sys, "platform", "win32"),
+              patch.dict(sys.modules, {"winreg": fake_winreg})):
+            self.assertEqual(multihost_gate_probe._machine_fingerprint(), expected)
+
+    def test_current_machine_fingerprint_is_hashed_and_usable(self):
+        fingerprint = multihost_gate_probe._machine_fingerprint()
+        self.assertRegex(fingerprint, r"^[a-f0-9]{64}$")
+
+    def test_windows_worker_shutdown_uses_signal_module_not_asyncio_signal_api(self):
+        class FakeLoop:
+            def __init__(self):
+                self.callbacks = []
+
+            def call_soon_threadsafe(self, callback):
+                self.callbacks.append(callback)
+
+            def add_signal_handler(self, *_args):
+                raise AssertionError("Windows does not support loop signal handlers")
+
+        class FakeStop:
+            def __init__(self):
+                self.called = False
+
+            def set(self):
+                self.called = True
+
+        loop = FakeLoop()
+        stop = FakeStop()
+        with (patch.object(sys, "platform", "win32"),
+              patch.object(multihost_gate_probe.signal, "signal") as install_signal):
+            multihost_gate_probe._install_worker_signal_handlers(loop, stop)
+
+        self.assertEqual(install_signal.call_count, 2)
+        handler = install_signal.call_args_list[0].args[1]
+        handler(None, None)
+        self.assertEqual(len(loop.callbacks), 1)
+        loop.callbacks[0]()
+        self.assertTrue(stop.called)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
 
 _RUN_ID = re.compile(r"^[a-f0-9]{8,32}$")
 _HOST_ID = re.compile(r"^[A-Za-z0-9._~-]{1,40}$")
+_PRODUCTION_PROJECT_IDENTIFIERS = frozenset({"trendscout-192e4", "556422620769"})
 
 
 def _now():
@@ -45,14 +46,34 @@ def _now():
 
 
 def _machine_fingerprint():
-    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+    if sys.platform == "win32":
         try:
-            value = Path(path).read_text(encoding="ascii").strip()
-        except OSError:
-            continue
-        if value:
-            return hashlib.sha256(value.encode("ascii")).hexdigest()
-    raise RuntimeError("Linux machine-id unavailable; cannot distinguish worker hosts")
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Cryptography",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "MachineGuid")
+        except (ImportError, OSError) as exc:
+            raise RuntimeError(
+                "Windows MachineGuid unavailable; cannot distinguish worker hosts"
+            ) from exc
+        if isinstance(value, str) and value.strip():
+            return hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+        raise RuntimeError("Windows MachineGuid is empty; cannot distinguish worker hosts")
+
+    if sys.platform.startswith("linux"):
+        for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                value = Path(path).read_text(encoding="ascii").strip()
+            except OSError:
+                continue
+            if value:
+                return hashlib.sha256(value.encode("ascii")).hexdigest()
+        raise RuntimeError("Linux machine-id unavailable; cannot distinguish worker hosts")
+
+    raise RuntimeError(f"unsupported host platform {sys.platform!r}; cannot distinguish worker hosts")
 
 
 def _store(project_id):
@@ -357,6 +378,33 @@ def _validated(value, pattern, label):
     return value
 
 
+def _validate_target(project_id, confirmed_project, *, acknowledge_nonproduction_writes,
+                     emulator_host):
+    if not isinstance(project_id, str) or not project_id.strip() or project_id != project_id.strip():
+        raise SystemExit("--project-id must be a non-empty project ID without surrounding whitespace")
+    if project_id.casefold() in _PRODUCTION_PROJECT_IDENTIFIERS:
+        raise SystemExit("refusing synthetic multi-host writes to the TrendScout production project")
+    if project_id != confirmed_project:
+        raise SystemExit("non-production project confirmation does not match --project-id")
+    if emulator_host:
+        raise SystemExit("cloud multi-host probe does not accept a Firestore Emulator override")
+    if not acknowledge_nonproduction_writes:
+        raise SystemExit("refusing Firestore writes without --acknowledge-nonproduction-writes")
+
+
+def _install_worker_signal_handlers(loop, stop):
+    if sys.platform == "win32":
+        def request_stop(_signum, _frame):
+            loop.call_soon_threadsafe(stop.set)
+
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
+        return
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+
+
 async def _run_worker(args, store):
     host_id = args.host_id
     expected = tuple(sorted(value.strip() for value in args.expected_hosts.split(",")))
@@ -375,8 +423,7 @@ async def _run_worker(args, store):
                                      idle_poll_seconds=args.idle_poll_seconds)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(signum, stop.set)
+    _install_worker_signal_handlers(loop, stop)
     completed = await runner.run(stop)
     print(json.dumps({"event": "worker_stopped", "host_id": host_id,
                       "completed_jobs": completed}), flush=True)
@@ -385,10 +432,12 @@ async def _run_worker(args, store):
 
 def main(argv=None):
     args = _parser().parse_args(argv)
-    if args.confirm_nonproduction_project != args.project_id:
-        raise SystemExit("project confirmation does not match --project-id")
-    if not args.acknowledge_nonproduction_writes:
-        raise SystemExit("refusing Firestore writes without --acknowledge-nonproduction-writes")
+    _validate_target(
+        args.project_id,
+        args.confirm_nonproduction_project,
+        acknowledge_nonproduction_writes=args.acknowledge_nonproduction_writes,
+        emulator_host=os.environ.get("FIRESTORE_EMULATOR_HOST"),
+    )
     store = _store(args.project_id)
     if args.action == "worker":
         return asyncio.run(_run_worker(args, store))
