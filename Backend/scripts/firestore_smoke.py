@@ -1,16 +1,49 @@
-"""One-document live smoke; run explicitly with GOOGLE_CLOUD_PROJECT set."""
+"""Bounded Firestore smoke for an explicitly approved non-production project."""
 
+import argparse
 import asyncio
 import os
 from uuid import uuid4
 
 from app.storage.firestore import FirestoreStorage
 
+_PRODUCTION_PROJECT_IDENTIFIERS = frozenset({"trendscout-192e4", "556422620769"})
+
+
+def _validate_target(
+    project: str | None,
+    confirmed_project: str,
+    *,
+    acknowledge_nonproduction_writes: bool,
+    emulator_host: str | None,
+) -> None:
+    if not project or not project.strip() or project != project.strip():
+        raise SystemExit(
+            "GOOGLE_CLOUD_PROJECT must be a non-empty project ID without surrounding whitespace"
+        )
+    if project.casefold() in _PRODUCTION_PROJECT_IDENTIFIERS:
+        raise SystemExit("refusing smoke writes to the TrendScout production project")
+    if project != confirmed_project:
+        raise SystemExit("confirmed non-production project does not match GOOGLE_CLOUD_PROJECT")
+    if emulator_host:
+        raise SystemExit("live smoke does not accept a Firestore Emulator override")
+    if not acknowledge_nonproduction_writes:
+        raise SystemExit("refusing Firestore writes without --acknowledge-nonproduction-writes")
+
 
 async def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confirm-nonproduction-project", required=True)
+    parser.add_argument("--acknowledge-nonproduction-writes", action="store_true")
+    args = parser.parse_args()
+
     project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-    if project != "trendscout-192e4" or os.environ.get("FIRESTORE_EMULATOR_HOST"):
-        raise SystemExit("Smoke requires project trendscout-192e4 and no emulator override")
+    _validate_target(
+        project,
+        args.confirm_nonproduction_project,
+        acknowledge_nonproduction_writes=args.acknowledge_nonproduction_writes,
+        emulator_host=os.environ.get("FIRESTORE_EMULATOR_HOST"),
+    )
     storage = FirestoreStorage.from_project(project)
     if storage._client.project != project or storage._client._database != "(default)":
         raise SystemExit("Unexpected project or database; aborting")

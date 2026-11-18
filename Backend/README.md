@@ -73,19 +73,21 @@ try {
 }
 ```
 
-Các test dùng fake và mock, không gọi cloud. Để kiểm tra live thủ công sau khi xác nhận project/ADC, chạy từ `Backend/`:
+Các test dùng fake và mock, không gọi cloud. Smoke script ghi một document tạm rồi xóa nó. Script đã bị khóa với project production `trendscout-192e4` và project number `556422620769`; không dùng nó để kiểm tra production. Hiện chưa có shared staging project được phê duyệt, vì vậy không chạy smoke live trong acceptance này.
 
 ```powershell
-$env:GOOGLE_CLOUD_PROJECT = 'trendscout-192e4'
+$env:GOOGLE_CLOUD_PROJECT = 'YOUR_APPROVED_NONPRODUCTION_PROJECT_ID'
 Push-Location Backend
 try {
-    .\.venv\Scripts\python.exe -m scripts.firestore_smoke
+    .\.venv\Scripts\python.exe -m scripts.firestore_smoke `
+        --confirm-nonproduction-project $env:GOOGLE_CLOUD_PROJECT `
+        --acknowledge-nonproduction-writes
 } finally {
     Pop-Location
 }
 ```
 
-Script chỉ chấp nhận project này, database `(default)` và không cho phép cấu hình emulator. Script tạo một document tên ngẫu nhiên trong `analysis_runs`, đọc/cập nhật, sau đó xóa chính document đó và kiểm tra lại. Nếu bị gián đoạn hoặc lỗi mạng sau khi gửi create, kiểm tra document `step3-smoke-*` được in trong log hoặc Console trước khi dọn; không xóa dữ liệu khác. Kiểm thử live có sử dụng quota Firestore hiện hành. Không cần bật billing cho thao tác trong free quota; tự xác nhận quota và cấu hình thực tế trước mỗi lần chạy.
+Chỉ thay placeholder sau khi owner xác nhận đây là project non-production đã tồn tại và cho phép ghi synthetic data. Script yêu cầu project ID trong `GOOGLE_CLOUD_PROJECT` khớp với cờ xác nhận, cờ `--acknowledge-nonproduction-writes`, và từ chối cấu hình emulator. Nó tạo, đọc, cập nhật rồi xóa document `analysis_runs/step3-smoke-*`; nếu tiến trình bị gián đoạn, document tạm có thể còn lại. Không bật billing hoặc tạo project/database để chạy smoke này.
 
 ## Ranh giới source
 
