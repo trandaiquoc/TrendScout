@@ -16,6 +16,36 @@ from app.orchestration.normal_google_live_composition import (
 from app.settings import Settings
 
 
+def _create_firestore_shared_live_client():
+    """Create the pinned local demo client only from keyless SA impersonation ADC."""
+    import google.auth
+    from google.auth import impersonated_credentials
+    from google.cloud import firestore
+
+    from app.orchestration.firestore_shared_live_composition import (
+        PRODUCTION_FIRESTORE_PROJECT_ID,
+    )
+    from app.storage.vercel_identity import VERCEL_IMPERSONATED_SERVICE_ACCOUNT
+
+    credentials, _ = google.auth.default(
+        scopes=("https://www.googleapis.com/auth/datastore",)
+    )
+    if (not isinstance(credentials, impersonated_credentials.Credentials)
+            or credentials.service_account_email != VERCEL_IMPERSONATED_SERVICE_ACCOUNT):
+        raise ValueError(
+            "Firestore Shared LIVE requires ADC impersonating the approved backend service account"
+        )
+    client = firestore.Client(
+        project=PRODUCTION_FIRESTORE_PROJECT_ID,
+        database="(default)",
+        credentials=credentials,
+    )
+    if (client.project != PRODUCTION_FIRESTORE_PROJECT_ID
+            or getattr(client, "_database", None) != "(default)"):
+        raise ValueError("Firestore Shared LIVE client target is invalid")
+    return client
+
+
 def local_live_settings():
     """Return the normal Windows local LIVE source policy."""
     return replace(
@@ -36,6 +66,11 @@ def main(argv=None):
     parser.add_argument(
         "--port", type=int,
         default=int(os.environ.get("TREND_SCOUT_DEMO_PORT", "8000")),
+    )
+    parser.add_argument(
+        "--firestore-shared-live", action="store_true",
+        help=("Opt this local loopback demo into the existing trendscout-192e4 "
+              "(default) shared Firestore state/cache; omitted means SQLite."),
     )
     parser.add_argument(
         "--youtube-owner-acceptance", action="store_true",
@@ -60,6 +95,17 @@ def main(argv=None):
         parser.error("choose either --youtube-owner-acceptance or --youtube-owner-manual-live")
     if arguments.youtube_owner_force_fresh_test and not arguments.youtube_owner_manual_live:
         parser.error("--youtube-owner-force-fresh-test requires --youtube-owner-manual-live")
+    firestore_client = None
+    if arguments.firestore_shared_live:
+        if os.environ.get("VERCEL"):
+            parser.error("Firestore Shared LIVE is restricted to the local demo runtime")
+        try:
+            firestore_client = _create_firestore_shared_live_client()
+        except Exception as error:
+            parser.error(
+                "Firestore Shared LIVE requires keyless ADC impersonation of the approved "
+                f"backend service account ({type(error).__name__})"
+            )
     if arguments.youtube_owner_manual_live:
         if os.environ.get("VERCEL"):
             parser.error("--youtube-owner-manual-live is restricted to local development")
@@ -107,6 +153,7 @@ def main(argv=None):
                                        or arguments.youtube_owner_manual_live) else 2),
             youtube_manual_live=arguments.youtube_owner_manual_live,
             youtube_force_fresh_test_once=arguments.youtube_owner_force_fresh_test,
+            shared_firestore_client=firestore_client,
         ),
     )
     run_normal_google_live(application, port=arguments.port)

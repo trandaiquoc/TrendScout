@@ -21,7 +21,9 @@ Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; khôn
 
 Để cài đặt và khởi động từ Windows PowerShell tại repository root, chạy `.\setup.ps1` một lần rồi `.\start.ps1`; xem [README chính](../README.md). `start.ps1` chạy profile LIVE đa nguồn đã mô tả ở trên; các runtime legacy bên dưới tách biệt với launcher này.
 
-Repository còn có legacy Firestore-backed run API riêng. Nó không được `start.ps1` khởi chạy. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
+Quy tắc không cần Firebase/ADC ở trên áp dụng cho SQLite mặc định. Để chọn Shared LIVE bằng Firestore hiện có cho demo local, chạy `..\start.ps1 -FirestoreSharedLive`. Chế độ này chỉ chạy loopback, pin `trendscout-192e4/(default)` và chỉ chấp nhận ADC impersonate `trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com`; không chấp nhận service-account key. Quota, cache, checkpoint và snapshot dùng database chung; Fetch vẫn đi qua approval/quota guards hiện có. Bỏ switch để rollback về SQLite. Vercel Production routes vẫn read-only; mode này không deploy hay bật Vercel Production Fetch.
+
+Repository còn có legacy Firestore-backed run API riêng, tách biệt với Shared LIVE Fetch. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
 
 ## Firestore và ADC
 

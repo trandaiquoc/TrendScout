@@ -126,6 +126,10 @@ def create_app(
             expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}
             if getattr(distributed_public_fetch, "normal_bing_live", False):
                 expected_sources.add(BING_SOURCE_ID)
+        elif getattr(distributed_public_fetch, "firestore_shared_live", False):
+            expected_sources = set(getattr(
+                distributed_public_fetch, "normal_google_live_sources", ()
+            ))
         else:
             expected_sources = {
                 WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
@@ -138,7 +142,8 @@ def create_app(
                     or not (getattr(distributed_public_fetch, "local_live", False)
                             or getattr(distributed_public_fetch, "normal_wikimedia_live", False)
                             or getattr(distributed_public_fetch, "normal_google_live", False)
-                            or getattr(distributed_public_fetch, "normal_bing_live", False))))
+                            or getattr(distributed_public_fetch, "normal_bing_live", False)
+                            or getattr(distributed_public_fetch, "firestore_shared_live", False))))
                 or (not local_live_opt_in and (run_mode != "synthetic"
                     or not settings.public_fetch_enabled
                     or distributed_public_fetch.data_mode != "SYNTHETIC"))
@@ -492,7 +497,8 @@ def _validate_local_live_facade(facade):
             or not (getattr(facade, "local_live", False)
                     or getattr(facade, "normal_wikimedia_live", False)
             or getattr(facade, "normal_google_live", False)
-            or getattr(facade, "normal_bing_live", False))):
+            or getattr(facade, "normal_bing_live", False)
+            or getattr(facade, "firestore_shared_live", False))):
         raise ValueError("local composition did not provide a guarded LIVE facade")
 
 

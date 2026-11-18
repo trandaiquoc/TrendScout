@@ -1,12 +1,41 @@
 # TrendScout — Firebase Shared LIVE Runtime, Phase 1
 
-**Status:** Active acceptance continuation; both Firestore Emulator suites pass 25/25 on the isolated Linux runner and the local cache/SQLite transition contracts pass. A bounded synthetic Production smoke verified the real Vercel OIDC-to-Google STS-to-Firestore path and one cross-request cache hit; the temporary route is removed from the feature branch and Production aliases are back on the baseline deployment. External use of project-level Token Creator, least-privilege validation, and cross-process/machine acceptance remain open. Production Shared LIVE and user Fetch remain disabled.
+**Status:** Demo scope is active. Previously accepted Firestore connectivity and the bounded synthetic Production cache smoke remain PASS. The local normal Google Fetch pipeline now has an explicit Firestore Shared LIVE opt-in; SQLite remains the default and Vercel Production Fetch remains disabled. Full Shared LIVE hardening (G4 cross-host, complete IAM least privilege, and external Token Creator consumers) remains separately partial.
 
 **As of:** 2026-11-18
 
 **Progress:** 83% (weighted evidence below).
 
 *This report is chronological. The latest smoke section and acceptance table below supersede older checkpoint statements that predate the smoke.*
+
+## Latest owner scope correction — demo acceptance (2026-11-18)
+
+The active product goal is the TrendScout demo. Vercel plan tier, multi-region deployment, physical host fingerprints, Windows 1/Windows 2 being online together, Usage dashboard evidence, a staging database, and a full external Token Creator audit are **not prerequisites** for demo work. Keep those only under **Full Shared LIVE Hardening**. Do not award hardening points or label G4 cross-host PASS from the demo work below.
+
+### Demo acceptance evidence
+
+| Gate | Result | Evidence and boundary |
+|---|---|---|
+| Firestore online connectivity | **PASS** | The already accepted, bounded synthetic smoke against `trendscout-192e4/(default)` verified Vercel OIDC → Google STS → the backend service account → Firestore. Its cache HIT and exact cleanup remain accepted; this continuation made no Production data writes. Read-only database metadata reports Standard edition, `asia-southeast1`, `(default)`, `freeTier=true`. |
+| Fetch integration | **PASS — offline route integration** | The local normal Google LIVE composition accepts one explicitly injected Firestore client for quota, checkpoints, cache, and snapshot blobs. The existing guarded `POST /api/v1/fetches` path was exercised twice using separate app/composition instances against one offline fake Firestore client. No external provider transport was called. |
+| Cache HIT | **PASS** | The second app instance received `CACHED` with provider request count `0`; the earlier real Production smoke independently proved a cross-request cache HIT with no provider call. The new route test is offline and does not claim separate-host acceptance. |
+| Quota protection | **PASS — offline contract** | The integration fixture had a one-attempt source quota. The first request used one attempt; the second request returned from shared cache and left stored daily quota usage at `1`. The existing 25/25 Emulator evidence for transactional quota, lease/fencing, expiry, and cleanup is retained and was not rerun. |
+| SQLite compatibility | **PASS** | The existing local Fetch HTTP regression suite passed 5/5 after the routing change. SQLite remains the default; omit `-FirestoreSharedLive` to roll back. The previously accepted full SQLite compatibility gate remains unchanged. |
+
+### Implementation, risk, and remaining acceptance
+
+- `start.ps1` / `run_google_live_local.py` now expose the opt-in `-FirestoreSharedLive` / `--firestore-shared-live`. It is local loopback only, pins `trendscout-192e4/(default)`, rejects non-impersonated credentials and service-account keys, and requires ADC impersonating the existing backend service account. Quota, cache, checkpoint, and snapshot state use the existing database when this option is selected; the Fetch source requests still pass the existing approval/quota guards. Without the switch the app keeps SQLite. The Firestore path does not run broad expiry cleanup on startup. Vercel Production remains read-only.
+- Firestore-backed state reads no longer write unchanged documents. A stored shared quota policy mismatch fails closed; it will not perform an implicit cloud migration. The existing source approval and provider quota guards remain active. No IAM, WIF, Rules, billing, credentials, provider settings, or Production routes were changed.
+- **No Production Fetch was run here.** The one-time synthetic smoke authorization did not cover application Fetch writes, so this continuation generated no Production token, made no provider call, accessed no customer data, and wrote no Production application data. The real local ADC identity for this optional path has not been exercised; actual owner-run Firestore mode remains unverified. This is not a blocker for the SQLite demo or feature-branch work.
+- There is no remaining blocker for the SQLite local demo or for continuing feature-branch work. To run the online shared mode, the local environment must already have ADC impersonation for the exact backend service account; no IAM change is proposed. Lack of Vercel Pro, a second region, host fingerprint, Usage screenshot, or external-consumer audit does not block the demo.
+- Full weighted acceptance stays **83%**. G0/G5 IAM findings are unchanged; G4 cross-host remains **PARTIAL (2/15)**. No additional points are awarded from offline route tests or prior same-deployment Production requests. Emulator acceptance remains 25/25; SQLite full acceptance remains accepted; neither full gate was rerun.
+
+### Focused evidence from this continuation
+
+- `test_d5_firestore_atomic_state.py`: **4/4 PASS**, including no write on unchanged state reads.
+- `test_d5_firestore_shared_cache.py`: **11/11 PASS**, including normal Google Firestore composition selection, two app instances through the Fetch API, cache HIT with zero second provider calls, and one quota reservation total.
+- `test_d6_local_live_http.py`: **5/5 PASS**, including the existing guarded SQLite Fetch path and loopback/request guards.
+- No Emulator suite or full SQLite acceptance rerun; no real provider request or Production Fetch.
 
 **Target selected by the owner:** `trendscout-192e4/(default)`; the only Production write was the explicitly authorized one-document synthetic smoke recorded below. It was deleted and independently verified absent; no application/customer data was touched.
 
@@ -17,7 +46,7 @@
 - `write` created exactly one synthetic shared-cache coordination document (2 reads, 2 writes). A separate `verify` request, using a new request-scoped client, returned `CACHED` with zero provider calls (2 reads, 2 writes). `cleanup` deleted the owned document and confirmed absence (2 reads, 1 write). An independent Firebase exact-path read returned `NOT_FOUND` (1 additional read). Total observed: 7 reads, 5 writes, one document created then deleted; within the owner caps. No application/customer data was read or written, and no secret or token value was logged.
 - This proves a real Production identity exchange and a cache hit across separate HTTP requests. Both requests reached the same deployment; it does not establish separate-process, separate-host, or Windows/Linux/Vercel shared state. G4 stays partial.
 - Cleanup and rollback: the temporary Vercel share link was revoked; Production aliases `trend-scout-mu.vercel.app`, `trend-scout-rakoon1.vercel.app`, and `trend-scout-git-main-rakoon1.vercel.app` were verified back on baseline `dpl_GLKxzS5QstU9seuDfK6i91fNKpvr`; the feature-branch alias was restored to Preview `dpl_ChMm2xvteEfi1bJ8nitcq6VjmVpP`. The Production smoke env is disabled, its configured expiry moved into the past, and the sensitive token rotated without reading it. The READY temporary deployment remains in Vercel history because the available connector cannot delete a READY deployment; it has no aliases and remains behind SSO protection. Its immutable environment snapshot has the route's self-expiry at `2026-11-18T08:33:21Z`; the temporary route code has been removed from the feature branch source. No Production promotion remains active.
-- Credit one G5 point for the real Production WIF/STS/Firestore exchange evidence: G5 is 13/15 and weighted progress is 83%. G0 remains 8/10 due to unresolved external Token Creator consumers and complete effective IAM; G4 remains 2/15 because no independent process/host acceptance was proven. Production Shared LIVE and user Fetch remain disabled.
+- Credit one G5 point for the real Production WIF/STS/Firestore exchange evidence: G5 is 13/15 and weighted progress is 83%. G0 remains 8/10 due to unresolved external Token Creator consumers and complete effective IAM; G4 remains 2/15 because no independent process/host acceptance was proven. Vercel Production Shared LIVE and Fetch remain disabled; the local demo defaults to SQLite and has a separate Firestore opt-in.
 
 ## G4 Production cross-runtime plan (prepared; not authorized for execution)
 
@@ -355,7 +384,7 @@ Official references consulted on 2026-11-18: [Vercel OIDC request headers and to
 1. Continue IAM review: the exact Firestore database condition has been applied and independently verified. The existing `roles/datastore.user` remains write-capable within `(default)`; validate a read-only Production identity and any separate Shared LIVE writer only against an approved non-production database and after separate authorization. Current-project Asset Inventory shows no Cloud Run, Cloud Functions, App Engine, or Compute workload resources; external consumers and other projects remain open. Cloud Audit Logs cannot establish past Token Creator use because IAM API Data Access logging is disabled. Do not remove the project-level Token Creator binding now. A bounded audit window requires owner authorization; any later removal or resource-level replacement requires separate authorization after the external-consumer review. The Cloud Run Admin API is disabled, and Console reports that this account cannot enable it; do not add `serviceusage.services.enable` without authorization. The bounded Production smoke verified the WIF/STS exchange, so G5 is now 13/15 and the weighted score is 83%.
 2. The bounded smoke verified production-subject Vercel OIDC -> Google STS -> service-account impersonation -> Firestore access. Do not create another Production diagnostic route or repeat the smoke without a new explicit authorization. No general Production Shared LIVE request path has been accepted.
 3. Complete independent-client and cross-machine shared-cache/restart acceptance across Windows 1, Windows 2, and Linux. The Emulator child-process cache-hit case passed, but that does not prove Vercel or separate-host consistency.
-4. Keep NORMAL_DEMO and current normal LIVE modes on SQLite. The one authorized synthetic smoke is complete; do not make additional Production writes, enable billing, change IAM or Security Rules, activate Production Shared LIVE or user Fetch, call provider APIs, or perform D7 without separate authorization and the remaining acceptance evidence.
+4. For full hardening, keep NORMAL_DEMO and local normal LIVE on SQLite by default; the local demo may select the explicit Firestore feature flag described in the latest owner scope section. Keep Vercel Production Fetch disabled. Do not change IAM or Security Rules, enable billing, or run production data operations beyond explicit owner authorization.
 
 ## Cross-runtime non-production procedure (prepared; not executed)
 

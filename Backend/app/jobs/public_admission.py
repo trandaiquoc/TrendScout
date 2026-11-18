@@ -1,7 +1,8 @@
 """Storage-independent shared admission and pre-attempt quota reservation.
 
-This component is not wired to public Fetch. Its guarantees depend on a
-serializable durable store and a trustworthy, bounded-skew server clock.
+The local Google LIVE Fetch can explicitly use it with SQLite or Firestore.
+Its guarantees depend on a serializable durable store and a trustworthy,
+bounded-skew server clock.
 """
 
 import hashlib

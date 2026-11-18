@@ -1,9 +1,8 @@
 """Fenced worker loop for source-scoped jobs stored by ``PublicAdmission``.
 
-The worker is deliberately not started by the web application. A deployment must
-compose it with an approved durable ``AtomicStateStore`` and a bounded source
-handler registry. It is not yet wired to HTTP Fetch or a production job runner.
-Offline tests use a multi-process SQLite harness only.
+The worker is used by the guarded local LIVE Fetch only when an explicit source
+composition is selected. Production deployment and production Fetch remain
+separate opt-in decisions; offline tests use local or injected Firestore stores.
 """
 
 import inspect

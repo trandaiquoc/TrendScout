@@ -11,6 +11,8 @@ Cần Python native 3.12. `setup.ps1` dùng Python Launcher `py -3.12`, tạo `B
 .\start.ps1
 ```
 
+Mặc định quota, cache và snapshot dùng SQLite local. Để chọn Shared LIVE trên Firestore hiện có cho demo local, chạy `.\start.ps1 -FirestoreSharedLive`. Chế độ này chỉ chạy loopback, pin `trendscout-192e4/(default)` và đòi ADC impersonate đúng backend service account bằng keyless credentials. Fetch vẫn chạy qua các quota và approval hiện có; cache/quota/checkpoint được chia sẻ trên database đó. Không có switch thì SQLite là đường rollback. Vercel Production Fetch vẫn tắt.
+
 Mở `http://127.0.0.1:8000/dashboard/`; nhấn Ctrl+C để dừng. `start.ps1` chạy profile LIVE đa nguồn trên loopback với một worker: Wikimedia, Google Trends/Google Search, Bing Search và YouTube Search. Google/Bing cần `SERPAPI_API_KEY`, YouTube cần `YOUTUBE_API_KEY` trong `.env` ở thư mục gốc. Khởi động không gửi request tới provider; việc thu thập chỉ bắt đầu khi bạn chọn Fetch. Quota, lịch YouTube và đồng ý chính sách YouTube trong dashboard vẫn được áp dụng. Đặt `TREND_SCOUT_DEMO_PORT` để đổi cổng (mặc định `8000`).
 
 Chạy offline regression, browser E2E và benchmark:

@@ -1,7 +1,7 @@
-"""Firestore adapter for one-document atomic state; not wired to the runtime.
+"""Firestore adapter for one-document atomic state used by explicit runtimes.
 
-No Firebase client is constructed here. The caller must explicitly supply an
-authorized client after deployment review. Transaction callbacks must be pure.
+No Firebase client or credentials are constructed here. The caller explicitly
+injects a project-pinned client. Transaction callbacks must be pure.
 """
 
 import json
@@ -55,8 +55,12 @@ class FirestoreAtomicStateStore:
                 raise ValueError("coordination state must be finite JSON") from None
             if len(encoded) > _MAX_BYTES:
                 raise ValueError("coordination state exceeds document budget")
-            tx.set(reference, updated)
-            callback_completed[0] = True
+            # Read-only operations (quota snapshots, status lookups, cache
+            # misses) must not turn into Firestore writes. Besides reducing
+            # quota use, this keeps startup probes from creating empty state.
+            if updated != current:
+                tx.set(reference, updated)
+                callback_completed[0] = True
             return result
 
         try:

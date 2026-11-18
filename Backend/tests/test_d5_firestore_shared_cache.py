@@ -1,13 +1,27 @@
 """Offline transactional contract tests for Firestore-backed shared cache blobs."""
 
 import asyncio
+import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
+from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
+from app.jobs.source_checkpoints import CheckpointGrant
+from app.main import create_normal_google_live_app
+from app.orchestration.firestore_shared_live_composition import (
+    PRODUCTION_FIRESTORE_PROJECT_ID,
+    create_firestore_shared_live_composition,
+)
+from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -21,6 +35,7 @@ from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
 from app.storage.firestore_shared_cache import create_firestore_shared_cache
 from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
 from app.workers.d5_source_handlers import D5SourceHandlers
+from app.workers.guarded_attempt import GuardedAttemptRunner
 
 NOW = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
 SCOPE = CacheScope(GOOGLE_SOURCE_ID, "serpapi_google", "linen pants", "a" * 64,
@@ -107,6 +122,13 @@ class FakeClient:
 
     def transaction(self, max_attempts):
         return FakeTransaction(self)
+
+
+class SharedRuntimeFakeClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.project = PRODUCTION_FIRESTORE_PROJECT_ID
+        self._database = "(default)"
 
 
 def fake_transactional(callback):
@@ -318,6 +340,222 @@ class FirestoreSharedCacheTests(unittest.TestCase):
                 job_id, "worker", fence, source_id=GOOGLE_SOURCE_ID,
                 attempt_id="google-physical-attempt-002", now=NOW,
             )
+
+
+class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_google_composition_selects_firestore_only_when_injected(self):
+        client = SharedRuntimeFakeClient()
+
+        class NoCredentials:
+            def resolve(self, _reference):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            from app.collections.store import CollectionStore
+
+            collection_store = CollectionStore(Path(directory) / "collections.sqlite")
+            send = patch.object(httpx.AsyncHTTPTransport, "handle_async_request")
+            transaction_patchers = [
+                patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+                patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+                send,
+            ]
+            started = [patcher.start() for patcher in transaction_patchers]
+            send_mock = started[-1]
+            self.addCleanup(lambda: [patcher.stop() for patcher in reversed(transaction_patchers)])
+
+            async with normal_google_live_composition(
+                user_agent="TrendScoutTestBot/0.1 (https://example.invalid/contact)",
+                google_settings=GoogleLiveSettings(),
+                credential_provider=NoCredentials(),
+                collection_store=collection_store,
+                preserve_expired_data=True,
+                shared_firestore_client=client,
+            ) as facade:
+                self.assertIsInstance(facade.admission.store, FirestoreAtomicStateStore)
+                self.assertIsInstance(facade.journal.snapshot_blobs, FirestoreSnapshotBlobs)
+                self.assertIs(facade.admission.store._client, client)
+                self.assertIs(facade.journal.snapshot_blobs._client, client)
+                self.assertTrue(facade.firestore_shared_live)
+                self.assertFalse(facade.normal_google_live)
+                self.assertEqual(
+                    facade.normal_google_live_sources,
+                    frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}),
+                )
+                self.assertIsNone(facade.youtube_retention_cleanup)
+                send_mock.assert_not_called()
+
+    async def test_local_fetch_api_uses_shared_firestore_cache_and_charges_quota_once(self):
+        client = SharedRuntimeFakeClient()
+        state_key = "firestore-fetch-integration"
+        policy = AdmissionPolicy(
+            enabled_sources=frozenset({GOOGLE_SOURCE_ID}),
+            pools={"serpapi": PoolLimit(1, 1, 1, 1, 1,
+                                        max_inflight=1, attempt_timeout_seconds=10)},
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            max_starts_per_window=10,
+            cooldown_seconds=0,
+            lease_seconds=30,
+            max_attempts=1,
+            max_job_seconds=60,
+            receipt_seconds=120,
+            enabled=True,
+        )
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "policy-v1", NOW + timedelta(days=1),
+            max_fresh_seconds=600, max_stale_seconds=1200,
+            max_retention_seconds=1800, allowed=True,
+        )
+        scope = CacheScope(
+            source_id=GOOGLE_SOURCE_ID,
+            provider_id="serpapi_google",
+            query="shared-fetch-integration",
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            market="US",
+            language="en",
+            window="7d",
+            parser_version="source-v1",
+            policy_version=grant.policy_version,
+        )
+        provider_calls = []
+        compositions = []
+
+        def handlers_factory(cache):
+            quota = PublicAdmission(cache.store, policy, state_key=state_key)
+            runner = GuardedAttemptRunner(quota, clock=lambda: NOW)
+
+            async def handler(context):
+                cached = cache.get(scope, grant=grant, now=NOW)
+                if cached.get("status") == "CACHED":
+                    payload = dict(cached["payload"])
+                    payload["delivery_state"] = "CACHED"
+                    payload["provider_request_count"] = 0
+                    payload["coverage"] = {
+                        **payload.get("coverage", {}),
+                        "provider_request_count": 0,
+                        "cache_fetched_at": cached.get("fetched_at"),
+                    }
+                    return payload
+
+                async def provider_request():
+                    provider_calls.append(context.job_id)
+                    return {
+                        "status": "SUCCESS",
+                        "data_mode": "LIVE",
+                        "delivery_state": "FRESH",
+                        "records": [],
+                        "record_count": 0,
+                        "provider_request_count": 1,
+                        "coverage": {"provider_request_count": 1},
+                    }
+
+                outcome = await runner.run(
+                    job_id=context.job_id,
+                    owner=context.owner,
+                    fence=context.fence,
+                    source_id=GOOGLE_SOURCE_ID,
+                    attempt_id=f"fixture-{context.job_id}",
+                    timeout_seconds=5,
+                    request=provider_request,
+                )
+                if outcome.status != "COMPLETED":
+                    return {
+                        "status": "FAILED", "data_mode": "LIVE",
+                        "record_count": 0, "records": [],
+                        "error_code": "FIXTURE_ATTEMPT_FAILED",
+                    }
+                result = outcome.value
+                cache.put(
+                    scope, grant=grant, origin="LIVE", payload=result,
+                    fetched_at=NOW, now=NOW,
+                )
+                return result
+
+            handler.__trendscout_data_mode__ = "LIVE"
+            return {GOOGLE_SOURCE_ID: handler}
+
+        @asynccontextmanager
+        async def composition():
+            value = create_firestore_shared_live_composition(
+                client,
+                policy=policy,
+                state_key=state_key,
+                handlers_factory=handlers_factory,
+                resolve_grant=lambda source, now: CheckpointGrant(
+                    source, "LIVE", "fixture-retention", now + timedelta(minutes=2),
+                    120, True,
+                ),
+                resolve_processing_grants=lambda _now: (),
+                utcnow=lambda: NOW,
+            )
+            value.public_fetch.normal_google_live_sources = frozenset({GOOGLE_SOURCE_ID})
+            compositions.append(value)
+            yield value.public_fetch
+
+        settings = Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "local",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_READ_ONLY": "false",
+            "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+            "WIKIMEDIA_USER_AGENT": "TrendScout offline Firestore integration test",
+        })
+        transaction_patchers = [
+            patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+            patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+        ]
+        for patcher in transaction_patchers:
+            patcher.start()
+        self.addCleanup(lambda: [patcher.stop() for patcher in reversed(transaction_patchers)])
+
+        with tempfile.TemporaryDirectory() as directory:
+            from app.collections.store import CollectionStore
+
+            collection_store = CollectionStore(Path(directory) / "collections.sqlite")
+            store_patcher = patch(
+                "app.collections.store.CollectionStore.local", return_value=collection_store
+            )
+            store_patcher.start()
+            self.addCleanup(store_patcher.stop)
+
+            for key in (
+                "firestore-shared-runtime-first-request",
+                "firestore-shared-runtime-second-request",
+            ):
+                app = create_normal_google_live_app(
+                    enabled=True,
+                    workers=1,
+                    composition_factory=composition,
+                    settings=settings,
+                )
+                inner = app.app
+                async with inner.router.lifespan_context(inner):
+                    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+                    async with httpx.AsyncClient(
+                        transport=transport, base_url="http://127.0.0.1"
+                    ) as session:
+                        accepted = await session.post(
+                            "/api/v1/fetches", json={}, headers={"Idempotency-Key": key}
+                        )
+                        self.assertEqual(accepted.status_code, 202, accepted.text)
+                        status = await session.get(accepted.json()["status_url"])
+                        self.assertEqual(status.status_code, 200, status.text)
+                        source_result = status.json()["sources"][0]
+                        self.assertEqual(source_result["status"], "SUCCESS")
+                        self.assertEqual(
+                            source_result["delivery_state"],
+                            "FRESH" if len(compositions) == 1 else "CACHED",
+                        )
+                        self.assertEqual(
+                            source_result["provider_request_count"],
+                            1 if len(compositions) == 1 else 0,
+                        )
+
+        self.assertEqual(len(provider_calls), 1)
+        self.assertEqual(
+            compositions[-1].admission.quota_snapshot("serpapi", now=NOW)["daily"]["used"],
+            1,
+        )
+        self.assertTrue(compositions[-1].public_fetch.firestore_shared_live)
 
 
 if __name__ == "__main__":

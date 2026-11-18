@@ -66,6 +66,22 @@ class FirestoreAtomicStateTests(unittest.TestCase):
                 store.transact("public", lambda state: ({"value": float("nan")}, None))
         self.assertEqual(client.data["public"], {"count": 1})
 
+    def test_read_only_transaction_does_not_create_or_rewrite_document(self):
+        client = FakeClient()
+        store = FirestoreAtomicStateStore(client)
+        with patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional):
+            self.assertEqual(store.transact("empty-state", lambda state: (state, "read")), "read")
+            self.assertNotIn("empty-state", client.data)
+            self.assertEqual(
+                store.transact("public", lambda state: ({"count": 1}, "write")), "write"
+            )
+            client.pending = None
+            self.assertEqual(
+                store.transact("public", lambda state: (state, "read")), "read"
+            )
+            self.assertIsNone(client.pending)
+        self.assertEqual(client.data["public"], {"count": 1})
+
     def test_ambiguous_commit_is_never_reported_successful(self):
         client = FakeClient()
         store = FirestoreAtomicStateStore(client)

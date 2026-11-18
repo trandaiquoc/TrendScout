@@ -1,8 +1,8 @@
 """Explicit, injected Firestore composition for the shared LIVE fetch worker.
 
 This module never creates a Firestore client or credentials. Callers must pass
-the reviewed backend client for ``trendscout-192e4``. NORMAL_DEMO and the
-existing local LIVE compositions continue to use their SQLite stores.
+the reviewed backend client for ``trendscout-192e4``. Existing compositions use
+SQLite by default; local Google LIVE can explicitly inject this shared backend.
 """
 
 from __future__ import annotations

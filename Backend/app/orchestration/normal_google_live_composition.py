@@ -1,4 +1,4 @@
-"""Separately approved local LIVE composition for Wikimedia and Google Trends."""
+"""Local multi-source LIVE composition with SQLite default and Firestore opt-in."""
 
 from __future__ import annotations
 
@@ -194,7 +194,8 @@ async def normal_google_live_composition(*, user_agent,
                                          preserve_expired_data: bool = False,
                                          youtube_max_queries: int = 2,
                                          youtube_manual_live: bool = False,
-                                         youtube_force_fresh_test_once: bool = False):
+                                         youtube_force_fresh_test_once: bool = False,
+                                         shared_firestore_client=None):
     """Compose one local worker; no Google call is made without its own approval."""
     config = google_settings or GoogleLiveSettings.from_environment()
     if (os.environ.get("VERCEL") or not isinstance(config, GoogleLiveSettings)
@@ -225,16 +226,26 @@ async def normal_google_live_composition(*, user_agent,
                 or runtime_host.casefold() != config.youtube_live_host.casefold()):
             raise ValueError("owner manual YouTube LIVE requires an approved local owner host")
 
-    directory = Path(state_directory) if state_directory is not None else (
-        Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
-    )
-    secure_private_directory(directory)
-    store = LocalSQLiteAtomicStateStore.for_local_live(directory / "state.sqlite")
-    snapshot_blobs = LocalSQLiteSnapshotBlobs(
-        store, preserve_expired=preserve_expired_data
-    )
-    if not preserve_expired_data:
-        snapshot_blobs.purge_expired(now=utcnow())
+    uses_firestore = shared_firestore_client is not None
+    if uses_firestore:
+        from app.orchestration.firestore_shared_live_composition import _client_project_id
+        from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
+        from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
+
+        _client_project_id(shared_firestore_client)
+        store = FirestoreAtomicStateStore(shared_firestore_client)
+        snapshot_blobs = FirestoreSnapshotBlobs(shared_firestore_client)
+    else:
+        directory = Path(state_directory) if state_directory is not None else (
+            Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
+        )
+        secure_private_directory(directory)
+        store = LocalSQLiteAtomicStateStore.for_local_live(directory / "state.sqlite")
+        snapshot_blobs = LocalSQLiteSnapshotBlobs(
+            store, preserve_expired=preserve_expired_data
+        )
+        if not preserve_expired_data:
+            snapshot_blobs.purge_expired(now=utcnow())
     policy = normal_google_live_policy(
         serpapi_daily_budget=config.serpapi_daily_budget,
         serpapi_monthly_budget=config.serpapi_monthly_budget,
@@ -252,7 +263,14 @@ async def normal_google_live_composition(*, user_agent,
     existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
     # First launch has no quota state to migrate; any populated ledger must
     # still match one of the explicit migration paths below.
-    if existing_state and existing_state.get("policy_digest") != admission.policy_digest:
+    if (uses_firestore and existing_state
+            and existing_state.get("policy_digest") != admission.policy_digest):
+        raise ValueError(
+            "Firestore shared LIVE quota policy differs from stored state; "
+            "refusing an implicit shared-state migration"
+        )
+    if (not uses_firestore and existing_state
+            and existing_state.get("policy_digest") != admission.policy_digest):
         def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
             return normal_google_live_policy(
                     serpapi_daily_budget=config.serpapi_daily_budget,
@@ -346,7 +364,11 @@ async def normal_google_live_composition(*, user_agent,
             else:
                 raise ValueError("stored Google LIVE policy does not match a supported local migration")
     runner = GuardedAttemptRunner(admission, clock=utcnow)
-    cache = SharedCache(store)
+    cache = SharedCache(
+        store,
+        payload_blobs=snapshot_blobs if uses_firestore else None,
+        max_inline_bytes=500_000 if uses_firestore else None,
+    )
     youtube_cache_scope = CacheScope(
         source_id=YOUTUBE_SOURCE_ID,
         provider_id="youtube_data_api_v3",
@@ -373,12 +395,17 @@ async def normal_google_live_composition(*, user_agent,
         cache_deleted = purge_expired_youtube_cache(
             cache, youtube_cache_scope, youtube_cache_grant_at(now), now=now
         )
+        if uses_firestore:
+            return {
+                "cache_entries": int(cache_deleted),
+                "expired_blobs": int(snapshot_blobs.purge_expired(now=now)),
+            }
         checkpoint_counts = purge_expired_youtube_checkpoints(
             store, snapshot_blobs, now=now, state_key=GOOGLE_STATE_KEY
         )
         return {"cache_entries": int(cache_deleted), **checkpoint_counts}
 
-    if not preserve_expired_data:
+    if not preserve_expired_data and not uses_firestore:
         cleanup_youtube_data()
     resources = []
     quota_state = {"status": "NOT_CONFIGURED", "snapshot": None}
@@ -728,10 +755,14 @@ async def normal_google_live_composition(*, user_agent,
         )
         facade = DistributedPublicFetch(
             admission, worker, resolve_grant=resolve_checkpoint,
-            utcnow=utcnow, normal_google_live=True,
+            utcnow=utcnow,
+            normal_google_live=not uses_firestore,
+            firestore_shared_live=uses_firestore,
             resolve_processing_grants=resolve_processing,
             provider_retry_after_seconds=pace_request.retry_after_seconds,
         )
+        if uses_firestore:
+            facade.normal_google_live_sources = frozenset(policy.enabled_sources)
         facade.entity_lookup_before_request = pace_request.wait_sync
         facade.normal_bing_live = bing_gateway is not None
         facade.normal_youtube_live = youtube_gateway is not None
@@ -834,7 +865,7 @@ async def normal_google_live_composition(*, user_agent,
 
         facade.youtube_quota_metadata = youtube_quota_metadata
         facade.youtube_retention_cleanup = (
-            None if preserve_expired_data else cleanup_youtube_data
+            None if preserve_expired_data or uses_firestore else cleanup_youtube_data
         )
 
         def google_quota_metadata():

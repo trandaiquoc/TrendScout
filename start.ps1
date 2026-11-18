@@ -1,6 +1,7 @@
 param(
     [int]$Port = 0,
-    [switch]$YoutubeOwnerManualLive
+    [switch]$YoutubeOwnerManualLive,
+    [switch]$FirestoreSharedLive
 )
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
@@ -46,6 +47,7 @@ if ($YoutubeOwnerManualLive) {
     }
     $launcherArguments += '--youtube-owner-manual-live'
 }
+if ($FirestoreSharedLive) { $launcherArguments += '--firestore-shared-live' }
 $previousYoutubeApproval = $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED
 $previousYoutubeHost = $env:TREND_SCOUT_YOUTUBE_LIVE_HOST
 $env:TREND_SCOUT_YOUTUBE_LIVE_APPROVED = 'true'

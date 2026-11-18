@@ -175,7 +175,6 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                 GOOGLE_POLICY_VERSION,
                 normal_google_live_policy,
             )
-            from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
             store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
             valid = (not os.environ.get("VERCEL")
                     and source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID,
@@ -183,8 +182,7 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                      and approval.policy_version == GOOGLE_POLICY_VERSION
                      and approval.local_controls_verified is True
                      and isinstance(runner, GuardedAttemptRunner)
-                     and type(store) is LocalSQLiteAtomicStateStore
-                     and store.data_mode == "LIVE"
+                     and _is_approved_normal_google_state_store(store)
                      and _matches_bounded_google_local_policy(
                          runner.admission.policy, normal_google_live_policy
                      )
@@ -196,6 +194,25 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
     if not valid:
         raise GatewayError("SOURCE_NOT_APPROVED")
     return approval
+
+
+def _is_approved_normal_google_state_store(store):
+    """Allow the local policy on SQLite or its explicitly pinned shared store."""
+    from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+
+    if type(store) is LocalSQLiteAtomicStateStore:
+        return store.data_mode == "LIVE"
+    try:
+        from app.orchestration.firestore_shared_live_composition import (
+            PRODUCTION_FIRESTORE_PROJECT_ID,
+            _client_project_id,
+        )
+        from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
+
+        return (type(store) is FirestoreAtomicStateStore
+                and _client_project_id(store._client) == PRODUCTION_FIRESTORE_PROJECT_ID)
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
