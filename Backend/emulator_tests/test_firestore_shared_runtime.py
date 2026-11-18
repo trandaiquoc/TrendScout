@@ -20,7 +20,13 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
 sys.path.insert(0, str(BACKEND / "tests"))
 
-from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission  # noqa: E402
+from app.jobs.public_admission import (  # noqa: E402
+    SOURCE_POOLS,
+    AdmissionDenied,
+    AdmissionPolicy,
+    PoolLimit,
+    PublicAdmission,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope  # noqa: E402
 from app.orchestration.firestore_shared_live_composition import (  # noqa: E402
     create_firestore_shared_live_composition,
@@ -47,15 +53,18 @@ from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs  # noqa:
 from app.workers.d5_source_handlers import D5SourceHandlers  # noqa: E402
 
 
-def admission_policy(*, request_limit=8, max_inflight=8):
+def admission_policy(*, request_limit=8, max_inflight=8, enabled_sources=None):
+    enabled_sources = frozenset(enabled_sources or (WIKIMEDIA_SOURCE_ID,))
+    pools = {
+        pool: PoolLimit(
+            request_limit, request_limit, request_limit, request_limit, 1,
+            max_inflight=max_inflight, attempt_timeout_seconds=60,
+        )
+        for pool in {SOURCE_POOLS[source] for source in enabled_sources}
+    }
     return AdmissionPolicy(
-        enabled_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
-        pools={
-            "wikimedia": PoolLimit(
-                request_limit, request_limit, request_limit, request_limit, 1,
-                max_inflight=max_inflight, attempt_timeout_seconds=60,
-            ),
-        },
+        enabled_sources=enabled_sources,
+        pools=pools,
         plan_fingerprint="a" * 64,
         max_starts_per_window=16,
         cooldown_seconds=0,
@@ -170,7 +179,15 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
     def test_shared_quota_race_allows_one_reservation_and_no_provider_call(self):
         count = 4
         key = self.state_key("quota")
-        policy = admission_policy(request_limit=1, max_inflight=count)
+        enabled_sources = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID})
+        policy = admission_policy(request_limit=1, max_inflight=count,
+                                  enabled_sources=enabled_sources)
+        request_sources = (
+            [WIKIMEDIA_SOURCE_ID],
+            [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID],
+            [WIKIMEDIA_SOURCE_ID, BING_SOURCE_ID],
+            [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID],
+        )
         clients = [self.client, self.new_client()]
         admissions = [
             PublicAdmission(FirestoreAtomicStateStore(client, max_attempts=10),
@@ -182,7 +199,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
             admission = admissions[0]
             job = admission.admit(
                 f"emulator-quota-job-{self.suffix}-{index:02d}", now=self.now,
-                request_metadata={"emulator_fixture": index},
+                request_metadata={"sources": request_sources[index]},
             )
             claim = admission.claim(job["job_id"], f"worker-{index}", now=self.now)
             jobs.append((job["job_id"], claim["fence"]))
@@ -213,7 +230,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         quota = admissions[1].quota_snapshot("wikimedia", now=self.now)
         self.assertEqual(quota["daily"]["used"], 1)
         self.assertEqual(quota["monthly"]["used"], 1)
-        self.assertEqual(policy.enabled_sources, frozenset({WIKIMEDIA_SOURCE_ID}))
+        self.assertEqual(policy.enabled_sources, enabled_sources)
 
     def test_lost_commit_ack_replays_receipt_without_double_reserving(self):
         key = self.state_key("recovery")

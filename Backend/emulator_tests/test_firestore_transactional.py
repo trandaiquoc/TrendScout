@@ -158,7 +158,8 @@ class FirestoreTransactionalEmulatorTests(unittest.TestCase):
         )
         self.datasets.seal(dataset_id, self.resource, job_id, owner, job.fencing,
                            job.revision, token, manifest)
-        job = self.jobs.transition(job_id, owner, job.fencing, job.revision, State.VALIDATING)
+        if job.state != State.VALIDATING:
+            job = self.jobs.transition(job_id, owner, job.fencing, job.revision, State.VALIDATING)
         self.assertTrue(self.datasets.verify(dataset_id, self.resource, job_id, owner,
                                              job.fencing, job.revision, token))
         job = self.jobs.get(job_id)
