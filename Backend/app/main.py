@@ -368,14 +368,6 @@ def create_app(
     application.include_router(fetches_router, prefix="/api/v1")
     application.include_router(collections_router, prefix="/api/v1")
     application.include_router(datasets_router, prefix="/api/v1")
-    if (
-        os.environ.get("VERCEL") == "1"
-        and os.environ.get("VERCEL_ENV") == "production"
-        and os.environ.get("TREND_SCOUT_FIRESTORE_SMOKE_ENABLED") == "1"
-    ):
-        from app.api.firestore_smoke import router as firestore_smoke_router
-
-        application.include_router(firestore_smoke_router, prefix="/api/internal")
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     if read_only:
 
