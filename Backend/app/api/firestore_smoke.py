@@ -68,7 +68,7 @@ def _enabled(request: Request) -> bool:
 def _authorize(request: Request) -> None:
     if not _enabled(request):
         raise HTTPException(404, "Not found")
-    expected = getattr(request.app.state, "operator_token", None)
+    expected = os.environ.get("TREND_SCOUT_FIRESTORE_SMOKE_TOKEN")
     supplied = request.headers.get("authorization", "")
     if not isinstance(expected, str) or len(expected) < 32:
         raise HTTPException(404, "Not found")

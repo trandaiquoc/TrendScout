@@ -15,7 +15,6 @@ class FirestoreSmokeRouteTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.app = FastAPI()
         self.app.state.read_only = True
-        self.app.state.operator_token = "operator-token-that-is-at-least-32-bytes-long"
         self.app.state.read_storage_factory = lambda _token: self.fail(
             "storage factory must not run before the auth gates"
         )
@@ -26,6 +25,7 @@ class FirestoreSmokeRouteTests(unittest.IsolatedAsyncioTestCase):
             "VERCEL_ENV": "production",
             "TREND_SCOUT_FIRESTORE_SMOKE_ENABLED": "1",
             "TREND_SCOUT_FIRESTORE_SMOKE_EXPIRES_AT": expires,
+            "TREND_SCOUT_FIRESTORE_SMOKE_TOKEN": "smoke-token-that-is-at-least-32-bytes-long",
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -53,7 +53,7 @@ class FirestoreSmokeRouteTests(unittest.IsolatedAsyncioTestCase):
         expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         with patch.dict(os.environ, {"TREND_SCOUT_FIRESTORE_SMOKE_EXPIRES_AT": expired}):
             response = await self._post(
-                authorization=f"Bearer {self.app.state.operator_token}"
+                authorization=f"Bearer {os.environ['TREND_SCOUT_FIRESTORE_SMOKE_TOKEN']}"
             )
 
         self.assertEqual(response.status_code, 404)
@@ -61,7 +61,7 @@ class FirestoreSmokeRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_production_environment_hides_the_route(self):
         with patch.dict(os.environ, {"VERCEL_ENV": "preview"}):
             response = await self._post(
-                authorization=f"Bearer {self.app.state.operator_token}"
+                authorization=f"Bearer {os.environ['TREND_SCOUT_FIRESTORE_SMOKE_TOKEN']}"
             )
 
         self.assertEqual(response.status_code, 404)
@@ -72,7 +72,7 @@ class FirestoreSmokeRouteTests(unittest.IsolatedAsyncioTestCase):
         ) as client:
             response = await client.post(
                 "/api/internal/firestore-smoke/write",
-                headers={"authorization": f"Bearer {self.app.state.operator_token}"},
+                headers={"authorization": f"Bearer {os.environ['TREND_SCOUT_FIRESTORE_SMOKE_TOKEN']}"},
                 json={"run_id": "a" * 32, "project": "other"},
             )
 
