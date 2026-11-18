@@ -63,6 +63,7 @@ jobs:
           node-version: 22.12.0
 
       - name: Install isolated runner prerequisites
+        timeout-minutes: 8
         shell: bash
         run: |
           set -Eeuo pipefail
