@@ -375,6 +375,7 @@ async def capabilities(request: Request, response: Response):
     settings = request.app.state.settings
     enabled = bool(request.app.state.public_fetch_enabled)
     block_reason = request.app.state.public_fetch_block_reason
+    shared_policy_reconciliation_required = False
     distributed = (getattr(request.state, "distributed_public_fetch", None)
                    or request.app.state.distributed_public_fetch)
     if enabled:
@@ -383,6 +384,19 @@ async def capabilities(request: Request, response: Response):
                 enabled = distributed.admission.operationally_enabled()
                 if not enabled:
                     block_reason = "FEATURE_DISABLED"
+                    if (settings.environment_profile == "vercel"
+                            and getattr(distributed, "vercel_wikimedia_live", False)):
+                        sync_status = getattr(
+                            distributed, "vercel_wikimedia_policy_sync_status", None
+                        )
+                        if callable(sync_status):
+                            sync_status = sync_status()
+                        if sync_status == "READY_TO_SYNC":
+                            enabled = True
+                            block_reason = None
+                            shared_policy_reconciliation_required = True
+                        elif sync_status == "POLICY_MISMATCH":
+                            block_reason = "POLICY_MISMATCH"
             except Exception:
                 enabled = False
                 block_reason = "ADMISSION_STATE_UNAVAILABLE"
@@ -482,6 +496,7 @@ async def capabilities(request: Request, response: Response):
         "public_fetch_enabled": enabled,
         "fetch_enabled": enabled,
         "fetch_block_reason": block_reason,
+        "shared_policy_reconciliation_required": shared_policy_reconciliation_required,
         "data_mode": (distributed.data_mode
                       if request.app.state.public_fetch_enabled
                       and distributed is not None

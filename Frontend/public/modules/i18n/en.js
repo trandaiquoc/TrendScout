@@ -1,4 +1,8 @@
 export const en = {
+  'fetch.policy-mismatch': 'The shared Firestore quota policy is not a recognized version. Fetch is disabled and no Wikimedia request was sent.',
+  'fetch.policy-sync-label': 'SYNC REQUIRED',
+  'fetch.sync-and-fetch': 'Sync and fetch Wikimedia',
+  'fetch.shared-policy-sync-ready': 'This Fetch will reconcile a recognized Firestore quota ledger while preserving usage and history, then request Wikimedia.',
   'meta.description': 'Discover topics in Wikimedia Pageviews with clear source evidence and bounded local search.',
   'a11y.skip': 'Skip navigation',
   'a11y.navigation': 'Workspace navigation',

@@ -217,6 +217,19 @@ class PublicAdmission:
             and set(current_pools) - set(previous_pools)
             == {SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}
         )
+        added_bing_and_youtube = (
+            not previous_allocations
+            and current_allocations == {
+                GOOGLE_SOURCE_ID: "serpapi_google", BING_SOURCE_ID: "serpapi_bing",
+            }
+            and current_sources - previous_sources == {BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
+            and GOOGLE_SOURCE_ID in previous_sources
+            and WIKIMEDIA_SOURCE_ID in previous_sources
+            and set(current_pools) - set(previous_pools) == {
+                "serpapi_google", "serpapi_bing",
+                SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL,
+            }
+        )
         increased_fetch_capacity = (
             allow_fetch_capacity_increase
             and type(previous_fetch_cap) is int and type(current_fetch_cap) is int
@@ -225,10 +238,13 @@ class PublicAdmission:
         if (previous_base != current_base
                 or previous_fetch_cap != current_fetch_cap and not increased_fetch_capacity
                 or current_sources != previous_sources
-                and not (added_bing_allocations or added_youtube_source)
-                or previous_allocations != current_allocations and not added_bing_allocations
+                and not (added_bing_allocations or added_youtube_source
+                         or added_bing_and_youtube)
+                or previous_allocations != current_allocations
+                and not (added_bing_allocations or added_bing_and_youtube)
                 or not (set(previous_pools) == set(current_pools)
-                        or added_bing_allocations or added_youtube_source)):
+                        or added_bing_allocations or added_youtube_source
+                        or added_bing_and_youtube)):
             raise AdmissionDenied("POLICY_MIGRATION_SCOPE_INVALID")
 
         changed_pools = []
@@ -253,9 +269,9 @@ class PublicAdmission:
             if any(old_values[limit_field] < new_values[limit_field]
                    for limit_field in budget_fields):
                 changed_pools.append(name)
-        if added_bing_allocations:
+        if added_bing_allocations or added_bing_and_youtube:
             changed_pools.append("source_allocations")
-        if added_youtube_source:
+        if added_youtube_source or added_bing_and_youtube:
             changed_pools.extend(sorted({SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}))
         if not changed_pools and not increased_fetch_capacity:
             raise AdmissionDenied("POLICY_MIGRATION_NO_CHANGE")
@@ -264,6 +280,8 @@ class PublicAdmission:
             if (not state or state.get("schema") != 1
                     or state.get("policy_digest") != previous_digest):
                 raise AdmissionDenied("POLICY_MISMATCH")
+            if state.get("operational_enabled") is not True:
+                raise AdmissionDenied("FEATURE_DISABLED")
             jobs, inflight = state.get("jobs"), state.get("inflight")
             quota = state.get("quota")
             if not isinstance(jobs, dict) or not isinstance(inflight, dict) or not isinstance(quota, dict):
@@ -277,7 +295,7 @@ class PublicAdmission:
                         and _parse(slot.get("expires_at", "1970-01-01T00:00:00+00:00")) > now):
                     raise AdmissionDenied("POLICY_MIGRATION_BUSY")
             migrated_quota = deepcopy(quota)
-            if added_bing_allocations:
+            if added_bing_allocations or added_bing_and_youtube:
                 # The old policy enabled only Google SerpApi. Preserve its
                 # current day/month usage under Google's new allocation while
                 # retaining the provider-level shared counters unchanged.
@@ -340,7 +358,8 @@ class PublicAdmission:
                 "changed_pools": changed_pools,
                 "changed_admission_limits": (
                     (["max_starts_per_window"] if increased_fetch_capacity else [])
-                    + (["enabled_sources"] if added_youtube_source else [])
+                    + (["enabled_sources"]
+                       if added_youtube_source or added_bing_and_youtube else [])
                 ),
                 "authorization_note": authorization_note,
                 "quota_preserved": True,
@@ -426,6 +445,8 @@ class PublicAdmission:
             if (not state or state.get("schema") != 1
                     or state.get("policy_digest") != previous_digest):
                 raise AdmissionDenied("POLICY_MISMATCH")
+            if state.get("operational_enabled") is not True:
+                raise AdmissionDenied("FEATURE_DISABLED")
             jobs, inflight, quota = (
                 state.get("jobs"), state.get("inflight"), state.get("quota")
             )

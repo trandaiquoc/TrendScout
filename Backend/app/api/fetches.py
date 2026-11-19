@@ -237,6 +237,15 @@ async def create_fetch(
         effective_sources = set(request_sources)
         if YOUTUBE_SOURCE_ID in effective_sources:
             _require_youtube_policy_consent(request, distributed)
+        shared_state_policy_sync = None
+        policy_sync = getattr(distributed, "prepare_for_wikimedia_fetch", None)
+        if callable(policy_sync):
+            try:
+                shared_state_policy_sync = policy_sync()
+            except AdmissionDenied as exc:
+                _raise_distributed_admission_error(exc.code, distributed)
+            except ValueError:
+                raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         try:
             accepted = distributed.submit(idempotency_key, source_ids=request_sources)
         except AdmissionDenied as exc:
@@ -259,6 +268,8 @@ async def create_fetch(
             "sources": sorted(effective_sources),
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",
+            **({"shared_state_policy_sync": shared_state_policy_sync}
+               if shared_state_policy_sync is not None else {}),
         }
     if selected_sources is not None:
         raise HTTPException(409, {"code": "SOURCE_SELECTION_UNAVAILABLE"})
@@ -440,7 +451,7 @@ def _raise_distributed_admission_error(code: str, service) -> None:
         if code == "COOLDOWN":
             retry_after = max(1, service.admission.policy.cooldown_seconds)
         raise HTTPException(429, {"code": code}, headers={"Retry-After": str(retry_after)}) from None
-    if code in {"LEASE_BUSY", "FETCH_ALREADY_RUNNING"}:
+    if code in {"LEASE_BUSY", "FETCH_ALREADY_RUNNING", "POLICY_MIGRATION_BUSY"}:
         raise HTTPException(409, {"code": "FETCH_ALREADY_RUNNING"}) from None
     if code in {"IDEMPOTENCY_KEY_CONFLICT", "HISTORICAL_FETCH_UNAVAILABLE"}:
         raise HTTPException(409, {"code": code}) from None

@@ -1,4 +1,8 @@
 export const vi = {
+  'fetch.policy-mismatch': 'Chính sách quota Firestore không khớp phiên bản được hỗ trợ. Fetch đang tắt và chưa gửi yêu cầu tới Wikimedia.',
+  'fetch.policy-sync-label': 'CẦN ĐỒNG BỘ',
+  'fetch.sync-and-fetch': 'Đồng bộ & lấy Wikimedia',
+  'fetch.shared-policy-sync-ready': 'Lần Fetch này sẽ đồng bộ ledger quota Firestore đã biết, giữ nguyên quota đã dùng và lịch sử, rồi mới gửi yêu cầu Wikimedia.',
   'meta.description': 'Khám phá chủ đề trong Wikimedia Pageviews với bằng chứng nguồn rõ ràng và tìm kiếm cục bộ có giới hạn.',
   'a11y.skip': 'Bỏ qua điều hướng',
   'a11y.navigation': 'Điều hướng workspace',

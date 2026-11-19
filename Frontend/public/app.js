@@ -804,6 +804,7 @@ function getErrorMessage(error, fallbackKey) {
 
 const FETCH_BLOCK_MESSAGES = {
   FEATURE_DISABLED: 'fetch.disabled',
+  POLICY_MISMATCH: 'fetch.policy-mismatch',
   LIVE_FETCH_NOT_APPROVED: 'fetch.live-not-approved',
   READ_ONLY_DEPLOYMENT: 'fetch.read-only',
   CLOUD_STORAGE_NOT_ALLOWED: 'fetch.read-only',
@@ -946,7 +947,9 @@ function renderFetchPresentation() {
   if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
   const buttonKey = presentation.kind === 'retryable'
     ? 'fetch.retry'
-    : canRetry ? 'fetch.check-status' : 'fetch.cta';
+    : state.capabilities?.shared_policy_reconciliation_required === true
+      && presentation.kind === 'disabled' ? 'fetch.sync-and-fetch'
+      : canRetry ? 'fetch.check-status' : 'fetch.cta';
   button.querySelector('[data-i18n="fetch.cta"]').textContent = t(buttonKey);
   const liveDemo = isLocalLiveDemo(state.capabilities);
   const sharedLiveDemo = isVercelSharedLive(state.capabilities);
@@ -963,14 +966,17 @@ function renderFetchPresentation() {
   const historyButtonKey = presentation.requestKind === 'history' && canRetry
     ? 'fetch.check-status' : historyStateKey || 'fetch.history-cta';
   historyButton.textContent = t(historyButtonKey);
-  badge.textContent = t(state.fetchReady
-    ? (sharedLiveDemo ? 'fetch.shared-live-label'
+  const policySyncRequired = state.capabilities?.shared_policy_reconciliation_required === true;
+  badge.textContent = t(policySyncRequired ? 'fetch.policy-sync-label'
+    : state.fetchReady ? (sharedLiveDemo ? 'fetch.shared-live-label'
       : liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
-  badge.classList.toggle('pill--green', state.fetchReady);
-  badge.classList.toggle('pill--amber', !state.fetchReady);
+  badge.classList.toggle('pill--green', state.fetchReady && !policySyncRequired);
+  badge.classList.toggle('pill--amber', !state.fetchReady || policySyncRequired);
   readiness.textContent = youtubePolicyPending ? t('fetch.youtube-policy-pending')
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
-      : state.fetchReady ? t(sharedLiveDemo ? 'fetch.shared-live-ready'
+      : state.fetchReady ? t(policySyncRequired
+        ? 'fetch.shared-policy-sync-ready'
+        : sharedLiveDemo ? 'fetch.shared-live-ready'
         : liveDemo ? 'fetch.live-ready' : 'fetch.ready') : t(blockKey);
   status.hidden = !isActionState;
   status.replaceChildren();

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import httpx
 
+from app.jobs.public_admission import AdmissionDenied
 from app.main import create_app
 from app.settings import Settings
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
@@ -255,6 +256,99 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overview.status_code, 200, overview.text)
         self.assertIsNone(overview.json()["keyword_totals"]["unique"])
         self.assertEqual(overview.json()["shared_fetch_history"]["items"], 1)
+
+    async def test_recognized_policy_mismatch_exposes_explicit_sync_then_fetch(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        original_submit = facade.submit
+
+        def submit_after_sync(idempotency_key, *, source_ids):
+            events.append("fetch_submitted")
+            return original_submit(idempotency_key, source_ids=source_ids)
+
+        def prepare_for_fetch():
+            events.append("policy_reconciled")
+            return "RECONCILED"
+
+        facade.submit = submit_after_sync
+        facade.prepare_for_wikimedia_fetch = prepare_for_fetch
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://trend-scout.example"
+            ) as browser:
+                headers = {"x-vercel-oidc-token": "synthetic-test-token"}
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={**headers, "Origin": "https://trend-scout.example",
+                             "Idempotency-Key": "vercel-wikimedia-sync-0001"},
+                    json={},
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["shared_state_policy_sync"], "RECONCILED")
+        self.assertLess(events.index("policy_reconciled"), events.index("fetch_submitted"))
+        self.assertLess(events.index("fetch_submitted"), events.index("worker_finished"))
+
+    async def test_recognized_policy_mismatch_is_actionable_in_capabilities(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.admission.operationally_enabled = lambda: False
+        facade.vercel_wikimedia_policy_sync_status = lambda: "READY_TO_SYNC"
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://trend-scout.example"
+            ) as browser:
+                response = await browser.get(
+                    "/api/v1/capabilities",
+                    headers={"x-vercel-oidc-token": "synthetic-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["public_fetch_enabled"])
+        self.assertTrue(response.json()["shared_policy_reconciliation_required"])
+        self.assertTrue(response.json()["vercel_shared_live"])
+
+    async def test_policy_sync_failure_stops_before_job_admission_or_provider_worker(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+
+        def reject_policy_sync():
+            raise AdmissionDenied("POLICY_MISMATCH")
+
+        facade.prepare_for_wikimedia_fetch = reject_policy_sync
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://trend-scout.example"
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                        "Idempotency-Key": "vercel-wikimedia-sync-failed-0001",
+                    },
+                    json={},
+                )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "POLICY_MISMATCH")
+        self.assertIsNone(facade.submitted_sources)
+        self.assertNotIn("worker_finished", events)
+
+    async def test_unknown_policy_mismatch_stays_disabled(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.admission.operationally_enabled = lambda: False
+        facade.vercel_wikimedia_policy_sync_status = lambda: "POLICY_MISMATCH"
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://trend-scout.example"
+            ) as browser:
+                response = await browser.get(
+                    "/api/v1/capabilities",
+                    headers={"x-vercel-oidc-token": "synthetic-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["public_fetch_enabled"])
+        self.assertFalse(response.json()["shared_policy_reconciliation_required"])
+        self.assertEqual(response.json()["fetch_block_reason"], "POLICY_MISMATCH")
 
 
 if __name__ == "__main__":

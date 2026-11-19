@@ -25,7 +25,7 @@
 
     <section>
       <h2>1. Demonstration service</h2>
-      <p>TrendScout helps users inspect candidate keywords and their source evidence. The hosted Vercel dashboard is currently read-only, and public Fetch is disabled. Other operator-run deployments may expose only the data sources explicitly configured and enabled for that runtime. Publishing these static policy pages does not itself enable a data provider or Fetch feature.</p>
+      <p>TrendScout helps users inspect candidate keywords and their source evidence. The hosted Vercel dashboard keeps SQLite and legacy run writes read-only. A separate Wikimedia Fetch can run only when the server enables it and the shared Firestore quota policy is valid; other providers remain unavailable in this Vercel slice. Publishing these static policy pages does not itself enable a provider or Fetch feature.</p>
       <p>The demonstration may be unavailable, incomplete, changed, or discontinued. It has no user accounts and may use synthetic fixtures in offline mode.</p>
     </section>
 
