@@ -16,7 +16,7 @@ from app.orchestration.normal_google_live_composition import (
 from app.settings import Settings
 
 
-def _create_firestore_shared_live_client():
+def _create_firestore_shared_live_client(*, refresh_credentials=False):
     """Create the pinned local demo client only from keyless SA impersonation ADC."""
     import google.auth
     from google.auth import impersonated_credentials
@@ -35,6 +35,14 @@ def _create_firestore_shared_live_client():
         raise ValueError(
             "Firestore Shared LIVE requires ADC impersonating the approved backend service account"
         )
+    if refresh_credentials:
+        from google.auth.transport.requests import Request
+
+        # The read-only preflight uses this to fail promptly if the caller is
+        # not allowed to impersonate the pinned service account. Without the
+        # explicit refresh, Firestore retries the metadata-plugin failure as
+        # UNAVAILABLE for up to a minute and obscures the IAM cause.
+        credentials.refresh(Request())
     client = firestore.Client(
         project=PRODUCTION_FIRESTORE_PROJECT_ID,
         database="(default)",

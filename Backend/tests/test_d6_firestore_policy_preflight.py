@@ -5,7 +5,12 @@ import unittest
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import PublicAdmission
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY
-from scripts.d6_firestore_policy_preflight import _policies_for_preflight, summarize_ledger
+from scripts.d6_firestore_policy_preflight import (
+    _policies_for_preflight,
+    classify_failure,
+    failure_report,
+    summarize_ledger,
+)
 
 
 class FirestorePolicyPreflightTests(unittest.TestCase):
@@ -56,6 +61,31 @@ class FirestorePolicyPreflightTests(unittest.TestCase):
             report["windows2_current_policy_digest"],
             PublicAdmission._policy_digest(policies["windows2_current"]),
         )
+
+    def test_impersonation_failure_is_classified_without_leaking_error_detail(self):
+        error = RuntimeError(
+            "Permission 'iam.serviceAccounts.getAccessToken' denied; "
+            "sensitive-provider-detail"
+        )
+        report = failure_report(
+            stage="ADC_IMPERSONATION", code=classify_failure(error)
+        )
+
+        self.assertEqual(report["failure_code"], "SERVICE_ACCOUNT_IMPERSONATION_DENIED")
+        self.assertEqual(report["failure_stage"], "ADC_IMPERSONATION")
+        self.assertFalse(report["firestore_read_attempted"])
+        self.assertFalse(report["firestore_state_read"])
+        self.assertFalse(report["firestore_state_write"])
+        self.assertEqual(report["provider_calls"], 0)
+        self.assertNotIn("sensitive-provider-detail", str(report))
+
+    def test_unrecognized_failure_uses_generic_sanitized_reason(self):
+        report = failure_report(
+            stage="FIRESTORE_READ", code=classify_failure(RuntimeError("private detail"))
+        )
+
+        self.assertEqual(report["failure_code"], "FIRESTORE_PREFLIGHT_FAILED")
+        self.assertNotIn("private detail", str(report))
 
 
 if __name__ == "__main__":
