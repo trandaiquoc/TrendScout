@@ -8,7 +8,10 @@ import math
 import re
 from datetime import datetime, timezone
 
-from app.jobs.public_admission import AdmissionDenied
+from app.jobs.public_admission import (
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import GOOGLE_SOURCE_ID, source_capability
 from app.sources.google_trends.trending_now import (
@@ -24,7 +27,9 @@ from app.sources.google_trends.verification_plan import (
 from app.sources.live_gateway import GatewayError
 from app.sources.refresh_eligibility import (
     GOOGLE_REFRESH_STATE_KEY,
+    OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -180,6 +185,11 @@ class GoogleTrendsDiscoveryHandler:
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:
             raise ValueError("Google Trends handler received a different source")
+        acceptance_fresh = (
+            isinstance(context.request_metadata, dict)
+            and context.request_metadata.get("owner_fresh_acceptance")
+            == OWNER_FRESH_ACCEPTANCE_MARKER
+        )
         progress = ((context.resume_snapshot or {}).get("progress")
                     if isinstance(context.resume_snapshot, dict) else None)
         saved = progress.get("google_trends_receipt") if isinstance(progress, dict) else None
@@ -187,7 +197,7 @@ class GoogleTrendsDiscoveryHandler:
         cache_scope, cache_grant = (None, None)
         cached_result = None
         cache_state = "UNAVAILABLE"
-        if self.cache is not None and not has_saved_result:
+        if self.cache is not None and not has_saved_result and not acceptance_fresh:
             try:
                 cache_scope, cache_grant = self._cache_scope(context)
                 if cache_scope is not None:
@@ -201,13 +211,34 @@ class GoogleTrendsDiscoveryHandler:
                             # candidates to the separately approved SERP planner.
                             # Preserve its original timestamps and never refresh
                             # cache age merely because verification was requested.
+                            cached_delivery = (
+                                "CACHED" if cached.get("status") == "CACHED" else "STALE_CACHE"
+                            )
+                            cached_coverage = payload.get("coverage")
+                            cached_coverage = (dict(cached_coverage)
+                                               if isinstance(cached_coverage, dict) else {})
+                            cached_coverage.pop("owner_fresh_acceptance", None)
+                            originating_count = cached_coverage.get("provider_request_count")
+                            if type(originating_count) is not int or originating_count < 0:
+                                originating_count = payload.get("provider_request_count")
+                            if type(originating_count) is int and originating_count >= 0:
+                                cached_coverage["cached_provider_request_count"] = originating_count
+                            cached_coverage["provider_request_count"] = 0
+                            cached_coverage["attempted_calls"] = 0
+                            cached_coverage["cached_serp_verification_attempted"] = (
+                                cached_coverage.get("serp_verification_attempted", 0)
+                            )
+                            cached_coverage["serp_verification_attempted"] = 0
+                            cached_coverage["cache_fetched_at"] = cached.get("fetched_at")
                             cached_result = {
                                 **payload,
-                                "delivery_state": "CACHED",
+                                "delivery_state": cached_delivery,
                                 "shared_cache_state": cached.get("status"),
                                 "shared_cache_fetched_at": cached.get("fetched_at"),
+                                "provider_request_count": 0,
+                                "coverage": cached_coverage,
                                 "records": [
-                                    ({**record, "delivery_state": "CACHED"}
+                                    ({**record, "delivery_state": cached_delivery}
                                      if isinstance(record, dict) else record)
                                     for record in payload.get("records", [])
                                 ],
@@ -216,6 +247,13 @@ class GoogleTrendsDiscoveryHandler:
                 # Cache failure does not authorize data substitution or a stale
                 # result. Proceed with the one explicitly admitted source request.
                 cache_scope, cache_grant, cached_result = None, None, None
+        elif self.cache is not None:
+            # Acceptance runs and resumed receipts skip cache reads, but still
+            # need the approved scope/grant to persist the fresh receipt.
+            try:
+                cache_scope, cache_grant = self._cache_scope(context)
+            except Exception:
+                cache_scope, cache_grant = None, None
 
         result = None
         account_quota = None
@@ -223,6 +261,7 @@ class GoogleTrendsDiscoveryHandler:
         provider_fetched = False
         provider_attempted = False
         eligible_slot = None
+        cache_reused = False
         if has_saved_result:
             result = saved["result"]
             if (result.get("data_mode") != self.data_mode
@@ -259,10 +298,13 @@ class GoogleTrendsDiscoveryHandler:
                 }
         else:
             try:
-                eligible_slot = candidate_slot(
-                    self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
-                    error_code="GOOGLE_SCHEDULE_STATE_INVALID",
-                    allow_initial_acceptance=self.allow_initial_acceptance,
+                eligible_slot = (
+                    f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
+                    if acceptance_fresh else candidate_slot(
+                        self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                        error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                        allow_initial_acceptance=self.allow_initial_acceptance,
+                    )
                 )
             except AdmissionDenied as error:
                 return {
@@ -293,7 +335,7 @@ class GoogleTrendsDiscoveryHandler:
                 request = GoogleTrendsRequest(
                     source_id=GOOGLE_SOURCE_ID,
                     policy_fingerprint=self.policy_fingerprint,
-                    force_refresh=self.force_refresh,
+                    force_refresh=self.force_refresh or acceptance_fresh,
                 )
                 attempt_id = hashlib.sha256(
                     f"{context.job_id}:trends:{request.plan_id}:{request.plan_version}".encode()
@@ -331,11 +373,15 @@ class GoogleTrendsDiscoveryHandler:
                             "source_url": records[0]["source_url"] if records else None,
                             "eligible_slot": eligible_slot,
                             "attempted_calls": 1,
+                            "provider_request_count": 1,
                             "stop_reason": "REJECTED_PROVIDER_RECORDS"
                                 if page.rejected_record_count else None,
                         },
                         "quality_flags": ["PROVIDER_APPROXIMATE_BUCKET", "NO_COMPATIBLE_BASELINE"],
+                        "provider_request_count": 1,
                     }
+                    if acceptance_fresh:
+                        result["coverage"]["owner_fresh_acceptance"] = True
                     context.checkpoint({"google_trends_receipt": {"result": result}})
                     receipt_box.append(result)
 
@@ -344,10 +390,16 @@ class GoogleTrendsDiscoveryHandler:
                     account_quota = (await self.ensure_paid_budget()
                                      if self.ensure_paid_budget is not None else None)
                     try:
-                        eligible_slot = reserve_source_slot(
-                            self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
-                            error_code="GOOGLE_SCHEDULE_STATE_INVALID",
-                            allow_initial_acceptance=self.allow_initial_acceptance,
+                        eligible_slot = (
+                            reserve_owner_acceptance_slot(
+                                self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                                job_id=context.job_id,
+                                error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                            ) if acceptance_fresh else reserve_source_slot(
+                                self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                                error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                                allow_initial_acceptance=self.allow_initial_acceptance,
+                            )
                         )
                     except AdmissionDenied as error:
                         return {
@@ -413,6 +465,7 @@ class GoogleTrendsDiscoveryHandler:
                            if _retry_after(error) is not None else {}),
                         "coverage": coverage,
                     }
+        cache_reused = cached_result is not None and not provider_fetched and not has_saved_result
         records = [dict(item) for item in result["records"]]
         coverage = dict(result.get("coverage", {}))
         quality_flags = list(result.get("quality_flags", []))
@@ -458,7 +511,7 @@ class GoogleTrendsDiscoveryHandler:
                 if isinstance(item.get("serp_verification"), dict)
                 and item["serp_verification"].get("status") == "FAILED"
             )
-        if self.serp_gateway is not None:
+        if self.serp_gateway is not None and not cache_reused:
             try:
                 old = self.previously_observed()
                 recent = self.recently_verified()
@@ -505,6 +558,7 @@ class GoogleTrendsDiscoveryHandler:
                         context=serp_context, cursor=initial_offset(serp_context),
                         job_id=context.job_id, owner=context.owner, fence=context.fence,
                         attempt_id=attempt_id, timeout_seconds=15,
+                        **({"force_refresh": True} if acceptance_fresh else {}),
                     )
                     verification = _serialize_serp_page(
                         serp_context, gateway_page.page, fetched_at=self.utcnow(),
@@ -550,6 +604,19 @@ class GoogleTrendsDiscoveryHandler:
             "serp_max_queries_per_batch": MAX_VERIFICATION_QUERIES,
             "serp_pages_per_query": 1,
         })
+        if acceptance_fresh:
+            coverage["owner_fresh_acceptance"] = True
+        if cache_reused:
+            coverage["provider_request_count"] = 0
+            coverage["attempted_calls"] = 0
+            verification_attempted = 0
+            provider_request_count = 0
+        else:
+            discovery_requests = coverage.get("attempted_calls", 0)
+            if type(discovery_requests) is not int or discovery_requests < 0:
+                discovery_requests = 0
+            provider_request_count = discovery_requests + verification_attempted
+            coverage["provider_request_count"] = provider_request_count
         if account_quota is not None:
             coverage["serpapi_account_quota"] = account_quota
         accepted, omitted, used = [], 0, 2
@@ -571,12 +638,21 @@ class GoogleTrendsDiscoveryHandler:
             "delivery_state": result.get("delivery_state", "FRESH"),
             "records": accepted, "record_count": len(accepted),
             "coverage": coverage, "quality_flags": sorted(set(quality_flags)),
+            "provider_request_count": provider_request_count,
         }
-        if (provider_fetched and cache_scope is not None and cache_grant is not None
+        if ((provider_fetched or resumed_receipt)
+                and output["delivery_state"] == "FRESH"
+                and cache_scope is not None and cache_grant is not None
                 and cache_grant.allowed):
             try:
+                raw_fetched_at = coverage.get("fetched_at")
+                if not isinstance(raw_fetched_at, str):
+                    raise ValueError("Google Trends fetch timestamp is missing")
+                fetched_at = datetime.fromisoformat(raw_fetched_at.replace("Z", "+00:00"))
+                if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+                    raise ValueError("Google Trends fetch timestamp is invalid")
                 self.cache.put(cache_scope, grant=cache_grant, origin=output["data_mode"], payload=output,
-                               fetched_at=self.utcnow(), now=self.utcnow())
+                               fetched_at=fetched_at, now=self.utcnow())
             except Exception:
                 output["quality_flags"].append("CACHE_WRITE_FAILED")
         return output

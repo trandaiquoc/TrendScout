@@ -45,11 +45,13 @@ from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
     GOOGLE_REFRESH_STATE_KEY,
     MIN_SOURCE_SPACING,
+    OWNER_ACCEPTANCE_SLOT_PREFIX,
     SCHEDULE_SLOTS,
     SCHEDULE_TIMEZONE,
     SLOT_GRACE,
     YOUTUBE_REFRESH_STATE_KEY,
     candidate_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
     schedule_metadata,
 )
@@ -233,7 +235,8 @@ def _youtube_scope_anchor(schedule):
     if not isinstance(schedule, dict):
         raise ValueError("YouTube schedule metadata is invalid")
     value = schedule.get("last_slot")
-    if value == "INITIAL_ACCEPTANCE":
+    if (value == "INITIAL_ACCEPTANCE"
+            or isinstance(value, str) and value.startswith(OWNER_ACCEPTANCE_SLOT_PREFIX)):
         value = schedule.get("last_attempt_at")
     if not isinstance(value, str) or not value:
         raise ValueError("YouTube schedule has no reserved slot")
@@ -740,12 +743,16 @@ async def normal_google_live_composition(*, user_agent,
             ensure_paid_budget=budget.ensure_attempt_allowed,
             utcnow=utcnow,
             allow_initial_acceptance=allow_initial_bing_acceptance,
+            shared_cache=cache,
+            resolve_cache_grant=resolve_cache_grant,
             candidate_loader=lambda now: _shared_google_candidate_rows(
                 cache, resolve_cache_grant, now=now
             ),
         ) if bing_gateway is not None and budget is not None else None)
 
-        def resolve_youtube_provider_batch(source_id, now):
+        def resolve_youtube_provider_batch(source_id, now, *,
+                                           owner_fresh_acceptance=False,
+                                           acceptance_job_id=None):
             if source_id != YOUTUBE_SOURCE_ID:
                 return None
             if not config.youtube_approval_configured:
@@ -765,6 +772,16 @@ async def normal_google_live_composition(*, user_agent,
                 return {"allowed": False, "error_code": "QUOTA_EXHAUSTED"}
             if youtube_manual_live:
                 return {"allowed": True, "mode": OWNER_MANUAL_LIVE}
+            if owner_fresh_acceptance:
+                try:
+                    reserved = reserve_owner_acceptance_slot(
+                        store, YOUTUBE_REFRESH_STATE_KEY, now,
+                        job_id=acceptance_job_id,
+                        error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    )
+                except AdmissionDenied as error:
+                    return {"allowed": False, "error_code": error.code}
+                return {"allowed": True, "slot": reserved}
             try:
                 slot = candidate_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
@@ -863,6 +880,10 @@ async def normal_google_live_composition(*, user_agent,
             firestore_shared_live=uses_firestore,
             resolve_processing_grants=resolve_processing,
             provider_retry_after_seconds=pace_request.retry_after_seconds,
+            owner_fresh_acceptance_once=(
+                uses_firestore and vercel_shared_live
+                and os.environ.get("VERCEL_ENV") == "production"
+            ),
         )
         if uses_firestore:
             facade.normal_google_live_sources = frozenset(policy.enabled_sources)

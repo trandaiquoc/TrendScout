@@ -1,5 +1,6 @@
 """Shared user-triggered refresh slots for paid sources."""
 
+import re
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ MIN_SOURCE_SPACING = timedelta(hours=8)
 GOOGLE_REFRESH_STATE_KEY = "normal-google-trends-refresh-v1"
 BING_REFRESH_STATE_KEY = "normal-bing-search-schedule-v1"
 YOUTUBE_REFRESH_STATE_KEY = "normal-youtube-search-schedule-v1"
+OWNER_ACCEPTANCE_SLOT_PREFIX = "D6_OWNER_ACCEPTANCE:"
 
 
 def eligible_slot(now: datetime, *, last_attempt_at: datetime | None = None) -> str | None:
@@ -105,6 +107,52 @@ def reserve_source_slot(atomic_store, state_key: str, now: datetime, *, error_co
             slot = "INITIAL_ACCEPTANCE"
         if slot is None or slot == state["last_slot"]:
             return raw_state, None
+        value = {
+            "schema": 1,
+            "last_attempt_at": now.astimezone(timezone.utc).isoformat(),
+            "last_slot": slot,
+        }
+        return value, slot
+
+    try:
+        return atomic_store.transact(state_key, operation)
+    except AdmissionDenied:
+        raise
+    except Exception:
+        raise AdmissionDenied(error_code) from None
+
+
+def reserve_owner_acceptance_slot(atomic_store, state_key: str, now: datetime, *,
+                                  job_id: str, error_code: str) -> str:
+    """Record the one accepted fresh run while bypassing only the normal schedule."""
+    if (not callable(getattr(atomic_store, "transact", None))
+            or not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
+            or not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id)):
+        raise AdmissionDenied(error_code)
+    slot = f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{job_id}"
+
+    def operation(raw_state):
+        if not raw_state:
+            state = {"schema": 1, "last_attempt_at": None, "last_slot": None}
+        elif isinstance(raw_state, dict) and raw_state.get("schema") == 1:
+            raw_attempt, last_slot = raw_state.get("last_attempt_at"), raw_state.get("last_slot")
+            if raw_attempt is None and last_slot is None:
+                state = {"schema": 1, "last_attempt_at": None, "last_slot": None}
+            elif isinstance(raw_attempt, str) and isinstance(last_slot, str) and last_slot:
+                try:
+                    parsed = datetime.fromisoformat(raw_attempt.replace("Z", "+00:00"))
+                except ValueError:
+                    raise AdmissionDenied(error_code) from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise AdmissionDenied(error_code)
+                state = {"schema": 1, "last_attempt_at": parsed, "last_slot": last_slot}
+            else:
+                raise AdmissionDenied(error_code)
+        else:
+            raise AdmissionDenied(error_code)
+
+        if state["last_slot"] == slot:
+            return raw_state, slot
         value = {
             "schema": 1,
             "last_attempt_at": now.astimezone(timezone.utc).isoformat(),

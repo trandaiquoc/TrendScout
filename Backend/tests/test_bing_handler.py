@@ -8,6 +8,8 @@ from pathlib import Path
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, keyword_record
 from app.jobs.distributed_worker import SourceWorkContext
+from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER
+from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.sources.bing_search.handler import BingSavedCandidateHandler
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.sources.google_trends.trending_now import normalize_keyword
@@ -71,13 +73,14 @@ class FakeBingGateway:
         return gateway_page
 
 
-def work_context(now=NOW, *, checkpointed=None):
+def work_context(now=NOW, *, checkpointed=None, request_metadata=None, job_id="b" * 32):
     checkpointed = checkpointed if checkpointed is not None else []
     return SourceWorkContext(
-        job_id="b" * 32, owner="test-worker", fence=1, source_id=BING_SOURCE_ID,
+        job_id=job_id, owner="test-worker", fence=1, source_id=BING_SOURCE_ID,
         plan_fingerprint=POLICY, job_expires_at=now + timedelta(minutes=5),
         resume_snapshot=None, checkpoint=lambda value: checkpointed.append(value) or 1,
-        heartbeat=lambda: "ok", request_metadata={"sources": [BING_SOURCE_ID]},
+        heartbeat=lambda: "ok",
+        request_metadata=request_metadata or {"sources": [BING_SOURCE_ID]},
     )
 
 
@@ -179,7 +182,10 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
             ensure_paid_budget=lambda: self._budget(), utcnow=lambda: later,
         )
         cached = await cached_handler(work_context(later))
-        self.assertEqual(cached["delivery_state"], "CACHED")
+        self.assertEqual(cached["delivery_state"], "STALE_CACHE")
+        self.assertEqual(cached["records"][0]["bing_verification"]["delivery_state"],
+                         "STALE_CACHE")
+        self.assertEqual(cached["provider_request_count"], 0)
         self.assertEqual(cached["coverage"]["provider_request_count"], 0)
         self.assertEqual(cached["coverage"]["cache_state"], "STALE")
         self.assertEqual(cached["coverage"]["query"], "Pleated tote")
@@ -239,6 +245,58 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "SUCCESS")
         self.assertEqual(result["records"][0]["candidate_keyword_id"], self.candidate["id"])
         self.assertEqual(self.gateway.calls[0]["context"].canonical_query, "Pleated tote")
+
+    async def test_owner_acceptance_bing_receipt_is_cached_for_a_new_provider_free_fetch(self):
+        evidence = json.loads(self.candidate["evidence"])
+        shared_candidate = {
+            "record_id": self.candidate["id"],
+            "canonical_keyword": self.candidate["keyword"],
+            "source_id": self.candidate["source"],
+            "project": self.candidate["project"],
+            "observed_at": self.candidate["observed_at"],
+            "fetched_at": evidence["fetched_at"],
+            "data_mode": "LIVE",
+            "evidence": evidence,
+        }
+        cache = SharedCache(self.atomic)
+        current = [NOW]
+
+        def grant_for(source_id, now):
+            return CacheGrant(
+                source_id, "D6_BING_ACCEPTANCE_CACHE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            )
+
+        handler = BingSavedCandidateHandler(
+            gateway=self.gateway, collection_store=None, atomic_store=self.atomic,
+            policy_fingerprint=POLICY, ensure_paid_budget=lambda: self._budget(),
+            utcnow=lambda: current[0], candidate_loader=lambda _now: (shared_candidate,),
+            shared_cache=cache, resolve_cache_grant=grant_for,
+        )
+        sources = sorted({BING_SOURCE_ID, GOOGLE_SOURCE_ID,
+                          "wikimedia_pageviews_top_per_country", "youtube_video_search"})
+        first = await handler(work_context(
+            request_metadata={"sources": sources,
+                              "owner_fresh_acceptance": OWNER_FRESH_ACCEPTANCE_MARKER},
+            job_id="1" * 32,
+        ))
+        self.assertEqual(first["delivery_state"], "FRESH")
+        self.assertEqual(first["provider_request_count"], 1)
+        self.assertTrue(first["coverage"]["owner_fresh_acceptance"])
+
+        current[0] += timedelta(minutes=1)
+        second = await handler(work_context(
+            current[0], request_metadata={"sources": sources}, job_id="2" * 32,
+        ))
+
+        self.assertEqual(second["delivery_state"], "CACHED")
+        self.assertEqual(second["provider_request_count"], 0)
+        self.assertEqual(second["coverage"]["provider_request_count"], 0)
+        self.assertEqual(second["coverage"]["cached_provider_request_count"], 1)
+        self.assertEqual(second["records"][0]["bing_verification"]["fetched_at"],
+                         first["records"][0]["bing_verification"]["fetched_at"])
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(len(self.budget_calls), 1)
 
 
 if __name__ == "__main__":

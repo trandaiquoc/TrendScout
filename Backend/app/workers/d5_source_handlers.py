@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Callable, Mapping
 
 from app.jobs.distributed_worker import SourceWorkContext
-from app.jobs.public_admission import AdmissionDenied
+from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER, AdmissionDenied
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -328,17 +328,34 @@ class D5SourceHandlers:
         setattr(cached_only, "__trendscout_data_mode__", "LIVE")
         return cached_only
 
-    async def _with_cache(self, source_id, context, collect, *, query_scope=None):
-        force_fresh = (source_id == YOUTUBE_SOURCE_ID
-                       and self._youtube_force_fresh_once)
-        if force_fresh:
+    async def _with_cache(self, source_id, context, collect, *, query_scope=None,
+                          skip_cache_read=False, cache_fetched_at=None):
+        if (type(skip_cache_read) is not bool
+                or cache_fetched_at is not None
+                and (not isinstance(cache_fetched_at, datetime)
+                     or cache_fetched_at.tzinfo is None
+                     or cache_fetched_at.utcoffset() is None)):
+            raise ValueError("valid cache recovery policy required")
+        acceptance_fresh = (
+            isinstance(getattr(context, "request_metadata", None), dict)
+            and context.request_metadata.get("owner_fresh_acceptance")
+            == OWNER_FRESH_ACCEPTANCE_MARKER
+        )
+        owner_manual_fresh = (source_id == YOUTUBE_SOURCE_ID
+                              and self._youtube_force_fresh_once)
+        force_fresh = acceptance_fresh or owner_manual_fresh
+        if owner_manual_fresh:
             # This local-launcher one-shot is consumed by the next user-triggered
             # YouTube handler, even when admission later rejects the attempt.
             self._youtube_force_fresh_once = False
         if self.shared_cache is None:
             result = await collect()
-            return self._mark_owner_fresh_test(result) if force_fresh else result
+            if owner_manual_fresh:
+                result = self._mark_owner_fresh_test(result)
+            return self._mark_owner_acceptance_fresh(result) if acceptance_fresh else result
         now = self.utcnow()
+        if cache_fetched_at is not None and cache_fetched_at > now:
+            raise ValueError("cache recovery timestamp cannot be in the future")
         batch_decision = None
         stale_fallback = None
         cache_lookup = None
@@ -360,7 +377,7 @@ class D5SourceHandlers:
                 parser_version=f"source-v{capability.capability_version}",
                 policy_version=grant.policy_version,
             )
-            if not force_fresh:
+            if not force_fresh and not skip_cache_read:
                 cached = self.shared_cache.get(scope, grant=grant, now=now)
                 cache_lookup = cached
                 cached_status = cached.get("status")
@@ -398,10 +415,18 @@ class D5SourceHandlers:
                         )
                     stale_fallback = (payload, cached.get("fetched_at"))
 
+        def provider_batch_decision():
+            if acceptance_fresh:
+                return self.resolve_provider_batch(
+                    source_id, now, owner_fresh_acceptance=True,
+                    acceptance_job_id=context.job_id,
+                )
+            return self.resolve_provider_batch(source_id, now)
+
         if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
                 and batch_decision is None):
             try:
-                decision = self.resolve_provider_batch(source_id, now)
+                decision = provider_batch_decision()
             except Exception:
                 decision = {"allowed": False, "error_code": "REFRESH_POLICY_UNAVAILABLE"}
             if not isinstance(decision, dict) or decision.get("allowed") is not True:
@@ -439,7 +464,9 @@ class D5SourceHandlers:
                     "provider_request_count": provider_request_count,
                     "coverage": {**cache_coverage,
                                   **({"owner_manual_fresh_test": True}
-                                     if force_fresh else {})},
+                                     if owner_manual_fresh else {}),
+                                  **({"owner_fresh_acceptance": True}
+                                     if acceptance_fresh else {})},
                 }
 
         try:
@@ -456,8 +483,10 @@ class D5SourceHandlers:
             }
         if not isinstance(result, dict):
             return result
-        if force_fresh:
+        if owner_manual_fresh:
             result = self._mark_owner_fresh_test(result)
+        if acceptance_fresh:
+            result = self._mark_owner_acceptance_fresh(result)
         if (stale_fallback is not None
                 and result.get("status") in {"FAILED", "UNAVAILABLE", "PARTIAL"}
                 and not result.get("records")):
@@ -484,6 +513,13 @@ class D5SourceHandlers:
                 fallback.pop("provider_request_count", None)
             return fallback
         result.setdefault("delivery_state", "FRESH")
+        request_count = self._provider_request_count(result)
+        if request_count is not None:
+            result["provider_request_count"] = request_count
+            coverage = result.get("coverage")
+            coverage = dict(coverage) if isinstance(coverage, dict) else {}
+            coverage["provider_request_count"] = request_count
+            result["coverage"] = coverage
         negative_day_cache = (result.get("status") == "UNAVAILABLE"
                               and result.get("error_code") == "DAY_UNAVAILABLE")
         cache_grant = grant
@@ -497,7 +533,7 @@ class D5SourceHandlers:
                 and (result.get("status") in {"SUCCESS", "PARTIAL"}
                      and result.get("record_count", 0) > 0 or negative_day_cache)
                 and result.get("data_mode") in {"SYNTHETIC", "LIVE"}):
-            fetched_at = self.utcnow()
+            fetched_at = cache_fetched_at or self.utcnow()
             try:
                 self.shared_cache.put(
                     scope, grant=cache_grant, origin=result["data_mode"], payload=result,
@@ -519,11 +555,21 @@ class D5SourceHandlers:
         return {**result, "coverage": coverage}
 
     @staticmethod
+    def _mark_owner_acceptance_fresh(result):
+        if not isinstance(result, dict):
+            return result
+        coverage = result.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage["owner_fresh_acceptance"] = True
+        return {**result, "coverage": coverage}
+
+    @staticmethod
     def _cache_delivery(payload, delivery_state, delivered_at, *, cache_fetched_at=None,
                         next_eligible_at=None, refresh_eligible=None):
         """Return cached evidence with its original observation time and this delivery time."""
         coverage = payload.get("coverage")
         coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        coverage.pop("owner_fresh_acceptance", None)
         originating_count = coverage.get("provider_request_count")
         if type(originating_count) is not int or originating_count < 0:
             originating_count = payload.get("provider_request_count")
@@ -555,7 +601,13 @@ class D5SourceHandlers:
 
     async def _wikimedia_handler(self, context: SourceWorkContext, observation_date=None):
         context.heartbeat()
+        acceptance_fresh = (
+            isinstance(getattr(context, "request_metadata", None), dict)
+            and context.request_metadata.get("owner_fresh_acceptance")
+            == OWNER_FRESH_ACCEPTANCE_MARKER
+        )
         date_value = observation_date or self.observation_date()
+        provider_requests = 0
 
         def result_for(page):
             records, omitted = _bounded_records([{
@@ -581,12 +633,13 @@ class D5SourceHandlers:
                         "explicitly_omitted_records": omitted,
                         "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
                         "records_omitted_storage_limit": omitted,
-                        "item_count": page.item_count}
+                        "item_count": page.item_count,
+                        "provider_request_count": 1}
             if self.include_wikimedia_transport_metrics:
                 coverage.update(http_status=page.http_status, response_bytes=page.response_bytes)
             return {"status": "PARTIAL" if page.rejected_count or omitted else "SUCCESS",
                     "data_mode": page.data_mode, "records": records,
-                    "record_count": len(records),
+                    "record_count": len(records), "provider_request_count": 1,
                     "coverage": coverage}
 
         saved_progress = (context.resume_snapshot or {}).get("progress", {})
@@ -635,7 +688,31 @@ class D5SourceHandlers:
                     )
             except Exception:
                 raise AdmissionDenied("SETTLEMENT_PENDING") from None
-            return result
+            recovered_cache_timestamp = None
+            if result["records"]:
+                raw_fetched_at = result["records"][0].get("fetched_at")
+                if isinstance(raw_fetched_at, str):
+                    try:
+                        parsed_fetched_at = datetime.fromisoformat(
+                            raw_fetched_at.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        parsed_fetched_at = None
+                    if (isinstance(parsed_fetched_at, datetime)
+                            and parsed_fetched_at.tzinfo is not None
+                            and parsed_fetched_at.utcoffset() is not None
+                            and parsed_fetched_at <= self.utcnow()):
+                        recovered_cache_timestamp = parsed_fetched_at
+
+            async def recovered_page():
+                return result
+
+            return await self._with_cache(
+                WIKIMEDIA_SOURCE_ID, context, recovered_page,
+                query_scope=f"{self.plan.fingerprint}:{saved_date.isoformat()}",
+                skip_cache_read=True,
+                cache_fetched_at=recovered_cache_timestamp,
+            )
 
         # AQS may lag the latest complete UTC day. Try at most three dates,
         # treating 404 as unavailable (never as zero), and stop on any other
@@ -651,6 +728,8 @@ class D5SourceHandlers:
 
             def persist_page_receipt(page):
                 result = result_for(page)
+                result["provider_request_count"] = provider_requests
+                result["coverage"]["provider_request_count"] = provider_requests
                 receipt = {
                     "schema": 1,
                     "source_id": WIKIMEDIA_SOURCE_ID,
@@ -663,7 +742,9 @@ class D5SourceHandlers:
                 context.checkpoint({"wikimedia_receipt": receipt})
 
             async def fetch_date():
+                nonlocal provider_requests
                 try:
+                    provider_requests += 1
                     page = await self.wikimedia.fetch_day(
                         request=request, job_id=context.job_id, owner=context.owner,
                         fence=context.fence, attempt_id=attempt_id,
@@ -676,7 +757,9 @@ class D5SourceHandlers:
                     return {"status": "UNAVAILABLE", "data_mode": self.wikimedia.data_mode,
                         "records": [], "record_count": 0, "error_code": exc.code,
                         "coverage": {"observation_date": request_date.isoformat(),
-                                     "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST"}}
+                                     "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
+                                     "provider_request_count": provider_requests},
+                        "provider_request_count": provider_requests}
                 return result_for(page)
 
             try:
@@ -703,6 +786,14 @@ class D5SourceHandlers:
             coverage_date = (result.get("coverage") or {}).get("observation_date")
             if coverage_date != request_date.isoformat():
                 raise AdmissionDenied("SOURCE_OBSERVATION_DATE_MISMATCH")
+            if result.get("delivery_state") != "CACHED":
+                result["provider_request_count"] = provider_requests
+                coverage = result.get("coverage")
+                coverage = dict(coverage) if isinstance(coverage, dict) else {}
+                coverage["provider_request_count"] = provider_requests
+                if acceptance_fresh:
+                    coverage["owner_fresh_acceptance"] = True
+                result["coverage"] = coverage
             return result
 
         exc = last_error
@@ -715,7 +806,11 @@ class D5SourceHandlers:
         context.checkpoint({"status": "UNAVAILABLE", "error_code": error_code})
         status = "PARTIAL" if error_code in {"RATE_LIMITED", "DAY_UNAVAILABLE"} else "FAILED"
         result = {"status": status, "data_mode": self.wikimedia.data_mode,
-                  "records": [], "record_count": 0, "error_code": error_code}
+                  "records": [], "record_count": 0, "error_code": error_code,
+                  "provider_request_count": provider_requests,
+                  "coverage": {"provider_request_count": provider_requests,
+                               **({"owner_fresh_acceptance": True}
+                                  if acceptance_fresh else {})}}
         if (exc is not None and exc.code == "RATE_LIMITED"
                 and exc.retry_after_unbounded_seconds is not None):
             result["retry_after_seconds"] = min(

@@ -68,7 +68,8 @@ class DistributedPublicFetch:
                  resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
                  local_live=False, normal_wikimedia_live=False, normal_google_live=False,
                  firestore_shared_live=False, resolve_processing_grants=None,
-                 provider_retry_after_seconds=None):
+                 provider_retry_after_seconds=None,
+                 owner_fresh_acceptance_once: bool = False):
         if (not isinstance(admission, PublicAdmission)
                 or not isinstance(worker, DistributedFetchWorker)
                 or worker.admission.policy_digest != admission.policy_digest
@@ -76,6 +77,8 @@ class DistributedPublicFetch:
                 or type(local_live) is not bool or type(normal_wikimedia_live) is not bool
                 or type(normal_google_live) is not bool
                 or type(firestore_shared_live) is not bool
+                or type(owner_fresh_acceptance_once) is not bool
+                or owner_fresh_acceptance_once and not firestore_shared_live
                 or sum((local_live, normal_wikimedia_live, normal_google_live,
                         firestore_shared_live)) > 1
                 or (provider_retry_after_seconds is not None
@@ -183,6 +186,7 @@ class DistributedPublicFetch:
             self.data_mode = "SYNTHETIC"
         self.resolve_processing_grants = resolve_processing_grants
         self.provider_retry_after_seconds = provider_retry_after_seconds
+        self.owner_fresh_acceptance_once = owner_fresh_acceptance_once
 
     def submit(self, idempotency_key: str, *, history_days: int | None = None,
                source_ids: list[str] | None = None) -> dict:
@@ -205,9 +209,16 @@ class DistributedPublicFetch:
             if retry_after:
                 raise AdmissionDenied("PROVIDER_RATE_LIMITED")
         accepted = self.admission.admit(idempotency_key, now=self.utcnow(),
-                                        request_metadata=request_metadata)
+                                        request_metadata=request_metadata,
+                                        owner_fresh_acceptance_once=(
+                                            self.owner_fresh_acceptance_once
+                                            and history_days is None
+                                            and source_ids is not None
+                                            and set(source_ids) == set(self.admission.policy.enabled_sources)
+                                        ))
         return {"job_id": accepted["job_id"], "result": accepted["result"],
-                "status": accepted["status"], "created_at": accepted.get("created_at")}
+                "status": accepted["status"], "created_at": accepted.get("created_at"),
+                "owner_fresh_acceptance": accepted.get("owner_fresh_acceptance", False)}
 
     def status(self, job_id: str, *, include_records: bool = False) -> dict | None:
         now = self.utcnow()

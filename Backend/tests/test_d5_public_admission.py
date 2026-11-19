@@ -9,13 +9,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.jobs.public_admission import (
+    OWNER_FRESH_ACCEPTANCE_MARKER,
     YOUTUBE_OTHER_POOL,
     AdmissionDenied,
     AdmissionPolicy,
     PoolLimit,
     PublicAdmission,
 )
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.storage.local_file_security import secure_private_directory, verify_private_file
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
@@ -106,6 +112,52 @@ class PublicAdmissionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.control.admit("oversized-history-request", now=NOW,
                                request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 3})
+
+    def test_owner_fresh_acceptance_is_atomically_bound_once_to_a_new_all_source_job(self):
+        base = policy()
+        all_sources = frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID})
+        all_policy = policy(
+            enabled_sources=all_sources,
+            pools={**base.pools, "wikimedia": PoolLimit(3, 6, 3, 6, 1)},
+        )
+        admission = PublicAdmission(SqliteTestStore(self.path), all_policy, state_key="public")
+
+        subset = admission.admit(
+            "fresh-acceptance-subset-0001", now=NOW,
+            request_metadata={"sources": [GOOGLE_SOURCE_ID]},
+            owner_fresh_acceptance_once=True,
+        )
+        self.assertFalse(subset["owner_fresh_acceptance"])
+        subset_claim = admission.claim_next("subset-worker", now=NOW)
+        admission.finish(subset["job_id"], "subset-worker", subset_claim["fence"], now=NOW)
+
+        all_request = {"sources": sorted(all_sources)}
+        first = admission.admit(
+            "fresh-acceptance-all-00001", now=NOW + timedelta(seconds=31),
+            request_metadata=all_request, owner_fresh_acceptance_once=True,
+        )
+        self.assertTrue(first["owner_fresh_acceptance"])
+        replay = admission.admit(
+            "fresh-acceptance-all-00001", now=NOW + timedelta(seconds=31),
+            request_metadata=all_request, owner_fresh_acceptance_once=True,
+        )
+        self.assertEqual(replay["result"], "REPLAY")
+        self.assertEqual(replay["job_id"], first["job_id"])
+        self.assertTrue(replay["owner_fresh_acceptance"])
+        first_claim = admission.claim_next("fresh-worker", now=NOW + timedelta(seconds=31))
+        self.assertEqual(first_claim["request_metadata"]["owner_fresh_acceptance"],
+                         OWNER_FRESH_ACCEPTANCE_MARKER)
+        admission.finish(first["job_id"], "fresh-worker", first_claim["fence"],
+                         now=NOW + timedelta(seconds=31))
+
+        second = admission.admit(
+            "fresh-acceptance-all-00002", now=NOW + timedelta(seconds=62),
+            request_metadata=all_request, owner_fresh_acceptance_once=True,
+        )
+        self.assertFalse(second["owner_fresh_acceptance"])
+        second_claim = admission.claim_next("second-worker", now=NOW + timedelta(seconds=62))
+        self.assertNotIn("owner_fresh_acceptance", second_claim["request_metadata"])
 
     def test_independent_processes_coalesce_and_share_provider_budget(self):
         context = multiprocessing.get_context("spawn")

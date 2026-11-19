@@ -95,6 +95,7 @@ class WikimediaSyntheticEndToEndTests(unittest.IsolatedAsyncioTestCase):
             "provider_returned_records": 14, "accepted_records": 10,
             "rejected_records": 4, "explicitly_omitted_records": 0,
             "source_coverage": "TOP_PER_COUNTRY_DAILY_LIST",
+            "provider_request_count": 1,
         })
         records = wiki["records"]
         by_article = {record["article_original"]: record for record in records}

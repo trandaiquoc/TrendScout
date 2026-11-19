@@ -39,6 +39,7 @@ YOUTUBE_PROVIDER_TIMEZONE = ZoneInfo("America/Los_Angeles")
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
+OWNER_FRESH_ACCEPTANCE_MARKER = "D6_FOUR_SOURCE_FRESH_V1"
 
 
 class AdmissionDenied(Exception):
@@ -1122,24 +1123,41 @@ class PublicAdmission:
                 and type(value.get("history_days")) is int
                 and 1 <= value["history_days"] <= 2):
             return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
-        if (not isinstance(value, dict) or set(value) != {"sources"}
+        if (not isinstance(value, dict)
+                or set(value) not in ({"sources"}, {"sources", "owner_fresh_acceptance"})
                 or not isinstance(value.get("sources"), list)
                 or not 1 <= len(value["sources"]) <= len(SOURCE_POOLS)
                 or any(not isinstance(source, str) for source in value["sources"])
                 or len(value["sources"]) != len(set(value["sources"]))
                 or not set(value["sources"]) <= self.policy.enabled_sources):
             raise ValueError("invalid bounded Fetch request metadata")
-        return {"sources": sorted(value["sources"])}
+        metadata = {"sources": sorted(value["sources"])}
+        if "owner_fresh_acceptance" in value:
+            if (value.get("owner_fresh_acceptance") != OWNER_FRESH_ACCEPTANCE_MARKER
+                    or set(metadata["sources"]) != set(SOURCE_POOLS)):
+                raise ValueError("invalid owner fresh acceptance metadata")
+            metadata["owner_fresh_acceptance"] = OWNER_FRESH_ACCEPTANCE_MARKER
+        return metadata
 
-    def admit(self, idempotency_key: str, *, now: datetime, request_metadata=None) -> dict:
+    def admit(self, idempotency_key: str, *, now: datetime, request_metadata=None,
+              owner_fresh_acceptance_once: bool = False) -> dict:
         now = _utc(now)
         if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key):
             raise ValueError("invalid idempotency key")
+        if type(owner_fresh_acceptance_once) is not bool:
+            raise ValueError("owner fresh acceptance policy must be boolean")
         request_metadata = self._request_metadata(request_metadata)
         if not self.policy.enabled:
             raise AdmissionDenied("FEATURE_DISABLED")
         digest = hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
         new_id = secrets.token_hex(16)
+
+        def same_request(job):
+            stored = job.get("request_metadata", {})
+            if not isinstance(stored, dict):
+                return False
+            return {key: value for key, value in stored.items()
+                    if key != "owner_fresh_acceptance"} == request_metadata
 
         def op(state):
             self._guard_clock(state, now)
@@ -1148,21 +1166,29 @@ class PublicAdmission:
             existing = keys.get(digest)
             if existing:
                 job = jobs.get(existing["job_id"], {})
-                if job.get("request_metadata", {}) != request_metadata:
+                if not same_request(job):
                     raise AdmissionDenied("IDEMPOTENCY_KEY_CONFLICT")
                 return {"job_id": existing["job_id"], "result": "REPLAY",
                         "status": job.get("state", "EXPIRED"),
-                        "created_at": job.get("created_at")}
+                        "created_at": job.get("created_at"),
+                        "owner_fresh_acceptance": (
+                            job.get("request_metadata", {}).get("owner_fresh_acceptance")
+                            == OWNER_FRESH_ACCEPTANCE_MARKER
+                        )}
             active = next((job for job in jobs.values()
                            if job["state"] in {"QUEUED", "RUNNING"}
                            and _parse(job["expires_at"]) > now
                            and job["plan_fingerprint"] == self.policy.plan_fingerprint
-                           and job.get("request_metadata", {}) == request_metadata), None)
+                           and same_request(job)), None)
             if len(keys) >= self.policy.max_records:
                 raise AdmissionDenied("RECEIPT_CAPACITY")
             if active:
                 job_id = active["job_id"]
                 result = "JOINED"
+                owner_fresh_acceptance = (
+                    active.get("request_metadata", {}).get("owner_fresh_acceptance")
+                    == OWNER_FRESH_ACCEPTANCE_MARKER
+                )
             else:
                 starts = [value for value in state["starts"]
                           if _parse(value) > now - timedelta(seconds=self.policy.window_seconds)]
@@ -1174,20 +1200,40 @@ class PublicAdmission:
                 if len(jobs) >= self.policy.max_records:
                     raise AdmissionDenied("JOB_CAPACITY")
                 job_id, result = new_id, "CREATED"
+                stored_metadata = dict(request_metadata)
+                owner_fresh_acceptance = False
+                acceptance_sources = set(request_metadata.get("sources", []))
+                if owner_fresh_acceptance_once and acceptance_sources == set(SOURCE_POOLS):
+                    acceptance_state = state.get("d6_owner_fresh_acceptance")
+                    if acceptance_state is None:
+                        owner_fresh_acceptance = True
+                        stored_metadata["owner_fresh_acceptance"] = OWNER_FRESH_ACCEPTANCE_MARKER
+                        state["d6_owner_fresh_acceptance"] = {
+                            "schema": 1,
+                            "job_id": job_id,
+                            "assigned_at": now.isoformat(),
+                        }
+                    elif (not isinstance(acceptance_state, dict)
+                            or acceptance_state.get("schema") != 1
+                            or not isinstance(acceptance_state.get("job_id"), str)
+                            or not _JOB_ID.fullmatch(acceptance_state["job_id"])
+                            or not isinstance(acceptance_state.get("assigned_at"), str)):
+                        raise AdmissionDenied("OWNER_ACCEPTANCE_STATE_INVALID")
                 jobs[job_id] = {"job_id": job_id, "state": "QUEUED", "owner": None,
                                 "fence": 0, "attempts": 0, "lease_until": None,
                                 "created_at": now.isoformat(),
                                 "available_at": now.isoformat(),
                                 "expires_at": (now + timedelta(seconds=self.policy.max_job_seconds)).isoformat(),
                                 "plan_fingerprint": self.policy.plan_fingerprint,
-                                "request_metadata": request_metadata, "status_polls": 0,
+                                "request_metadata": stored_metadata, "status_polls": 0,
                                 "receipts": {}}
                 starts.append(now.isoformat())
             keys[digest] = {"job_id": job_id,
                             "expires_at": (now + timedelta(seconds=self.policy.receipt_seconds)).isoformat()}
             return {"job_id": job_id, "result": result,
                     "status": jobs[job_id]["state"],
-                    "created_at": jobs.get(job_id, {}).get("created_at")}
+                    "created_at": jobs.get(job_id, {}).get("created_at"),
+                    "owner_fresh_acceptance": owner_fresh_acceptance}
         return self._transaction(op)
 
     def read_job(self, job_id: str, *, now: datetime) -> dict | None:

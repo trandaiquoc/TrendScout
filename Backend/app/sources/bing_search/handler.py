@@ -6,15 +6,19 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-from app.jobs.public_admission import AdmissionDenied
+from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER, AdmissionDenied
+from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.bing_search.verification_plan import (
     build_verification_plan,
 )
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, source_capability
 from app.sources.live_gateway import GatewayError
+from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
+    OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -119,7 +123,7 @@ def _current_cached(cached, now):
     )[0]
     stale = now - fetched_at > timedelta(hours=1)
     copied = dict(verification)
-    copied["delivery_state"] = "CACHED"
+    copied["delivery_state"] = "STALE_CACHE" if stale else "CACHED"
     flags = list(copied.get("quality_flags", []))
     if stale:
         flags.append("STALE_LOCAL_CACHE_REUSED")
@@ -131,7 +135,7 @@ def _current_cached(cached, now):
     return {
         "status": "SUCCESS",
         "data_mode": "LIVE",
-        "delivery_state": "CACHED",
+        "delivery_state": "STALE_CACHE" if stale else "CACHED",
         "records": [_result_record(candidate, copied)],
         "record_count": 1,
         "coverage": {
@@ -139,6 +143,7 @@ def _current_cached(cached, now):
             "cache_state": "STALE" if stale else "FRESH",
             "cache_fetched_at": verification.get("fetched_at"),
             "provider_request_count": 0,
+            "cached_provider_request_count": 1,
             "pages": 1,
             "query": verification.get("query"),
             "market": verification.get("market"),
@@ -153,6 +158,7 @@ def _current_cached(cached, now):
             "candidate_selection_reason": verification.get("candidate_selection_reason"),
         },
         "quality_flags": copied["quality_flags"],
+        "provider_request_count": 0,
     }
 
 
@@ -161,7 +167,8 @@ class BingSavedCandidateHandler:
 
     def __init__(self, *, gateway, collection_store, atomic_store, policy_fingerprint,
                  ensure_paid_budget, utcnow=lambda: datetime.now(timezone.utc),
-                 allow_initial_acceptance: bool = False, candidate_loader=None):
+                 allow_initial_acceptance: bool = False, candidate_loader=None,
+                 shared_cache: SharedCache | None = None, resolve_cache_grant=None):
         if (not callable(getattr(gateway, "fetch_page", None))
                 or (not callable(getattr(collection_store, "connect", None))
                     and not callable(candidate_loader))
@@ -169,6 +176,9 @@ class BingSavedCandidateHandler:
                 or not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
                 or not callable(ensure_paid_budget) or not callable(utcnow)
                 or type(allow_initial_acceptance) is not bool
+                or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
+                or ((shared_cache is None) != (resolve_cache_grant is None))
+                or (resolve_cache_grant is not None and not callable(resolve_cache_grant))
                 or candidate_loader is not None and not callable(candidate_loader)):
             raise ValueError("approved Bing gateway, persisted stores and account preflight required")
         self.gateway = gateway
@@ -179,6 +189,83 @@ class BingSavedCandidateHandler:
         self.ensure_paid_budget = ensure_paid_budget
         self.utcnow = utcnow
         self.allow_initial_acceptance = allow_initial_acceptance
+        self.shared_cache = shared_cache
+        self.resolve_cache_grant = resolve_cache_grant
+
+    def _candidate_cache_scope(self, candidate, now):
+        if self.shared_cache is None:
+            return None, None
+        try:
+            grant = self.resolve_cache_grant(BING_SOURCE_ID, now)
+        except Exception:
+            return None, None
+        if not isinstance(grant, CacheGrant) or grant.source_id != BING_SOURCE_ID:
+            return None, None
+        capability = source_capability(BING_SOURCE_ID)
+        scope = CacheScope(
+            source_id=BING_SOURCE_ID,
+            provider_id=capability.provider_id,
+            query=f"saved-google-candidate:{candidate.identity}",
+            plan_fingerprint=self.policy_fingerprint,
+            market="US",
+            language="en-US",
+            window=DEFAULT_QUERY_PLAN.time_filter_rule,
+            parser_version=f"bing-candidate-v{capability.capability_version}",
+            policy_version=grant.policy_version,
+        )
+        return scope, grant
+
+    def _shared_cached_result(self, candidate, now):
+        scope, grant = self._candidate_cache_scope(candidate, now)
+        if scope is None:
+            return None, None
+        try:
+            cached = self.shared_cache.get(scope, grant=grant, now=now)
+        except Exception:
+            return None, None
+        if (not isinstance(cached, dict) or cached.get("status") not in {"CACHED", "STALE"}
+                or cached.get("origin") != "LIVE"):
+            return None, None
+        payload = cached.get("payload")
+        if (not isinstance(payload, dict) or payload.get("data_mode") != "LIVE"
+                or payload.get("status") not in {"SUCCESS", "PARTIAL"}
+                or not isinstance(payload.get("records"), list)
+                or not payload["records"]):
+            return None, None
+        delivery = "CACHED" if cached["status"] == "CACHED" else "STALE_CACHE"
+        coverage = payload.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        original_count = coverage.get("provider_request_count")
+        if type(original_count) is not int or original_count < 0:
+            original_count = payload.get("provider_request_count")
+        if type(original_count) is int and original_count >= 0:
+            coverage["cached_provider_request_count"] = original_count
+        coverage.pop("owner_fresh_acceptance", None)
+        coverage["provider_request_count"] = 0
+        coverage["cache_fetched_at"] = cached.get("fetched_at")
+        coverage["cache_state"] = cached["status"]
+        records = []
+        for row in payload["records"]:
+            if (not isinstance(row, dict)
+                    or row.get("candidate_keyword_id") != candidate.record_id
+                    or not isinstance(row.get("bing_verification"), dict)):
+                return None, None
+            verification = dict(row["bing_verification"])
+            verification["delivery_state"] = delivery
+            records.append(_result_record(candidate, verification))
+        flags = list(payload.get("quality_flags", []))
+        if delivery == "STALE_CACHE":
+            flags.append("STALE_SHARED_CACHE_REUSED")
+        result = {
+            **payload,
+            "delivery_state": delivery,
+            "records": records,
+            "record_count": len(records),
+            "provider_request_count": 0,
+            "coverage": coverage,
+            "quality_flags": sorted(set(flags)),
+        }
+        return cached["status"], result
 
     @staticmethod
     def __call_mode__():
@@ -187,6 +274,11 @@ class BingSavedCandidateHandler:
     async def __call__(self, context):
         if context.source_id != BING_SOURCE_ID:
             raise ValueError("Bing handler received a different source")
+        acceptance_fresh = (
+            isinstance(context.request_metadata, dict)
+            and context.request_metadata.get("owner_fresh_acceptance")
+            == OWNER_FRESH_ACCEPTANCE_MARKER
+        )
         progress = ((context.resume_snapshot or {}).get("progress")
                     if isinstance(context.resume_snapshot, dict) else None)
         saved = progress.get("bing_receipt") if isinstance(progress, dict) else None
@@ -200,7 +292,7 @@ class BingSavedCandidateHandler:
         if raw_now.tzinfo is None or raw_now.utcoffset() is None:
             raise ValueError("timezone-aware Bing handler clock required")
         now = raw_now.astimezone(timezone.utc)
-        if self.collection_store is not None:
+        if not acceptance_fresh and self.collection_store is not None:
             rows, recently_verified, cached = _read_saved_candidates(
                 self.collection_store, now=now
             )
@@ -212,20 +304,25 @@ class BingSavedCandidateHandler:
             except Exception:
                 loaded = ()
             if isinstance(loaded, (tuple, list)):
-                by_id = {
-                    row.get("record_id"): row for row in rows
-                    if isinstance(row, dict) and isinstance(row.get("record_id"), str)
-                }
-                for row in loaded:
-                    if (isinstance(row, dict)
-                            and isinstance(row.get("record_id"), str)
-                            and row["record_id"] not in by_id):
-                        by_id[row["record_id"]] = row
-                rows = tuple(by_id.values())
-        cached_result = _current_cached(cached, now)
+                if acceptance_fresh:
+                    rows = tuple(row for row in loaded
+                                 if isinstance(row, dict)
+                                 and isinstance(row.get("record_id"), str))
+                else:
+                    by_id = {
+                        row.get("record_id"): row for row in rows
+                        if isinstance(row, dict) and isinstance(row.get("record_id"), str)
+                    }
+                    for row in loaded:
+                        if (isinstance(row, dict)
+                                and isinstance(row.get("record_id"), str)
+                                and row["record_id"] not in by_id):
+                            by_id[row["record_id"]] = row
+                    rows = tuple(by_id.values())
+        cached_result = _current_cached(cached, now) if not acceptance_fresh else None
         plan = build_verification_plan(
             rows, policy_fingerprint=self.policy_fingerprint, started_at=now,
-            recently_verified=recently_verified,
+            recently_verified=(frozenset() if acceptance_fresh else recently_verified),
         )
         if not plan.candidates:
             if cached_result is not None:
@@ -239,15 +336,29 @@ class BingSavedCandidateHandler:
             }
 
         candidate, serp_context = plan.candidates[0], plan.contexts[0]
-        slot = candidate_slot(
-            self.atomic_store, BING_REFRESH_STATE_KEY, now,
-            error_code="BING_SCHEDULE_STATE_INVALID",
-            allow_initial_acceptance=self.allow_initial_acceptance,
+        shared_stale_result = None
+        if not acceptance_fresh and self.shared_cache is not None:
+            cache_status, shared_result = self._shared_cached_result(candidate, now)
+            if cache_status == "CACHED":
+                context.checkpoint({"bing_receipt": {"result": shared_result}})
+                return shared_result
+            if cache_status == "STALE":
+                shared_stale_result = shared_result
+        slot = (
+            f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
+            if acceptance_fresh else candidate_slot(
+                self.atomic_store, BING_REFRESH_STATE_KEY, now,
+                error_code="BING_SCHEDULE_STATE_INVALID",
+                allow_initial_acceptance=self.allow_initial_acceptance,
+            )
         )
         if slot is None:
             if cached_result is not None:
                 context.checkpoint({"bing_receipt": {"result": cached_result}})
                 return cached_result
+            if shared_stale_result is not None:
+                context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
+                return shared_stale_result
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
@@ -268,10 +379,16 @@ class BingSavedCandidateHandler:
                              "eligible_slot": slot},
             }
         try:
-            slot = reserve_source_slot(
-                self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
-                error_code="BING_SCHEDULE_STATE_INVALID",
-                allow_initial_acceptance=self.allow_initial_acceptance,
+            slot = (
+                reserve_owner_acceptance_slot(
+                    self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
+                    job_id=context.job_id,
+                    error_code="BING_SCHEDULE_STATE_INVALID",
+                ) if acceptance_fresh else reserve_source_slot(
+                    self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
+                    error_code="BING_SCHEDULE_STATE_INVALID",
+                    allow_initial_acceptance=self.allow_initial_acceptance,
+                )
             )
         except AdmissionDenied:
             slot = None
@@ -279,6 +396,9 @@ class BingSavedCandidateHandler:
             if cached_result is not None:
                 context.checkpoint({"bing_receipt": {"result": cached_result}})
                 return cached_result
+            if shared_stale_result is not None:
+                context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
+                return shared_stale_result
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
@@ -360,7 +480,21 @@ class BingSavedCandidateHandler:
                     "eligible_slot": slot,
                     "account_quota": account_snapshot,
                 },
+                "provider_request_count": 1,
             }
+            if acceptance_fresh:
+                result["coverage"]["owner_fresh_acceptance"] = True
+            if self.shared_cache is not None:
+                scope, grant = self._candidate_cache_scope(candidate, fetched_at)
+                if scope is None or not isinstance(grant, CacheGrant):
+                    raise GatewayError("RESULT_PERSISTENCE_FAILED")
+                try:
+                    self.shared_cache.put(
+                        scope, grant=grant, origin="LIVE", payload=result,
+                        fetched_at=fetched_at, now=self.utcnow(),
+                    )
+                except Exception:
+                    raise GatewayError("RESULT_PERSISTENCE_FAILED") from None
             context.checkpoint({"bing_receipt": {"result": result}})
             receipt_box.append(result)
 

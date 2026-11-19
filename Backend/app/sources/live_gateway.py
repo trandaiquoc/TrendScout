@@ -409,8 +409,10 @@ class LivePageGateway:
             return YOUTUBE_VIDEO_LIST_ENDPOINT
         return source_capability(self.source_id).endpoint
 
-    def _params(self, context, cursor, max_results):
+    def _params(self, context, cursor, max_results, *, force_refresh=False):
         try:
+            if type(force_refresh) is not bool:
+                raise ValueError("invalid refresh policy")
             if isinstance(context, GoogleTrendsRequest):
                 if self.source_id != GOOGLE_SOURCE_ID:
                     raise ValueError("Google Trends request on a different source")
@@ -423,9 +425,11 @@ class LivePageGateway:
                 if not isinstance(context, SerpContext) or context.source_id != self.source_id:
                     raise ValueError("source mismatch")
                 params = build_request_params(context, cursor)
-                if self.source_id == BING_SOURCE_ID:
+                if self.source_id == BING_SOURCE_ID or force_refresh:
                     # A newly admitted Bing verification must fetch the provider,
                     # even when SerpApi has a same-query result in its own cache.
+                    # Google candidate verification uses this only for the
+                    # one durable owner-acceptance refresh.
                     params["no_cache"] = "true"
             elif isinstance(context, YouTubeVideoListRequest):
                 if (self.source_id != YOUTUBE_SOURCE_ID
@@ -449,14 +453,18 @@ class LivePageGateway:
             raise GatewayError("INVALID_SERVER_QUERY") from None
 
     async def fetch_page(self, *, context, cursor, job_id, owner, fence, attempt_id,
-                         max_results=50, timeout_seconds=15, on_page_receipt=None) -> GatewayPage:
+                         max_results=50, timeout_seconds=15, on_page_receipt=None,
+                         force_refresh=False) -> GatewayPage:
         if self._closed:
             raise GatewayError("GATEWAY_CLOSED")
+        if (type(force_refresh) is not bool
+                or force_refresh and self.source_id != GOOGLE_SOURCE_ID):
+            raise GatewayError("INVALID_SERVER_QUERY")
         self._last_provider_request_started_at = None
         if on_page_receipt is not None and not callable(on_page_receipt):
             raise GatewayError("INVALID_RECEIPT_CALLBACK")
         approved = self._check_approval()
-        params = self._params(context, cursor, max_results)
+        params = self._params(context, cursor, max_results, force_refresh=force_refresh)
         if (type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds
                 <= self.policy.total_timeout_seconds):
             raise GatewayError("INVALID_TIMEOUT")

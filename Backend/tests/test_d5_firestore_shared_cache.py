@@ -504,6 +504,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
         client = SharedRuntimeFakeClient()
         environment = {
             "VERCEL": "1",
+            "VERCEL_ENV": "production",
             "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "true",
             "TREND_SCOUT_GOOGLE_SERP_APPROVED": "true",
             "TREND_SCOUT_BING_SERP_APPROVED": "true",
@@ -555,6 +556,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(facade.youtube_capabilities["live_host_status"],
                                  "VERCEL_SHARED_RUNTIME")
                 self.assertEqual(facade.google_account_quota_state["status"], "NOT_CHECKED")
+                self.assertTrue(facade.owner_fresh_acceptance_once)
 
         send_mock.assert_not_called()
 
@@ -842,7 +844,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         source["delivery_state"], "FRESH" if index == 0 else "CACHED"
                     )
                     self.assertEqual(
-                        source["provider_request_count"], None if index == 0 else 0
+                        source["provider_request_count"], 1 if index == 0 else 0
                     )
                 now[0] += timedelta(seconds=2)
 

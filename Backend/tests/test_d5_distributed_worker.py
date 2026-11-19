@@ -16,7 +16,11 @@ from test_d5_wikimedia_gateway import USER_AGENT
 from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker, SourceWorkContext
-from app.jobs.public_admission import AdmissionDenied, PoolLimit
+from app.jobs.public_admission import (
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
+    PoolLimit,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
@@ -346,7 +350,20 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         admission = coordinator(self.path, config)
         self.admission = admission
         plan = DEFAULT_QUERY_PLAN
-        job_id = admission.admit("wikimedia-receipt-crash-idempotency", now=self.clock())["job_id"]
+        cache = SharedCache(SqliteTestStore(self.path))
+        cache_policy = "d6-wikimedia-recovery-cache-v1"
+
+        def cache_grant(source_id, now):
+            return CacheGrant(
+                source_id, cache_policy, now + timedelta(days=1),
+                600, 1200, 1800, allowed=True,
+            )
+
+        job_id = admission.admit(
+            "wikimedia-receipt-crash-idempotency", now=self.clock(),
+            request_metadata={"sources": sorted(SOURCES)},
+            owner_fresh_acceptance_once=True,
+        )["job_id"]
         first_claim = admission.claim(job_id, "worker-a", now=self.clock())
         runner = GuardedAttemptRunner(admission, clock=self.clock)
         request_count = [0]
@@ -372,17 +389,31 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         handlers = D5SourceHandlers(
             query_collectors=collectors, wikimedia=wikimedia, plan=plan,
             limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
-            observation_date=lambda: NOW.date(), utcnow=self.clock,
+            observation_date=lambda: NOW.date(), shared_cache=cache,
+            resolve_cache_grant=cache_grant, utcnow=self.clock,
         ).build()
         handler = handlers[WIKIMEDIA_SOURCE_ID]
         grant = self.grant(WIKIMEDIA_SOURCE_ID, self.clock())
+        capability = source_capability(WIKIMEDIA_SOURCE_ID)
+        cache_scope = CacheScope(
+            source_id=WIKIMEDIA_SOURCE_ID,
+            provider_id=capability.provider_id,
+            query=f"{plan.fingerprint}:{NOW.date().isoformat()}",
+            plan_fingerprint=plan.fingerprint,
+            market=plan.market,
+            language=plan.language or "all",
+            window=plan.time_filter_rule,
+            parser_version=f"source-v{capability.capability_version}",
+            policy_version=cache_policy,
+        )
         journal = SourceCheckpointJournal(admission)
         revision = [0]
 
-        def make_context(claim, owner, resume_snapshot, *, crash=False):
+        def make_context(claim, owner, resume_snapshot, *, current_job_id=job_id,
+                         crash=False):
             def checkpoint(progress):
                 revision[0] = journal.save(
-                    job_id, owner, claim["fence"], source_id=WIKIMEDIA_SOURCE_ID,
+                    current_job_id, owner, claim["fence"], source_id=WIKIMEDIA_SOURCE_ID,
                     grant=grant, now=self.clock(), expected_revision=revision[0],
                     snapshot={"schema": 1, "source_id": WIKIMEDIA_SOURCE_ID,
                               "data_mode": "SYNTHETIC", "plan_fingerprint": plan.fingerprint,
@@ -393,9 +424,10 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                 return revision[0]
 
             return SourceWorkContext(
-                job_id, owner, claim["fence"], WIKIMEDIA_SOURCE_ID, plan.fingerprint,
+                current_job_id, owner, claim["fence"], WIKIMEDIA_SOURCE_ID, plan.fingerprint,
                 datetime.fromisoformat(claim["expires_at"]), resume_snapshot,
                 checkpoint, lambda: "OK",
+                request_metadata=claim.get("request_metadata", {}),
             )
 
         with self.assertRaises(SimulatedProcessCrash):
@@ -412,12 +444,38 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_count[0], 1)
         self.assertEqual(result["data_mode"], "SYNTHETIC")
         self.assertEqual(result["records"][0]["canonical_keyword"], "Coffee")
+        self.assertEqual(result["delivery_state"], "FRESH")
+        self.assertTrue(result["coverage"]["owner_fresh_acceptance"])
+        self.assertEqual(result["provider_request_count"], 1)
         self.assertFalse(admission.settle_attempt(
             job_id, "worker-b", second_claim["fence"],
             attempt_id=hashlib.sha256(
                 f"{job_id}:{WIKIMEDIA_SOURCE_ID}:{NOW.date().isoformat()}:page-1".encode()
             ).hexdigest(), now=self.clock(),
         ))
+        admission.finish(job_id, "worker-b", second_claim["fence"], now=self.clock())
+
+        second_job_id = admission.admit(
+            "wikimedia-receipt-cache-idempotency", now=self.clock(),
+            request_metadata={"sources": sorted(SOURCES)},
+            owner_fresh_acceptance_once=True,
+        )["job_id"]
+        second_job_claim = admission.claim(second_job_id, "worker-c", now=self.clock())
+        second_result = await handler(make_context(
+            second_job_claim, "worker-c", None, current_job_id=second_job_id,
+        ))
+        cache_entry = cache.get(
+            cache_scope, grant=cache_grant(WIKIMEDIA_SOURCE_ID, self.clock()),
+            now=self.clock(),
+        )
+
+        self.assertEqual(second_result["delivery_state"], "CACHED")
+        self.assertEqual(second_result["provider_request_count"], 0)
+        self.assertEqual(second_result["coverage"]["provider_request_count"], 0)
+        self.assertEqual(second_result["coverage"]["cache_fetched_at"],
+                         result["records"][0]["fetched_at"])
+        self.assertEqual(cache_entry["status"], "CACHED")
+        self.assertEqual(request_count[0], 1)
 
     async def test_youtube_source_selection_supports_requested_combinations(self):
         combinations = (
@@ -697,6 +755,97 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["delivery_state"], "CACHED")
         self.assertEqual(cached["records"][0]["video_id"], "video-forced-refresh")
         self.assertEqual(len(forced_calls), 1)
+
+    async def test_d6_acceptance_refreshes_youtube_once_without_bypassing_provider_gate(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+        current = [NOW]
+
+        def cache_grant(source_id, now):
+            return CacheGrant(
+                source_id, "D6_YOUTUBE_ACCEPTANCE_CACHE_V1", now + timedelta(days=1),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            )
+
+        capability = source_capability(YOUTUBE_SOURCE_ID)
+        old_fetched_at = current[0] - timedelta(minutes=1)
+        scope = CacheScope(
+            source_id=YOUTUBE_SOURCE_ID,
+            provider_id=capability.provider_id,
+            query=DEFAULT_QUERY_PLAN.fingerprint,
+            plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            market=DEFAULT_QUERY_PLAN.market,
+            language=DEFAULT_QUERY_PLAN.language or "all",
+            window=DEFAULT_QUERY_PLAN.time_filter_rule,
+            parser_version=f"source-v{capability.capability_version}",
+            policy_version="D6_YOUTUBE_ACCEPTANCE_CACHE_V1",
+        )
+        cache.put(
+            scope, grant=cache_grant(YOUTUBE_SOURCE_ID, current[0]), origin="LIVE",
+            payload={"status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+                     "records": [{"provider_video_id": "old-video"}], "record_count": 1,
+                     "provider_request_count": 1,
+                     "coverage": {"provider_request_count": 1,
+                                  "source_fetched_at": old_fetched_at.isoformat()}},
+            fetched_at=old_fetched_at, now=current[0],
+        )
+        batch_decisions = []
+
+        def resolve_batch(source_id, now, *, owner_fresh_acceptance=False,
+                          acceptance_job_id=None):
+            batch_decisions.append((source_id, owner_fresh_acceptance, acceptance_job_id))
+            return {"allowed": True, "quota_remaining": 5}
+
+        registry = D5SourceHandlers(
+            query_collectors={GOOGLE_SOURCE_ID: None, BING_SOURCE_ID: None,
+                              YOUTUBE_SOURCE_ID: None},
+            wikimedia=None, plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+            unavailable_mode="LIVE", shared_cache=cache,
+            resolve_cache_grant=cache_grant,
+            resolve_provider_batch=resolve_batch,
+            utcnow=lambda: current[0],
+        )
+        calls = []
+
+        async def collect():
+            calls.append(current[0])
+            return {
+                "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+                "records": [{"provider_video_id": "fresh-video"}], "record_count": 1,
+                "provider_request_count": 1,
+                "coverage": {"provider_request_count": 1,
+                             "source_fetched_at": current[0].isoformat()},
+            }
+
+        all_sources = sorted(SOURCES)
+
+        def context(job_id, metadata):
+            return SourceWorkContext(
+                job_id, "test-worker", 1, YOUTUBE_SOURCE_ID,
+                DEFAULT_QUERY_PLAN.fingerprint, current[0] + timedelta(minutes=5),
+                None, lambda _value: 1, lambda: "ACTIVE", request_metadata=metadata,
+            )
+
+        first = await registry._with_cache(YOUTUBE_SOURCE_ID, context("1" * 32, {
+            "sources": all_sources,
+            "owner_fresh_acceptance": OWNER_FRESH_ACCEPTANCE_MARKER,
+        }), collect)
+        self.assertEqual(first["delivery_state"], "FRESH")
+        self.assertEqual(first["records"][0]["provider_video_id"], "fresh-video")
+        self.assertTrue(first["coverage"]["owner_fresh_acceptance"])
+        self.assertEqual(first["provider_request_count"], 1)
+        self.assertEqual(batch_decisions, [(YOUTUBE_SOURCE_ID, True, "1" * 32)])
+
+        current[0] += timedelta(minutes=1)
+        second = await registry._with_cache(
+            YOUTUBE_SOURCE_ID, context("2" * 32, {"sources": all_sources}), collect,
+        )
+        self.assertEqual(second["delivery_state"], "CACHED")
+        self.assertEqual(second["records"][0]["provider_video_id"], "fresh-video")
+        self.assertEqual(second["provider_request_count"], 0)
+        self.assertEqual(second["coverage"]["provider_request_count"], 0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(batch_decisions), 1)
 
     def youtube_cache_only_handler(self, cache):
         capability = source_capability(YOUTUBE_SOURCE_ID)

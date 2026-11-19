@@ -14,7 +14,11 @@ import httpx
 from app.collections.store import CollectionStore, keyword_record, saved_source_record
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import SourceWorkContext
-from app.jobs.public_admission import AdmissionDenied, PublicAdmission
+from app.jobs.public_admission import (
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
+    PublicAdmission,
+)
 from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import (
@@ -23,8 +27,16 @@ from app.orchestration.normal_google_live_composition import (
     _youtube_scope_anchor,
     normal_google_live_composition,
 )
-from app.sources.catalog import GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
-from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
+from app.sources.google_trends.handler import (
+    GoogleTrendsDiscoveryHandler,
+    trending_now_cache_scope,
+)
 from app.sources.google_trends.rss import parse_google_trends_rss
 from app.sources.google_trends.trending_now import (
     TRENDING_NOW_ENGINE,
@@ -322,6 +334,120 @@ class SerpApiAccountTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_acceptance_bypasses_shared_cache_once_then_new_fetch_is_cached(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        atomic = LocalSQLiteAtomicStateStore.for_local_live(root / "state.sqlite")
+        cache = SharedCache(atomic)
+        current = [datetime(2026, 11, 16, 10, 5, tzinfo=ZoneInfo(
+            "Asia/Ho_Chi_Minh")).astimezone(timezone.utc)]
+        old_fetched_at = current[0] - timedelta(minutes=30)
+        def grant_for(_source, now):
+            return CacheGrant(
+                GOOGLE_SOURCE_ID, "D6_ACCEPTANCE_CACHE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            )
+        grant = grant_for(GOOGLE_SOURCE_ID, current[0])
+        scope = trending_now_cache_scope(DEFAULT_QUERY_PLAN.fingerprint, grant)
+        _, normalized_old = normalize_keyword("old cached candidate")
+        cache.put(
+            scope, grant=grant, origin="LIVE",
+            payload={
+                "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+                "records": [{
+                    "canonical_keyword": "old cached candidate",
+                    "canonical_keyword_identity": hashlib.sha256(
+                        normalized_old.encode("utf-8")
+                    ).hexdigest(),
+                    "source_id": GOOGLE_SOURCE_ID,
+                    "provider_id": "serpapi_google_trends_trending_now",
+                    "data_mode": "LIVE", "delivery_state": "FRESH",
+                    "fetched_at": old_fetched_at.isoformat(),
+                    "provider_data_at": old_fetched_at.isoformat(),
+                    "trend_clusters": [], "quality_flags": [],
+                }],
+                "record_count": 1,
+                "coverage": {"fetched_at": old_fetched_at.isoformat(),
+                             "provider_request_count": 1, "attempted_calls": 1},
+                "quality_flags": [],
+                "provider_request_count": 1,
+            },
+            fetched_at=old_fetched_at, now=current[0],
+        )
+        atomic.transact(
+            GOOGLE_REFRESH_STATE_KEY,
+            lambda _state: ({
+                "schema": 1,
+                "last_attempt_at": (current[0] - timedelta(minutes=30)).isoformat(),
+                "last_slot": "2026-11-16T09:30:00+07:00",
+            }, None),
+        )
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            def __init__(self):
+                self.calls = []
+
+            async def fetch_page(self, *, context, on_page_receipt, **kwargs):
+                self.calls.append((context, kwargs))
+                page = parse_trending_now_response(
+                    _trending_response([_trend_row()]),
+                    request=context, sensitive_key=FAKE_KEY,
+                )
+                gateway_page = GatewayPage(GOOGLE_SOURCE_ID, "LIVE", page)
+                on_page_receipt(gateway_page)
+                return gateway_page
+
+        gateway = TrendsGateway()
+        budget_checks = []
+
+        async def ensure_budget():
+            budget_checks.append(current[0])
+            return {"budget_status": "AVAILABLE", "total_remaining": 5}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=gateway, data_mode="LIVE",
+            policy_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            utcnow=lambda: current[0], cache=cache, resolve_cache_grant=grant_for,
+            atomic_store=atomic, ensure_paid_budget=ensure_budget,
+            allow_initial_acceptance=True,
+        )
+        all_sources = sorted({GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                              WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID})
+
+        def context(job_id, metadata):
+            return SourceWorkContext(
+                job_id, "test-worker", 1, GOOGLE_SOURCE_ID,
+                DEFAULT_QUERY_PLAN.fingerprint, current[0] + timedelta(minutes=5),
+                None, lambda _value: 1, lambda: "ACTIVE", request_metadata=metadata,
+            )
+
+        try:
+            first = await handler(context("1" * 32, {
+                "sources": all_sources,
+                "owner_fresh_acceptance": OWNER_FRESH_ACCEPTANCE_MARKER,
+            }))
+            self.assertEqual(first["delivery_state"], "FRESH")
+            self.assertTrue(first["coverage"]["owner_fresh_acceptance"])
+            self.assertEqual(first["provider_request_count"], 1)
+            self.assertTrue(gateway.calls[0][0].force_refresh)
+            self.assertEqual(len(budget_checks), 1)
+
+            current[0] += timedelta(minutes=1)
+            second = await handler(context("2" * 32, {"sources": all_sources}))
+
+            self.assertEqual(second["delivery_state"], "CACHED")
+            self.assertEqual(second["provider_request_count"], 0)
+            self.assertEqual(second["coverage"]["provider_request_count"], 0)
+            self.assertEqual(second["coverage"]["cached_provider_request_count"], 1)
+            self.assertEqual(second["coverage"]["cache_fetched_at"],
+                             first["coverage"]["fetched_at"])
+            self.assertEqual(len(gateway.calls), 1)
+            self.assertEqual(len(budget_checks), 1)
+        finally:
+            directory.cleanup()
+
     async def test_google_refreshes_stale_cache_once_per_eligible_user_slot(self):
         directory = tempfile.TemporaryDirectory()
         root = Path(directory.name)
@@ -387,7 +513,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
 
             too_soon = await fetch_at(3, datetime(2026, 11, 16, 15, 5, tzinfo=ZoneInfo(
                 "Asia/Ho_Chi_Minh")))
-            self.assertEqual(too_soon["delivery_state"], "CACHED")
+            self.assertEqual(too_soon["delivery_state"], "STALE_CACHE")
             self.assertEqual(too_soon["coverage"]["refresh_state"], "NOT_YET_ELIGIBLE")
             self.assertEqual(len(gateway.calls), 1)
 
@@ -510,9 +636,9 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(handler.__call_mode__(), "LIVE")
         self.assertEqual(result["status"], "SUCCESS")
-        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(result["delivery_state"], "STALE_CACHE")
         self.assertEqual(result["record_count"], 1)
-        self.assertEqual(result["records"][0]["delivery_state"], "CACHED")
+        self.assertEqual(result["records"][0]["delivery_state"], "STALE_CACHE")
         self.assertEqual(result["records"][0]["fetched_at"],
                          "2026-11-15T17:50:24.177260+00:00")
         self.assertEqual(result["coverage"]["shared_cache_state"], "STALE")
@@ -544,7 +670,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["record_count"], 0)
         self.assertEqual(result["coverage"]["attempted_calls"], 0)
 
-    async def test_cached_trends_candidates_can_be_serp_verified_without_refreshing_trends(self):
+    async def test_stale_trends_cache_is_not_delivered_as_cached_or_paid_verified(self):
         candidate = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
         candidate.update({
             "source_id": GOOGLE_SOURCE_ID,
@@ -620,14 +746,15 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
 
         result = await handler(context)
 
-        self.assertEqual(serp.queries, ["portable outdoor blanket"])
-        self.assertEqual(len(paid_budget_checks), 1)
-        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(serp.queries, [])
+        self.assertEqual(len(paid_budget_checks), 0)
+        self.assertEqual(result["delivery_state"], "STALE_CACHE")
         self.assertEqual(result["records"][0]["fetched_at"], "2026-11-15T11:55:02+00:00")
-        self.assertEqual(result["records"][0]["delivery_state"], "CACHED")
+        self.assertEqual(result["records"][0]["delivery_state"], "STALE_CACHE")
         self.assertEqual(result["coverage"]["shared_cache_state"], "STALE")
         self.assertIn("STALE_SHARED_CACHE_REUSED", result["quality_flags"])
-        self.assertEqual(result["records"][0]["serp_verification"]["status"], "VERIFIED")
+        self.assertEqual(result["coverage"]["provider_request_count"], 0)
+        self.assertNotEqual(result["records"][0]["serp_verification"]["status"], "VERIFIED")
         self.assertEqual(result["coverage"]["archive_search_id"], "archived-search")
 
     async def test_resumed_trends_receipt_skips_already_attempted_serp_candidate(self):
