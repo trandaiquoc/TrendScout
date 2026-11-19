@@ -1,4 +1,15 @@
 const REQUEST_TIMEOUT_MS = 15000;
+const COLLECTIONS_TIMEOUT_MS = 65000;
+
+function requestTimeoutMs(path, requestedTimeoutMs) {
+  if (Number.isFinite(requestedTimeoutMs)) return requestedTimeoutMs;
+  if (path === '/api/v1/collections' || path.startsWith('/api/v1/collections/')
+      || path === '/api/v1/datasets/latest'
+      || path.startsWith('/api/v1/datasets/latest/')) {
+    return COLLECTIONS_TIMEOUT_MS;
+  }
+  return REQUEST_TIMEOUT_MS;
+}
 
 export class ApiError extends Error {
   constructor(message, status = null, body = null, retryAfterSeconds = null) {
@@ -34,7 +45,7 @@ export async function requestJson(path, {
   body: requestBody,
   headers = {},
   locale = 'vi',
-  timeoutMs = REQUEST_TIMEOUT_MS,
+  timeoutMs = null,
 } = {}) {
   if (typeof path !== 'string' || !path.startsWith('/api/')) {
     throw new ApiError(locale === 'en' ? 'Only same-origin API requests are allowed.' : 'Chỉ cho phép yêu cầu API cùng nguồn gốc.');
@@ -42,8 +53,9 @@ export async function requestJson(path, {
   if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) {
     throw new ApiError(locale === 'en' ? 'This request method is not allowed.' : 'Phương thức yêu cầu này không được phép.');
   }
+  const effectiveTimeoutMs = requestTimeoutMs(path, timeoutMs);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
   try {
     const response = await fetch(path, {
       method,
