@@ -6,6 +6,8 @@
 
 **Progress:** 83% (weighted evidence below).
 
+**Firebase Demo Functional Acceptance:** COMPLETE (2026-11-19). The broader weighted Firebase acceptance remains 83%; G4 cross-host and IAM hardening remain separate partial items.
+
 *This report is chronological. The latest dated acceptance section records current evidence and supersedes earlier checkpoint statements.*
 
 ## Latest code-first demo continuation (2026-11-19)
@@ -15,7 +17,9 @@
 - Verification: Run History browser acceptance **PASS**; distributed Fetch browser E2E **PASS**; frontend Node tests **22/22 PASS**; JavaScript syntax check, Ruff for changed Python test files, and `git diff --check` **PASS**. Browser E2E used deterministic offline fixtures; no provider API, Production data, IAM, credentials, or Firestore Production operation occurred.
 - Added an Emulator route assertion that Run History `data_mode` matches the actual Fetch status for both fresh and cached LIVE requests. GitHub Actions run [44450792240](https://github.com/trandaiquoc/TrendScout/actions/runs/44450792240), commit `53cf0b6c60cccc5738e2d5dc759a5a5e285757af`, passed **26/26** with `NETWORK_ISOLATION=PASS` and `SECCOMP_PROBE=PASS`. The Emulator suite made no provider calls. Previously accepted online Production smoke and SQLite compatibility remain accepted and were not rerun. No weighted points are added; progress remains **83%**.
 - Vercel Preview for commit `0a4f16ca340662758c4be6046f3d1abceaf504a9` is **READY**, `target: null`, and has no aliases ([open Preview](https://trend-scout-1hfqu8wjw-rakoon1.vercel.app); deployment `dpl_CvKhzCbnegpL18bbdxHL6AbmNPYR`). The deployed page and `/api/v1/capabilities` both returned HTTP 200; capabilities report `environment_mode=vercel`, `read_only=true`, `public_fetch_enabled=false`, `fetch_enabled=false`, and `allowed_operations.fetch=false`. The deployed Run History module contains the corrected separator. No provider call or application-data write was made. This confirms the intended read-only Preview/API boundary; it does not claim Fetch, cache, or quota execution in Vercel.
-- The latest test commit `53cf0b6c60cccc5738e2d5dc759a5a5e285757af` also has a Vercel Preview **READY**, `target: null`, no aliases ([open Preview](https://trend-scout-ar7z3s5rs-rakoon1.vercel.app); deployment `dpl_4aoSxHQt2gS6vi48TqSJAgtBfuib`). Remaining demo functional acceptance is the owner’s brief Windows 2 UI check. Full Shared LIVE hardening remains separate; G4 cross-host and IAM findings are unchanged.
+- The latest test commit `53cf0b6c60cccc5738e2d5dc759a5a5e285757af` also has a Vercel Preview **READY**, `target: null`, no aliases ([open Preview](https://trend-scout-ar7z3s5rs-rakoon1.vercel.app); deployment `dpl_4aoSxHQt2gS6vi48TqSJAgtBfuib`). The page and API checks above confirm the intended read-only boundary.
+- Windows 2 manual UI acceptance **PASS**: the owner selected only Wikimedia Pageviews and clicked Fetch once. The screenshot shows `LOCAL · LIVE`, successful Fresh delivery, and other sources unselected. A read-only local API check confirmed the same Fetch reached terminal `COMPLETED` with `data_mode=LIVE`; Run History detail also reports `COMPLETED`, `data_mode=LIVE`, and `processing_status=COMPLETED`, with 1,000 received records and 952 retained keywords. The one user-triggered provider request was Wikimedia only; data was stored in local SQLite. No Firestore Production data was written.
+- **Firebase Demo Functional Acceptance is COMPLETE.** Code paths and automated tests pass; the Windows 2 Fetch and Run History agree; Vercel Preview/API is read-only; Emulator shared-cache/quota and existing SQLite evidence remain accepted. Overall weighted Firebase progress stays **83%** because full Shared LIVE hardening remains separate. G4 cross-host and IAM findings are unchanged.
 
 ## Latest owner scope correction — demo acceptance (2026-11-18)
 
