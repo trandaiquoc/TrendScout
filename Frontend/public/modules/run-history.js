@@ -132,7 +132,7 @@ function renderRunHistoryDetail(item, errorMessage = null) {
       source.googleProviderDataAt?`${t('runs.google-source-time')}: ${timestamp(source.googleProviderDataAt)}`:null,
       source.googleFetchedAt?`${t('runs.google-fetched-at')}: ${timestamp(source.googleFetchedAt)}`:null,
       source.deliveryState?`${t('runs.google-delivery')}: ${t(`fetch.delivery.${source.deliveryState}`)}`:null,
-    ].filter(Boolean).join(' Â· ');
+    ].filter(Boolean).join(' · ');
   }).filter(Boolean).join(' | ');
   const quality=(item.quality_flags || []).length
     ? t('runs.outcome.quality-notes',{count:number(item.quality_flags.length)})

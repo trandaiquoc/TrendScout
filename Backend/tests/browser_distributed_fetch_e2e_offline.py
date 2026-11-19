@@ -80,7 +80,7 @@ check(posts.length===1,'duplicate click submits one POST');check(posts[0]?.body=
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'idempotency key is present');check(statusReads===1,'one status poll reaches terminal result');
 check(document.querySelector('#fetch-status').textContent.includes('Google Search'),'localized source status is visible');
 check(document.querySelector('#fetch-status').textContent.includes('SYNTHETIC'),'synthetic origin is visible');
-check(document.querySelector('#fetch-status').textContent.includes('FRESH'),'fresh delivery is visible');
+check(document.querySelector('#fetch-status').textContent.includes('dữ liệu mới'),'localized fresh delivery is visible');
 check(document.querySelector('#rows').textContent.includes('quiet luxury'),'public Fetch populates keyword discovery table');
 check(document.querySelector('#rows').textContent.toLocaleUpperCase('vi').includes('CHƯA ĐỦ DỮ LIỆU'),'single-snapshot candidate is labeled insufficient');
 check(!document.querySelector('form[id="login"]'),'no login form is present');

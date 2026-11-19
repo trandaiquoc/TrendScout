@@ -169,13 +169,16 @@ def main():
                 "Candidates: 2",
                 "SERP verified: 0",
                 "cached delivery",
+                "Synthetic fixtures",
                 "Nov 15, 2026",
             ):
                 if expected not in detail_text:
                     raise RuntimeError("Google run evidence is missing: " + expected)
+            if "Candidates: 2 · Distinct keywords: 2 · SERP verified: 0" not in detail_text:
+                raise RuntimeError("Google run summary separators are not rendered correctly")
             print(
                 "PASS: VI/EN detail names, Chrome AX region name, focus entry, "
-                "Escape close and focus return, aria-expanded reset, live relocalization, "
+                "Escape close and focus return, aria-expanded reset, live relocalization, run mode, "
                 "Google RSS provenance, zero SERP verifications and cached delivery."
             )
         finally:

@@ -8,6 +8,14 @@
 
 *This report is chronological. The latest dated acceptance section records current evidence and supersedes earlier checkpoint statements.*
 
+## Latest code-first demo continuation (2026-11-19)
+
+- Fixed a mojibake separator in the Google Run History evidence summary (`Â·` to `·`). The offline browser regression now checks the exact rendered summary and confirms the selected `Synthetic fixtures` mode is visible.
+- Updated the offline distributed-Fetch browser assertion to expect the localized Vietnamese Fresh label (`dữ liệu mới`) rendered by the UI, instead of the untranslated internal value `FRESH`.
+- Verification: Run History browser acceptance **PASS**; distributed Fetch browser E2E **PASS**; frontend Node tests **22/22 PASS**; JavaScript syntax check, Ruff for changed Python test files, and `git diff --check` **PASS**. Browser E2E used deterministic offline fixtures; no provider API, Firestore, Production data, IAM, credentials, or deployment were touched during these checks.
+- These changes verify Run History display consistency and the existing synthetic Fetch UI path. Previously accepted Firestore Emulator, online smoke, quota/cache, and SQLite gates were not rerun because their implementation did not change. No weighted points are added; progress remains **83%**.
+- Remaining demo acceptance is a short owner UI check on Windows 2 and confirmation of the new Vercel Preview after the feature-branch push. Full Shared LIVE hardening remains separate; G4 cross-host and IAM findings are unchanged.
+
 ## Latest owner scope correction — demo acceptance (2026-11-18)
 
 The active product goal is the TrendScout demo. Vercel plan tier, multi-region deployment, physical host fingerprints, Windows 1/Windows 2 being online together, Usage dashboard evidence, a staging database, and a full external Token Creator audit are **not prerequisites** for demo work. Keep those only under **Full Shared LIVE Hardening**. Do not award hardening points or label G4 cross-host PASS from the demo work below.
