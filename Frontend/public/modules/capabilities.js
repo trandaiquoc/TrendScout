@@ -2,6 +2,46 @@ import { getJson } from './api.js';
 
 const CAPABILITIES_REQUEST_TIMEOUT_MS = 25_000;
 const CAPABILITY_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000, 10_000]);
+const CAPABILITIES_CACHE_KEY = 'trendscout.public-capabilities.v1';
+
+function storageOrNull(storage) {
+  if (storage !== undefined) return storage;
+  try { return globalThis.localStorage; } catch { return null; }
+}
+
+function validCapabilities(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && Array.isArray(value.sources));
+}
+
+export function readLastKnownCapabilities(storage) {
+  try {
+    const store = storageOrNull(storage);
+    const value = JSON.parse(store?.getItem(CAPABILITIES_CACHE_KEY) || 'null');
+    if (value?.schema !== 1 || !validCapabilities(value.capabilities)
+        || typeof value.checkedAt !== 'string'
+        || !Number.isFinite(Date.parse(value.checkedAt))) return null;
+    return { capabilities: value.capabilities, checkedAt: value.checkedAt };
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastKnownCapabilities(capabilities, storage) {
+  if (!validCapabilities(capabilities)) return false;
+  try {
+    const store = storageOrNull(storage);
+    if (!store) return false;
+    store.setItem(CAPABILITIES_CACHE_KEY, JSON.stringify({
+      schema: 1,
+      checkedAt: new Date().toISOString(),
+      capabilities,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function capabilityRetryDelayMs(attempt) {
   return Number.isInteger(attempt) && attempt >= 0

@@ -74,7 +74,10 @@ export class PublicFetchController {
     this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
+    this.requestBody = null;
     this.activeYoutubePolicyVersion = null;
+    this.includesYouTube = false;
+    this.resumeNeeded = false;
     this.busy = false;
     this.stopped = false;
     this.retryTimer = null;
@@ -84,30 +87,39 @@ export class PublicFetchController {
     if (this.busy || this.stopped) {
       return;
     }
-    if (this.fetchId) {
+    if (this.fetchId && !this.resumeNeeded) {
       await this.poll();
       return;
     }
+    if (this.resumeNeeded) this.fetchId = null;
     this.busy = true;
     this.emit({ kind: 'submitting', busy: true });
     try {
-      const selectedSources = this.historyDays === null && typeof this.sourceIds === 'function'
-        ? this.sourceIds() : null;
-      const includesYouTube = Array.isArray(selectedSources)
-        ? selectedSources.includes(YOUTUBE_SOURCE_ID) : this.youtubeSelected();
-      const policyVersion = includesYouTube
-        ? this.activeYoutubePolicyVersion || this.youtubePolicyVersion() : null;
-      if (includesYouTube && !policyVersion) {
+      if (!this.requestBody) {
+        const selectedSources = this.historyDays === null && typeof this.sourceIds === 'function'
+          ? this.sourceIds() : null;
+        this.includesYouTube = Array.isArray(selectedSources)
+          ? selectedSources.includes(YOUTUBE_SOURCE_ID) : this.youtubeSelected();
+        const policyVersion = this.includesYouTube
+          ? this.activeYoutubePolicyVersion || this.youtubePolicyVersion() : null;
+        if (this.includesYouTube && !policyVersion) {
+          const error = new Error('YouTube policy agreement is required before Fetch.');
+          error.code = 'YOUTUBE_POLICY_CONSENT_REQUIRED';
+          throw error;
+        }
+        this.key = this.key || newIdempotencyKey();
+        this.activeYoutubePolicyVersion = this.includesYouTube ? policyVersion : null;
+        this.requestBody = this.historyDays !== null
+          ? { days: this.historyDays }
+          : Array.isArray(selectedSources) && selectedSources.length
+            ? { sources: selectedSources } : {};
+      }
+      if (this.includesYouTube && !this.activeYoutubePolicyVersion) {
         const error = new Error('YouTube policy agreement is required before Fetch.');
         error.code = 'YOUTUBE_POLICY_CONSENT_REQUIRED';
         throw error;
       }
       this.key = this.key || newIdempotencyKey();
-      this.activeYoutubePolicyVersion = includesYouTube ? policyVersion : null;
-      const body = this.historyDays !== null
-        ? { days: this.historyDays }
-        : Array.isArray(selectedSources) && selectedSources.length
-          ? { sources: selectedSources } : {};
       const headers = { 'Idempotency-Key': this.key };
       if (this.activeYoutubePolicyVersion) {
         headers[YOUTUBE_POLICY_VERSION_HEADER] = this.activeYoutubePolicyVersion;
@@ -115,17 +127,46 @@ export class PublicFetchController {
       const accepted = await requestJson(this.historyDays === null
         ? '/api/v1/fetches' : '/api/v1/fetches/history', {
         method: 'POST',
-        body,
+        body: this.requestBody,
         headers,
         locale: this.locale(),
       });
       this.fetchId = accepted.fetch_id;
+      this.resumeNeeded = false;
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       await this.poll();
     } catch (error) {
       this.busy = false;
       this.emit({ kind: this.kindForError(error), busy: false, error });
     }
+  }
+
+  async resumeAvailableJob({ sources, requestKind = 'LATEST', historyDays = null } = {}) {
+    if (this.busy || this.stopped) return false;
+    if (requestKind === 'WIKIMEDIA_HISTORY') {
+      if (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2) return false;
+      this.historyDays = historyDays;
+      this.requestKind = 'history';
+      this.requestBody = { days: historyDays };
+      this.includesYouTube = false;
+      this.activeYoutubePolicyVersion = null;
+    } else {
+      if (!Array.isArray(sources) || !sources.length
+          || sources.some((source) => typeof source !== 'string')
+          || new Set(sources).size !== sources.length) return false;
+      this.historyDays = null;
+      this.requestKind = 'latest';
+      this.requestBody = { sources: [...sources] };
+      this.includesYouTube = sources.includes(YOUTUBE_SOURCE_ID);
+      this.activeYoutubePolicyVersion = this.includesYouTube
+        ? this.youtubePolicyVersion() : null;
+    }
+    this.key = null;
+    this.fetchId = null;
+    this.resumeNeeded = false;
+    this.stopped = false;
+    await this.activate();
+    return true;
   }
 
   async poll() {
@@ -143,17 +184,28 @@ export class PublicFetchController {
           this.busy = false;
           this.key = null;
           this.fetchId = null;
+          this.requestBody = null;
           this.activeYoutubePolicyVersion = null;
+          this.includesYouTube = false;
+          this.resumeNeeded = false;
           this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
+          return;
+        }
+        if (status.recovery_available === true && status.status === 'QUEUED') {
+          this.busy = false;
+          this.resumeNeeded = true;
+          this.emit({ kind: 'recovery-available', busy: false, fetch: status });
           return;
         }
         await wait(POLL_INTERVAL_MS);
       }
       this.busy = false;
+      this.resumeNeeded = Boolean(this.fetchId);
       this.emit({ kind: 'poll-limit', busy: false, fetch: status });
     } catch (error) {
       this.busy = false;
+      this.resumeNeeded = Boolean(this.fetchId);
       this.emit({ kind: this.kindForError(error), busy: false, error, fetch: status });
     }
   }
@@ -167,13 +219,19 @@ export class PublicFetchController {
     if (code === 'YOUTUBE_POLICY_NOT_APPROVED') {
       this.fetchId = null;
       this.key = null;
+      this.requestBody = null;
       this.activeYoutubePolicyVersion = null;
+      this.includesYouTube = false;
+      this.resumeNeeded = false;
       return 'policy-not-approved';
     }
     if (code === 'YOUTUBE_POLICY_CONSENT_REQUIRED') {
       this.fetchId = null;
       this.key = null;
+      this.requestBody = null;
       this.activeYoutubePolicyVersion = null;
+      this.includesYouTube = false;
+      this.resumeNeeded = false;
       return 'policy-consent-required';
     }
     if (error instanceof ApiError && error.status === 429) {
@@ -189,6 +247,8 @@ export class PublicFetchController {
     if (error instanceof ApiError && error.status === 404) {
       this.fetchId = null;
       this.key = null;
+      this.requestBody = null;
+      this.resumeNeeded = false;
       return 'expired';
     }
     return this.fetchId ? 'poll-error' : 'retryable';

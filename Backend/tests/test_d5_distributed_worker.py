@@ -890,6 +890,29 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AdmissionDenied, "STATUS_POLL_LIMIT"):
             public.status(accepted["job_id"])
 
+    async def test_shared_history_preserves_recovery_request_scope(self):
+        handlers = {}
+        for source in SOURCES:
+            def handler(_context):
+                return self.source_result()
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+            handlers[source] = handler
+        worker = self.worker(handlers)
+        public = DistributedPublicFetch(self.admission, worker,
+                                        resolve_grant=self.grant, utcnow=self.clock)
+        latest = public.submit("history-latest-recovery-scope", source_ids=[GOOGLE_SOURCE_ID])
+        historical = self.admission.admit(
+            "history-wikimedia-recovery-scope", now=self.clock(),
+            request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 2},
+        )
+
+        rows = {item["fetch_id"]: item for item in public.history(limit=20)}
+
+        self.assertEqual(rows[latest["job_id"]]["request_kind"], "LATEST")
+        self.assertEqual(rows[latest["job_id"]]["sources"], [GOOGLE_SOURCE_ID])
+        self.assertEqual(rows[historical["job_id"]]["request_kind"], "WIKIMEDIA_HISTORY")
+        self.assertEqual(rows[historical["job_id"]]["history_days"], 2)
+
     async def test_public_fetch_facade_rejects_undeclared_or_live_handlers(self):
         admission = coordinator(self.path, self.config)
         for mode in (None, "LIVE"):

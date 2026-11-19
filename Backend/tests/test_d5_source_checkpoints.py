@@ -11,6 +11,7 @@ from test_d5_public_admission import policy as admission_policy
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.storage.firestore_atomic_state import CommitOutcomeUnknown
 
 
 def grant(*, seconds=600, allowed=True, mode="SYNTHETIC", version="policy-v1"):
@@ -47,6 +48,32 @@ class SourceCheckpointTests(unittest.TestCase):
     def test_save_load_and_idempotent_retry(self):
         self.assertEqual(self.save(), 1)
         self.assertEqual(self.save(), 1)
+        loaded = self.load()
+        self.assertEqual(loaded["revision"], 1)
+        self.assertEqual(loaded["snapshot"], self.snapshot)
+
+    def test_unknown_checkpoint_commit_is_reconciled_without_losing_receipt(self):
+        underlying = self.admission.store
+
+        class LostAcknowledgementStore:
+            def __init__(self):
+                self.uncertain = True
+                self.calls = 0
+
+            def transact(self, key, operation):
+                self.calls += 1
+                result = underlying.transact(key, operation)
+                if self.uncertain:
+                    self.uncertain = False
+                    raise CommitOutcomeUnknown("synthetic lost commit acknowledgement")
+                return result
+
+        store = LostAcknowledgementStore()
+        self.admission.store = store
+        self.journal = SourceCheckpointJournal(self.admission)
+
+        self.assertEqual(self.save(), 1)
+        self.assertEqual(store.calls, 2)
         loaded = self.load()
         self.assertEqual(loaded["revision"], 1)
         self.assertEqual(loaded["snapshot"], self.snapshot)
@@ -130,19 +157,56 @@ class SourceCheckpointTests(unittest.TestCase):
             admission.state_key,
             lambda state: (state, state["jobs"][job_id]),
         )
-        self.assertEqual(first["source_checkpoints"], 1)
+        self.assertEqual(first["source_checkpoints"], 0)
         self.assertEqual(retained["state"], "EXPIRED")
-        self.assertEqual(retained["source_checkpoints"], {})
+        self.assertIn(GOOGLE_SOURCE_ID, retained["source_checkpoints"])
         self.assertEqual(retained["job_id"], job_id)
 
         second = admission.prune_expired(now=NOW + timedelta(seconds=21))
         remaining = admission.store.transact(
             admission.state_key,
-            lambda state: (state, (job_id in state["jobs"], bool(state["keys"]))),
+            lambda state: (state, (job_id in state["jobs"], bool(state["keys"]),
+                                   GOOGLE_SOURCE_ID in state["jobs"][job_id]["source_checkpoints"])),
         )
         self.assertEqual(second["idempotency_receipts"], 1)
-        self.assertEqual(second["jobs"], 1)
-        self.assertEqual(remaining, (False, False))
+        self.assertEqual(second["jobs"], 0)
+        self.assertEqual(remaining, (True, False, True))
+
+        third = admission.prune_expired(now=NOW + timedelta(seconds=301))
+        final = admission.store.transact(
+            admission.state_key,
+            lambda state: (state, (job_id in state["jobs"], bool(state["keys"]))),
+        )
+        self.assertEqual(third["source_checkpoints"], 1)
+        self.assertEqual(third["jobs"], 1)
+        self.assertEqual(final, (False, False))
+
+    def test_deadline_terminalizes_saved_source_as_partial_without_dropping_its_result(self):
+        long_grant = CheckpointGrant(
+            GOOGLE_SOURCE_ID, "SYNTHETIC", "policy-v1", NOW + timedelta(seconds=600),
+            600, True,
+        )
+        complete = {
+            "schema": 1,
+            "source_id": GOOGLE_SOURCE_ID,
+            "data_mode": "SYNTHETIC",
+            "plan_fingerprint": self.admission.policy.plan_fingerprint,
+            "phase": "COMPLETE",
+            "result": {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "records": [{"title": "saved Google result"}], "record_count": 1,
+            },
+        }
+        self.journal.save(
+            self.job, self.owner, self.fence, source_id=GOOGLE_SOURCE_ID,
+            grant=long_grant, now=NOW, expected_revision=0, snapshot=complete,
+        )
+
+        status = self.admission.read_job(self.job, now=NOW + timedelta(seconds=301))
+
+        self.assertEqual(status["state"], "PARTIAL")
+        self.assertIsNotNone(status["finished_at"])
+        self.assertIn(GOOGLE_SOURCE_ID, status["source_checkpoints"])
 
 
 if __name__ == "__main__":

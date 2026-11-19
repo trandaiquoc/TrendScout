@@ -8,6 +8,8 @@ From the repository root, run `..\start.ps1` to start the normal multi-source LI
 
 The workspace defaults to Light and Vietnamese. Theme and locale preferences persist in this browser under **trendscout.theme** and **trendscout.locale**; these keys contain only **light/dark** and **vi/en**. No credential, API key, Run ID, or user data is written to browser storage.
 
+For reloads, the browser also keeps a versioned copy of the public capabilities response. It can render the last known Fetch readiness immediately while a background check runs; stale status is labelled, and the server still validates policy, approval, and quota on every Fetch. This cache contains no credentials, Fetch IDs, run results, or private user data. Reloading never submits a Fetch; Run History offers an explicit **Continue Fetch** action for a recovered durable job and resubmits its stored source scope so the server can join the queued job and reuse its checkpoints.
+
 To use a different port, set `$env:TREND_SCOUT_DEMO_PORT = '8123'` before running `.\start.ps1`. Startup does not fetch provider data. Choose **Collections / Bộ sưu tập** to search and manage saved keywords. **Chưa xếp vào Bộ sưu tập / Not in a Collection** is the place for eligible keywords that have not been organized. Search, sorting, filters and paging read the local database only. **Organize saved keywords again / Sắp xếp lại từ khóa từ dữ liệu đã lưu** uses evidence already saved. Create, edit, merge and delete operate on the local Collections database; merge and delete require confirmation.
 
 Collection counts show keywords placed directly in a Collection; parent counts include unique keywords in subcollections. Missing counts display as unavailable, not zero. Keyword details keep source records, analysis results and data limitations collapsed until opened. Wikimedia pageviews are approximate observed pageviews; they do not measure search volume or purchase intent.
@@ -18,8 +20,8 @@ Collection counts show keywords placed directly in a Collection; parent counts i
 - **public/styles.css** supplies the shared foundations; **public/phoenix.css** supplies the rebuilt shell and workspace layouts, Light/Dark presentation, and responsive refinements.
 - **public/app.js** composes shared views and capability state; **public/modules/source-library.js**, **research-workspace.js**, and **run-history.js** own their respective screen interactions and request state.
 - **public/modules/api.js** is the single HTTP boundary. It issues same-origin GET/POST requests with a bounded timeout and validates JSON/HTTP errors. POST requests are never retried automatically.
-- **public/modules/capabilities.js** loads server-owned source and Fetch readiness.
-- **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch and bounded status polling.
+- **public/modules/capabilities.js** loads server-owned source and Fetch readiness and stores the last-known public response for immediate, stale-labelled rendering after reload.
+- **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch, bounded status polling, and explicit recovery of a durable job.
 - **public/modules/format.js** formats dates and numbers for the selected locale.
 - **public/modules/theme.js** and **public/modules/i18n.js** manage display preferences.
 - **public/modules/i18n/vi.js** and **public/modules/i18n/en.js** are separate user-facing copy catalogs.

@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from google.cloud import firestore
 
 _COLLECTION = "_ts_d5_cache_blobs"
-_MAX_BLOB_BYTES = 4_000_016
+_MAX_BLOB_BYTES = 5_000_000
 _MAX_ITEMS = 5000
 _CHUNK_BYTES = 196_608
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")

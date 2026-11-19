@@ -354,6 +354,7 @@ class DistributedPublicFetch:
             "updated_at": job.get("updated_at") or job.get("available_at"),
             "finished_at": job.get("finished_at"),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
+            "recovery_available": job.get("recovery_available") is True,
         }
 
     def history(self, *, limit: int = 20) -> list[dict]:
@@ -405,6 +406,9 @@ class DistributedPublicFetch:
                 "mode": "LIVE" if self.data_mode == "LIVE" else self.data_mode,
                 "data_mode": "LIVE" if self.data_mode == "LIVE" else self.data_mode,
                 "sources": list(selected),
+                "request_kind": metadata.get("kind", "LATEST"),
+                **({"history_days": metadata["history_days"]}
+                   if metadata.get("kind") == "WIKIMEDIA_HISTORY" else {}),
                 "source_manifest": manifest,
                 "received_record_count": received,
                 "retained_keyword_count": None,
@@ -413,6 +417,7 @@ class DistributedPublicFetch:
                 "created_at": job.get("created_at"),
                 "updated_at": job.get("updated_at") or job.get("created_at"),
                 "fetched_at": job.get("finished_at"),
+                "recovery_available": job.get("recovery_available") is True,
                 "error_code": None,
                 "duration_seconds": None,
                 "progress": {

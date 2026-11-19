@@ -3,11 +3,13 @@ name: Firestore emulator acceptance
 on:
   push:
     branches:
+      - main
       - codex/firebase-shared-live-acceptance
     paths:
       - .github/workflows/firestore-emulator-acceptance.yml
       - Backend/app/jobs/firestore_transactional.py
       - Backend/app/jobs/public_admission.py
+      - Backend/app/jobs/source_checkpoints.py
       - Backend/app/jobs/shared_cache.py
       - Backend/app/orchestration/firestore_shared_live_composition.py
       - Backend/app/storage/firestore*.py

@@ -195,6 +195,12 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expired"):
             reopened.get(ref, now=NOW + timedelta(seconds=40))
 
+    def test_snapshot_within_checkpoint_budget_round_trips_across_multiple_chunks(self):
+        records = [{"text": "x" * 4_100_000, "record_count": 1}]
+        ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))
+        self.assertGreater(ref["raw_bytes"], 4_000_016)
+        self.assertEqual(self.blobs.get(ref, now=NOW), records)
+
     def test_partial_transaction_is_not_visible(self):
         self.client.fail_write_at = 1
         with self.assertRaisesRegex(RuntimeError, "injected transaction failure"):

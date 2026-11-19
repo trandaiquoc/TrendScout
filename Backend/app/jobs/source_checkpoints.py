@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.shared_cache import _safe_payload
+from app.storage.firestore_atomic_state import CommitOutcomeUnknown
 
 _MAX_INLINE_CHECKPOINT_BYTES = 150_000
 _MAX_RESOLVED_CHECKPOINT_BYTES = 5_000_000
+_MAX_CHECKPOINT_COMMIT_RETRIES = 3
 _RECORD_PATHS = (
     ("progress", "wikimedia_receipt", "result", "records"),
     ("progress", "wikimedia_history_records"),
@@ -291,4 +293,15 @@ class SourceCheckpointJournal:
             entries[source_id] = entry
             return revision + 1
 
-        return self.admission.transact_owned(job_id, owner, fence, now=now, operation=operation)
+        # A Firestore timeout after the transaction callback can mean the
+        # commit landed but its acknowledgement was lost. Repeating this exact
+        # checkpoint write is safe: the revision+digest check above recognizes
+        # the committed value and never repeats the provider request.
+        for attempt in range(_MAX_CHECKPOINT_COMMIT_RETRIES):
+            try:
+                return self.admission.transact_owned(
+                    job_id, owner, fence, now=now, operation=operation
+                )
+            except CommitOutcomeUnknown:
+                if attempt + 1 == _MAX_CHECKPOINT_COMMIT_RETRIES:
+                    raise

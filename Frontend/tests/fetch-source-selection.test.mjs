@@ -191,3 +191,82 @@ test('reports a status-poll allowance separately from provider rate limits', asy
     globalThis.fetch = previousFetch;
   }
 });
+
+test('explicitly resumes a recovered durable job with the same idempotent request', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  const states = [];
+  let statusReads = 0;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    statusReads += 1;
+    const body = statusReads === 1
+      ? { status: 'QUEUED', recovery_available: true, terminal: false }
+      : { status: 'COMPLETED', recovery_available: false, terminal: true, run_id: null };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind),
+      onTerminal: () => {},
+      locale: () => 'en',
+      sourceIds: () => ['google_web_serp'],
+    });
+    await controller.activate();
+    assert.equal(states.at(-1), 'recovery-available');
+    assert.equal(requests.filter((request) => request.path === '/api/v1/fetches').length, 1);
+    assert.equal(statusReads, 1);
+
+    // This second call represents the user's explicit Continue Fetch click.
+    await controller.activate();
+    const submissions = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[0].headers['Idempotency-Key'], submissions[1].headers['Idempotency-Key']);
+    assert.equal(submissions[0].body, submissions[1].body);
+    assert.equal(statusReads, 2);
+    assert.equal(states.at(-1), 'completed');
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('Run History recovery resubmits the stored source scope after reload', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      status: 'QUEUED', recovery_available: true, terminal: false,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => [],
+    });
+    await controller.resumeAvailableJob({
+      sources: ['google_web_serp', 'bing_web_search'], requestKind: 'LATEST',
+    });
+    const post = requests.find((request) => request.path === '/api/v1/fetches');
+    assert.deepEqual(JSON.parse(post.body), { sources: ['google_web_serp', 'bing_web_search'] });
+    assert.ok(post.headers['Idempotency-Key']);
+    assert.equal(requests.filter((request) => request.path === '/api/v1/fetches').length, 1);
+    assert.equal(requests.filter((request) => request.method === 'GET').length, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});

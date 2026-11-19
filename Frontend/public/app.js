@@ -1,5 +1,5 @@
 import { getJson, requestJson } from './modules/api.js';
-import { acceptsDiscovery, canStartFetch, capabilityRetryDelayMs, defaultFetchSourceIds, isLocalLiveDemo, isRetryableCapabilityCheckError, isVercelSharedLive, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
+import { acceptsDiscovery, canStartFetch, capabilityRetryDelayMs, defaultFetchSourceIds, isLocalLiveDemo, isRetryableCapabilityCheckError, isVercelSharedLive, loadCapabilities, readLastKnownCapabilities, renderFetchDefaults, renderSourceCapabilities, saveLastKnownCapabilities } from './modules/capabilities.js';
 import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
@@ -38,6 +38,8 @@ const state = {
   capabilityRetryTimer: null,
   capabilityRetryAttempt: 0,
   capabilities: null,
+  capabilitiesStale: false,
+  capabilityCheckFailed: false,
   fetchCapabilitiesLoading: true,
   fetchReady: false,
   fetchBlockReason: null,
@@ -834,6 +836,7 @@ const FETCH_STATE_MESSAGES = {
   retryable: 'fetch.retryable',
   'poll-limit': 'fetch.poll-limit',
   'poll-error': 'fetch.poll-error',
+  'recovery-available': 'fetch.recovery-available',
   expired: 'fetch.expired',
   'policy-not-approved': 'fetch.youtube-policy-pending',
   'policy-consent-required': 'fetch.youtube-consent-required',
@@ -937,7 +940,10 @@ function renderFetchPresentation() {
   const badge = $('#fetch-badge');
   const readiness = $('#fetch-readiness');
   const status = $('#fetch-status');
-  const canRetry = ['retryable', 'poll-limit', 'poll-error'].includes(presentation.kind);
+  const capabilityNote = $('#fetch-capabilities-note');
+  const capabilityRetry = $('#fetch-capabilities-retry');
+  const canRetry = ['retryable', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
+  const canResume = ['poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const busy = Boolean(presentation.busy);
   const youtubeSelected = effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID);
   const youtubeWorkflow = state.capabilities?.youtube_workflow || {};
@@ -945,12 +951,28 @@ function renderFetchPresentation() {
   const youtubeConsentMissing = youtubeSelected && !youtubePolicyPending
     && !acceptedYoutubePolicyVersion();
 
+  const showCapabilityNote = state.capabilitiesStale || state.capabilityCheckFailed;
+  if (capabilityNote) {
+    capabilityNote.hidden = !showCapabilityNote;
+    capabilityNote.textContent = showCapabilityNote
+      ? t(state.capabilityCheckFailed
+        ? (state.capabilities ? 'fetch.capabilities-stale-error' : 'fetch.capability-unavailable')
+        : state.fetchCapabilitiesLoading
+          ? 'fetch.capabilities-stale-checking' : 'fetch.capabilities-stale')
+      : '';
+  }
+  if (capabilityRetry) {
+    capabilityRetry.hidden = !state.capabilityCheckFailed;
+    capabilityRetry.disabled = state.fetchCapabilitiesLoading;
+  }
+
   button.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited'
     || youtubePolicyPending;
   const sourceSelect = $('#fetch-source-select');
   if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
   const buttonKey = presentation.kind === 'retryable'
     ? 'fetch.retry'
+    : canResume ? 'fetch.resume'
     : state.capabilities?.shared_policy_reconciliation_required === true
       && presentation.kind === 'disabled' ? 'fetch.sync-and-fetch'
       : canRetry ? 'fetch.check-status' : 'fetch.cta';
@@ -967,8 +989,9 @@ function renderFetchPresentation() {
       completed: 'fetch.history-completed-live', failed: 'fetch.history-failed-live',
     })[presentation.kind]
     : null;
-  const historyButtonKey = presentation.requestKind === 'history' && canRetry
-    ? 'fetch.check-status' : historyStateKey || 'fetch.history-cta';
+  const historyButtonKey = presentation.requestKind === 'history' && canResume
+    ? 'fetch.resume' : presentation.requestKind === 'history' && canRetry
+      ? 'fetch.check-status' : historyStateKey || 'fetch.history-cta';
   historyButton.textContent = t(historyButtonKey);
   const policySyncRequired = state.capabilities?.shared_policy_reconciliation_required === true;
   badge.textContent = t(policySyncRequired ? 'fetch.policy-sync-label'
@@ -979,6 +1002,7 @@ function renderFetchPresentation() {
   badge.classList.toggle('pill--amber', !state.fetchReady || policySyncRequired);
   readiness.textContent = capabilityRetryPending ? t('fetch.capabilities-retrying')
     : capabilityCheckPending ? t('fetch.capabilities-loading')
+    : state.capabilityCheckFailed && !state.capabilities ? t('fetch.capability-unavailable')
     : youtubePolicyPending ? t('fetch.youtube-policy-pending')
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
       : state.fetchReady ? t(policySyncRequired
@@ -1212,77 +1236,90 @@ function scheduleCapabilityRefresh(delayMs) {
   }, delayMs);
 }
 
-async function loadPublicCapabilities() {
-  if (!state.capabilities) {
-    state.fetchCapabilitiesLoading = true;
-    renderFetchPresentation();
+function applyPublicCapabilities(capabilities) {
+  state.capabilities = capabilities;
+  const sourceSelect = $('#fetch-source-select');
+  const sourceControl = $('#fetch-source-control');
+  const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
+    .filter((source) => source?.enabled_for_current_operation === true)
+    .map((source) => source.source_id).filter((source) => typeof source === 'string');
+  if (sourceSelect && sourceControl) {
+    const previous = sourceSelect.value;
+    sourceSelect.replaceChildren(new Option(t('fetch.source-all'), ''));
+    for (const sourceId of enabledSources) {
+      const key = FETCH_SOURCE_LABELS[sourceId];
+      sourceSelect.add(new Option(key ? t(key) : sourceId, sourceId));
+    }
+    sourceSelect.value = enabledSources.includes(previous) ? previous : '';
+    sourceControl.hidden = capabilities.source_selection_supported !== true
+      || enabledSources.length < 2;
   }
-  try {
-    const capabilities = await loadCapabilities(getLocale());
-    state.capabilities = capabilities;
-    state.fetchCapabilitiesLoading = false;
-    state.capabilityRetryAttempt = 0;
-    const sourceSelect = $('#fetch-source-select');
-    const sourceControl = $('#fetch-source-control');
-    const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
-      .filter((source) => source?.enabled_for_current_operation === true)
-      .map((source) => source.source_id).filter((source) => typeof source === 'string');
-    if (sourceSelect && sourceControl) {
-      const previous = sourceSelect.value;
-      sourceSelect.replaceChildren(new Option(t('fetch.source-all'), ''));
-      for (const sourceId of enabledSources) {
-        const key = FETCH_SOURCE_LABELS[sourceId];
-        sourceSelect.add(new Option(key ? t(key) : sourceId, sourceId));
-      }
-      sourceSelect.value = enabledSources.includes(previous) ? previous : '';
-      sourceControl.hidden = capabilities.source_selection_supported !== true
-        || enabledSources.length < 2;
-    }
-    state.fetchBlockReason = capabilities.fetch_block_reason || null;
-    state.fetchReady = canStartFetch(capabilities);
-    if (!state.fetchReady && !state.fetchBlockReason) {
-      state.fetchBlockReason = 'FEATURE_DISABLED';
-    }
-    if (state.fetchReady) {
-      clearTimeout(state.capabilityRetryTimer);
-      state.capabilityRetryTimer = null;
-      if (state.fetchPresentation.kind === 'rate-limited') {
-        state.fetchPresentation = { kind: 'disabled', busy: false };
-      }
-    } else if ([
-      'FETCH_ALREADY_RUNNING',
-      'PUBLIC_FETCH_RATE_LIMITED',
-      'RUN_COOLDOWN_ACTIVE',
-    ].includes(state.fetchBlockReason)) {
-      scheduleCapabilityRefresh(60000);
-    }
-    if (state.fetchPresentation.kind === 'policy-not-approved'
-        || state.fetchPresentation.kind === 'policy-consent-required') {
+  state.fetchBlockReason = capabilities.fetch_block_reason || null;
+  state.fetchReady = canStartFetch(capabilities);
+  if (!state.fetchReady && !state.fetchBlockReason) {
+    state.fetchBlockReason = 'FEATURE_DISABLED';
+  }
+  if (state.fetchReady) {
+    clearTimeout(state.capabilityRetryTimer);
+    state.capabilityRetryTimer = null;
+    if (state.fetchPresentation.kind === 'rate-limited') {
       state.fetchPresentation = { kind: 'disabled', busy: false };
     }
-    renderSourceCapabilities(capabilities, t);
-    renderFetchDefaults(capabilities, t);
-    sourceLibrary.setCapabilities(capabilities);
-    renderFetchPresentation();
-  } catch (error) {
-    state.capabilities = null;
+  } else if ([
+    'FETCH_ALREADY_RUNNING',
+    'PUBLIC_FETCH_RATE_LIMITED',
+    'RUN_COOLDOWN_ACTIVE',
+  ].includes(state.fetchBlockReason)) {
+    scheduleCapabilityRefresh(60000);
+  }
+  if (state.fetchPresentation.kind === 'policy-not-approved'
+      || state.fetchPresentation.kind === 'policy-consent-required') {
+    state.fetchPresentation = { kind: 'disabled', busy: false };
+  }
+  renderSourceCapabilities(capabilities, t);
+  renderFetchDefaults(capabilities, t);
+  sourceLibrary.setCapabilities(capabilities);
+  renderFetchPresentation();
+}
+
+async function loadPublicCapabilities() {
+  if (!state.capabilities) {
+    const cached = readLastKnownCapabilities();
+    if (cached) {
+      state.capabilitiesStale = true;
+      applyPublicCapabilities(cached.capabilities);
+    }
+  }
+  state.fetchCapabilitiesLoading = true;
+  state.capabilityCheckFailed = false;
+  renderFetchPresentation();
+  try {
+    const capabilities = await loadCapabilities(getLocale());
     state.fetchCapabilitiesLoading = false;
-    state.fetchReady = false;
-    state.fetchBlockReason = null;
-    renderSourceCapabilities(null, t);
-    renderFetchDefaults(null, t);
-    sourceLibrary.setCapabilities(null);
+    state.capabilityCheckFailed = false;
+    state.capabilitiesStale = false;
+    state.capabilityRetryAttempt = 0;
+    saveLastKnownCapabilities(capabilities);
+    applyPublicCapabilities(capabilities);
+  } catch (error) {
+    state.fetchCapabilitiesLoading = false;
+    state.capabilityCheckFailed = true;
+    state.capabilitiesStale = Boolean(state.capabilities);
+    if (!state.capabilities) {
+      state.fetchReady = false;
+      state.fetchBlockReason = null;
+      renderSourceCapabilities(null, t);
+      renderFetchDefaults(null, t);
+      sourceLibrary.setCapabilities(null);
+    }
     const retryDelay = isRetryableCapabilityCheckError(error)
       ? capabilityRetryDelayMs(state.capabilityRetryAttempt)
       : null;
     if (retryDelay !== null) {
       state.capabilityRetryAttempt += 1;
       scheduleCapabilityRefresh(retryDelay);
-      renderFetchPresentation();
-      return;
     }
     renderFetchPresentation();
-    $('#fetch-readiness').textContent = t('fetch.capability-unavailable');
   }
 }
 
@@ -1355,6 +1392,21 @@ const fetchController = new PublicFetchController({
 const historyFetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale, historyDays: 2,
 });
+
+async function resumeRecoveredFetch(run) {
+  if (fetchController.busy || historyFetchController.busy
+      || run?.recovery_available !== true) return;
+  const requestKind = run.request_kind || 'LATEST';
+  const controller = requestKind === 'WIKIMEDIA_HISTORY'
+    ? historyFetchController : fetchController;
+  showView('overview');
+  window.location.hash = 'overview';
+  await controller.resumeAvailableJob({
+    sources: run.sources,
+    requestKind,
+    historyDays: run.history_days,
+  });
+}
 
 function localizedStatus(prefix, status) {
   if (typeof status !== 'string' || !status) {
@@ -2497,6 +2549,7 @@ function addAlgorithmDetail(list, label, value) {
 
 function bindEvents() {
   $('#source-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
+  $('#fetch-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
   $('#sidebar-collapse').addEventListener('click', () => {
     if (isMobileNav()) return;
@@ -2809,7 +2862,10 @@ initializeTheme();
 initializeScheduleForm();
 const sourceLibrary = initializeSourceLibrary();
 const researchWorkspace = initializeResearchWorkspace({ announce, localizedSourceName });
-const runHistory = initializeRunHistory({ localizedRunType, localizedRunMode, localizedRunOutcome, localizedSourceName, localizedStatus });
+const runHistory = initializeRunHistory({
+  localizedRunType, localizedRunMode, localizedRunOutcome, localizedSourceName, localizedStatus,
+  onResumeRecovery: resumeRecoveredFetch,
+});
 bindEvents();
 showView(window.location.hash.slice(1));
 setMobileNav(false);

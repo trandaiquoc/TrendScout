@@ -5,6 +5,8 @@ import {
   capabilityRetryDelayMs,
   isRetryableCapabilityCheckError,
   loadCapabilities,
+  readLastKnownCapabilities,
+  saveLastKnownCapabilities,
 } from '../public/modules/capabilities.js';
 
 const source = new URL('../public/', import.meta.url);
@@ -28,6 +30,35 @@ test('initial Fetch card reports a capability check instead of a policy block', 
   assert.match(en, /'fetch\.capabilities-loading': 'Checking the connection and Fetch availability/);
   assert.match(vi, /'fetch\.capabilities-retrying': 'Kết nối đang chậm/);
   assert.match(en, /'fetch\.capabilities-retrying': 'The connection is taking longer/);
+  assert.match(html, /id="fetch-capabilities-retry"[^>]*data-i18n="fetch\.capabilities-retry"/);
+  assert.match(app, /readLastKnownCapabilities\(\)/);
+  assert.match(app, /saveLastKnownCapabilities\(capabilities\)/);
+  assert.match(app, /fetch-capabilities-retry/);
+  assert.match(app, /onResumeRecovery: resumeRecoveredFetch/);
+  assert.match(await readFile(new URL('../public/modules/run-history.js', import.meta.url), 'utf8'),
+    /runs\.recovery-resume/);
+});
+
+test('last-known capabilities are cached for display and malformed values are ignored', () => {
+  let saved = null;
+  const storage = {
+    getItem: () => saved,
+    setItem: (_key, value) => { saved = value; },
+  };
+  const capabilities = { sources: [{ source_id: 'wikimedia_pageviews_top_per_country' }] };
+
+  assert.equal(saveLastKnownCapabilities(capabilities, storage), true);
+  const cached = readLastKnownCapabilities(storage);
+  assert.deepEqual(cached.capabilities, capabilities);
+  assert.ok(Number.isFinite(Date.parse(cached.checkedAt)));
+
+  saved = '{broken';
+  assert.equal(readLastKnownCapabilities(storage), null);
+  saved = JSON.stringify({ schema: 1, checkedAt: 'not-a-date', capabilities });
+  assert.equal(readLastKnownCapabilities(storage), null);
+  saved = JSON.stringify({ schema: 1, checkedAt: new Date().toISOString(), capabilities: {} });
+  assert.equal(readLastKnownCapabilities(storage), null);
+  assert.equal(saveLastKnownCapabilities({}, storage), false);
 });
 
 test('capability status retries transient failures with a finite backoff', () => {

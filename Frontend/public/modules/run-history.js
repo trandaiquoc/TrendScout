@@ -15,7 +15,7 @@ const element = (tag, text = null, className = '') => {
 };
 const getErrorMessage = (error, fallback) => error && typeof error.message === 'string' ? error.message : t(fallback);
 
-export function initializeRunHistory({ localizedRunType, localizedRunMode, localizedRunOutcome, localizedSourceName, localizedStatus }) {
+export function initializeRunHistory({ localizedRunType, localizedRunMode, localizedRunOutcome, localizedSourceName, localizedStatus, onResumeRecovery }) {
   const state = { runHistoryOffset: 0, runHistoryCursor: null, runHistoryDetailSequence: 0, runHistoryDetailId: null, runHistoryDetailItem: null, runHistoryDetailTrigger: null };
   let searchTimer, listSequence = 0;
 async function loadRunHistory({ append = false } = {}) {
@@ -69,6 +69,16 @@ async function loadRunHistory({ append = false } = {}) {
         button.addEventListener('click',()=>loadRunHistoryDetail(run.fetch_id,button)); actions.append(button);
       }
       else actions.textContent='—';
+      if (run.recovery_available === true && typeof onResumeRecovery === 'function') {
+        const resume = element('button', t('runs.recovery-resume'), 'button button-primary');
+        resume.type = 'button';
+        resume.addEventListener('click', async () => {
+          resume.disabled = true;
+          try { await onResumeRecovery(run); }
+          finally { resume.disabled = false; }
+        });
+        actions.append(resume);
+      }
       actions.dataset.label=headers[8];
       tr.append(actions); body.append(tr);
     });
@@ -143,6 +153,8 @@ function renderRunHistoryDetail(item, errorMessage = null) {
     ? `${observationStart} – ${observationEnd}` : observationStart || observationEnd || t('common.unavailable');
   const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.outcome_status || item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
+    ...(item.recovery_available === true
+      ? [[t('runs.recovery'), t('runs.recovery-available'), 'wide']] : []),
     [t('runs.source-coverage'),sourceCoverageSummary,'wide'],
     ...(googleSummary?[[t('runs.google-summary'),googleSummary,'wide']]:[]),
     [t('runs.provider-records'),coverage.providerRecordCount],

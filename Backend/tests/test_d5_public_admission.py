@@ -234,6 +234,29 @@ class PublicAdmissionTests(unittest.TestCase):
             source_id=GOOGLE_SOURCE_ID, attempt_id="one-physical-attempt", now=later), "REPLAY")
         self.control.finish(job, "worker2", new, now=later)
 
+    def test_status_and_history_requeue_an_expired_lease_without_running_a_worker(self):
+        job_id = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
+        self.control.claim(job_id, "worker", now=NOW)
+        later = NOW + timedelta(seconds=11)
+
+        status = self.control.read_job(job_id, now=later)
+        self.assertEqual(status["state"], "QUEUED")
+        self.assertTrue(status["recovery_available"])
+        self.assertIsNone(status["owner"])
+        self.assertIsNone(status["lease_until"])
+
+        history = self.control.list_jobs(limit=20, now=later)
+        self.assertEqual(history[0]["state"], "QUEUED")
+        self.assertTrue(history[0]["recovery_available"])
+
+        # A later explicit POST can join and dispatch the queued durable job.
+        joined = self.control.admit("explicit-recovery-request", now=later)
+        self.assertEqual(joined["job_id"], job_id)
+        self.assertEqual(joined["result"], "JOINED")
+        reclaimed = self.control.claim_next("recovery-worker", now=later)
+        self.assertEqual(reclaimed["job_id"], job_id)
+        self.assertEqual(reclaimed["fence"], 2)
+
     def test_cooldown_kill_switch_and_mismatched_policy_fail_closed(self):
         job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
         fence = self.control.claim(job, "worker", now=NOW)["fence"]

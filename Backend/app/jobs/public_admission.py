@@ -911,6 +911,100 @@ class PublicAdmission:
             raise AdmissionDenied("CLOCK_REGRESSION")
         state["last_observed_at"] = now.isoformat()
 
+    def _selected_job_sources(self, job):
+        metadata = job.get("request_metadata", {})
+        if not isinstance(metadata, dict):
+            raise AdmissionDenied("JOB_STATE_INVALID")
+        try:
+            normalized = self._request_metadata(metadata if metadata else None)
+        except ValueError:
+            raise AdmissionDenied("JOB_STATE_INVALID") from None
+        if normalized.get("kind") == "WIKIMEDIA_HISTORY":
+            return [WIKIMEDIA_SOURCE_ID]
+        return normalized.get("sources", sorted(self.policy.enabled_sources))
+
+    def _completed_job_sources(self, job):
+        selected = self._selected_job_sources(job)
+        checkpoints = job.get("source_checkpoints", {})
+        if not isinstance(checkpoints, dict):
+            raise AdmissionDenied("JOB_STATE_INVALID")
+        completed = {}
+        for source_id in selected:
+            entry = checkpoints.get(source_id)
+            snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if (isinstance(snapshot, dict) and snapshot.get("phase") == "COMPLETE"
+                    and isinstance(result, dict)):
+                completed[source_id] = result
+        all_complete = len(completed) == len(selected)
+        all_success = all_complete and all(
+            value.get("status") == "SUCCESS" for value in completed.values()
+        )
+        return completed, all_complete, all_success
+
+    def _terminal_state_for_job(self, job, fallback):
+        completed, all_complete, all_success = self._completed_job_sources(job)
+        if all_complete:
+            return "COMPLETED" if all_success else "PARTIAL"
+        if completed:
+            return "PARTIAL"
+        return fallback
+
+    @staticmethod
+    def _finish_recovered_job(job, state, now):
+        job.update(state=state, owner=None, lease_until=None,
+                   recovery_available=False, updated_at=now.isoformat(),
+                   finished_at=now.isoformat())
+
+    def _repair_job_lifecycle(self, job, now):
+        """Make expired durable jobs observable without starting a worker."""
+        if job.get("state") not in {"QUEUED", "RUNNING"}:
+            return False
+        try:
+            expires_at = _parse(job["expires_at"])
+            attempts = job["attempts"]
+            if type(attempts) is not int or attempts < 0:
+                raise ValueError("invalid job attempt count")
+        except (KeyError, TypeError, ValueError):
+            raise AdmissionDenied("JOB_STATE_INVALID") from None
+
+        if expires_at <= now:
+            fallback = "EXPIRED"
+            self._finish_recovered_job(
+                job, self._terminal_state_for_job(job, fallback), now
+            )
+            return True
+
+        if job["state"] == "RUNNING":
+            try:
+                lease_until = _parse(job["lease_until"])
+            except (KeyError, TypeError, ValueError):
+                raise AdmissionDenied("JOB_STATE_INVALID") from None
+            if lease_until > now:
+                return False
+            if attempts >= self.policy.max_attempts:
+                fallback = "FAILED"
+                self._finish_recovered_job(
+                    job, self._terminal_state_for_job(job, fallback), now
+                )
+            else:
+                job.update(state="QUEUED", owner=None, lease_until=None,
+                           available_at=now.isoformat(), recovery_available=True,
+                           updated_at=now.isoformat())
+            return True
+
+        try:
+            available_at = _parse(job["available_at"])
+        except (KeyError, TypeError, ValueError):
+            raise AdmissionDenied("JOB_STATE_INVALID") from None
+        if available_at <= now and attempts >= self.policy.max_attempts:
+            fallback = "FAILED"
+            self._finish_recovered_job(
+                job, self._terminal_state_for_job(job, fallback), now
+            )
+            return True
+        return False
+
     def _prune_expired_records(self, state, now):
         """Remove expired receipts and payloads without dropping live replay state."""
         jobs, keys = state.get("jobs"), state.get("keys")
@@ -952,7 +1046,7 @@ class PublicAdmission:
                     if (not isinstance(source_id, str) or not source_id
                             or not isinstance(checkpoint, dict)):
                         raise ValueError("invalid checkpoint metadata")
-                    expiry = min(_parse(checkpoint["retain_until"]), job_expiry)
+                    expiry = _parse(checkpoint["retain_until"])
                 except (KeyError, TypeError, ValueError):
                     del checkpoints[source_id]
                     counts["invalid_checkpoints"] += 1
@@ -963,15 +1057,15 @@ class PublicAdmission:
                 elif expiry.isoformat() != checkpoint["retain_until"]:
                     checkpoint["retain_until"] = expiry.isoformat()
 
+            self._repair_job_lifecycle(job, now)
+
         referenced = {receipt["job_id"] for receipt in keys.values()}
         for job_id, job in list(jobs.items()):
             job_expiry = _parse(job["expires_at"])
-            if job_expiry <= now:
-                if job.get("state") in {"QUEUED", "RUNNING"}:
-                    job.update(state="EXPIRED", owner=None, lease_until=None)
-                if job_id not in referenced:
-                    del jobs[job_id]
-                    counts["jobs"] += 1
+            checkpoints = job.get("source_checkpoints", {})
+            if job_expiry <= now and job_id not in referenced and not checkpoints:
+                del jobs[job_id]
+                counts["jobs"] += 1
 
         start_cutoff = now - timedelta(seconds=self.policy.window_seconds)
         kept_starts = []
@@ -1121,6 +1215,7 @@ class PublicAdmission:
             if polls >= self.policy.max_status_polls:
                 raise AdmissionDenied("STATUS_POLL_LIMIT")
             job["status_polls"] = polls + 1
+            self._repair_job_lifecycle(job, now)
             return state, deepcopy(job)
         return self.store.transact(self.state_key, operation)
 
@@ -1138,16 +1233,20 @@ class PublicAdmission:
                     or not isinstance(state.get("jobs"), dict)):
                 raise AdmissionDenied("STATE_INVALID")
             jobs = []
+            lifecycle_changed = False
             for job_id, job in state["jobs"].items():
                 if (not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id)
                         or not isinstance(job, dict) or job.get("job_id") != job_id):
                     raise AdmissionDenied("STATE_INVALID")
+                lifecycle_changed |= self._repair_job_lifecycle(job, now)
                 try:
                     created = _parse(job["created_at"])
                     updated = _parse(job.get("updated_at") or job["created_at"])
                 except (KeyError, TypeError, ValueError):
                     raise AdmissionDenied("STATE_INVALID") from None
                 jobs.append((updated, created, deepcopy(job)))
+            if lifecycle_changed:
+                self._guard_clock(state, now)
             jobs.sort(key=lambda item: (item[0], item[1], item[2]["job_id"]), reverse=True)
             return state, [item[2] for item in jobs[:limit]]
 
@@ -1179,7 +1278,7 @@ class PublicAdmission:
                    attempts=job["attempts"] + 1,
                    lease_until=min(now + timedelta(seconds=self.policy.lease_seconds),
                                    _parse(job["expires_at"])).isoformat(),
-                   updated_at=now.isoformat())
+                   recovery_available=False, updated_at=now.isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
                 "lease_until": job["lease_until"], "expires_at": job["expires_at"],
                 "request_metadata": deepcopy(job.get("request_metadata", {}))}
@@ -1195,12 +1294,16 @@ class PublicAdmission:
                 if job["state"] not in {"QUEUED", "RUNNING"}:
                     continue
                 if _parse(job["expires_at"]) <= now:
-                    job.update(state="EXPIRED", owner=None, lease_until=None)
+                    self._finish_recovered_job(
+                        job, self._terminal_state_for_job(job, "EXPIRED"), now
+                    )
                     continue
                 due = (job["state"] == "QUEUED" and _parse(job["available_at"]) <= now
                        or job["state"] == "RUNNING" and _parse(job["lease_until"]) <= now)
                 if due and job["attempts"] >= self.policy.max_attempts:
-                    job.update(state="FAILED", owner=None, lease_until=None)
+                    self._finish_recovered_job(
+                        job, self._terminal_state_for_job(job, "FAILED"), now
+                    )
                 elif due:
                     return self._claim_job(job, owner, now)
             return None
@@ -1220,7 +1323,8 @@ class PublicAdmission:
             if not now < not_before < _parse(job["expires_at"]):
                 raise AdmissionDenied("RETRY_OUTSIDE_DEADLINE")
             job.update(state="QUEUED", owner=None, lease_until=None,
-                       available_at=not_before.isoformat(), updated_at=now.isoformat())
+                       available_at=not_before.isoformat(), recovery_available=False,
+                       updated_at=now.isoformat())
         self._transaction(op)
 
     def heartbeat(self, job_id: str, owner: str, fence: int, *, now: datetime) -> str:
@@ -1452,6 +1556,7 @@ class PublicAdmission:
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             job.update(state="PARTIAL" if partial else "COMPLETED", owner=None,
+                       recovery_available=False,
                        lease_until=None, updated_at=now.isoformat(), finished_at=now.isoformat())
         self._transaction(op)
 
