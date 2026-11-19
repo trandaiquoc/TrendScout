@@ -22,6 +22,10 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
         async def read_route(item_id=None):
             return {"item_id": item_id}
 
+        @app.get("/api/v1/collections/jobs/{fetch_id}")
+        async def read_collection_job(fetch_id):
+            return {"fetch_id": fetch_id}
+
         @app.post("/api/v1/research")
         @app.patch("/api/v1/research/{item_id}")
         @app.post("/api/v1/scheduler")
@@ -38,6 +42,7 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
                 "/api/v1/runs/history/" + "a" * 32,
                 "/api/v1/runs/history/context-classification-preview",
                 "/api/v1/runs/history/organize-7b406cfd-e1c5-46b3-b592-53e5cbb9eaf4",
+                "/api/v1/collections/jobs/" + "d" * 32,
             ):
                 with self.subTest(method="GET", path=path):
                     response = await client.get(path)
@@ -58,6 +63,8 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(denied.status_code, 404)
             denied_run_id = await client.get("/api/v1/runs/history/unsafe.id")
             self.assertEqual(denied_run_id.status_code, 404)
+            denied_job_path = await client.get("/api/v1/collections/jobs/" + "d" * 32 + "/extra")
+            self.assertEqual(denied_job_path.status_code, 404)
 
 
 if __name__ == "__main__":

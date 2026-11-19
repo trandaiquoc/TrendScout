@@ -44,7 +44,7 @@ class LocalLiveGuard:
         ) or (method == "GET" and re.fullmatch(
             r"/api/v1/collections/keywords/[a-f0-9]{64}", path
         )) or (method == "GET" and re.fullmatch(
-            rf"/api/v1/collections/(?:jobs/[^/]{1,64}|{collection_id}/keywords|classifications/[a-f0-9]{{64}})", path
+            rf"/api/v1/collections/(?:jobs/[^/]{{1,64}}|{collection_id}/keywords|classifications/[a-f0-9]{{64}})", path
         ))
         algorithm_read = method == "GET" and path in {
             "/api/v1/algorithms", "/api/v1/algorithms/results",
