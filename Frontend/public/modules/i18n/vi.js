@@ -1197,7 +1197,7 @@ export const vi = {
   'settings.storage-records': 'Từ khóa đã lưu',
   'settings.storage-size': 'Dung lượng cơ sở dữ liệu',
   'settings.storage-access': 'Quyền truy cập ứng dụng',
-  'settings.read-only': 'Chỉ đọc',
+  'settings.read-only': 'SQLite chỉ đọc; Fetch Shared LIVE dùng Firestore',
   'settings.read-write-configured': 'Cho phép đọc và ghi',
   'settings.runtime-error': 'Không tải được cấu hình môi trường chạy.',
   'algorithms.kicker': 'ĐO LƯỜNG VÀ SO SÁNH',

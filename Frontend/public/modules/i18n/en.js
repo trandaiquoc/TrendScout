@@ -1197,7 +1197,7 @@ export const en = {
   'settings.storage-records': 'Saved keywords',
   'settings.storage-size': 'Database size',
   'settings.storage-access': 'Application access',
-  'settings.read-only': 'Read-only',
+  'settings.read-only': 'SQLite read-only; Shared LIVE Fetch uses Firestore',
   'settings.read-write-configured': 'Read and write enabled',
   'settings.runtime-error': 'Runtime configuration could not be loaded.',
   'algorithms.kicker': 'MEASUREMENT AND COMPARISON',
