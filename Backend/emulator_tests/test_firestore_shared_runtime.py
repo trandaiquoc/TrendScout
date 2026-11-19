@@ -298,6 +298,8 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
                              "handle_async_request", fixture_transport),
                 patch("app.collections.store.CollectionStore.local",
                       return_value=collection_store),
+                patch("app.collections.embeddings.embed",
+                      side_effect=RuntimeError("model inference is outside this Fetch test")),
             ):
                 for index, client in enumerate(clients):
                     self.assertIsNot(client, clients[1 - index])
