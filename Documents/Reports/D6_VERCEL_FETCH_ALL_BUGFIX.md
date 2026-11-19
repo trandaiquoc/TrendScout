@@ -2,14 +2,14 @@
 
 **Ngày:** 2026-11-19
 **Nhánh làm việc:** `main`
-**Trạng thái:** G1–G4 PASS; G5 chờ Firestore Emulator acceptance trên `main`; G6 chờ Owner acceptance.
-**Tiến độ:** 75% theo trọng số gate.
+**Trạng thái:** G1–G6 PASS.
+**Tiến độ:** 100% theo trọng số gate.
 
 ## Phạm vi và giới hạn
 
 Sửa tính bền vững của Fetch dùng Firestore, khôi phục job Vercel bị kẹt, và UX sau reload. Không gửi POST Fetch, không gọi API nhà cung cấp thật, không reset dữ liệu/quota Production, không sửa IAM/billing.
 
-**Production deployment đã xảy ra:** theo yêu cầu dùng một link chính, deployment `dpl_7b6cFCmW4qXCJgNuEe4Wquw6XzYV` được tạo qua Vercel API bằng cách redeploy Preview `dpl_6WFCatRwF5ZByMeMGJ76Dgb4kcPw`. Metadata của Vercel ghi `source: redeploy`, không có Git commit SHA. Preview source được tải lên từ worktree local; vì vậy Vercel chưa đọc commit D6 từ GitHub. Lúc kiểm tra gần nhất, `origin/main` vẫn ở `b57389babc6ea308043a31c9ef66a935da3b269d` và các sửa đổi D6 còn ở worktree. Việc này đang được khắc phục bằng commit/push trực tiếp trên `main`; alias dùng cho Owner vẫn là một URL.
+**Production deployment đã xảy ra:** ban đầu, theo yêu cầu dùng một link chính, Preview `dpl_6WFCatRwF5ZByMeMGJ76Dgb4kcPw` được redeploy qua Vercel API thành `dpl_7b6cFCmW4qXCJgNuEe4Wquw6XzYV`. Metadata ghi `source: redeploy`, không có Git commit SHA; source lúc đó là worktree local tải lên Vercel. Sau đó D6 được commit/push thẳng lên `main` (`6f374e5`); workflow timeout được cập nhật ở `36a380e`. `origin/main` hiện ở `36a380ed90ce0ca3408b8ae23ad6d3e620cddf59`, và Production được thay bằng Git deployment `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F` từ commit đó. Alias Owner vẫn chỉ có một URL.
 
 Run đã được báo cáo: `14e4f63bc0944b65b573d0b23a787c8e`. Vercel vẫn trả thông tin trạng thái từ shared state, nhưng runtime logs của run này không còn trong thời hạn lưu hiện tại. Vì vậy không thể xác nhận duy nhất lỗi nào đã xảy ra trong request Production cụ thể. Các nguyên nhân bên dưới là failure mode được tái hiện độc lập trên code hiện tại, không phải kết luận về log đã hết hạn.
 
@@ -24,18 +24,21 @@ Run đã được báo cáo: `14e4f63bc0944b65b573d0b23a787c8e`. Vercel vẫn tr
 ## Kiểm tra
 
 - **150 backend tests PASS** khi chạy lại trên Python của `Backend/.venv`: 119 test qua `test_d5_source_checkpoints`, `test_d5_public_admission`, `test_d5_distributed_worker`, `test_d5_firestore_shared_cache`, `test_google_trends`, `test_bing_handler`, `test_vercel_shared_live_fetch`; thêm 31 test qua `test_d5_guarded_attempt`, `test_d5_live_gateway`, `test_d5_firestore_atomic_state`.
+- **26 Firestore Emulator integration tests PASS** trên GitHub Actions run [44542548880](https://github.com/trandaiquoc/TrendScout/actions/runs/44542548880), commit `36a380ed90ce0ca3408b8ae23ad6d3e620cddf59`. Chạy `test_firestore_transactional` và `test_firestore_shared_runtime`; gồm Google Fetch route với RSS fixture, cache/quota/checkpoint persistence, nhiều client và lost-commit retry. Không gọi Google/provider thật.
 - **24 frontend tests PASS** qua `fetch-loading-state`, `fetch-source-selection` và `run-history-coverage`.
 - **6 browser modules** được kiểm tra cú pháp dưới ES modules.
 - `Backend/scripts/prepare_vercel.py` chạy thành công. Bản chạy lại không in số lượng assets.
 - Vercel Preview `https://trend-scout-np8wty5kt-rakoon1.vercel.app` ở trạng thái `READY`, `target: null`; build dùng cây làm việc hiện tại, không push hoặc tạo nhánh. GET tĩnh `/dashboard/` và các module `fetch.js`, `run-history.js` đều trả **HTTP 200**; HTML có `lang="vi"`, module Run History có trường và nhãn recovery.
 - Playwright render Preview bằng share link tạm, với mọi `/api/**` bị chặn ngay trong browser và trả mock `503`. Shell tiếng Việt và nút thử lại hiển thị; không có request app API tới server. Ở viewport 390 px, `scrollWidth = clientWidth = 390`, không tràn ngang. 7 console errors đều là HTTP 503 do mock có chủ ý.
 - URL Owner cung cấp `https://trend-scout-mu.vercel.app` ban đầu là alias **Production** ở commit cũ `b57389babc6ea308043a31c9ef66a935da3b269d` (deployment `dpl_2r294JjWURedcsGhwiaAB8zDDbmZ`). Theo chỉ dẫn của Owner dùng một link, bản D6 đã được phát hành lên alias đó.
-- Production deployment `dpl_7b6cFCmW4qXCJgNuEe4Wquw6XzYV` hiện `READY`, `target: production`, aliases gồm `trend-scout-mu.vercel.app` và `trend-scout-rakoon1.vercel.app`. Vercel web fetch xác nhận HTML và module `fetch.js`, `run-history.js` trên URL Owner đưa trả **HTTP 200**; module Run History có recovery field/label. Đây là kiểm tra tĩnh, không xác nhận UI chạy cùng API thật.
+- Production deployment `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F` hiện `READY`, `target: production`, được Vercel Git build từ commit `36a380e`; aliases gồm `trend-scout-mu.vercel.app` và `trend-scout-rakoon1.vercel.app`. Vercel web fetch xác nhận HTML và module `fetch.js`, `run-history.js` trên URL Owner đưa trả **HTTP 200**; module Run History có recovery field/label. Đây là kiểm tra tĩnh, không xác nhận UI chạy cùng API thật.
+- Owner manual acceptance **PASS** trên URL Production duy nhất `https://trend-scout-mu.vercel.app/dashboard/`: reload trang, dashboard tiếng Việt hiển thị, không kẹt ở “Đang kiểm tra”, và Run History tải dòng job đã lưu với bốn nguồn. Production GET `/api/v1/runs/history?limit=20` trả **HTTP 200**, có run `14e4f63bc0944b65b573d0b23a787c8e`, trạng thái `PARTIAL`, đủ Bing, Google, Wikimedia và YouTube; response báo `history_source=local_sqlite_and_shared_firestore`. Đây là bản ghi cũ đã lưu, không phải kết quả của Fetch mới. `manual_history_status=LOCAL_LEDGER_ONLY` chỉ áp dụng lịch sử `MANUAL_ANALYSIS`; mục Fetch vẫn có trong Run History.
 - Truy vấn runtime logs mới nhất bị Vercel API từ chối `403`; tình trạng log runtime hiện **chưa xác minh**, không kết luận rằng không có lỗi.
-- Playwright mở trực tiếp link Production bị chuyển tới trang đăng nhập Vercel. Preview đã được mở qua share link tạm để smoke-test UI. Không tắt Deployment Protection hay thay đổi quyền project. Production UI chưa được kiểm tra trực tiếp bằng browser phiên đã đăng nhập.
-- JavaScript dashboard tự gửi GET capabilities/history khi chạy bình thường. Trong smoke test, mọi route `/api/**` bị chặn tại browser và mock 503, nên không có request app API tới server; không gửi Fetch POST, gọi provider hay Firestore thật.
-- `git diff --check` sạch. Các kiểm tra backend đã chạy dùng fixture/transport giả và SQLite tạm; không gọi provider thật hay Firestore Production. Firestore Emulator suite chưa chạy trên Windows 1 vì không có Java/WSL và guard yêu cầu Linux `bwrap` với network namespace chỉ-loopback.
-- GitHub Actions gần nhất trên `main` chỉ là Pages build/deployment thành công cho commit cũ `b57389b`; trạng thái đó không xác nhận code D6. Workflow Firestore Emulator đã được mở cho push `main` để có thể chạy acceptance trên commit D6.
+- Playwright mở trực tiếp link Production bị chuyển tới trang đăng nhập Vercel. Owner đã kiểm tra UI trong phiên đăng nhập của mình. Không tắt Deployment Protection hay thay đổi quyền project.
+- JavaScript dashboard tự gửi GET capabilities/history khi chạy bình thường. Trong Playwright Preview smoke, mọi route `/api/**` bị chặn tại browser và mock 503 nên browser smoke không gửi request app API thật. Riêng QA Production gọi GET history chỉ đọc và nhận HTTP 200; không gửi Fetch POST hay gọi provider.
+- `git diff --check` sạch. Các kiểm tra local dùng fixture/transport giả và SQLite tạm; Firestore Emulator được chạy trong runner GitHub Linux cô lập với `bwrap` và network chỉ-loopback vì Windows 1 không có Java/WSL.
+- GitHub Actions Firestore Emulator run `44542548880` và Pages build run `44542547219` đều **success** trên commit `36a380ed90ce0ca3408b8ae23ad6d3e620cddf59`.
+- Repo hiện sạch trên `main`; code D6 đã push. Vercel Production `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F` là deployment Git từ commit `36a380e`, `READY`, và alias chính trỏ đúng deployment.
 
 ## Gate
 
@@ -45,16 +48,14 @@ Run đã được báo cáo: `14e4f63bc0944b65b573d0b23a787c8e`. Vercel vẫn tr
 | G2 — persistence/Firestore | 25% | PASS | Retry checkpoint idempotent, chunk snapshot 4,1 MB, retention độc lập với deadline. |
 | G3 — lifecycle/recovery | 20% | PASS | Lease hết hạn, deadline, checkpoint đã hoàn tất, status/history không dispatch, POST tường minh để tiếp tục. |
 | G4 — frontend/reload UX | 15% | PASS | Capabilities cache có nhãn stale; Run History tiếp tục theo scope lưu; reload không tự POST. |
-| G5 — tích hợp/hồi quy | 15% | CHỜ | 150 backend và 24 frontend tests offline/fixture đạt; Firestore Emulator suite chưa chạy. Workflow nay có trigger cho push `main`. |
-| G6 — Vercel Preview QA + Owner acceptance | 10% | CHỜ | Preview `dpl_6WFCatRwF5ZByMeMGJ76Dgb4kcPw` đã qua UI smoke với API mock; bản Production `dpl_7b6cFCmW4qXCJgNuEe4Wquw6XzYV` `READY` và alias chính trả asset recovery HTTP 200. Chưa có Owner acceptance; chưa gửi request Fetch hay kiểm tra app API/Firestore thật. |
+| G5 — tích hợp/hồi quy | 15% | PASS | 150 backend, 24 frontend và 26 Firestore Emulator tests đạt; GitHub Actions run trên commit `36a380e` success. |
+| G6 — Vercel QA + Owner acceptance | 10% | PASS | Production deployment `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F` từ commit `36a380e` `READY`; API history trả 200 và Owner xác nhận UI/history PASS sau reload trên alias chính. Không gửi Fetch mới hay gọi provider thật. |
 
-## Việc còn lại
+## Kết luận nghiệm thu
 
-Preview đã được tạo bằng Vercel MCP từ cây làm việc trên `main` sau khi Vercel CLI login gặp timeout tới `api.vercel.com`. Theo chỉ dẫn Owner dùng một link, source Preview được redeploy với target Production và gán vào `https://trend-scout-mu.vercel.app/dashboard/`; deployment đó chưa có Git commit. Bước code kế tiếp là commit/push trực tiếp `main`, sau đó đợi Vercel Git deployment và Firestore Emulator workflow hoàn tất.
-
-Owner acceptance còn lại: mở link chính trong phiên đăng nhập sẵn, reload một lần, xác nhận dashboard tiếng Việt không bị kẹt ở “Đang kiểm tra” và Run History hiển thị trạng thái đã lưu. Không nhấn Fetch. Trả lời `PASS` hoặc gửi ảnh/lỗi nếu có. Chỉ tăng tiến độ lên 100% khi acceptance và toàn bộ QA G6 đạt.
+G1–G6 đều PASS. Vercel Production chạy code đã push lên `main`; Owner xác nhận dashboard và Run History sau reload. Không gửi Fetch POST, gọi provider thật, reset Production data/quota hay thay đổi IAM/billing trong quá trình QA. Bản ghi Production hiện có mang trạng thái `PARTIAL`; việc hiển thị đúng trạng thái đã lưu được nghiệm thu, còn một lần Fetch live mới chưa được chạy.
 
 ## Production deployment and rollback
 
-- Production deployment `dpl_7b6cFCmW4qXCJgNuEe4Wquw6XzYV` is current on the single Owner-provided alias. No Fetch POST or provider request was sent during deployment verification.
-- Rollback target is the prior Production deployment `dpl_2r294JjWURedcsGhwiaAB8zDDbmZ` at commit `b57389babc6ea308043a31c9ef66a935da3b269d`. If a release issue appears, use Vercel `request_rollback` for project `prj_dB1JIG2hJG8NUukGPAaqvyI1Pk3R` with that deployment ID, then verify `trend-scout-mu.vercel.app` points back to it. No rollback request was sent.
+- Current Production deployment is `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F`, built by Git from commit `36a380e` and assigned to the single Owner-provided alias. No Fetch POST or provider request was sent during deployment verification.
+- Rollback target is previous Git-backed Production deployment `dpl_8KHV54j2qC74eUQCmzJAHKsDEroS` at D6 code commit `6f374e5aa8cc5a3c0eb64ef810cad82432429652`. If a release issue appears, use Vercel `request_rollback` for project `prj_dB1JIG2hJG8NUukGPAaqvyI1Pk3R` with that deployment ID, then verify `trend-scout-mu.vercel.app` points back to it. No rollback request was sent.
