@@ -254,7 +254,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
             "TREND_SCOUT_RUN_MODE": "live",
             "TREND_SCOUT_READ_ONLY": "false",
             "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
-            "WIKIMEDIA_USER_AGENT": "TrendScout isolated Emulator integration test",
+            "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid/contact)",
         })
         config = GoogleLiveSettings(rss_approved=True)
 
@@ -266,7 +266,7 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
         async def composition():
             client = clients[len(runtime_values)]
             async with normal_google_live_composition(
-                user_agent="TrendScout isolated Emulator integration test",
+                user_agent="TrendScoutTest/1.0 (https://example.invalid/contact)",
                 utcnow=lambda: self.now,
                 google_settings=config,
                 credential_provider=NoCredentials(),
