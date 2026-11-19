@@ -68,6 +68,13 @@ The active product goal is the TrendScout demo. Vercel plan tier, multi-region d
 - No token exchange or generation, Firestore application-data operation, key creation, billing/logging change, provider call, or deployment occurred. External Token Creator consumers and complete effective/inherited IAM remain unresolved. G0/G4/G5 findings are unchanged; G4 remains **PARTIAL (2/15)** and weighted progress remains **83%**.
 - Before this report-only refresh, `git fetch origin` confirmed local and remote feature HEAD `6d61c1e826ae5cf23829211c877fc6c960266ca1`, `origin/main` `86082460ce3956bd6837ddf5552b525acfbf367c`, and a clean worktree; the feature branch was 54 commits ahead and 0 behind. No previously passing Emulator or SQLite gate was rerun.
 
+### Fresh Chrome 9223 Firestore IAM condition read-back (2026-11-19)
+
+- The owner-opened Chrome instance on `127.0.0.1:9223` was independently reachable through its local DevTools Protocol. Its Cloud Console session was authenticated. A separate IAM tab for project `trendscout-192e4` showed the backend service account with `Cloud Datastore User`; opening the condition details (read-only) displayed title `TrendScout Default Firestore Only` and the exact current expression `resource.type == "firestore.googleapis.com/Database" && resource.name == "projects/trendscout-192e4/databases/(default)"`.
+- This fresh read-back confirms the current condition targets only the intended Firestore database. It does not narrow `roles/datastore.user` permissions within that database; the role remains write-capable. No Save action, IAM binding change, token exchange, or Firestore data operation occurred.
+- This resolves the previous refresh's open item about not re-reading the current CEL body. The project-level Firebase Admin SDK Token Creator grant, external consumers, full effective IAM, and G4 cross-host acceptance remain unresolved. No hardening points are added; weighted acceptance stays **83%** and G4 stays **PARTIAL (2/15)**.
+- The fresh check changed no application or test code. No tests were rerun; existing Emulator and SQLite evidence remains as recorded above.
+
 ### Windows 2 continuation sync (2026-11-18; before report-only refresh)
 
 - At the start of this report refresh, `git fetch origin` showed a clean worktree at local HEAD and `origin/codex/firebase-shared-live-acceptance` `77c08c5ae1583c49817e185587285ce7d78016a6`. `origin/main` was `86082460ce3956bd6837ddf5552b525acfbf367c`; the feature ref was 43 commits ahead and 0 behind at that checkpoint.
