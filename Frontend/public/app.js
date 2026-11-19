@@ -1293,10 +1293,16 @@ function handleFetchTerminal(runId, fetchStatus) {
       state.dataRunId = null;
       state.run = null;
       state.offset = 0;
-      if (localLive) {
+      const sharedLive = isVercelSharedLive(state.capabilities);
+      if (localLive || sharedLive) {
         showView('overview');
         window.location.hash = 'overview';
-        void loadLatestDataset().then(() => loadKeywords());
+        if (localLive) {
+          void loadLatestDataset().then(() => loadKeywords());
+        } else {
+          renderPublicFetchDiscovery();
+          loadKeywords();
+        }
       } else {
         renderPublicFetchDiscovery();
         showView('collections');
