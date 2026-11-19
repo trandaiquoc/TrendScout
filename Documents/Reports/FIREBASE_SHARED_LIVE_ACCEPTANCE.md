@@ -2,11 +2,11 @@
 
 **Status:** Demo scope is active. Previously accepted Firestore connectivity and the bounded synthetic Production cache smoke remain PASS. The local normal Google Fetch pipeline now has an explicit Firestore Shared LIVE opt-in; SQLite remains the default and Vercel Production Fetch remains disabled. Full Shared LIVE hardening (G4 cross-host, complete IAM least privilege, and external Token Creator consumers) remains separately partial.
 
-**As of:** 2026-11-18
+**As of:** 2026-11-19
 
 **Progress:** 83% (weighted evidence below).
 
-*This report is chronological. The latest smoke section and acceptance table below supersede older checkpoint statements that predate the smoke.*
+*This report is chronological. The latest dated acceptance section records current evidence and supersedes earlier checkpoint statements.*
 
 ## Latest owner scope correction — demo acceptance (2026-11-18)
 
@@ -37,6 +37,15 @@ The active product goal is the TrendScout demo. Vercel plan tier, multi-region d
 - `test_d6_local_live_http.py`: **5/5 PASS**, including the existing guarded SQLite Fetch path and loopback/request guards.
 - Ruff over the modified Python modules: **PASS**; `git diff --check`: **PASS**.
 - The hosted Emulator run exercised the Firestore transaction/shared-runtime suites, not the actual local normal-Google route or provider adapters. No real provider request or Production Fetch occurred. The full SQLite compatibility gate was not rerun.
+
+### Normal Google Fetch route on Firestore Emulator (2026-11-19)
+
+- Added `test_normal_google_fetch_route_uses_emulator_cache_quota_and_checkpoint` to the Firestore Emulator suite. It runs the normal Google LIVE composition and guarded `POST /api/v1/fetches` route against the Firestore Emulator using two separate app/composition instances and separate guarded Firestore client instances in one test process. The narrow approval override accepts only the synthetic Emulator state store; this does not verify local ADC or Production IAM.
+- The RSS response is a deterministic fixture. The transport fails closed unless the route requests the expected RSS endpoint; across both Fetches it handled exactly one fixture request. The first Fetch returned `FRESH`, the second returned `CACHED`, both status polls reached terminal `COMPLETED`, and Google RSS daily quota usage remained `1`. No real provider request, model download, Production Firestore write, or customer-data access occurred.
+- GitHub Actions [run 44438514554](https://github.com/trandaiquoc/TrendScout/actions/runs/44438514554), commit `819e3463079f92b54a5f729a2d79aed43a07e0b8`: **26/26 tests PASS**, including the new route test; `NETWORK_ISOLATION=PASS`, `SECCOMP_PROBE=PASS`. The route test is same-process Emulator evidence and does not complete G4 cross-host acceptance.
+- Current demo gates: Firestore online connectivity remains **PASS** from the previously accepted synthetic smoke; normal Fetch route, shared cache HIT, quota protection, and completion/checkpoint path are **PASS on Emulator**; SQLite compatibility remains **PASS from the previously accepted 5/5 HTTP suite** and was not rerun. SQLite remains the default when the Firestore opt-in flag is off.
+- Windows 1 ADC impersonation was not testable: `gcloud`, Firebase CLI, Docker, and Java are absent, and `GOOGLE_APPLICATION_CREDENTIALS` is unset. No credential was created or read. The local online Shared LIVE identity remains unverified; this does not block the SQLite demo.
+- Weighted acceptance remains **83%**. No hardening points were added: G0/G5 IAM findings remain open and G4 remains **PARTIAL (2/15)**. Production Fetch and Shared LIVE remain disabled.
 
 ### Windows 2 continuation sync (2026-11-18; before report-only refresh)
 
