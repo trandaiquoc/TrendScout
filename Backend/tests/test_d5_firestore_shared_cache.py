@@ -718,13 +718,24 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 collection_store = CollectionStore(Path(directory) / "collections.sqlite")
                 async with normal_google_live_composition(
                     user_agent="TrendScoutTest/0.1 (https://example.invalid/contact)",
-                    google_settings=GoogleLiveSettings(),
+                    google_settings=replace(
+                        GoogleLiveSettings(),
+                        trends_approved=True,
+                        serp_approved=True,
+                        bing_approved=True,
+                        policy_migration_approved=True,
+                        account_api_approved=True,
+                    ),
                     credential_provider=NoCredentials(),
                     collection_store=collection_store,
                     preserve_expired_data=True,
                     shared_firestore_client=client,
                     utcnow=lambda: now[0],
                 ) as windows2:
+                    self.assertEqual(
+                        windows2.admission.policy_digest,
+                        vercel.admission.policy_digest,
+                    )
                     accepted = windows2.submit(
                         "windows2-vercel-shared-cache-second",
                         source_ids=[WIKIMEDIA_SOURCE_ID],

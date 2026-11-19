@@ -108,7 +108,10 @@ async def vercel_wikimedia_live_composition(
         rss_daily_budget=google.rss_daily_budget,
         rss_monthly_budget=google.rss_monthly_budget,
         fetch_starts_per_hour=google.fetch_starts_per_hour,
-        bing_enabled=google.paid_bing_approved,
+        # Share the same quota-policy shape as the Windows 2 Firestore LIVE
+        # launcher. Bing remains unavailable below; this reserves the shared
+        # pool without enabling its adapter or making provider requests.
+        bing_enabled=True,
         bing_daily_budget=google.bing_daily_budget,
         youtube_enabled=True,
     )
