@@ -328,6 +328,11 @@ class FirestoreSharedRuntimeEmulatorTests(unittest.TestCase):
                             self.assertTrue(payload["terminal"], payload)
                             self.assertEqual(payload["status"], "COMPLETED")
                             self.assertEqual(payload["data_mode"], "LIVE")
+                            history = await session.get(
+                                f"/api/v1/runs/history/{accepted.json()['fetch_id']}"
+                            )
+                            self.assertEqual(history.status_code, 200, history.text)
+                            self.assertEqual(history.json()["item"]["data_mode"], payload["data_mode"])
                             source_result = payload["sources"][0]
                             self.assertEqual(source_result["source_id"], GOOGLE_SOURCE_ID)
                             self.assertEqual(source_result["status"], "SUCCESS")
