@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { defaultFetchSourceIds } from '../public/modules/capabilities.js';
+import {
+  defaultFetchSourceIds,
+  initialFetchDefaultSourceIds,
+} from '../public/modules/capabilities.js';
 
 const KEY = 'trendscout.fetch-default-sources.v1';
 const caps = {
@@ -25,6 +28,27 @@ function withStorage(value, run) {
 
 test('no saved preference leaves server enabled-source defaults in control', () => {
   withStorage(null, () => assert.equal(defaultFetchSourceIds(caps), null));
+});
+
+test('Vercel Shared LIVE settings initially select all four approved sources', () => {
+  const vercelCaps = {
+    ...caps,
+    sources: caps.sources.map((source) => ({ ...source, enabled_for_current_operation: true })),
+    youtube_workflow: { approval_status: 'APPROVED_FOR_VERCEL_SHARED_RUNTIME' },
+  };
+  assert.deepEqual(initialFetchDefaultSourceIds(vercelCaps), [
+    'wikimedia_pageviews_top_per_country',
+    'google_web_serp',
+    'bing_web_serp',
+    'youtube_video_search',
+  ]);
+});
+
+test('unapproved YouTube stays out of initial Fetch defaults', () => {
+  assert.deepEqual(initialFetchDefaultSourceIds(caps), [
+    'wikimedia_pageviews_top_per_country',
+    'google_web_serp',
+  ]);
 });
 
 test('saved defaults are restricted to sources the server currently enables', () => {

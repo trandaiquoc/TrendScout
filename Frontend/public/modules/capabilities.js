@@ -56,6 +56,16 @@ export function defaultFetchSourceIds(capabilities) {
   return selected.length ? selected : null;
 }
 
+export function initialFetchDefaultSourceIds(capabilities) {
+  const youtubeApproved = [
+    'APPROVED_FOR_LOCAL_RUNTIME',
+    'APPROVED_FOR_VERCEL_SHARED_RUNTIME',
+  ].includes(capabilities?.youtube_workflow?.approval_status);
+  return enabledSourceIds(capabilities).filter((sourceId) =>
+    sourceId !== 'youtube_video_search' || youtubeApproved
+  );
+}
+
 export function renderFetchDefaults(capabilities, translate) {
   const fieldset = document.querySelector('#fetch-default-sources');
   const status = document.querySelector('#fetch-default-status');
@@ -63,8 +73,7 @@ export function renderFetchDefaults(capabilities, translate) {
   const saved = readFetchDefaults();
   const enabled = enabledSourceIds(capabilities);
   const initial = saved ? saved.filter((sourceId) => enabled.includes(sourceId))
-    : enabled.filter((sourceId) => sourceId !== 'youtube_video_search'
-      || (capabilities?.youtube_workflow?.approval_status === 'APPROVED_FOR_LOCAL_RUNTIME'));
+    : initialFetchDefaultSourceIds(capabilities);
   const selected = new Set(initial);
   const labels = {
     wikimedia_pageviews_top_per_country: 'fetch.source.wikimedia',
