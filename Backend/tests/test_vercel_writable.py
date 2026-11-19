@@ -154,6 +154,15 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
             settings, "GET", "/api/v1/collections", enabled=True,
         ))
         self.assertTrue(_is_vercel_shared_live_request(
+            settings, "GET", "/api/v1/datasets/latest", enabled=True,
+        ))
+        self.assertTrue(_is_vercel_shared_live_request(
+            settings, "GET", "/api/v1/datasets/latest/keywords", enabled=True,
+        ))
+        self.assertFalse(_is_vercel_shared_live_request(
+            settings, "POST", "/api/v1/datasets/latest/keywords", enabled=True,
+        ))
+        self.assertTrue(_is_vercel_shared_live_request(
             settings, "POST", "/api/v1/collections", enabled=True,
         ))
         self.assertTrue(_is_vercel_shared_live_request(
@@ -204,12 +213,17 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
                         json={"name": "Demo collection"},
                     )
                     listed = await browser.get("/api/v1/collections", headers=headers)
+                    keyword_rows = await browser.get(
+                        "/api/v1/datasets/latest/keywords?limit=1", headers=headers,
+                    )
 
         self.assertEqual(created.status_code, 201, created.text)
         self.assertIn("snapshot_saved", events)
         self.assertEqual(listed.status_code, 200, listed.text)
         self.assertIn("Demo collection",
                       [item["name"] for item in listed.json()["items"]])
+        self.assertEqual(keyword_rows.status_code, 200, keyword_rows.text)
+        self.assertEqual(keyword_rows.json()["total"], 0)
 
 
 if __name__ == "__main__":

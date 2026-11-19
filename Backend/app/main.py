@@ -89,6 +89,14 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             or path.startswith("/api/v1/analytics/")
             or path == "/api/v1/algorithms/results"
             or path == "/api/v1/capabilities"
+            # The Collections workbench reads keyword rows through these
+            # legacy dataset routes. They must share its request-scoped
+            # Firestore-backed CollectionService instead of the empty Vercel
+            # app state.
+            or path in {
+                "/api/v1/datasets/latest",
+                "/api/v1/datasets/latest/keywords",
+            }
         )
         or path == "/api/v1/collections" and method in {"GET", "POST"}
         or path.startswith("/api/v1/collections/")

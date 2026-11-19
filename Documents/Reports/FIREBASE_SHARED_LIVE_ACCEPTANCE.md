@@ -10,6 +10,13 @@
 
 *This report is chronological. The latest dated acceptance section records current evidence and supersedes earlier checkpoint statements.*
 
+## Collections keyword read path on Vercel (2026-11-19)
+
+- The owner confirmed on the current Production page that Shared LIVE is enabled while Collections still shows the red backend/storage warning. This does not point to AI integration: the Collections workbench loads its list and then requests `/api/v1/datasets/latest/keywords` for keyword rows.
+- Code-path review found that Vercel's request-scoped Firestore middleware handled `/api/v1/collections` but omitted both `/api/v1/datasets/latest` routes. Vercel startup deliberately leaves the app-level `collection_service` unset, so the omitted keyword request reaches `_service()` without the Firestore-backed request service and returns `503 COLLECTIONS_UNAVAILABLE`; the frontend maps HTTP 503 to the generic red warning. The previous GET 200 for `/api/v1/collections` did not exercise this second route.
+- The minimal fix adds only the two exact dataset GET paths to the existing Shared LIVE middleware allowlist. They receive the same request-scoped Firestore-backed `CollectionService` and SQLite snapshot used by Collections. No API key, AI feature, provider call, IAM, database record, quota, or Fetch behavior is changed. Dataset writes remain unsupported.
+- Focused Vercel route/integration tests pass **4/4**, including a real FastAPI request through the middleware to `/api/v1/datasets/latest/keywords`. This is local fake-service evidence, not a live Firestore or Production UI result. The fix is local on `main`, not deployed; Production verification still needs the owner's browser refresh after the explicitly authorized deployment step. Weighted progress remains **83%**; no acceptance point is added.
+
 ## Vercel readiness mismatch and bounded client retry (2026-11-19)
 
 - Current Production deployment `dpl_5NsXdry5ngqnVsJ2HZAzL7p7eDJd` from `main` commit `ceed14a` is **READY** at `https://trend-scout-mu.vercel.app`. Read-only `GET /api/v1/capabilities` reports `read_only=false`, `fetch_enabled=true`, and `vercel_shared_live=true`, with all four sources enabled; `GET /api/v1/collections` returns HTTP 200. No Fetch POST, provider request, or Firestore application-data write was made.
