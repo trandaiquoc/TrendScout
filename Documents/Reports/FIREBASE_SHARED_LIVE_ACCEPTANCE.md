@@ -47,6 +47,13 @@ The active product goal is the TrendScout demo. Vercel plan tier, multi-region d
 - Windows 1 ADC impersonation was not testable: `gcloud`, Firebase CLI, Docker, and Java are absent, and `GOOGLE_APPLICATION_CREDENTIALS` is unset. No credential was created or read. The local online Shared LIVE identity remains unverified; this does not block the SQLite demo.
 - Weighted acceptance remains **83%**. No hardening points were added: G0/G5 IAM findings remain open and G4 remains **PARTIAL (2/15)**. Production Fetch and Shared LIVE remain disabled.
 
+### Windows 2 Goal resume revalidation (2026-11-19)
+
+- `git fetch origin` completed with a clean worktree at `af127b92af6f4a1f934223f153de94eefb2865ef`, matching `origin/codex/firebase-shared-live-acceptance`; `origin/main` remains `86082460ce3956bd6837ddf5552b525acfbf367c`. The feature branch is 50 commits ahead and 0 behind main. No local or staged changes were present at resume.
+- Current read-only Firebase inventory returns one accessible Firebase project, `trendscout-192e4` (`556422620769`), and one database, `(default)` in `asia-southeast1` (`STANDARD`, `freeTier=true`). No dedicated non-production database is visible through this connector. It does not inventory inaccessible Firebase or GCP-only projects; no resource was created and billing was not changed.
+- This Windows 2 host has no `gcloud`, Firebase CLI, Docker, Java, or GitHub CLI; `GOOGLE_APPLICATION_CREDENTIALS` is unset and the default gcloud ADC file is absent. No local ADC impersonation check was available through the installed tools, and no token was requested. Available Firebase/Vercel connectors expose no Google Cloud IAM policy read method. The 2026-11-18 Cloud Console read remains the latest direct IAM evidence: the pool/provider, Production subject condition, service-account binding, and exact database condition were observed. Parent/effective IAM and external Token Creator consumers remain unresolved; no IAM change is proposed.
+- No tests were rerun because this resume changed no application or test code. Emulator route CI remains 26/26 on `819e346`; SQLite HTTP acceptance remains the previously accepted 5/5. Weighted score stays **83%** (G0 8/10, G1 20/20, G2 20/20, G3 15/15, G4 2/15, G5 13/15, G6 5/5). G4 and IAM hardening remain separate from SQLite demo operation.
+
 ### Windows 2 continuation sync (2026-11-18; before report-only refresh)
 
 - At the start of this report refresh, `git fetch origin` showed a clean worktree at local HEAD and `origin/codex/firebase-shared-live-acceptance` `77c08c5ae1583c49817e185587285ce7d78016a6`. `origin/main` was `86082460ce3956bd6837ddf5552b525acfbf367c`; the feature ref was 43 commits ahead and 0 behind at that checkpoint.
