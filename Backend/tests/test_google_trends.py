@@ -19,6 +19,7 @@ from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import (
     _GoogleLocalApproval,
+    _youtube_query_scopes_for_reserved_schedule,
     _youtube_scope_anchor,
     normal_google_live_composition,
 )
@@ -44,6 +45,7 @@ from app.sources.live_gateway import (
     GatewayPage,
     LiveGatewayFailureDiagnostic,
 )
+from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.refresh_eligibility import GOOGLE_REFRESH_STATE_KEY
 from app.sources.serpapi.account import (
     SerpApiAccountClient,
@@ -711,6 +713,52 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             _youtube_scope_anchor({"last_slot": "INITIAL_ACCEPTANCE"})
+
+    def test_youtube_initial_acceptance_query_works_outside_scheduled_window(self):
+        scopes = _youtube_query_scopes_for_reserved_schedule(
+            {
+                "last_slot": "INITIAL_ACCEPTANCE",
+                "last_attempt_at": "2026-11-16T16:53:18+00:00",
+            },
+            plan=DEFAULT_QUERY_PLAN,
+            max_queries=1,
+        )
+        self.assertEqual(len(scopes), 1)
+        self.assertIn(scopes[0], {
+            "fashion", "home_living", "beauty_personal_care",
+            "travel_lifestyle", "technology",
+        })
+
+    async def test_enabled_youtube_initial_acceptance_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_dir = root / "google-state"
+            state_dir.mkdir(mode=0o700)
+            collection_store = CollectionStore(
+                root / "collections.sqlite", data_mode_scope="LIVE"
+            )
+
+            class NeverReadCredentials:
+                def resolve(self, _reference):
+                    raise AssertionError("composition must not call providers")
+
+            async with normal_google_live_composition(
+                user_agent="TrendScoutTest/1.0 (https://example.invalid)",
+                state_directory=state_dir,
+                google_settings=GoogleLiveSettings(),
+                credential_provider=NeverReadCredentials(),
+                collection_store=collection_store,
+                utcnow=lambda: NOW,
+                preserve_expired_data=True,
+                youtube_allow_initial_acceptance=True,
+            ) as facade:
+                schedule = facade.refresh_schedule_metadata()["sources"][YOUTUBE_SOURCE_ID]
+                self.assertTrue(schedule["initial_acceptance_available"])
+                self.assertIsNone(schedule["last_attempt_at"])
+                self.assertEqual(
+                    datetime.fromisoformat(schedule["next_eligible_at"]).timestamp(),
+                    NOW.timestamp(),
+                )
 
     async def test_owner_acceptance_preserves_expired_blobs_without_bypassing_schedule(self):
         with tempfile.TemporaryDirectory() as temporary:

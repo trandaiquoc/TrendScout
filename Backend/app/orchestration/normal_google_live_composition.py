@@ -246,6 +246,19 @@ def _youtube_scope_anchor(schedule):
     return parsed
 
 
+def _youtube_query_scopes_for_reserved_schedule(schedule, *, plan, max_queries):
+    """Use minute rotation for the one-time acceptance outside normal slots."""
+    try:
+        reserved_slot = _youtube_scope_anchor(schedule)
+    except ValueError:
+        raise AdmissionDenied("YOUTUBE_SCHEDULE_STATE_INVALID") from None
+    mode = (OWNER_MANUAL_LIVE
+            if schedule.get("last_slot") == "INITIAL_ACCEPTANCE" else NORMAL_DEMO)
+    return select_youtube_query_scopes(
+        now=reserved_slot, plan=plan, max_queries=max_queries, mode=mode,
+    )
+
+
 @asynccontextmanager
 async def normal_google_live_composition(*, user_agent,
                                          utcnow=lambda: datetime.now(timezone.utc),
@@ -793,13 +806,8 @@ async def normal_google_live_composition(*, user_agent,
                 store, YOUTUBE_REFRESH_STATE_KEY, now,
                 error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
             )
-            try:
-                reserved_slot = _youtube_scope_anchor(schedule)
-            except ValueError:
-                raise AdmissionDenied("YOUTUBE_SCHEDULE_STATE_INVALID") from None
-            return select_youtube_query_scopes(
-                now=reserved_slot, plan=DEFAULT_QUERY_PLAN,
-                max_queries=youtube_max_queries, mode=NORMAL_DEMO,
+            return _youtube_query_scopes_for_reserved_schedule(
+                schedule, plan=DEFAULT_QUERY_PLAN, max_queries=youtube_max_queries,
             )
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
@@ -884,7 +892,8 @@ async def normal_google_live_composition(*, user_agent,
                 (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
                  allow_initial_google_acceptance),
                 (BING_SOURCE_ID, BING_REFRESH_STATE_KEY, allow_initial_bing_acceptance),
-                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY, False),
+                (YOUTUBE_SOURCE_ID, YOUTUBE_REFRESH_STATE_KEY,
+                 youtube_allow_initial_acceptance),
             ):
                 if source_id == YOUTUBE_SOURCE_ID and youtube_manual_live:
                     sources[source_id] = {
