@@ -54,6 +54,26 @@ def _retry_after(error: BaseException) -> int | None:
     return min(31_536_000, max(1, math.ceil(value)))
 
 
+def trending_now_cache_scope(policy_fingerprint: str, grant: CacheGrant):
+    """Return the canonical scope used by both Google discovery and shared readers."""
+    if (not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in policy_fingerprint)
+            or not isinstance(grant, CacheGrant) or grant.source_id != GOOGLE_SOURCE_ID):
+        return None
+    capability = source_capability(GOOGLE_SOURCE_ID)
+    return CacheScope(
+        source_id=GOOGLE_SOURCE_ID,
+        provider_id=capability.provider_id,
+        query="google-trends-trending-now:US:en:24h",
+        plan_fingerprint=policy_fingerprint,
+        market="US",
+        language="en",
+        window="24h",
+        parser_version=TRENDING_NOW_PARSER_VERSION,
+        policy_version=grant.policy_version,
+    )
+
+
 def _serialize_serp_page(context, page, *, fetched_at: datetime, data_mode: str) -> dict:
     normalized, rejected = normalize_items(
         context, page.items, fetched_at=fetched_at, page=1, offset=0,
@@ -151,18 +171,11 @@ class GoogleTrendsDiscoveryHandler:
         self.previous_verification = previous_verification
 
     def _cache_scope(self, context):
-        capability = source_capability(GOOGLE_SOURCE_ID)
         now = self.utcnow()
         grant = self.resolve_cache_grant(GOOGLE_SOURCE_ID, now)
         if not isinstance(grant, CacheGrant) or grant.source_id != GOOGLE_SOURCE_ID:
             return None, None
-        return CacheScope(
-            source_id=GOOGLE_SOURCE_ID, provider_id=capability.provider_id,
-            query="google-trends-trending-now:US:en:24h",
-            plan_fingerprint=self.policy_fingerprint, market="US", language="en",
-            window="24h", parser_version=TRENDING_NOW_PARSER_VERSION,
-            policy_version=grant.policy_version,
-        ), grant
+        return trending_now_cache_scope(self.policy_fingerprint, grant), grant
 
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:

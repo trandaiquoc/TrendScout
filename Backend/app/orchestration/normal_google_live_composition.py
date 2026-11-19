@@ -31,7 +31,10 @@ from app.sources.catalog import (
     YOUTUBE_SOURCE_ID,
 )
 from app.sources.google_trends.budget import SerpApiAccountBudget
-from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
+from app.sources.google_trends.handler import (
+    GoogleTrendsDiscoveryHandler,
+    trending_now_cache_scope,
+)
 from app.sources.google_trends.rss_gateway import GoogleTrendsRSSGateway
 from app.sources.google_trends.rss_handler import GoogleTrendsRSSHandler
 from app.sources.google_trends.workflow import GoogleDiscoveryFallbackHandler
@@ -85,9 +88,66 @@ _MAX_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _MAX_CANDIDATE_HISTORY = 5_000
 
 
-class _GoogleLocalApproval:
-    def __init__(self, source_id, *, enabled, clock):
+def _shared_google_candidate_rows(cache, resolve_cache_grant, *, now):
+    """Read Google candidates from the shared source cache for a bounded Bing run."""
+    try:
+        grant = resolve_cache_grant(GOOGLE_SOURCE_ID, now)
+        if not isinstance(grant, CacheGrant):
+            return ()
+        scope = trending_now_cache_scope(DEFAULT_QUERY_PLAN.fingerprint, grant)
+        if scope is None:
+            return ()
+        cached = cache.get(scope, grant=grant, now=now)
+    except Exception:
+        return ()
+    if (not isinstance(cached, dict) or cached.get("status") not in {"CACHED", "STALE"}
+            or cached.get("origin") != "LIVE"):
+        return ()
+    payload = cached.get("payload")
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict) or payload.get("data_mode") != "LIVE"
+            or not isinstance(records, list) or len(records) > _MAX_CANDIDATE_HISTORY):
+        return ()
+    from app.sources.google_trends.trending_now import normalize_keyword
+
+    rows = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("data_mode") != "LIVE":
+            continue
+        try:
+            keyword, normalized = normalize_keyword(record.get("canonical_keyword"))
+        except (TypeError, ValueError):
+            continue
+        identity = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        if record.get("canonical_keyword_identity") != identity:
+            continue
+        fetched_at = record.get("fetched_at")
+        observed_at = (record.get("provider_data_at")
+                       or record.get("provider_created_at") or fetched_at)
+        if (not isinstance(fetched_at, str) or not isinstance(observed_at, str)
+                or not isinstance(record.get("trend_clusters"), list)):
+            continue
+        project = f"google_trends:{record.get('plan_id', 'trending-now')}:{record.get('plan_version', 1)}"
+        rows.append({
+            "record_id": identity,
+            "canonical_keyword": keyword,
+            "source_id": GOOGLE_SOURCE_ID,
+            "project": project,
+            "observed_at": observed_at,
+            "fetched_at": fetched_at,
+            "data_mode": "LIVE",
+            "evidence": record,
+        })
+    return tuple(rows)
+
+
+class _GoogleRuntimeApproval:
+    """Short-lived source approval for local LIVE or pinned Vercel Shared LIVE."""
+    def __init__(self, source_id, *, enabled, clock, scope="LOCAL_NORMAL_GOOGLE",
+                 local_controls_verified=True):
         self.source_id, self.enabled, self.clock = source_id, enabled, clock
+        self.scope = scope
+        self.local_controls_verified = local_controls_verified
         self._current = None
 
     def current(self, source_id):
@@ -111,10 +171,15 @@ class _GoogleLocalApproval:
             security_approved=True,
             egress_controls_verified=True,
             telemetry_controls_verified=True,
-            scope="LOCAL_NORMAL_GOOGLE",
-            local_controls_verified=True,
+            scope=self.scope,
+            local_controls_verified=self.local_controls_verified,
         )
         return self._current
+
+
+# Keep the local-only name available to existing tests and callers; local
+# approval defaults are unchanged, while Vercel explicitly supplies its scope.
+_GoogleLocalApproval = _GoogleRuntimeApproval
 
 
 class _PinnedSerpApiCredential:
@@ -195,22 +260,33 @@ async def normal_google_live_composition(*, user_agent,
                                          youtube_max_queries: int = 2,
                                          youtube_manual_live: bool = False,
                                          youtube_force_fresh_test_once: bool = False,
-                                         shared_firestore_client=None):
-    """Compose one local worker; no Google call is made without its own approval."""
+                                         shared_firestore_client=None,
+                                         vercel_shared_live: bool = False,
+                                         youtube_allow_initial_acceptance: bool = False):
+    """Compose the local or explicitly injected Vercel worker without startup fetches."""
     config = google_settings or GoogleLiveSettings.from_environment()
-    if (os.environ.get("VERCEL") or not isinstance(config, GoogleLiveSettings)
+    vercel_environment = os.environ.get("VERCEL")
+    if (not isinstance(config, GoogleLiveSettings)
             or not isinstance(user_agent, str) or not user_agent.strip()
             or not callable(utcnow) or type(force_refresh_trends) is not bool
             or type(allow_initial_google_acceptance) is not bool
             or type(allow_initial_bing_acceptance) is not bool
             or type(preserve_expired_data) is not bool
+            or type(vercel_shared_live) is not bool
+            or type(youtube_allow_initial_acceptance) is not bool
             or type(youtube_manual_live) is not bool
             or type(youtube_force_fresh_test_once) is not bool
             or type(youtube_max_queries) is not int
             or not 1 <= youtube_max_queries <= 2
             or (youtube_force_fresh_test_once and not youtube_manual_live)
             or (youtube_manual_live and youtube_max_queries != 1)):
-        raise ValueError("explicit local Google LIVE opt-in and valid configuration required")
+        raise ValueError("explicit Google LIVE runtime and valid configuration required")
+    if ((vercel_environment is not None and
+         (vercel_environment != "1" or not vercel_shared_live))
+            or (vercel_shared_live and
+                (vercel_environment != "1" or shared_firestore_client is None
+                 or youtube_manual_live or youtube_force_fresh_test_once))):
+        raise ValueError("Vercel Shared LIVE requires its request-scoped Firestore runtime")
     if credential_provider is None:
         from app.local_credentials import LocalCredentialProvider
         credential_provider = LocalCredentialProvider()
@@ -264,7 +340,8 @@ async def normal_google_live_composition(*, user_agent,
     # First launch has no quota state to migrate; any populated ledger must
     # still match one of the explicit migration paths below.
     if (uses_firestore and existing_state
-            and existing_state.get("policy_digest") != admission.policy_digest):
+            and existing_state.get("policy_digest") != admission.policy_digest
+            and not vercel_shared_live):
         raise ValueError(
             "Firestore shared LIVE quota policy differs from stored state; "
             "refusing an implicit shared-state migration"
@@ -413,8 +490,16 @@ async def normal_google_live_composition(*, user_agent,
         from app.orchestration.normal_wikimedia_live_composition import _PersistentOneSecondPacer
 
         pace_request = _PersistentOneSecondPacer(store, clock=utcnow)
-        wiki_approval = _GoogleLocalApproval(WIKIMEDIA_SOURCE_ID,
-                                             enabled=True, clock=utcnow)
+
+        def runtime_approval(source_id):
+            return _GoogleRuntimeApproval(
+                source_id, enabled=True, clock=utcnow,
+                scope=("VERCEL_SHARED_LIVE" if vercel_shared_live
+                       else "LOCAL_NORMAL_GOOGLE"),
+                local_controls_verified=not vercel_shared_live,
+            )
+
+        wiki_approval = runtime_approval(WIKIMEDIA_SOURCE_ID)
         wiki = await WikimediaTopPageGateway.controlled_network(
             wiki_approval, runner, user_agent=user_agent, clock=utcnow,
             before_request=pace_request,
@@ -529,14 +614,14 @@ async def normal_google_live_composition(*, user_agent,
         if paid_ready and config.trends_approved:
             trends_gateway = await LivePageGateway.controlled_network(
                 GOOGLE_SOURCE_ID, serpapi_credentials,
-                _GoogleLocalApproval(GOOGLE_SOURCE_ID, enabled=True, clock=utcnow),
+                runtime_approval(GOOGLE_SOURCE_ID),
                 runner, clock=utcnow,
             )
             resources.append(trends_gateway)
         if paid_ready and config.serp_approved:
             serp_gateway = await LivePageGateway.controlled_network(
                 GOOGLE_SOURCE_ID, serpapi_credentials,
-                _GoogleLocalApproval(GOOGLE_SOURCE_ID, enabled=True, clock=utcnow),
+                runtime_approval(GOOGLE_SOURCE_ID),
                 runner, clock=utcnow,
             )
             resources.append(serp_gateway)
@@ -545,14 +630,16 @@ async def normal_google_live_composition(*, user_agent,
         if paid_ready and config.paid_bing_approved:
             bing_gateway = await LivePageGateway.controlled_network(
                 BING_SOURCE_ID, serpapi_credentials,
-                _GoogleLocalApproval(BING_SOURCE_ID, enabled=True, clock=utcnow),
+                runtime_approval(BING_SOURCE_ID),
                 runner, clock=utcnow,
             )
             resources.append(bing_gateway)
 
         runtime_host = socket.gethostname().strip()
         youtube_host_status = (
-            "DESIGNATED"
+            "VERCEL_SHARED_RUNTIME"
+            if vercel_shared_live
+            else "DESIGNATED"
             if config.youtube_live_host
             and runtime_host.casefold() == config.youtube_live_host.casefold()
             else "NOT_DESIGNATED"
@@ -570,11 +657,11 @@ async def normal_google_live_composition(*, user_agent,
             youtube_credential_status = "INVALID_CONFIG"
         youtube_gateway = None
         if (config.youtube_approval_configured
-                and youtube_host_status == "DESIGNATED"
+                and (youtube_host_status in {"DESIGNATED", "VERCEL_SHARED_RUNTIME"})
                 and youtube_key is not None):
             youtube_gateway = await LivePageGateway.controlled_network(
                 YOUTUBE_SOURCE_ID, credential_provider,
-                _GoogleLocalApproval(YOUTUBE_SOURCE_ID, enabled=True, clock=utcnow),
+                runtime_approval(YOUTUBE_SOURCE_ID),
                 runner, clock=utcnow,
             )
             resources.append(youtube_gateway)
@@ -582,7 +669,7 @@ async def normal_google_live_composition(*, user_agent,
         rss_gateway = None
         if config.rss_approved:
             rss_gateway = await GoogleTrendsRSSGateway.controlled_network(
-                _GoogleLocalApproval(GOOGLE_SOURCE_ID, enabled=True, clock=utcnow),
+                runtime_approval(GOOGLE_SOURCE_ID),
                 runner, clock=utcnow,
             )
             resources.append(rss_gateway)
@@ -640,6 +727,9 @@ async def normal_google_live_composition(*, user_agent,
             ensure_paid_budget=budget.ensure_attempt_allowed,
             utcnow=utcnow,
             allow_initial_acceptance=allow_initial_bing_acceptance,
+            candidate_loader=lambda now: _shared_google_candidate_rows(
+                cache, resolve_cache_grant, now=now
+            ),
         ) if bing_gateway is not None and budget is not None else None)
 
         def resolve_youtube_provider_batch(source_id, now):
@@ -647,7 +737,7 @@ async def normal_google_live_composition(*, user_agent,
                 return None
             if not config.youtube_approval_configured:
                 return {"allowed": False, "error_code": "SOURCE_NOT_APPROVED"}
-            if youtube_host_status != "DESIGNATED":
+            if youtube_host_status not in {"DESIGNATED", "VERCEL_SHARED_RUNTIME"}:
                 return {"allowed": False, "error_code": "LIVE_HOST_NOT_DESIGNATED"}
             if youtube_credential_status != "PRESENT" or youtube_gateway is None:
                 return {"allowed": False, "error_code": "CREDENTIAL_NOT_CONFIGURED"}
@@ -666,6 +756,7 @@ async def normal_google_live_composition(*, user_agent,
                 slot = candidate_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    allow_initial_acceptance=youtube_allow_initial_acceptance,
                 )
                 if slot is None:
                     schedule = schedule_metadata(
@@ -677,6 +768,7 @@ async def normal_google_live_composition(*, user_agent,
                 reserved = reserve_source_slot(
                     store, YOUTUBE_REFRESH_STATE_KEY, now,
                     error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    allow_initial_acceptance=youtube_allow_initial_acceptance,
                 )
                 if reserved is None:
                     schedule = schedule_metadata(
@@ -752,6 +844,9 @@ async def normal_google_live_composition(*, user_agent,
             resolve_grant=resolve_checkpoint,
             utcnow=utcnow,
             snapshot_blobs=snapshot_blobs,
+            source_order=tuple(source for source in (
+                GOOGLE_SOURCE_ID, BING_SOURCE_ID, WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID,
+            ) if source in policy.enabled_sources),
         )
         facade = DistributedPublicFetch(
             admission, worker, resolve_grant=resolve_checkpoint,
@@ -779,7 +874,7 @@ async def normal_google_live_composition(*, user_agent,
             "cross_machine_reserve": config.cross_machine_reserve,
             "serp_max_queries_per_batch": 2,
             "serp_pages_per_query": 1,
-            "local_only": True,
+            "local_only": not uses_firestore,
             "live_verified": False,
         }
 

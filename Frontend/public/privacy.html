@@ -26,7 +26,7 @@
 
     <section>
       <h2>1. Service and current status</h2>
-      <p>TrendScout helps users review keyword candidates and their source evidence. It does not require a TrendScout account, Google sign-in, or Google OAuth. The hosted dashboard is served through Vercel. Its SQLite and legacy run writes stay read-only. A separate Wikimedia Fetch may run only when server policy and the shared Firestore quota ledger allow it; an unknown or invalid ledger blocks the request before it reaches Wikimedia. Other providers remain unavailable in this Vercel slice.</p>
+      <p>TrendScout helps users review keyword candidates and their source evidence. It does not require a TrendScout account, Google sign-in, or Google OAuth. The hosted dashboard is served through Vercel. Its SQLite and legacy run writes stay read-only. A separate Shared LIVE Fetch may run only for sources enabled by the operator and when the shared Firestore quota ledger allows it; an unknown or invalid ledger blocks the request before provider access. The current Vercel demo can select Wikimedia Pageviews, Google Trends/Search, Bing Search, and YouTube Search. Selecting Bing also runs the Google candidate step first; a fresh shared Google cache avoids another Google provider request.</p>
       <p>Publishing this policy does not enable a provider integration. YouTube remains separately gated by server configuration, applicable source approvals, and the user's acceptance of the current policy version.</p>
     </section>
 
@@ -42,7 +42,7 @@
     <section>
       <h2>3. Other sources and data sharing</h2>
       <p>Depending on the runtime and the sources enabled by the operator, TrendScout can retrieve Wikimedia pageviews, Google Trends RSS, Google Search results, or Bing Search results through SerpApi. Providers receive the bounded query and request parameters needed to answer a selected Fetch. TrendScout's current source plans are server-curated and do not provide a free-text field for personal information.</p>
-      <p>TrendScout does not sell source records or use them for advertising. The application does not send collection text to a hosted generative-AI service. Provider processing is governed by the relevant provider's terms and privacy notice. When the Vercel Wikimedia Fetch is enabled, the server requests public Wikimedia pageview data and stores its bounded shared cache and job state in the existing Firestore database. It does not call Google, Bing, or YouTube in this slice.</p>
+      <p>TrendScout does not sell source records or use them for advertising. The application does not send collection text to a hosted generative-AI service. Provider processing is governed by the relevant provider's terms and privacy notice. A user-triggered Vercel Shared LIVE Fetch sends bounded server-curated requests only to its selected, enabled sources. The backend uses the existing Firestore database for shared cache, job history, checkpoints, quota reservations, and refresh state. A Bing-only selection may also read the shared Google cache and may request Google data when the cache needs refresh. YouTube remains gated by server approval, provider quota controls, and acceptance of the current policy version.</p>
     </section>
 
     <section>
@@ -53,7 +53,7 @@
 
     <section>
       <h2>5. Storage, cache, and Fetch history</h2>
-      <p>On Vercel, SQLite and legacy run writes remain read-only. A separate Wikimedia Fetch uses the existing <code>trendscout-192e4/(default)</code> Firestore database for its bounded job history, cache, checkpoints, quota reservations, and refresh state. A local Windows installation continues to use SQLite by default; Firestore sharing is opt-in. Local SQLite files are not synchronized unless that shared runtime is explicitly configured.</p>
+      <p>On Vercel, SQLite and legacy run writes remain read-only. Shared LIVE Fetch uses the existing <code>trendscout-192e4/(default)</code> Firestore database for bounded source caches, job history, checkpoints, quota reservations, and refresh state. A local Windows installation continues to use SQLite by default; Firestore sharing is opt-in. Local SQLite files are not synchronized unless that shared runtime is explicitly configured.</p>
       <p>If YouTube is enabled in that standalone implementation, video records remain in the YouTube-scoped cache and Fetch checkpoint only as needed to serve a result. Cache freshness is eight hours, the cache retention ceiling is seven days, and a completed Fetch receipt/checkpoint is retained for up to one hour. Startup and hourly cleanup remove expired YouTube cache and checkpoint data; request-time checks prevent expired checkpoints from being returned.</p>
       <p>The Collections database does not store YouTube videos as keywords or scoring observations. It may store a source manifest and counts for a Fetch. Targeted YouTube deletion removes YouTube manifest entries and adjusts mixed-source counts. Fetch identifiers, quota reservations, refresh eligibility, and other non-content operational records may remain to prevent repeated requests and preserve operational history.</p>
     </section>

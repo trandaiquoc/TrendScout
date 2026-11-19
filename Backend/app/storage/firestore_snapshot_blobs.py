@@ -2,7 +2,7 @@
 
 The client is injected by the caller. A manifest and every chunk are written
 inside one Firestore transaction, so readers cannot observe a partial blob.
-The production Vercel application does not use this adapter.
+Production Vercel Shared LIVE and the local opt-in runtime use this adapter.
 """
 
 from __future__ import annotations

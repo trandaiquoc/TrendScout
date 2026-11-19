@@ -20,7 +20,12 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.ports.storage import StorageError
-from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION_HEADER
 
 router = APIRouter()
@@ -232,13 +237,22 @@ async def create_fetch(
         if (selected_sources is not None
                 and not set(selected_sources) <= available_sources):
             raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
-        request_sources = (selected_sources if selected_sources is not None
-                           else sorted(available_sources))
-        effective_sources = set(request_sources)
+        requested_sources = (selected_sources if selected_sources is not None
+                             else sorted(available_sources))
+        effective_sources = set(requested_sources)
+        # Bing verification requires a saved Google Trends observation. Make
+        # that dependency explicit in the durable job so a Bing-only click
+        # first serves/refreshes Google through the shared cache, then runs Bing.
+        if (BING_SOURCE_ID in effective_sources
+                and getattr(distributed, "data_mode", None) == "LIVE"
+                and getattr(distributed, "normal_bing_live", False)):
+            effective_sources.add(GOOGLE_SOURCE_ID)
+        request_sources = sorted(effective_sources)
         if YOUTUBE_SOURCE_ID in effective_sources:
             _require_youtube_policy_consent(request, distributed)
         shared_state_policy_sync = None
-        policy_sync = getattr(distributed, "prepare_for_wikimedia_fetch", None)
+        policy_sync = (getattr(distributed, "prepare_for_shared_fetch", None)
+                       or getattr(distributed, "prepare_for_wikimedia_fetch", None))
         if callable(policy_sync):
             try:
                 shared_state_policy_sync = policy_sync()
@@ -265,7 +279,8 @@ async def create_fetch(
             "fetch_id": fetch_id,
             "status": accepted["status"],
             "data_mode": distributed.data_mode,
-            "sources": sorted(effective_sources),
+            "requested_sources": sorted(set(requested_sources)),
+            "sources": request_sources,
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",
             **({"shared_state_policy_sync": shared_state_policy_sync}

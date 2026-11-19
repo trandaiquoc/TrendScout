@@ -203,6 +203,23 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
                          runner.admission.policy, normal_google_live_policy
                      )
                      and source_id in runner.admission.policy.enabled_sources)
+        elif valid and approval.scope == "VERCEL_SHARED_LIVE":
+            from app.normal_wikimedia_live_policy import (
+                GOOGLE_POLICY_VERSION,
+                normal_google_live_policy,
+            )
+            store = runner.admission.store if isinstance(runner, GuardedAttemptRunner) else None
+            valid = (os.environ.get("VERCEL") == "1"
+                     and source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                                       WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID}
+                     and approval.policy_version == GOOGLE_POLICY_VERSION
+                     and approval.local_controls_verified is False
+                     and isinstance(runner, GuardedAttemptRunner)
+                     and _is_approved_vercel_shared_state_store(store)
+                     and _matches_bounded_google_local_policy(
+                         runner.admission.policy, normal_google_live_policy
+                     )
+                     and source_id in runner.admission.policy.enabled_sources)
         else:
             valid = False
     except Exception:

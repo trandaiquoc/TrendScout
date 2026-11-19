@@ -10,7 +10,12 @@ import httpx
 from app.jobs.public_admission import AdmissionDenied
 from app.main import create_app
 from app.settings import Settings
-from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 
 _AUDIENCE = (
     "//iam.googleapis.com/projects/556422620769/locations/global/"
@@ -163,6 +168,36 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         client_factory.assert_called_once_with("synthetic-test-token")
         self.assertTrue(client.closed)
 
+    async def test_all_four_approved_sources_can_be_submitted_together(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        sources = [
+            WIKIMEDIA_SOURCE_ID,
+            GOOGLE_SOURCE_ID,
+            BING_SOURCE_ID,
+            YOUTUBE_SOURCE_ID,
+        ]
+        facade.available_sources = frozenset(sources)
+        facade.admission.policy.enabled_sources = facade.available_sources
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                        "Idempotency-Key": "vercel-four-sources-test-0001",
+                    },
+                    json={"sources": sources},
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(set(response.json()["sources"]), set(sources))
+        self.assertEqual(facade.submitted_sources, sorted(sources))
+        self.assertIn("worker_finished", events)
+
     async def test_feature_gate_off_never_constructs_identity_or_worker(self):
         app, events, _client, _facade, client_factory = self.app(enabled=False)
         async with app.router.lifespan_context(app):
@@ -221,6 +256,37 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("worker_finished", _events)
+
+    async def test_bing_only_request_adds_google_dependency_before_admission(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.available_sources = frozenset({
+            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+        })
+        facade.admission.policy.enabled_sources = facade.available_sources
+        facade.data_mode = "LIVE"
+        facade.normal_bing_live = True
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                        "Idempotency-Key": "vercel-bing-auto-google-0001",
+                    },
+                    json={"sources": [BING_SOURCE_ID]},
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["requested_sources"], [BING_SOURCE_ID])
+        self.assertEqual(
+            response.json()["sources"], sorted([GOOGLE_SOURCE_ID, BING_SOURCE_ID])
+        )
+        self.assertEqual(facade.submitted_sources,
+                         sorted([GOOGLE_SOURCE_ID, BING_SOURCE_ID]))
 
     async def test_shared_dashboard_history_and_detail_are_available_without_fabricated_totals(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)

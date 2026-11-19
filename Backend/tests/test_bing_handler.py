@@ -211,6 +211,35 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.gateway.calls, [])
         self.assertEqual(self.budget_calls, [])
 
+    async def test_shared_google_candidate_loader_supports_bing_without_local_sqlite(self):
+        evidence = json.loads(self.candidate["evidence"])
+        shared_candidate = {
+            "record_id": self.candidate["id"],
+            "canonical_keyword": self.candidate["keyword"],
+            "source_id": self.candidate["source"],
+            "project": self.candidate["project"],
+            "observed_at": self.candidate["observed_at"],
+            "fetched_at": evidence["fetched_at"],
+            "data_mode": "LIVE",
+            "evidence": evidence,
+        }
+        handler = BingSavedCandidateHandler(
+            gateway=self.gateway,
+            collection_store=None,
+            atomic_store=self.atomic,
+            policy_fingerprint=POLICY,
+            ensure_paid_budget=lambda: self._budget(),
+            utcnow=lambda: NOW,
+            allow_initial_acceptance=True,
+            candidate_loader=lambda _now: (shared_candidate,),
+        )
+
+        result = await handler(work_context())
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["records"][0]["candidate_keyword_id"], self.candidate["id"])
+        self.assertEqual(self.gateway.calls[0]["context"].canonical_query, "Pleated tote")
+
 
 if __name__ == "__main__":
     unittest.main()

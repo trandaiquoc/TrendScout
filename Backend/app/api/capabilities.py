@@ -384,10 +384,14 @@ async def capabilities(request: Request, response: Response):
                 enabled = distributed.admission.operationally_enabled()
                 if not enabled:
                     block_reason = "FEATURE_DISABLED"
-                    if (settings.environment_profile == "vercel"
-                            and getattr(distributed, "vercel_wikimedia_live", False)):
+                    vercel_live_runtime = bool(
+                        getattr(distributed, "vercel_shared_live", False)
+                        or getattr(distributed, "vercel_wikimedia_live", False)
+                    )
+                    if settings.environment_profile == "vercel" and vercel_live_runtime:
                         sync_status = getattr(
-                            distributed, "vercel_wikimedia_policy_sync_status", None
+                            distributed, "vercel_shared_live_policy_sync_status",
+                            getattr(distributed, "vercel_wikimedia_policy_sync_status", None),
                         )
                         if callable(sync_status):
                             sync_status = sync_status()
@@ -426,9 +430,13 @@ async def capabilities(request: Request, response: Response):
         and settings.vercel_shared_live_enabled
         and request.app.state.read_only
         and distributed is not None
-        and getattr(distributed, "vercel_wikimedia_live", False)
+        and (getattr(distributed, "vercel_shared_live", False)
+             or getattr(distributed, "vercel_wikimedia_live", False))
         and distributed.data_mode == "LIVE"
-        and set(source_ids) == {WIKIMEDIA_SOURCE_ID}
+        and set(source_ids) == set(getattr(
+            distributed, "available_sources", source_ids
+        ))
+        and bool(source_ids)
     )
     google_workflow = getattr(distributed, "google_capabilities", {})
     normal_local_live_runtime = bool(
@@ -561,6 +569,16 @@ async def capabilities(request: Request, response: Response):
                     "LIVE_CONFIGURED"
                     if vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID
                     else "LIVE_CONFIGURED"
+                    if vercel_shared_live and item.source_id == "bing_web_serp"
+                    and google_workflow.get("bing_serp_verification") == "LIVE_CONFIGURED"
+                    else "LIVE_CONFIGURED"
+                    if vercel_shared_live and item.source_id == "google_web_serp"
+                    and (google_workflow.get("trends_discovery") == "LIVE_CONFIGURED"
+                         or google_workflow.get("rss_discovery") == "LIVE_CONFIGURED")
+                    else "LIVE_CONFIGURED"
+                    if vercel_shared_live and item.source_id == "youtube_video_search"
+                    and youtube_workflow.get("live_status") == "LIVE_CONFIGURED"
+                    else "LIVE_CONFIGURED"
                     if item.source_id == "bing_web_serp"
                     and getattr(distributed, "normal_bing_live", False)
                     else "LIVE_CONFIGURED"
@@ -575,6 +593,13 @@ async def capabilities(request: Request, response: Response):
                 "approval_status": (
                     "APPROVED_FOR_VERCEL_SHARED_RUNTIME"
                     if vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID
+                    else "APPROVED_FOR_VERCEL_SHARED_RUNTIME"
+                    if vercel_shared_live and item.source_id == "bing_web_serp"
+                    and google_workflow.get("bing_serp_verification") == "LIVE_CONFIGURED"
+                    else "APPROVED_FOR_VERCEL_SHARED_RUNTIME"
+                    if vercel_shared_live and item.source_id == "google_web_serp"
+                    and (google_workflow.get("trends_discovery") == "LIVE_CONFIGURED"
+                         or google_workflow.get("rss_discovery") == "LIVE_CONFIGURED")
                     else youtube_workflow.get("approval_status", item.approval_status)
                     if item.source_id == "youtube_video_search"
                     else "APPROVED_FOR_LOCAL_RUNTIME"
@@ -592,6 +617,13 @@ async def capabilities(request: Request, response: Response):
                 "configuration_status": (
                     youtube_workflow.get("configuration_status", item.configuration_status)
                     if item.source_id == "youtube_video_search"
+                    else "PRESENT"
+                    if vercel_shared_live and item.source_id == "bing_web_serp"
+                    and google_workflow.get("bing_serp_verification") == "LIVE_CONFIGURED"
+                    else "PRESENT"
+                    if vercel_shared_live and item.source_id == "google_web_serp"
+                    and (google_workflow.get("trends_discovery") == "LIVE_CONFIGURED"
+                         or google_workflow.get("rss_discovery") == "LIVE_CONFIGURED")
                     else "PRESENT"
                     if item.source_id == "bing_web_serp"
                     and getattr(distributed, "normal_bing_live", False)
@@ -621,7 +653,7 @@ async def capabilities(request: Request, response: Response):
                          and item.source_id == "bing_web_serp"
                          or getattr(distributed, "normal_youtube_live", False)
                          and item.source_id == "youtube_video_search")
-                    or (vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID)
+                    or (vercel_shared_live and item.source_id in source_ids)
                 )
                     else list(item.supported_data_modes)),
                 "query_based": item.query_based,

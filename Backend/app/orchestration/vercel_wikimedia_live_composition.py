@@ -346,3 +346,111 @@ async def vercel_wikimedia_live_composition(
         yield facade
     finally:
         await wiki.aclose()
+
+
+class _VercelEnvironmentCredentialProvider:
+    """Resolve only the approved server-side provider credentials."""
+
+    _ALLOWED_REFERENCES = frozenset({"SERPAPI_API_KEY", "YOUTUBE_API_KEY"})
+
+    def resolve(self, reference):
+        if reference not in self._ALLOWED_REFERENCES:
+            return None
+        return os.environ.get(reference)
+
+
+@asynccontextmanager
+async def vercel_shared_live_composition(
+    client,
+    *,
+    user_agent: str,
+    utcnow=lambda: datetime.now(timezone.utc),
+):
+    """Compose all owner-approved Vercel sources over the shared Firestore ledger.
+
+    Constructing this request-scoped runtime does not contact any provider. The
+    existing adapter, consent, schedule, quota and shared-cache guards run only
+    after an authenticated same-origin Fetch is admitted.
+    """
+    if (os.environ.get("VERCEL") != "1" or not isinstance(user_agent, str)
+            or not user_agent.strip() or not callable(utcnow)):
+        raise ValueError("Vercel Shared LIVE requires its deployed runtime")
+    _client_project_id(client)
+
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from app.google_live_settings import GoogleLiveSettings
+    from app.normal_wikimedia_live_policy import normal_google_live_policy
+    from app.orchestration.normal_google_live_composition import (
+        normal_google_live_composition,
+    )
+    from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
+
+    google = GoogleLiveSettings.from_environment()
+    policy = normal_google_live_policy(
+        serpapi_daily_budget=google.serpapi_daily_budget,
+        serpapi_monthly_budget=google.serpapi_monthly_budget,
+        rss_daily_budget=google.rss_daily_budget,
+        rss_monthly_budget=google.rss_monthly_budget,
+        fetch_starts_per_hour=google.fetch_starts_per_hour,
+        bing_enabled=google.paid_bing_approved,
+        bing_daily_budget=google.bing_daily_budget,
+        youtube_enabled=True,
+    )
+    state_store = FirestoreAtomicStateStore(client)
+    policy_sync = _VercelWikimediaPolicySync(
+        state_store,
+        target_policy=policy,
+        previous_policies=_vercel_previous_policy_candidates(google),
+        state_key=GOOGLE_STATE_KEY,
+        utcnow=utcnow,
+    )
+
+    with TemporaryDirectory(prefix="trendscout-vercel-fetch-") as runtime_directory:
+        from app.collections.store import CollectionStore
+
+        collection_store = CollectionStore(Path(runtime_directory) / "collections.sqlite")
+        async with normal_google_live_composition(
+            user_agent=user_agent,
+            utcnow=utcnow,
+            google_settings=google,
+            credential_provider=_VercelEnvironmentCredentialProvider(),
+            collection_store=collection_store,
+            force_refresh_trends=True,
+            allow_initial_google_acceptance=True,
+            allow_initial_bing_acceptance=True,
+            preserve_expired_data=True,
+            youtube_max_queries=1,
+            shared_firestore_client=client,
+            vercel_shared_live=True,
+            youtube_allow_initial_acceptance=True,
+        ) as facade:
+            facade.available_sources = frozenset(policy.enabled_sources)
+            facade.vercel_shared_live = True
+            # Retain the old attribute for callers during the Wikimedia-only rollout.
+            facade.vercel_wikimedia_live = True
+            facade.vercel_shared_live_policy_sync_status = policy_sync.status
+            facade.vercel_wikimedia_policy_sync_status = policy_sync.status
+            facade.prepare_for_shared_fetch = policy_sync.prepare_for_fetch
+            facade.prepare_for_wikimedia_fetch = policy_sync.prepare_for_fetch
+            facade.google_capabilities = {
+                **facade.google_capabilities,
+                "runtime_scope": "VERCEL_SHARED_LIVE",
+                "local_only": False,
+            }
+            facade.youtube_capabilities = {
+                **facade.youtube_capabilities,
+                "approval_status": (
+                    "APPROVED_FOR_VERCEL_SHARED_RUNTIME"
+                    if google.youtube_approval_configured
+                    and facade.youtube_capabilities.get("configuration_status") == "PRESENT"
+                    else "PENDING_LIVE_APPROVAL"
+                ),
+                "live_host_status": (
+                    "VERCEL_SHARED_RUNTIME"
+                    if facade.normal_youtube_live else "NOT_DESIGNATED"
+                ),
+                "runtime_mode": "VERCEL_OWNER_TRIGGERED",
+            }
+            yield facade

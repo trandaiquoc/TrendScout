@@ -157,9 +157,9 @@ class VercelSharedLiveMiddleware:
             context_factory = self.context_factory
             if context_factory is None:
                 from app.orchestration.vercel_wikimedia_live_composition import (
-                    vercel_wikimedia_live_composition,
+                    vercel_shared_live_composition,
                 )
-                context_factory = vercel_wikimedia_live_composition
+                context_factory = vercel_shared_live_composition
             context_manager = context_factory(
                 client, user_agent=self.settings.wikimedia_user_agent
             )

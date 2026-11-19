@@ -1,6 +1,7 @@
 """Offline transactional contract tests for Firestore-backed shared cache blobs."""
 
 import asyncio
+import hashlib
 import os
 import tempfile
 import unittest
@@ -17,13 +18,17 @@ from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
-from app.main import create_normal_google_live_app
+from app.main import create_app, create_normal_google_live_app
 from app.orchestration.firestore_shared_live_composition import (
     PRODUCTION_FIRESTORE_PROJECT_ID,
     create_firestore_shared_live_composition,
 )
-from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.orchestration.normal_google_live_composition import (
+    _shared_google_candidate_rows,
+    normal_google_live_composition,
+)
 from app.orchestration.vercel_wikimedia_live_composition import (
+    vercel_shared_live_composition,
     vercel_wikimedia_live_composition,
 )
 from app.settings import Settings
@@ -34,6 +39,8 @@ from app.sources.catalog import (
     YOUTUBE_SOURCE_ID,
     source_capability,
 )
+from app.sources.google_trends.handler import GoogleTrendsDiscoveryHandler
+from app.sources.google_trends.trending_now import TRENDING_NOW_PARSER_VERSION
 from app.sources.guarded_collector import CollectionLimits
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
@@ -278,6 +285,59 @@ class FirestoreSharedCacheTests(unittest.TestCase):
             self.assertEqual(result["status"], "CACHED")
             self.assertEqual(result["payload"]["source_id"], source_id)
 
+    def test_google_candidates_are_read_from_the_shared_source_cache(self):
+        cache = SharedCache(self.atomic, payload_blobs=self.blobs)
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "four-source-policy", NOW + timedelta(days=7),
+            max_fresh_seconds=3600, max_stale_seconds=7 * 86400,
+            max_retention_seconds=7 * 86400, allowed=True,
+        )
+        google_handler = GoogleTrendsDiscoveryHandler(
+            policy_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            utcnow=lambda: NOW,
+            cache=cache,
+            resolve_cache_grant=lambda source_id, _now: (
+                grant if source_id == GOOGLE_SOURCE_ID else None
+            ),
+            data_mode="LIVE",
+        )
+        scope, writer_grant = google_handler._cache_scope(None)
+        self.assertEqual(scope.query, "google-trends-trending-now:US:en:24h")
+        self.assertEqual(scope.parser_version, TRENDING_NOW_PARSER_VERSION)
+        self.assertIs(writer_grant, grant)
+        keyword = "embroidered linen shirt"
+        identity = hashlib.sha256(keyword.encode()).hexdigest()
+        record = {
+            "source_id": GOOGLE_SOURCE_ID,
+            "data_mode": "LIVE",
+            "plan_id": "google-trending-now-us-en",
+            "plan_version": 1,
+            "canonical_keyword": keyword,
+            "canonical_keyword_identity": identity,
+            "fetched_at": NOW.isoformat(),
+            "provider_data_at": NOW.isoformat(),
+            "trend_clusters": [{"active": True, "increase_percentage": 35,
+                                "categories": [{"name": "Home & Living"}]}],
+        }
+        cache.put(
+            scope, grant=grant, origin="LIVE",
+            payload={"status": "SUCCESS", "data_mode": "LIVE", "records": [record]},
+            fetched_at=NOW, now=NOW,
+        )
+
+        rows = _shared_google_candidate_rows(
+            cache, lambda source_id, _now: grant if source_id == GOOGLE_SOURCE_ID else None,
+            now=NOW + timedelta(seconds=1),
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["record_id"], identity)
+        self.assertEqual(rows[0]["canonical_keyword"], keyword)
+        self.assertEqual(rows[0]["source_id"], GOOGLE_SOURCE_ID)
+        self.assertEqual(rows[0]["data_mode"], "LIVE")
+        self.assertEqual(rows[0]["fetched_at"], NOW.isoformat())
+        self.assertEqual(rows[0]["evidence"]["fetched_at"], NOW.isoformat())
+
     def test_external_cache_missing_blob_is_unavailable(self):
         cache = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=32)
         cache.put(SCOPE, grant=GRANT, origin="SYNTHETIC", payload={"value": "x" * 500},
@@ -358,6 +418,121 @@ class FirestoreSharedCacheTests(unittest.TestCase):
 
 
 class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vercel_capabilities_expose_all_four_shared_live_sources(self):
+        client = SharedRuntimeFakeClient()
+        environment = {
+            "VERCEL": "1",
+            "TREND_SCOUT_ENVIRONMENT": "vercel",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_READ_ONLY": "true",
+            "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+            "TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED": "true",
+            "GOOGLE_CLOUD_PROJECT": PRODUCTION_FIRESTORE_PROJECT_ID,
+            "GOOGLE_WIF_AUDIENCE": (
+                "//iam.googleapis.com/projects/556422620769/locations/global/"
+                "workloadIdentityPools/trendscout-vercel/providers/vercel-production"
+            ),
+            "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "true",
+            "TREND_SCOUT_GOOGLE_SERP_APPROVED": "true",
+            "TREND_SCOUT_BING_SERP_APPROVED": "true",
+            "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "true",
+            "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "true",
+            "SERPAPI_API_KEY": "test-serpapi-key",
+            "YOUTUBE_API_KEY": "test-youtube-api-key",
+        }
+        transaction_patchers = [
+            patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+            patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+        ]
+        send = patch.object(httpx.AsyncHTTPTransport, "handle_async_request")
+        with patch.dict(os.environ, environment, clear=True):
+            for patcher in transaction_patchers:
+                patcher.start()
+            send_mock = send.start()
+            self.addCleanup(lambda: [patcher.stop() for patcher in reversed(
+                [*transaction_patchers, send]
+            )])
+            app = create_app(
+                settings=Settings.from_environment(environment),
+                vercel_firestore_client_factory=lambda _token: client,
+            )
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="https://trend-scout.example",
+                ) as browser:
+                    response = await browser.get(
+                        "/api/v1/capabilities",
+                        headers={"x-vercel-oidc-token": "synthetic-test-token"},
+                    )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["vercel_shared_live"])
+        self.assertTrue(body["read_only"])
+        self.assertTrue(body["source_selection_supported"])
+        enabled = {
+            source["source_id"] for source in body["sources"]
+            if source["enabled_for_current_operation"]
+        }
+        self.assertEqual(enabled, {
+            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+        })
+        send_mock.assert_not_called()
+
+    async def test_vercel_shared_live_composes_all_sources_without_provider_calls(self):
+        client = SharedRuntimeFakeClient()
+        environment = {
+            "VERCEL": "1",
+            "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "true",
+            "TREND_SCOUT_GOOGLE_SERP_APPROVED": "true",
+            "TREND_SCOUT_BING_SERP_APPROVED": "true",
+            "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "true",
+            "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "true",
+            "SERPAPI_API_KEY": "test-serpapi-key",
+            "YOUTUBE_API_KEY": "test-youtube-api-key",
+        }
+        transaction_patchers = [
+            patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+            patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+        ]
+        send = patch.object(httpx.AsyncHTTPTransport, "handle_async_request")
+        with patch.dict(os.environ, environment, clear=True):
+            for patcher in transaction_patchers:
+                patcher.start()
+            send_mock = send.start()
+            self.addCleanup(lambda: [patcher.stop() for patcher in reversed(
+                [*transaction_patchers, send]
+            )])
+
+            async with vercel_shared_live_composition(
+                client,
+                user_agent="TrendScoutTestBot/0.1 (https://example.invalid/contact)",
+                utcnow=lambda: NOW,
+            ) as facade:
+                self.assertEqual(facade.data_mode, "LIVE")
+                self.assertTrue(facade.firestore_shared_live)
+                self.assertTrue(facade.vercel_shared_live)
+                self.assertEqual(facade.available_sources, frozenset({
+                    WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                    YOUTUBE_SOURCE_ID,
+                }))
+                self.assertEqual(facade.worker.source_order, (
+                    GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                    WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID,
+                ))
+                self.assertEqual(facade.google_capabilities["runtime_scope"],
+                                 "VERCEL_SHARED_LIVE")
+                self.assertEqual(facade.google_capabilities["bing_serp_verification"],
+                                 "LIVE_CONFIGURED")
+                self.assertEqual(facade.youtube_capabilities["live_status"],
+                                 "LIVE_CONFIGURED")
+                self.assertEqual(facade.youtube_capabilities["live_host_status"],
+                                 "VERCEL_SHARED_RUNTIME")
+                self.assertEqual(facade.google_account_quota_state["status"], "NOT_CHECKED")
+
+        send_mock.assert_not_called()
+
     async def test_normal_google_composition_selects_firestore_only_when_injected(self):
         client = SharedRuntimeFakeClient()
 

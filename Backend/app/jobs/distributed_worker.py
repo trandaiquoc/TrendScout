@@ -60,15 +60,20 @@ class DistributedFetchWorker:
                  handlers: Mapping[str, SourceHandler],
                  resolve_grant: GrantResolver,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 snapshot_blobs=None):
+                 snapshot_blobs=None,
+                 source_order: tuple[str, ...] | None = None):
         if not isinstance(admission, PublicAdmission):
             raise TypeError("PublicAdmission required")
+        order = tuple(sorted(handlers)) if source_order is None else source_order
         if (set(handlers) != set(admission.policy.enabled_sources)
                 or any(not callable(handler) for handler in handlers.values())
+                or not isinstance(order, tuple) or len(order) != len(handlers)
+                or set(order) != set(handlers)
                 or not callable(resolve_grant) or not callable(utcnow)):
             raise ValueError("complete server-owned handler and grant registries required")
         self.admission = admission
         self.handlers = dict(handlers)
+        self.source_order = order
         self.source_modes = {
             source_id: getattr(handler, "__trendscout_data_mode__", None)
             for source_id, handler in self.handlers.items()
@@ -97,7 +102,10 @@ class DistributedFetchWorker:
                 or len(selected_sources) != len(set(selected_sources))
                 or not set(selected_sources) <= set(self.handlers)):
             raise AdmissionDenied("REQUEST_SCOPE_INVALID")
-        for source_id in sorted(selected_sources):
+        selected = set(selected_sources)
+        for source_id in self.source_order:
+            if source_id not in selected:
+                continue
             now = self.utcnow()
             try:
                 grant = self.resolve_grant(source_id, now)

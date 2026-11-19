@@ -161,16 +161,19 @@ class BingSavedCandidateHandler:
 
     def __init__(self, *, gateway, collection_store, atomic_store, policy_fingerprint,
                  ensure_paid_budget, utcnow=lambda: datetime.now(timezone.utc),
-                 allow_initial_acceptance: bool = False):
+                 allow_initial_acceptance: bool = False, candidate_loader=None):
         if (not callable(getattr(gateway, "fetch_page", None))
-                or not callable(getattr(collection_store, "connect", None))
+                or (not callable(getattr(collection_store, "connect", None))
+                    and not callable(candidate_loader))
                 or not callable(getattr(atomic_store, "transact", None))
                 or not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
                 or not callable(ensure_paid_budget) or not callable(utcnow)
-                or type(allow_initial_acceptance) is not bool):
+                or type(allow_initial_acceptance) is not bool
+                or candidate_loader is not None and not callable(candidate_loader)):
             raise ValueError("approved Bing gateway, persisted stores and account preflight required")
         self.gateway = gateway
         self.collection_store = collection_store
+        self.candidate_loader = candidate_loader
         self.atomic_store = atomic_store
         self.policy_fingerprint = policy_fingerprint
         self.ensure_paid_budget = ensure_paid_budget
@@ -197,9 +200,28 @@ class BingSavedCandidateHandler:
         if raw_now.tzinfo is None or raw_now.utcoffset() is None:
             raise ValueError("timezone-aware Bing handler clock required")
         now = raw_now.astimezone(timezone.utc)
-        rows, recently_verified, cached = _read_saved_candidates(
-            self.collection_store, now=now
-        )
+        if self.collection_store is not None:
+            rows, recently_verified, cached = _read_saved_candidates(
+                self.collection_store, now=now
+            )
+        else:
+            rows, recently_verified, cached = (), frozenset(), ()
+        if self.candidate_loader is not None:
+            try:
+                loaded = self.candidate_loader(now)
+            except Exception:
+                loaded = ()
+            if isinstance(loaded, (tuple, list)):
+                by_id = {
+                    row.get("record_id"): row for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("record_id"), str)
+                }
+                for row in loaded:
+                    if (isinstance(row, dict)
+                            and isinstance(row.get("record_id"), str)
+                            and row["record_id"] not in by_id):
+                        by_id[row["record_id"]] = row
+                rows = tuple(by_id.values())
         cached_result = _current_cached(cached, now)
         plan = build_verification_plan(
             rows, policy_fingerprint=self.policy_fingerprint, started_at=now,

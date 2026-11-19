@@ -57,10 +57,12 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://127.0.0.1") as client:
             policy = await client.get("/dashboard/privacy.html")
+            capabilities = await client.get("/api/v1/capabilities")
             blocked = await client.post("/api/v1/fetches", json={})
         self.assertEqual(policy.status_code, 200)
         self.assertIn('d6-youtube-v2', policy.text)
-        self.assertIn('Fetch disabled', policy.text)
+        self.assertIn('Shared LIVE Fetch', policy.text)
+        self.assertFalse(capabilities.json()["fetch_enabled"])
         self.assertEqual(blocked.status_code, 405)
 
 

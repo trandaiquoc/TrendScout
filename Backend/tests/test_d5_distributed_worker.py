@@ -145,6 +145,29 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({fence for _, fence in seen}), 1)
         self.assertIsNone(await worker.run_once("worker-two"))
 
+    async def test_configured_source_order_is_used_for_fetch_all(self):
+        self.admit()
+        seen = []
+
+        def handler(context):
+            seen.append(context.source_id)
+            return self.source_result(1)
+
+        order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={source: handler for source in SOURCES},
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+            source_order=order,
+        )
+
+        outcome = await worker.run_once("worker-ordered")
+
+        self.assertEqual(outcome["state"], "COMPLETED")
+        self.assertEqual(seen, list(order))
+
     async def test_sanitized_transport_diagnostic_survives_result_validation_and_status(self):
         job_id = self.admit()
         diagnostic = {
