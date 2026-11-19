@@ -559,6 +559,7 @@ export const vi = {
   'fetch.history-failed-live': 'Không lấy được lịch sử Wikimedia LIVE.',
   'fetch.checking': 'Đang kiểm tra',
   'fetch.capabilities-loading': 'Đang kiểm tra kết nối và trạng thái Fetch. Trong lúc này chưa gửi yêu cầu tới nhà cung cấp.',
+  'fetch.capabilities-retrying': 'Kết nối đang chậm. Tôi sẽ tự kiểm tra lại sau giây lát; chưa gửi Fetch hay gọi nhà cung cấp.',
   'fetch.unavailable': 'Chưa khả dụng',
   'fetch.disabled': 'Fetch công khai đang bị chính sách máy chủ tắt. Không gửi yêu cầu tới nhà cung cấp.',
   'fetch.live-not-approved': 'Chưa được duyệt thu thập trực tiếp. Chỉ fixture ngoại tuyến được kiểm soát mới có thể chạy.',

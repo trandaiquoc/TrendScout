@@ -559,6 +559,7 @@ export const en = {
   'fetch.history-failed-live': 'Wikimedia LIVE history could not be fetched.',
   'fetch.checking': 'Checking',
   'fetch.capabilities-loading': 'Checking the connection and Fetch availability. No provider request has been sent.',
+  'fetch.capabilities-retrying': 'The connection is taking longer than expected. I’ll check again shortly; no Fetch or provider request has been sent.',
   'fetch.unavailable': 'Unavailable',
   'fetch.disabled': 'Public Fetch is disabled by server policy. No provider request will be sent.',
   'fetch.live-not-approved': 'Live collection is not approved. Only controlled offline fixtures can run.',

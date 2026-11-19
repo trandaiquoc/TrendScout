@@ -1,5 +1,19 @@
 import { getJson } from './api.js';
 
+const CAPABILITIES_REQUEST_TIMEOUT_MS = 25_000;
+const CAPABILITY_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000, 10_000]);
+
+export function capabilityRetryDelayMs(attempt) {
+  return Number.isInteger(attempt) && attempt >= 0
+    ? CAPABILITY_RETRY_DELAYS_MS[attempt] ?? null
+    : null;
+}
+
+export function isRetryableCapabilityCheckError(error) {
+  const status = error?.status;
+  return !Number.isInteger(status) || status === 429 || status >= 500;
+}
+
 // Translate only exact known registry text; changed provider metadata remains visible as supplied.
 const SOURCE_TEXT = {
   "wikimedia_pageviews_top_per_country": {
@@ -247,7 +261,10 @@ function renderYouTubeBudget(capabilities, translate) {
 }
 
 export function loadCapabilities(locale = 'vi') {
-  return getJson('/api/v1/capabilities', { locale });
+  return getJson('/api/v1/capabilities', {
+    locale,
+    timeoutMs: CAPABILITIES_REQUEST_TIMEOUT_MS,
+  });
 }
 
 export function isLocalLiveDemo(capabilities) {

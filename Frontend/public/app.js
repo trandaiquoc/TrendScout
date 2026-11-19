@@ -1,5 +1,5 @@
 import { getJson, requestJson } from './modules/api.js';
-import { acceptsDiscovery, canStartFetch, defaultFetchSourceIds, isLocalLiveDemo, isVercelSharedLive, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
+import { acceptsDiscovery, canStartFetch, capabilityRetryDelayMs, defaultFetchSourceIds, isLocalLiveDemo, isRetryableCapabilityCheckError, isVercelSharedLive, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
 import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
@@ -36,6 +36,7 @@ const state = {
   detailSequence: 0,
   detail: null,
   capabilityRetryTimer: null,
+  capabilityRetryAttempt: 0,
   capabilities: null,
   fetchCapabilitiesLoading: true,
   fetchReady: false,
@@ -929,6 +930,7 @@ function renderFetchPresentation() {
   const messageKey = FETCH_STATE_MESSAGES[presentation.kind];
   const blockKey = FETCH_BLOCK_MESSAGES[state.fetchBlockReason] || 'fetch.disabled';
   const capabilityCheckPending = state.fetchCapabilitiesLoading && !state.capabilities;
+  const capabilityRetryPending = state.capabilityRetryTimer !== null && !state.capabilities;
   const isActionState = Boolean(messageKey);
   const button = $('#open-fetch');
   const historyButton = $('#open-history-fetch');
@@ -970,12 +972,13 @@ function renderFetchPresentation() {
   historyButton.textContent = t(historyButtonKey);
   const policySyncRequired = state.capabilities?.shared_policy_reconciliation_required === true;
   badge.textContent = t(policySyncRequired ? 'fetch.policy-sync-label'
-    : capabilityCheckPending ? 'fetch.checking'
+    : capabilityCheckPending || capabilityRetryPending ? 'fetch.checking'
       : state.fetchReady ? (sharedLiveDemo ? 'fetch.shared-live-label'
         : liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
   badge.classList.toggle('pill--green', state.fetchReady && !policySyncRequired);
   badge.classList.toggle('pill--amber', !state.fetchReady || policySyncRequired);
-  readiness.textContent = capabilityCheckPending ? t('fetch.capabilities-loading')
+  readiness.textContent = capabilityRetryPending ? t('fetch.capabilities-retrying')
+    : capabilityCheckPending ? t('fetch.capabilities-loading')
     : youtubePolicyPending ? t('fetch.youtube-policy-pending')
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
       : state.fetchReady ? t(policySyncRequired
@@ -1218,6 +1221,7 @@ async function loadPublicCapabilities() {
     const capabilities = await loadCapabilities(getLocale());
     state.capabilities = capabilities;
     state.fetchCapabilitiesLoading = false;
+    state.capabilityRetryAttempt = 0;
     const sourceSelect = $('#fetch-source-select');
     const sourceControl = $('#fetch-source-control');
     const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
@@ -1260,7 +1264,7 @@ async function loadPublicCapabilities() {
     renderFetchDefaults(capabilities, t);
     sourceLibrary.setCapabilities(capabilities);
     renderFetchPresentation();
-  } catch {
+  } catch (error) {
     state.capabilities = null;
     state.fetchCapabilitiesLoading = false;
     state.fetchReady = false;
@@ -1268,9 +1272,25 @@ async function loadPublicCapabilities() {
     renderSourceCapabilities(null, t);
     renderFetchDefaults(null, t);
     sourceLibrary.setCapabilities(null);
+    const retryDelay = isRetryableCapabilityCheckError(error)
+      ? capabilityRetryDelayMs(state.capabilityRetryAttempt)
+      : null;
+    if (retryDelay !== null) {
+      state.capabilityRetryAttempt += 1;
+      scheduleCapabilityRefresh(retryDelay);
+      renderFetchPresentation();
+      return;
+    }
     renderFetchPresentation();
     $('#fetch-readiness').textContent = t('fetch.capability-unavailable');
   }
+}
+
+function retryCapabilityCheck() {
+  clearTimeout(state.capabilityRetryTimer);
+  state.capabilityRetryTimer = null;
+  state.capabilityRetryAttempt = 0;
+  return loadPublicCapabilities();
 }
 
 function handleFetchState(presentation) {
@@ -2476,7 +2496,7 @@ function addAlgorithmDetail(list, label, value) {
 }
 
 function bindEvents() {
-  $('#source-capabilities-retry').addEventListener('click', () => loadPublicCapabilities());
+  $('#source-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
   $('#sidebar-collapse').addEventListener('click', () => {
     if (isMobileNav()) return;
