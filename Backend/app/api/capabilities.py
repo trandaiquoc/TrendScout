@@ -9,12 +9,38 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from app.ports.storage import StorageError
-from app.sources.catalog import SOURCE_CAPABILITIES, WIKIMEDIA_SOURCE_ID
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    SOURCE_CAPABILITIES,
+    WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.sources.query_plan import get_query_plan
 from app.sources.youtube.policy import YOUTUBE_POLICY_APPROVED, YOUTUBE_POLICY_VERSION
 
 router = APIRouter()
 _RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_catalog.json"
+
+
+def _source_known_limitations(item, *, vercel_shared_live):
+    if not vercel_shared_live:
+        return list(item.known_limitations)
+    if item.source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
+        return [
+            "Live requests use the approved Vercel Shared LIVE runtime and its internal request budgets; provider-account usage and terms remain provider-specific.",
+            "Search-result rank is not search volume or purchase demand.",
+            "The returned sample is bounded and does not prove US audience or buyer location.",
+        ]
+    if item.source_id == YOUTUBE_SOURCE_ID:
+        return [
+            "Live requests are owner-triggered through Vercel Shared LIVE and require current in-app policy consent.",
+            "Provider quota status is unknown; the application still enforces its internal request budget.",
+            "Search rank is not view count, search volume, trending rank, or product demand.",
+            "Keyword extraction and derived metrics remain disabled; results are source evidence only.",
+            "US regionCode indicates viewability, not the residence of viewers or creators.",
+        ]
+    return list(item.known_limitations)
 
 
 def _public_saved_account_snapshot(value):
@@ -664,7 +690,9 @@ async def capabilities(request: Request, response: Response):
                 },
                 "market_scope": item.market,
                 "language_scope": item.language,
-                "known_limitations": list(item.known_limitations),
+                "known_limitations": _source_known_limitations(
+                    item, vercel_shared_live=vercel_shared_live
+                ),
                 "enabled_for_current_operation": (
                     enabled and item.source_id in source_ids
                 ),

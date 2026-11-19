@@ -375,7 +375,7 @@ export const en = {
   'brand.home': 'TrendScout — overview',
   'brand.demo': 'DEMO',
   'brand.footer': 'Signals with context.',
-  'policy.notice': 'POLICY PUBLISHED | YouTube Data API: owner-authorized, local, user-triggered Fetch only',
+  'policy.notice': 'POLICY PUBLISHED | YouTube Data API: owner-authorized, approved-runtime, user-triggered Fetch only',
   'policy.privacy': 'Privacy Policy',
   'policy.terms': 'Terms of Service',
   'nav.section': 'WORKSPACE',

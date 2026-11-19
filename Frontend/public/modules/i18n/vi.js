@@ -375,7 +375,7 @@ export const vi = {
   'brand.home': 'TrendScout — trang tổng quan',
   'brand.demo': 'BẢN DEMO',
   'brand.footer': 'Tín hiệu, có ngữ cảnh.',
-  'policy.notice': 'CHÍNH SÁCH ĐÃ CÔNG KHAI | YouTube Data API: chỉ Fetch cục bộ do chủ sở hữu khởi chạy',
+  'policy.notice': 'CHÍNH SÁCH ĐÃ CÔNG KHAI | YouTube Data API: chỉ Fetch do chủ sở hữu khởi chạy trên runtime được phê duyệt',
   'policy.privacy': 'Chính sách riêng tư',
   'policy.terms': 'Điều khoản sử dụng',
   'nav.section': 'KHÔNG GIAN LÀM VIỆC',

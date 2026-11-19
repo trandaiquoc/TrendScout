@@ -478,6 +478,20 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enabled, {
             WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
         })
+        sources = {source["source_id"]: source for source in body["sources"]}
+        self.assertTrue(any(
+            "Vercel Shared LIVE" in limitation
+            for limitation in sources[GOOGLE_SOURCE_ID]["known_limitations"]
+        ))
+        self.assertFalse(any(
+            "Offline mock transport only" in limitation
+            for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID)
+            for limitation in sources[source_id]["known_limitations"]
+        ))
+        self.assertTrue(any(
+            "Provider quota status is unknown" in limitation
+            for limitation in sources[YOUTUBE_SOURCE_ID]["known_limitations"]
+        ))
         send_mock.assert_not_called()
 
     async def test_vercel_shared_live_composes_all_sources_without_provider_calls(self):
