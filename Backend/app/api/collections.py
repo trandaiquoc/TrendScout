@@ -100,7 +100,8 @@ class BulkMembershipInput(BaseModel):
 
 def _service(request):
     validate_public_request_origin(request, request.app.state.settings.environment_profile)
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service is None:
         raise HTTPException(503, {"code": "COLLECTIONS_UNAVAILABLE"})
     return service
@@ -121,12 +122,10 @@ def _mode(service):
     with service.store.connect() as db:
         row = db.execute("SELECT value FROM settings WHERE key='creation_mode'").fetchone()
         if row:
-            # Preserve an explicit legacy choice while making the old label unambiguous.
+            # Present the legacy value clearly without making a GET mutate data.
             if row["value"] == "SUGGEST":
-                db.execute("UPDATE settings SET value='SUGGEST_ONLY' WHERE key='creation_mode'")
                 return "SUGGEST_ONLY"
             return row["value"]
-        db.execute("INSERT INTO settings(key,value) VALUES('creation_mode','AUTO_CREATE')")
         return "AUTO_CREATE"
 
 

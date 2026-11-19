@@ -49,7 +49,7 @@ def main():
     capabilities = {
         "contract_version": "1.0",
         "environment_mode": "vercel",
-        "read_only": True,
+        "read_only": False,
         "authentication_required": False,
         "public_fetch_enabled": True,
         "fetch_enabled": True,

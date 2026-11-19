@@ -408,9 +408,13 @@ async def vercel_shared_live_composition(
     )
 
     with TemporaryDirectory(prefix="trendscout-vercel-fetch-") as runtime_directory:
+        from app.collections.firestore_snapshot import FirestoreCollectionSnapshot
         from app.collections.store import CollectionStore
 
-        collection_store = CollectionStore(Path(runtime_directory) / "collections.sqlite")
+        collection_path = Path(runtime_directory) / "collections.sqlite"
+        collection_snapshot = FirestoreCollectionSnapshot(client, collection_path, utcnow=utcnow)
+        collection_snapshot.load()
+        collection_store = CollectionStore(collection_path, data_mode_scope="LIVE")
         async with normal_google_live_composition(
             user_agent=user_agent,
             utcnow=utcnow,
@@ -453,4 +457,15 @@ async def vercel_shared_live_composition(
                 ),
                 "runtime_mode": "VERCEL_OWNER_TRIGGERED",
             }
+            from app.collections.entity_context import WikimediaEntityContextResolver
+            from app.collections.service import CollectionService
+
+            facade.collection_service = CollectionService(
+                collection_store,
+                entity_context_resolver=WikimediaEntityContextResolver(
+                    collection_store,
+                    before_request=facade.entity_lookup_before_request,
+                ),
+            )
+            facade.collection_snapshot = collection_snapshot
             yield facade

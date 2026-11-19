@@ -23,11 +23,10 @@ Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; khôn
 
 Quy tắc không cần Firebase/ADC ở trên áp dụng cho SQLite mặc định. Để chọn Shared LIVE bằng Firestore hiện có cho demo local, chạy `..\start.ps1 -FirestoreSharedLive`. Chế độ này chỉ chạy loopback, pin `trendscout-192e4/(default)` và chỉ chấp nhận ADC impersonate `trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com`; không chấp nhận service-account key. Quota, cache, checkpoint và snapshot dùng database chung; Fetch vẫn đi qua approval/quota guards hiện có. Bỏ switch để rollback về SQLite. Vercel Shared LIVE có feature flag riêng, mặc định tắt, mô tả bên dưới.
 
-### Vercel Shared LIVE — Wikimedia slice
+### Vercel Shared LIVE — writable multi-source demo
 
-`TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` mặc định `false`. Khi được cấu hình rõ ràng trên Vercel Production, backend vẫn giữ `read_only=true` cho SQLite và chỉ cấp Firestore client theo request cho Fetch Wikimedia, trạng thái/history và capabilities. Client bị pin vào `trendscout-192e4/(default)` qua Vercel OIDC và backend service account hiện có; token không được chuyển xuống frontend. Các nguồn Google, Bing và YouTube chưa được Vercel cho chọn. Không bật general `TREND_SCOUT_PUBLIC_FETCH_ENABLED` trên Vercel. Rollback bằng cách để/tắt cờ Shared LIVE; SQLite mặc định và các route đọc hiện tại không đổi.
-
-Function dùng `maxDuration: 60` trong `vercel.json`; Wikimedia worker có deadline tối đa 45 giây. Preview không được IAM production subject cho phép impersonate; không xem Preview error là bằng chứng Fetch online hoạt động. Không bật cờ Production, deploy Production, gọi Wikimedia thật hoặc ghi dữ liệu Production khi chưa có ủy quyền cho lần chạy cụ thể.
+`TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` defaults to `false`. When enabled on Vercel, the application reports `read_only=false` for its supported demo APIs but does not start the desktop SQLite `RunService`, lock, or recovery path. Interactive API documentation stays disabled. Request-scoped Vercel OIDC is exchanged through the pinned WIF provider and existing backend service account; credentials stay server-side. Shared LIVE Fetch supports the owner-approved Wikimedia, Google, Bing, and YouTube source set behind the existing consent, quota, refresh, and provider approval guards. Collections endpoints restore their bounded SQLite working copy from a versioned snapshot in `trendscout-192e4/(default)` and commit mutations to that database before returning success; concurrent stale snapshots fail closed instead of overwriting newer data. The legacy process-backed `POST /api/runs` path is not used on Vercel. Turning the feature flag off disables the shared runtime; no IAM or billing change is part of this setting.
+Function dùng `maxDuration: 60` trong `vercel.json`; Preview không được production subject cho phép impersonate nên Preview không chứng minh Production identity. Bản sửa code này không gọi provider và không tạo thêm Production data write; Fetch thật vẫn do owner chủ động bấm sau khi kiểm tra bản triển khai.
 
 Repository còn có legacy Firestore-backed run API riêng, tách biệt với Shared LIVE Fetch. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
 
@@ -309,7 +308,9 @@ Các kiểm tra tích hợp/regression nằm trong `.\verify_offline_readiness.p
 
 Trước khi ghi bucket, backend ước lượng số document writes (snapshot + observation chunks + 16 shard kết quả + 10 lượt dự phòng trạng thái) và dừng nếu vượt 1.000. Đây là guard số thao tác dự kiến, không phải đồng hồ quota Firestore chính xác; retry, ghi từ process khác và độ trễ hiển thị usage có thể ảnh hưởng con số thực tế. Các test có thể truyền `run_mode="synthetic"` hoặc `"replay"` vào `create_app` khi inject nguồn giả, để dữ liệu test không được gắn nhãn live. Production mặc định live và không cho client chọn mode.
 
-## Hotfix dashboard công khai và runtime chỉ đọc trên Vercel
+## Historical Vercel deployment snapshot (2026-11-17; superseded)
+
+This section records the pre-D6 deployment state. The writable Shared LIVE design above supersedes it for current Vercel behavior.
 
 **Trạng thái code:** hotfix mới chỉ được kiểm tra offline; chưa xác minh deployment Vercel mới. Deployment `dpl_EZbtefvf2PqprB7bgrUtnJTStTMH` đã được kiểm tra ở trạng thái READY nhưng runtime trả HTTP 500 cho `/`, `/dashboard/` và `/api/health`; runtime log báo thiếu `fastapi`. Build log chọn `pyproject.toml`, trước hotfix file này không khai báo runtime dependencies, còn `requirements.txt` không được cài. Bản sửa khai báo toàn bộ runtime package đang pin trong `[project].dependencies`; `requirements.txt` chuyển tiếp về project metadata để chỉ có một danh sách pin. `requires-python` giới hạn deployment ở Python 3.12. Tài liệu Vercel xác nhận Python runtime đọc dependencies và khoảng phiên bản interpreter từ các trường này ([Python runtime](https://vercel.com/docs/functions/runtimes/python), [FastAPI trên Vercel](https://vercel.com/docs/frameworks/backend/fastapi); đã kiểm tra 11/11/2026).
 

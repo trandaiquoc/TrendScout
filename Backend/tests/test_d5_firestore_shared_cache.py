@@ -469,7 +469,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertTrue(body["vercel_shared_live"])
-        self.assertTrue(body["read_only"])
+        self.assertFalse(body["read_only"])
         self.assertTrue(body["source_selection_supported"])
         enabled = {
             source["source_id"] for source in body["sources"]
@@ -524,9 +524,14 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 user_agent="TrendScoutTestBot/0.1 (https://example.invalid/contact)",
                 utcnow=lambda: NOW,
             ) as facade:
+                from app.collections.firestore_snapshot import FirestoreCollectionSnapshot
+                from app.collections.service import CollectionService
+
                 self.assertEqual(facade.data_mode, "LIVE")
                 self.assertTrue(facade.firestore_shared_live)
                 self.assertTrue(facade.vercel_shared_live)
+                self.assertIsInstance(facade.collection_service, CollectionService)
+                self.assertIsInstance(facade.collection_snapshot, FirestoreCollectionSnapshot)
                 self.assertEqual(facade.available_sources, frozenset({
                     WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID,
                     YOUTUBE_SOURCE_ID,

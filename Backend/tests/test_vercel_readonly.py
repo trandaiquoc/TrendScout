@@ -92,7 +92,7 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual((await client.get('/dashboard/modules/../app/main.py')).status_code, 404)
                         self.assertTrue((await client.get('/api/config')).json()['read_only'])
 
-    async def test_public_dashboard_needs_no_read_password_but_run_reads_fail_closed(self):
+    async def test_vercel_shared_mode_is_writable_but_legacy_run_reads_fail_closed(self):
         read_storage_factory = Mock(side_effect=AssertionError('private storage read'))
         with patch.dict(os.environ, {'VERCEL': '1'}, clear=True), \
              patch.dict(sys.modules, {'app.dashboard_assets': dashboard_bundle_module()}):
@@ -106,9 +106,10 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await client.get('/dashboard/modules/i18n/en.js')).status_code, 200)
                     self.assertEqual((await client.get('/api/health')).status_code, 200)
                     self.assertEqual((await client.get('/api/v1/capabilities')).status_code, 200)
+                    self.assertFalse((await client.get('/api/config')).json()['read_only'])
                     self.assertEqual((await client.get('/api/runs/' + RUN)).status_code, 503)
-                    self.assertEqual((await client.post('/api/runs')).status_code, 405)
-                    self.assertEqual((await client.post('/api/v1/fetches', content='{}')).status_code, 405)
+                    self.assertEqual((await client.post('/api/runs')).status_code, 503)
+                    self.assertNotEqual((await client.post('/api/v1/fetches', content='{}')).status_code, 405)
             read_storage_factory.assert_not_called()
 
     def test_oidc_identity_no_adc_fallback(self):

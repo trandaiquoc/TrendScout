@@ -79,15 +79,32 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
     if (settings.environment_profile != "vercel" or not enabled
             or not settings.vercel_shared_live_enabled):
         return False
+    method = method.upper()
     return (
         method == "POST" and path == "/api/v1/fetches"
         or method == "GET" and (
             path.startswith("/api/v1/fetches/")
             or path == "/api/v1/runs/history"
             or path.startswith("/api/v1/runs/history/")
-            or path == "/api/v1/analytics/overview"
+            or path.startswith("/api/v1/analytics/")
+            or path == "/api/v1/algorithms/results"
             or path == "/api/v1/capabilities"
         )
+        or path == "/api/v1/collections" and method in {"GET", "POST"}
+        or path.startswith("/api/v1/collections/")
+        and method in {"GET", "POST", "PATCH", "PUT", "DELETE"}
+    )
+
+
+def _is_vercel_fetch_submission(method, path):
+    return method.upper() == "POST" and path == "/api/v1/fetches"
+
+
+def _persists_vercel_collections(method, path):
+    method = method.upper()
+    return (
+        (path == "/api/v1/collections" or path.startswith("/api/v1/collections/"))
+        and method in {"POST", "PATCH", "PUT", "DELETE"}
     )
 
 
@@ -113,7 +130,10 @@ class VercelSharedLiveMiddleware:
             return
 
         request = Request(scope, receive)
-        if scope.get("method") == "POST":
+        if (_persists_vercel_collections(scope.get("method", ""), scope.get("path", ""))
+                or _is_vercel_fetch_submission(
+                    scope.get("method", ""), scope.get("path", "")
+                )):
             try:
                 from app.api.fetches import validate_public_request_origin
                 validate_public_request_origin(request, "vercel")
@@ -178,6 +198,7 @@ class VercelSharedLiveMiddleware:
 
         state = scope.setdefault("state", {})
         state["distributed_public_fetch"] = distributed
+        state["collection_service"] = getattr(distributed, "collection_service", None)
         state["public_fetch_source_ids"] = tuple(sorted(
             getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})
         ))
@@ -193,7 +214,57 @@ class VercelSharedLiveMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, send_no_store)
+            is_collection_write = _persists_vercel_collections(
+                scope.get("method", ""), scope.get("path", "")
+            )
+            if not is_collection_write:
+                await self.app(scope, receive, send_no_store)
+                if _is_vercel_fetch_submission(
+                    scope.get("method", ""), scope.get("path", "")
+                ):
+                    snapshot = getattr(distributed, "collection_snapshot", None)
+                    if snapshot is not None:
+                        try:
+                            await asyncio.to_thread(snapshot.save)
+                        except Exception:
+                            # The accepted Fetch result and checkpoints have
+                            # their own Firestore ledger. Keep the async 202
+                            # contract and record only a sanitized sync error.
+                            _logger.error("Vercel Fetch Collections snapshot commit failed")
+                return
+
+            # A mutation must not report success until the request-local SQLite
+            # working copy has been committed to the shared Firestore snapshot.
+            messages = []
+
+            async def capture(message):
+                messages.append(message)
+
+            await self.app(scope, receive, capture)
+            snapshot = getattr(distributed, "collection_snapshot", None)
+            if snapshot is not None:
+                try:
+                    await asyncio.to_thread(snapshot.save)
+                except Exception as exc:
+                    from app.collections.firestore_snapshot import CollectionSnapshotConflict
+
+                    if isinstance(exc, CollectionSnapshotConflict):
+                        response = JSONResponse(
+                            {"detail": {"code": "COLLECTIONS_CONCURRENT_UPDATE"}},
+                            status_code=409,
+                            headers={"Cache-Control": "no-store"},
+                        )
+                    else:
+                        _logger.exception("Vercel Collections snapshot commit failed")
+                        response = JSONResponse(
+                            {"detail": {"code": "COLLECTIONS_PERSISTENCE_FAILED"}},
+                            status_code=503,
+                            headers={"Cache-Control": "no-store"},
+                        )
+                    await response(scope, receive, send)
+                    return
+            for message in messages:
+                await send_no_store(message)
         finally:
             if context_entered:
                 try:
@@ -224,9 +295,8 @@ def create_app(
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
     read_only = (
-        settings.read_only
-        if read_only is None
-        else read_only or settings.environment_profile == "vercel"
+        False if settings.environment_profile == "vercel"
+        else settings.read_only if read_only is None else read_only
     )
     public_fetch_enabled, public_fetch_block_reason = _public_fetch_policy(
         settings,
@@ -353,6 +423,12 @@ def create_app(
                         app.state.public_fetch_enabled = False
                         app.state.public_fetch_block_reason = "LOCAL_RUNTIME_STOPPED"
                 return
+            # Vercel Functions are stateless between invocations. Shared LIVE
+            # routes build their request-scoped services from Firestore; never
+            # start the desktop SQLite RunService in a hosted function.
+            if settings.environment_profile == "vercel":
+                yield
+                return
             if read_only:
                 yield
                 return
@@ -414,9 +490,10 @@ def create_app(
     application = FastAPI(
         title=settings.app_name,
         lifespan=lifespan,
-        docs_url=None if read_only else "/docs",
-        redoc_url=None if read_only else "/redoc",
-        openapi_url=None if read_only else "/openapi.json",
+        # Keep interactive API/debug surfaces disabled on hosted Vercel.
+        docs_url=("/docs" if not read_only and settings.environment_profile != "vercel" else None),
+        redoc_url=("/redoc" if not read_only and settings.environment_profile != "vercel" else None),
+        openapi_url=("/openapi.json" if not read_only and settings.environment_profile != "vercel" else None),
     )
     application.state.read_only = read_only
     application.state.settings = settings
@@ -467,14 +544,18 @@ def create_app(
                 headers={"Cache-Control": "no-store"},
             )
         protected = path == "/api/runs" or path.startswith("/api/runs/")
-        if not read_only or not protected:
+        if not protected:
             return await call_next(request)
         if path.rstrip("/") == "/api/runs" and request.method == "POST":
-            return JSONResponse(
-                {"detail": "Read-only deployment"},
-                status_code=405,
-                headers={"Cache-Control": "no-store"},
-            )
+            if read_only:
+                return JSONResponse(
+                    {"detail": "Read-only deployment"},
+                    status_code=405,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return await call_next(request)
+        if not read_only and settings.environment_profile != "vercel":
+            return await call_next(request)
         password = settings.read_password or ""
         if len(password) < 32:
             return JSONResponse(
@@ -530,12 +611,12 @@ def create_app(
         application.add_middleware(
             VercelSharedLiveMiddleware,
             settings=settings,
-            enabled=public_fetch_enabled and run_mode == "live" and read_only,
+            enabled=public_fetch_enabled and run_mode == "live" and not read_only,
             client_factory=vercel_firestore_client_factory,
             context_factory=vercel_live_context_factory,
         )
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
-    if read_only:
+    if read_only or settings.environment_profile == "vercel":
 
         @application.get("/dashboard/")
         @application.get("/dashboard/{asset:path}")
@@ -666,7 +747,7 @@ def _validate_local_live_facade(facade):
 def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory,
                          distributed_public_fetch=None):
     if settings.environment_profile == "vercel":
-        if settings.vercel_shared_live_enabled and read_only and run_mode == "live":
+        if settings.vercel_shared_live_enabled and not read_only and run_mode == "live":
             return True, None
         return False, "VERCEL_SHARED_LIVE_DISABLED"
     if not settings.public_fetch_enabled:

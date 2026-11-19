@@ -113,7 +113,8 @@ def _latest_saved_account_snapshot(saved_activity):
 
 def _saved_source_activity(request):
     """Return the latest persisted Fetch evidence per source, never live health."""
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service is None:
         return {}
     data_mode_scope = getattr(service.store, "data_mode_scope", None)
@@ -454,7 +455,7 @@ async def capabilities(request: Request, response: Response):
         enabled
         and settings.environment_profile == "vercel"
         and settings.vercel_shared_live_enabled
-        and request.app.state.read_only
+        and not request.app.state.read_only
         and distributed is not None
         and (getattr(distributed, "vercel_shared_live", False)
              or getattr(distributed, "vercel_wikimedia_live", False))

@@ -93,7 +93,8 @@ def _scheduler_status(request: Request):
 
 @router.get("/analytics/overview")
 def overview(request: Request):
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service is None:
         distributed = _request_distributed_fetch(request)
         if distributed is not None and getattr(distributed, "firestore_shared_live", False):
@@ -366,7 +367,8 @@ def overview(request: Request):
 
 
 def _history_storage(request):
-    if getattr(request.app.state, "read_only", False):
+    if (getattr(request.app.state, "read_only", False)
+            or request.app.state.settings.environment_profile == "vercel"):
         if _request_distributed_fetch(request) is not None:
             return None
         factory = getattr(request.app.state, "read_storage_factory", None)
@@ -523,7 +525,8 @@ def _history_item_from_distributed(run):
 async def _run_history_cursor_page(request, q, status, mode, limit, token):
     filters = {"q": q, "status": status, "mode": mode}
     positions = _history_cursor_decode(token, filters)
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     local_rows = []
     local_has_more = False
     if service:
@@ -675,7 +678,8 @@ async def run_history(
         if offset:
             raise HTTPException(422, {"code": "CURSOR_AND_OFFSET_CANNOT_BE_COMBINED"})
         return await _run_history_cursor_page(request, q, status, mode, limit, cursor)
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service:
         with service.store.connect() as db:
             rows = db.execute("""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
@@ -823,7 +827,8 @@ async def run_history_detail(fetch_id: str, request: Request):
             )
         except Exception:
             shared_result = None
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service:
         with service.store.connect() as db:
             row = db.execute(

@@ -6,7 +6,6 @@ import unicodedata
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from app.orchestration.runs import RunBusy, RunCooldown
-from app.ports.storage import StorageError
 
 router = APIRouter()
 
@@ -19,13 +18,14 @@ def service(request):
 
 
 def read_storage(request):
-    if not request.app.state.read_only:
+    if (not request.app.state.read_only
+            and request.app.state.settings.environment_profile != "vercel"):
         return service(request).storage
     factory = request.app.state.read_storage_factory
     try:
         return factory(request.headers.get("x-vercel-oidc-token"))
     except ValueError:
-        raise HTTPException(503, "Read-only storage identity is not configured") from None
+        raise HTTPException(503, "Firestore run storage identity is not configured") from None
 
 
 def check_run_id(value):

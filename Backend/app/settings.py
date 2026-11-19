@@ -130,7 +130,7 @@ class Settings:
             raise ValueError("Vercel shared LIVE setting must be boolean")
         if self.vercel_shared_live_enabled and (
             self.environment_profile != "vercel"
-            or not self.read_only
+            or self.read_only
             or self.run_mode != "live"
             or self.public_fetch_enabled
             or self.google_cloud_project != "trendscout-192e4"
@@ -203,7 +203,11 @@ class Settings:
             raise ValueError("Unsupported TREND_SCOUT_ENVIRONMENT profile")
         is_vercel = environment.get("VERCEL", "") == "1" or raw_profile == "vercel"
         profile = "vercel" if is_vercel else raw_profile
-        read_only = is_vercel or _boolean(environment, "TREND_SCOUT_READ_ONLY", False)
+        # Vercel is stateless, but the supported demo APIs are not read-only:
+        # they use request-scoped Firestore identity and persistence instead.
+        read_only = False if is_vercel else _boolean(
+            environment, "TREND_SCOUT_READ_ONLY", False
+        )
         run_mode = environment.get("TREND_SCOUT_RUN_MODE", "live").strip().lower()
         if run_mode not in {"live", "synthetic", "replay"}:
             raise ValueError("Unsupported TREND_SCOUT_RUN_MODE")
@@ -284,7 +288,7 @@ class Settings:
         scheduler_enabled = _boolean(environment, "TREND_SCOUT_SCHEDULER_ENABLED", False)
         allowed_fetch_operations = (
             frozenset({"manual_run"})
-            if not read_only and operator_token and len(operator_token) >= 24
+            if not is_vercel and not read_only and operator_token and len(operator_token) >= 24
             else frozenset()
         )
         return cls(

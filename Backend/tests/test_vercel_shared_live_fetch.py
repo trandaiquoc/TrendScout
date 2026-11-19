@@ -206,7 +206,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             ) as browser:
                 response = await browser.post("/api/v1/fetches", json={})
 
-        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 503)
         client_factory.assert_not_called()
         self.assertEqual(events, [])
 
@@ -309,7 +309,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history.json()["items"][0]["fetch_id"], _JOB_ID)
         self.assertEqual(capabilities.status_code, 200, capabilities.text)
         self.assertTrue(capabilities.json()["vercel_shared_live"])
-        self.assertTrue(capabilities.json()["read_only"])
+        self.assertFalse(capabilities.json()["read_only"])
         self.assertEqual(capabilities.json()["data_mode"], "LIVE")
         self.assertEqual(
             [source["source_id"] for source in capabilities.json()["sources"]

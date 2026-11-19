@@ -37,6 +37,7 @@ const state = {
   detail: null,
   capabilityRetryTimer: null,
   capabilities: null,
+  fetchCapabilitiesLoading: true,
   fetchReady: false,
   fetchBlockReason: null,
   fetchPresentation: { kind: 'disabled', busy: false },
@@ -807,7 +808,7 @@ const FETCH_BLOCK_MESSAGES = {
   POLICY_MISMATCH: 'fetch.policy-mismatch',
   LIVE_FETCH_NOT_APPROVED: 'fetch.live-not-approved',
   READ_ONLY_DEPLOYMENT: 'fetch.read-only',
-  CLOUD_STORAGE_NOT_ALLOWED: 'fetch.read-only',
+  CLOUD_STORAGE_NOT_ALLOWED: 'fetch.not-enabled',
   OFFLINE_FAKE_STORAGE_REQUIRED: 'fetch.offline-unavailable',
   OFFLINE_FIXTURE_ADAPTER_REQUIRED: 'fetch.offline-unavailable',
   SYNTHETIC_RUNTIME_UNAVAILABLE: 'fetch.offline-unavailable',
@@ -927,6 +928,7 @@ function renderFetchPresentation() {
   const presentation = state.fetchPresentation;
   const messageKey = FETCH_STATE_MESSAGES[presentation.kind];
   const blockKey = FETCH_BLOCK_MESSAGES[state.fetchBlockReason] || 'fetch.disabled';
+  const capabilityCheckPending = state.fetchCapabilitiesLoading && !state.capabilities;
   const isActionState = Boolean(messageKey);
   const button = $('#open-fetch');
   const historyButton = $('#open-history-fetch');
@@ -968,11 +970,13 @@ function renderFetchPresentation() {
   historyButton.textContent = t(historyButtonKey);
   const policySyncRequired = state.capabilities?.shared_policy_reconciliation_required === true;
   badge.textContent = t(policySyncRequired ? 'fetch.policy-sync-label'
-    : state.fetchReady ? (sharedLiveDemo ? 'fetch.shared-live-label'
-      : liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
+    : capabilityCheckPending ? 'fetch.checking'
+      : state.fetchReady ? (sharedLiveDemo ? 'fetch.shared-live-label'
+        : liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
   badge.classList.toggle('pill--green', state.fetchReady && !policySyncRequired);
   badge.classList.toggle('pill--amber', !state.fetchReady || policySyncRequired);
-  readiness.textContent = youtubePolicyPending ? t('fetch.youtube-policy-pending')
+  readiness.textContent = capabilityCheckPending ? t('fetch.capabilities-loading')
+    : youtubePolicyPending ? t('fetch.youtube-policy-pending')
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
       : state.fetchReady ? t(policySyncRequired
         ? 'fetch.shared-policy-sync-ready'
@@ -1206,9 +1210,14 @@ function scheduleCapabilityRefresh(delayMs) {
 }
 
 async function loadPublicCapabilities() {
+  if (!state.capabilities) {
+    state.fetchCapabilitiesLoading = true;
+    renderFetchPresentation();
+  }
   try {
     const capabilities = await loadCapabilities(getLocale());
     state.capabilities = capabilities;
+    state.fetchCapabilitiesLoading = false;
     const sourceSelect = $('#fetch-source-select');
     const sourceControl = $('#fetch-source-control');
     const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
@@ -1253,6 +1262,7 @@ async function loadPublicCapabilities() {
     renderFetchPresentation();
   } catch {
     state.capabilities = null;
+    state.fetchCapabilitiesLoading = false;
     state.fetchReady = false;
     state.fetchBlockReason = null;
     renderSourceCapabilities(null, t);

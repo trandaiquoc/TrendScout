@@ -193,7 +193,8 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
     result = await distributed.run_once(owner)
     if result and result.get("job_id") != fetch_id and result.get("state") in {"COMPLETED", "PARTIAL"}:
         result = await distributed.run_once(owner)
-    service = getattr(request.app.state, "collection_service", None)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
     if service is None:
         return
     try:

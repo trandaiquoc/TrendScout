@@ -51,8 +51,9 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.app_name, "TrendScout test API")
         self.assertEqual(settings.environment_profile, "vercel")
-        self.assertTrue(settings.read_only)
+        self.assertFalse(settings.read_only)
         self.assertEqual(settings.operator_token, token)
+        self.assertEqual(settings.allowed_fetch_operations, frozenset())
         self.assertEqual(settings.read_password, password)
         self.assertEqual(settings.google_cloud_project, "synthetic-project")
         self.assertEqual(settings.google_wif_audience, audience)
@@ -131,7 +132,11 @@ class SettingsTests(unittest.TestCase):
 
         vercel_profile = Settings.from_environment({"TREND_SCOUT_ENVIRONMENT": "vercel"})
         self.assertEqual(vercel_profile.environment_profile, "vercel")
-        self.assertTrue(vercel_profile.read_only)
+        self.assertFalse(vercel_profile.read_only)
+        forced_vercel = Settings.from_environment({
+            "VERCEL": "1", "TREND_SCOUT_READ_ONLY": "true",
+        })
+        self.assertFalse(forced_vercel.read_only)
 
     def test_public_fetch_flag_requires_local_synthetic_non_cloud_runtime(self):
         settings = Settings.from_environment(
@@ -192,10 +197,15 @@ class SettingsApiTests(unittest.IsolatedAsyncioTestCase):
             response = await client.get("/api/config")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"read_only": True})
+        self.assertEqual(response.json(), {"read_only": False})
         self.assertNotIn(token, response.text)
         self.assertNotIn(password, response.text)
         self.assertNotIn("synthetic-project-id", response.text)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            self.assertEqual((await client.get("/docs")).status_code, 404)
+            self.assertEqual((await client.get("/openapi.json")).status_code, 404)
 
     async def test_existing_operator_token_setting_still_protects_manual_runs(self):
         token = "synthetic-operator-token-long-enough"

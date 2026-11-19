@@ -15,7 +15,8 @@ def list_algorithms():
 @router.get('/algorithms/results')
 def list_algorithm_results(request: Request, limit: int = Query(default=100, ge=1, le=500)):
     validate_public_request_origin(request, request.app.state.settings.environment_profile)
-    service = getattr(request.app.state, 'collection_service', None)
+    service = (getattr(getattr(request, 'state', None), 'collection_service', None)
+               or getattr(request.app.state, 'collection_service', None))
     if service is None:
         raise HTTPException(503, {'code': 'ANALYTICS_UNAVAILABLE'})
     mode = service.store.data_mode_scope

@@ -27,14 +27,14 @@ const synthetic = {...base, data_mode:'SYNTHETIC', local_live_demo:false};
 assert.equal(canStartFetch(synthetic), true);
 assert.equal(acceptsDiscovery(synthetic, {data_mode:'LIVE'}), false);
 assert.equal(acceptsDiscovery(synthetic, {data_mode:'SYNTHETIC'}), true);
-const vercelShared = {...base, environment_mode:'vercel', read_only:true,
+const vercelShared = {...base, environment_mode:'vercel', read_only:false,
   local_live_demo:false, vercel_shared_live:true};
 assert.equal(isVercelSharedLive(vercelShared), true);
 assert.equal(canStartFetch(vercelShared), true);
 assert.equal(acceptsDiscovery(vercelShared, {data_mode:'LIVE'}), true);
 assert.equal(acceptsDiscovery(vercelShared, {data_mode:'MIXED'}), true);
 assert.equal(acceptsDiscovery(vercelShared, {data_mode:'SYNTHETIC'}), false);
-for (const changes of [{vercel_shared_live:false}, {read_only:false},
+for (const changes of [{vercel_shared_live:false}, {read_only:true},
   {environment_mode:'local'}, {fetch_enabled:false}]) {
   assert.equal(canStartFetch({...vercelShared, ...changes}), false);
 }

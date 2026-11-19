@@ -257,7 +257,7 @@ export function isLocalLiveDemo(capabilities) {
 
 export function isVercelSharedLive(capabilities) {
   return capabilities?.data_mode === 'LIVE' && capabilities.vercel_shared_live === true
-    && capabilities.environment_mode === 'vercel' && capabilities.read_only === true;
+    && capabilities.environment_mode === 'vercel' && capabilities.read_only === false;
 }
 
 export function canStartFetch(capabilities) {
