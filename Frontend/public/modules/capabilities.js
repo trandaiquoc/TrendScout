@@ -246,17 +246,24 @@ export function isLocalLiveDemo(capabilities) {
     && capabilities.environment_mode === 'local' && capabilities.read_only === false;
 }
 
+export function isVercelSharedLive(capabilities) {
+  return capabilities?.data_mode === 'LIVE' && capabilities.vercel_shared_live === true
+    && capabilities.environment_mode === 'vercel' && capabilities.read_only === true;
+}
+
 export function canStartFetch(capabilities) {
   return capabilities?.public_fetch_enabled === true && capabilities.fetch_enabled === true
     && capabilities.authentication_required === false
-    && (capabilities.data_mode === 'SYNTHETIC' || isLocalLiveDemo(capabilities))
+    && (capabilities.data_mode === 'SYNTHETIC' || isLocalLiveDemo(capabilities)
+      || isVercelSharedLive(capabilities))
     && Array.isArray(capabilities.sources)
     && capabilities.sources.some((source) => source.enabled_for_current_operation === true);
 }
 
 export function acceptsDiscovery(capabilities, discovery) {
   return (capabilities?.data_mode === 'SYNTHETIC' && discovery?.data_mode === 'SYNTHETIC')
-    || (isLocalLiveDemo(capabilities) && ['LIVE', 'MIXED'].includes(discovery?.data_mode));
+    || ((isLocalLiveDemo(capabilities) || isVercelSharedLive(capabilities))
+      && ['LIVE', 'MIXED'].includes(discovery?.data_mode));
 }
 
 function localizedStatus(value, translate) {
@@ -496,7 +503,8 @@ export function renderSourceCapabilities(capabilities, translate) {
   const sidebarStatus = document.querySelector('#sidebar-source-status');
   const sidebarDot = document.querySelector('#sidebar-source-dot');
   const mainStatus = document.querySelector('#main-source-status');
-  if (wikimedia?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED') {
+  if (!isVercelSharedLive(capabilities)
+      && wikimedia?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED') {
     for (const badge of [sidebarStatus, mainStatus]) {
       if (badge) badge.textContent = translate(enabled ? 'source.enabled-local-verified' : 'source.historical-local-verified');
     }

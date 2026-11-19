@@ -1,5 +1,5 @@
 import { getJson, requestJson } from './modules/api.js';
-import { acceptsDiscovery, canStartFetch, defaultFetchSourceIds, isLocalLiveDemo, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
+import { acceptsDiscovery, canStartFetch, defaultFetchSourceIds, isLocalLiveDemo, isVercelSharedLive, loadCapabilities, renderFetchDefaults, renderSourceCapabilities } from './modules/capabilities.js';
 import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
@@ -949,6 +949,8 @@ function renderFetchPresentation() {
     : canRetry ? 'fetch.check-status' : 'fetch.cta';
   button.querySelector('[data-i18n="fetch.cta"]').textContent = t(buttonKey);
   const liveDemo = isLocalLiveDemo(state.capabilities);
+  const sharedLiveDemo = isVercelSharedLive(state.capabilities);
+  const liveFetch = liveDemo || sharedLiveDemo;
   historyButton.hidden = !liveDemo;
   historyButton.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited';
   const historyStateKey = presentation.requestKind === 'history'
@@ -962,17 +964,19 @@ function renderFetchPresentation() {
     ? 'fetch.check-status' : historyStateKey || 'fetch.history-cta';
   historyButton.textContent = t(historyButtonKey);
   badge.textContent = t(state.fetchReady
-    ? (liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
+    ? (sharedLiveDemo ? 'fetch.shared-live-label'
+      : liveDemo ? 'fetch.live-label' : 'fetch.synthetic-label') : 'fetch.unavailable');
   badge.classList.toggle('pill--green', state.fetchReady);
   badge.classList.toggle('pill--amber', !state.fetchReady);
   readiness.textContent = youtubePolicyPending ? t('fetch.youtube-policy-pending')
     : youtubeConsentMissing ? t('fetch.youtube-consent-required')
-      : state.fetchReady ? t(liveDemo ? 'fetch.live-ready' : 'fetch.ready') : t(blockKey);
+      : state.fetchReady ? t(sharedLiveDemo ? 'fetch.shared-live-ready'
+        : liveDemo ? 'fetch.live-ready' : 'fetch.ready') : t(blockKey);
   status.hidden = !isActionState;
   status.replaceChildren();
   if (isActionState) {
     const message = document.createElement('p');
-    message.textContent = t(liveDemo
+    message.textContent = t(liveFetch
       ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey);
     status.append(message);
     const sourceOutcomes = renderFetchSourceOutcomes(presentation.fetch);
@@ -1459,7 +1463,8 @@ function updatePublicDiscoverySummary(discovery, sources) {
   const lastFetch = state.publicFetchFinishedAt || fetchedAt;
   $('#metric-last-fetch').textContent = lastFetch ? compactTimestamp(lastFetch) : '—';
   $('#metric-last-fetch-note').textContent = lastFetch ? t('metric.last-fetch-context') : t('metric.fetch-to-begin');
-  const dataMode = discovery.data_mode === 'LIVE' ? t('fetch.live-label')
+  const dataMode = discovery.data_mode === 'LIVE'
+    ? t(isVercelSharedLive(state.capabilities) ? 'fetch.shared-live-label' : 'fetch.live-label')
     : discovery.data_mode === 'SYNTHETIC' ? t('fetch.synthetic-label')
       : discovery.data_mode || t('common.unavailable');
   const context = [t('chart.scope'), dataMode, delivery, observedDate ? date(observedDate) : '—',

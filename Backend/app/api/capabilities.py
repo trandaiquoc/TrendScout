@@ -375,8 +375,9 @@ async def capabilities(request: Request, response: Response):
     settings = request.app.state.settings
     enabled = bool(request.app.state.public_fetch_enabled)
     block_reason = request.app.state.public_fetch_block_reason
+    distributed = (getattr(request.state, "distributed_public_fetch", None)
+                   or request.app.state.distributed_public_fetch)
     if enabled:
-        distributed = request.app.state.distributed_public_fetch
         if distributed is not None:
             try:
                 enabled = distributed.admission.operationally_enabled()
@@ -402,7 +403,19 @@ async def capabilities(request: Request, response: Response):
                     block_reason = "ADMISSION_STATE_UNAVAILABLE"
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
     saved_activity = _saved_source_activity(request)
-    distributed = request.app.state.distributed_public_fetch
+    source_ids = getattr(
+        request.state, "public_fetch_source_ids", request.app.state.public_fetch_source_ids
+    )
+    vercel_shared_live = bool(
+        enabled
+        and settings.environment_profile == "vercel"
+        and settings.vercel_shared_live_enabled
+        and request.app.state.read_only
+        and distributed is not None
+        and getattr(distributed, "vercel_wikimedia_live", False)
+        and distributed.data_mode == "LIVE"
+        and set(source_ids) == {WIKIMEDIA_SOURCE_ID}
+    )
     google_workflow = getattr(distributed, "google_capabilities", {})
     normal_local_live_runtime = bool(
         distributed is not None
@@ -469,13 +482,14 @@ async def capabilities(request: Request, response: Response):
         "public_fetch_enabled": enabled,
         "fetch_enabled": enabled,
         "fetch_block_reason": block_reason,
-        "data_mode": (request.app.state.distributed_public_fetch.data_mode
+        "data_mode": (distributed.data_mode
                       if request.app.state.public_fetch_enabled
-                      and request.app.state.distributed_public_fetch is not None
+                      and distributed is not None
                       else "SYNTHETIC" if request.app.state.public_fetch_enabled else None),
         "local_live_demo": bool(enabled and settings.environment_profile == "local"
-                                and request.app.state.distributed_public_fetch is not None
-                                and request.app.state.distributed_public_fetch.data_mode == "LIVE"),
+                                and distributed is not None
+                                and distributed.data_mode == "LIVE"),
+        "vercel_shared_live": vercel_shared_live,
         "allowed_operations": {"fetch": enabled},
         "query_plan": {
             "id": plan.plan_id,
@@ -488,34 +502,34 @@ async def capabilities(request: Request, response: Response):
         },
         "admission": {
             "global_fetch_limit": (
-                request.app.state.distributed_public_fetch.admission.policy.max_starts_per_window
-                if request.app.state.distributed_public_fetch is not None
+                distributed.admission.policy.max_starts_per_window
+                if distributed is not None
                 else request.app.state.public_fetch_limit
             ),
             "window_seconds": (
-                request.app.state.distributed_public_fetch.admission.policy.window_seconds
-                if request.app.state.distributed_public_fetch is not None
+                distributed.admission.policy.window_seconds
+                if distributed is not None
                 else request.app.state.public_fetch_window_seconds
             ),
             "max_concurrent": 1,
             "cooldown_seconds": (
-                request.app.state.distributed_public_fetch.admission.policy.cooldown_seconds
-                if request.app.state.distributed_public_fetch is not None
+                distributed.admission.policy.cooldown_seconds
+                if distributed is not None
                 else settings.run_cooldown_seconds
             ),
             "status_poll_limit": (
-                request.app.state.distributed_public_fetch.admission.policy.max_status_polls
-                if request.app.state.distributed_public_fetch is not None
+                distributed.admission.policy.max_status_polls
+                if distributed is not None
                 else request.app.state.public_fetch_poll_limit
             ),
             "idempotency_ttl_seconds": (
-                request.app.state.distributed_public_fetch.admission.policy.receipt_seconds
-                if request.app.state.distributed_public_fetch is not None
+                distributed.admission.policy.receipt_seconds
+                if distributed is not None
                 else request.app.state.public_fetch_ttl_seconds
             ),
             "guarantee_scope": (
                 "injected AtomicStateStore; backing guarantees are environment-specific"
-                if request.app.state.distributed_public_fetch is not None
+                if distributed is not None
                 else "single local process; resets on restart"
             ),
         },
@@ -530,6 +544,8 @@ async def capabilities(request: Request, response: Response):
                 "quota": {"status": "UNKNOWN", "remaining": None, "total": None, "reset_at": None},
                 "adapter_status": (
                     "LIVE_CONFIGURED"
+                    if vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID
+                    else "LIVE_CONFIGURED"
                     if item.source_id == "bing_web_serp"
                     and getattr(distributed, "normal_bing_live", False)
                     else "LIVE_CONFIGURED"
@@ -542,7 +558,9 @@ async def capabilities(request: Request, response: Response):
                     else item.adapter_status
                 ),
                 "approval_status": (
-                    youtube_workflow.get("approval_status", item.approval_status)
+                    "APPROVED_FOR_VERCEL_SHARED_RUNTIME"
+                    if vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID
+                    else youtube_workflow.get("approval_status", item.approval_status)
                     if item.source_id == "youtube_video_search"
                     else "APPROVED_FOR_LOCAL_RUNTIME"
                     if item.source_id == "bing_web_serp"
@@ -579,7 +597,8 @@ async def capabilities(request: Request, response: Response):
                     getattr(distributed, "normal_youtube_live", False),
                 ),
                 "production_readiness": item.production_readiness,
-                "supported_data_modes": (["LIVE"] if normal_local_live_runtime
+                "supported_data_modes": (["LIVE"] if (
+                    normal_local_live_runtime
                     and (item.source_id == WIKIMEDIA_SOURCE_ID
                          or getattr(distributed, "normal_google_live", False)
                          and item.source_id == "google_web_serp"
@@ -587,6 +606,8 @@ async def capabilities(request: Request, response: Response):
                          and item.source_id == "bing_web_serp"
                          or getattr(distributed, "normal_youtube_live", False)
                          and item.source_id == "youtube_video_search")
+                    or (vercel_shared_live and item.source_id == WIKIMEDIA_SOURCE_ID)
+                )
                     else list(item.supported_data_modes)),
                 "query_based": item.query_based,
                 "metric": {
@@ -598,11 +619,11 @@ async def capabilities(request: Request, response: Response):
                 "language_scope": item.language,
                 "known_limitations": list(item.known_limitations),
                 "enabled_for_current_operation": (
-                    enabled and item.source_id in request.app.state.public_fetch_source_ids
+                    enabled and item.source_id in source_ids
                 ),
                 "last_saved_fetch": saved_activity.get(item.source_id),
                 "disabled_reason": None
-                if enabled and item.source_id in request.app.state.public_fetch_source_ids
+                if enabled and item.source_id in source_ids
                 else (block_reason or "SOURCE_NOT_ALLOWED"),
             }
             for item in SOURCE_CAPABILITIES

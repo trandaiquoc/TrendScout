@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 import hmac
+import inspect
 import logging
 import mimetypes
 import os
@@ -63,6 +64,145 @@ async def _run_youtube_retention_sweeper(cleanup, *, sleep=asyncio.sleep):
         await sleep(_YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS)
 
 
+async def _close_request_client(client):
+    close = getattr(client, "close", None)
+    if callable(close):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            pass
+
+
+def _is_vercel_shared_live_request(settings, method, path, *, enabled):
+    if (settings.environment_profile != "vercel" or not enabled
+            or not settings.vercel_shared_live_enabled):
+        return False
+    return (
+        method == "POST" and path == "/api/v1/fetches"
+        or method == "GET" and (
+            path.startswith("/api/v1/fetches/")
+            or path == "/api/v1/runs/history"
+            or path.startswith("/api/v1/runs/history/")
+            or path == "/api/v1/analytics/overview"
+            or path == "/api/v1/capabilities"
+        )
+    )
+
+
+class VercelSharedLiveMiddleware:
+    """Keep Vercel Firestore and provider resources alive for the full ASGI request."""
+
+    def __init__(self, app, *, settings, enabled, client_factory=None, context_factory=None):
+        self.app = app
+        self.settings = settings
+        self.enabled = enabled
+        self.client_factory = client_factory
+        self.context_factory = context_factory
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http"
+                or not _is_vercel_shared_live_request(
+                    self.settings,
+                    scope.get("method", ""),
+                    scope.get("path", ""),
+                    enabled=self.enabled,
+                )):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        if scope.get("method") == "POST":
+            try:
+                from app.api.fetches import validate_public_request_origin
+                validate_public_request_origin(request, "vercel")
+            except Exception:
+                response = JSONResponse(
+                    {"detail": {"code": "ORIGIN_NOT_ALLOWED"}},
+                    status_code=403,
+                    headers={"Cache-Control": "no-store"},
+                )
+                await response(scope, receive, send)
+                return
+
+        oidc_token = request.headers.get("x-vercel-oidc-token")
+        if not oidc_token:
+            response = JSONResponse(
+                {"detail": {"code": "FIRESTORE_IDENTITY_REQUIRED"}},
+                status_code=401,
+                headers={"Cache-Control": "no-store"},
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            if self.client_factory is None:
+                from app.storage.vercel_identity import firestore_client_for_request
+                client = firestore_client_for_request(oidc_token, settings=self.settings)
+            else:
+                client = self.client_factory(oidc_token)
+        except Exception:
+            response = JSONResponse(
+                {"detail": {"code": "FIRESTORE_IDENTITY_REJECTED"}},
+                status_code=403,
+                headers={"Cache-Control": "no-store"},
+            )
+            await response(scope, receive, send)
+            return
+
+        context_manager = None
+        context_entered = False
+        try:
+            context_factory = self.context_factory
+            if context_factory is None:
+                from app.orchestration.vercel_wikimedia_live_composition import (
+                    vercel_wikimedia_live_composition,
+                )
+                context_factory = vercel_wikimedia_live_composition
+            context_manager = context_factory(
+                client, user_agent=self.settings.wikimedia_user_agent
+            )
+            distributed = await context_manager.__aenter__()
+            context_entered = True
+        except Exception:
+            _logger.error("Vercel shared LIVE composition failed")
+            await _close_request_client(client)
+            response = JSONResponse(
+                {"detail": {"code": "SHARED_FETCH_UNAVAILABLE"}},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+            await response(scope, receive, send)
+            return
+
+        state = scope.setdefault("state", {})
+        state["distributed_public_fetch"] = distributed
+        state["public_fetch_source_ids"] = tuple(sorted(
+            getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})
+        ))
+
+        async def send_no_store(message):
+            if message.get("type") == "http.response.start":
+                headers = [
+                    (name, value) for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                ]
+                headers.append((b"cache-control", b"no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_no_store)
+        finally:
+            if context_entered:
+                try:
+                    await context_manager.__aexit__(None, None, None)
+                except Exception:
+                    _logger.error("Vercel shared LIVE cleanup failed")
+            await _close_request_client(client)
+
+
 def create_app(
     *,
     storage=None,
@@ -78,6 +218,8 @@ def create_app(
     local_live_opt_in: bool = False,
     local_live_context_factory=None,
     scheduler_store=None,
+    vercel_firestore_client_factory=None,
+    vercel_live_context_factory=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -301,14 +443,23 @@ def create_app(
         if read_storage_factory is not None
         else lambda oidc_token: read_only_storage(oidc_token, settings=settings)
     )
+    application.state.vercel_firestore_client_factory = vercel_firestore_client_factory
+    application.state.vercel_live_context_factory = vercel_live_context_factory
 
     @application.middleware("http")
     async def protect_read_only(request: Request, call_next):
         path = request.url.path
+        vercel_fetch_post = (
+            settings.environment_profile == "vercel"
+            and public_fetch_enabled
+            and path == "/api/v1/fetches"
+            and request.method == "POST"
+        )
         if (
             read_only
             and (path == "/api/v1/fetches" or path.startswith("/api/v1/fetches/"))
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not vercel_fetch_post
         ):
             return JSONResponse(
                 {"detail": "Read-only deployment"},
@@ -373,6 +524,16 @@ def create_app(
     application.include_router(fetches_router, prefix="/api/v1")
     application.include_router(collections_router, prefix="/api/v1")
     application.include_router(datasets_router, prefix="/api/v1")
+    if settings.environment_profile == "vercel":
+        # Add last so this pure ASGI middleware wraps FastAPI's request middleware
+        # and remains active through Starlette BackgroundTasks execution.
+        application.add_middleware(
+            VercelSharedLiveMiddleware,
+            settings=settings,
+            enabled=public_fetch_enabled and run_mode == "live" and read_only,
+            client_factory=vercel_firestore_client_factory,
+            context_factory=vercel_live_context_factory,
+        )
     frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     if read_only:
 
@@ -504,6 +665,10 @@ def _validate_local_live_facade(facade):
 
 def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory,
                          distributed_public_fetch=None):
+    if settings.environment_profile == "vercel":
+        if settings.vercel_shared_live_enabled and read_only and run_mode == "live":
+            return True, None
+        return False, "VERCEL_SHARED_LIVE_DISABLED"
     if not settings.public_fetch_enabled:
         return False, "FEATURE_DISABLED"
     if read_only:

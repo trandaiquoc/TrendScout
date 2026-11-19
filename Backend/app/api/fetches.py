@@ -28,6 +28,11 @@ MAX_BODY_BYTES = 1024
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
 
 
+def _distributed_for_request(request):
+    return (getattr(request.state, "distributed_public_fetch", None)
+            or getattr(request.app.state, "distributed_public_fetch", None))
+
+
 def _require_youtube_policy_consent(request: Request, distributed) -> None:
     """Require reviewed policy and explicit browser acceptance for API Client use."""
     workflow = getattr(distributed, "youtube_capabilities", None)
@@ -71,6 +76,33 @@ def _allowed_local_host(host: str, profile: str) -> bool:
 
 def validate_public_request_origin(request: Request, profile: str) -> None:
     """Reject ambiguous host/proxy context; these checks are not caller authentication."""
+    if profile == "vercel":
+        host_header = request.headers.get("host")
+        try:
+            parsed_host = urlsplit(f"https://{host_header}")
+            if (not host_header or parsed_host.hostname is None
+                    or parsed_host.username is not None or parsed_host.password is not None
+                    or parsed_host.path or parsed_host.query or parsed_host.fragment
+                    or (parsed_host.port not in {None, 443})):
+                raise ValueError("invalid host")
+            expected = _origin_tuple(f"https://{parsed_host.netloc}")
+        except ValueError:
+            raise HTTPException(403, {"code": "HOST_NOT_ALLOWED"}) from None
+
+        origin = request.headers.get("origin")
+        if origin is not None or request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                supplied = _origin_tuple(origin or "")
+            except ValueError:
+                raise HTTPException(403, {"code": "ORIGIN_NOT_ALLOWED"}) from None
+            if supplied != expected or supplied[0] != "https":
+                raise HTTPException(403, {"code": "ORIGIN_NOT_ALLOWED"})
+
+        fetch_site = request.headers.get("sec-fetch-site")
+        if fetch_site and fetch_site.lower() not in {"same-origin", "none"}:
+            raise HTTPException(403, {"code": "CROSS_SITE_REQUEST"})
+        return
+
     if any(
         name in request.headers
         for name in (
@@ -192,23 +224,27 @@ async def create_fetch(
     ):
         raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
 
-    distributed = request.app.state.distributed_public_fetch
+    distributed = _distributed_for_request(request)
     if distributed is not None:
+        available_sources = getattr(
+            distributed, "available_sources", distributed.admission.policy.enabled_sources
+        )
         if (selected_sources is not None
-                and not set(selected_sources) <= distributed.admission.policy.enabled_sources):
+                and not set(selected_sources) <= available_sources):
             raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
-        effective_sources = (set(selected_sources) if selected_sources is not None
-                             else distributed.admission.policy.enabled_sources)
+        request_sources = (selected_sources if selected_sources is not None
+                           else sorted(available_sources))
+        effective_sources = set(request_sources)
         if YOUTUBE_SOURCE_ID in effective_sources:
             _require_youtube_policy_consent(request, distributed)
         try:
-            accepted = distributed.submit(idempotency_key, source_ids=selected_sources)
+            accepted = distributed.submit(idempotency_key, source_ids=request_sources)
         except AdmissionDenied as exc:
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
             raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
-        # Background work is only enabled by explicit local/test composition.
-        # The durable queue remains authoritative if this process stops.
+        # Vercel's request-scoped middleware keeps Firestore resources alive
+        # through this worker; the durable queue remains authoritative on retry.
         if accepted["status"] in {"QUEUED", "RUNNING"}:
             background_tasks.add_task(
                 _run_fetch_and_collections, request, distributed, accepted["job_id"],
@@ -220,8 +256,7 @@ async def create_fetch(
             "fetch_id": fetch_id,
             "status": accepted["status"],
             "data_mode": distributed.data_mode,
-            "sources": (sorted(selected_sources) if selected_sources is not None else
-                        sorted(distributed.admission.policy.enabled_sources)),
+            "sources": sorted(effective_sources),
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",
         }
@@ -305,7 +340,7 @@ async def create_history_fetch(
     days = body.get("days")
     if set(body) != {"days"} or type(days) is not int or not 1 <= days <= 2:
         raise HTTPException(422, {"code": "HISTORY_WINDOW_OUT_OF_RANGE", "maximum_days": 2})
-    distributed = request.app.state.distributed_public_fetch
+    distributed = _distributed_for_request(request)
     if distributed is None or not getattr(distributed, "normal_wikimedia_live", False):
         raise HTTPException(409, {"code": "HISTORICAL_FETCH_UNAVAILABLE"})
     try:
@@ -338,7 +373,7 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
     _require_enabled(request)
     if not FETCH_ID_RE.fullmatch(fetch_id):
         raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
-    distributed = request.app.state.distributed_public_fetch
+    distributed = _distributed_for_request(request)
     if distributed is not None:
         validate_public_request_origin(request, request.app.state.settings.environment_profile)
         try:

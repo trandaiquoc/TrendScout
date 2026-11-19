@@ -1103,6 +1103,35 @@ class PublicAdmission:
             return state, deepcopy(job)
         return self.store.transact(self.state_key, operation)
 
+    def list_jobs(self, *, limit: int, now: datetime) -> list[dict]:
+        """Return a bounded newest-first job snapshot without charging status polls."""
+        now = _utc(now)
+        if type(limit) is not int or not 1 <= limit <= min(100, self.policy.max_records):
+            raise ValueError("bounded job-history limit required")
+
+        def operation(state):
+            if not state:
+                return state, []
+            if (state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest
+                    or not isinstance(state.get("jobs"), dict)):
+                raise AdmissionDenied("STATE_INVALID")
+            jobs = []
+            for job_id, job in state["jobs"].items():
+                if (not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id)
+                        or not isinstance(job, dict) or job.get("job_id") != job_id):
+                    raise AdmissionDenied("STATE_INVALID")
+                try:
+                    created = _parse(job["created_at"])
+                    updated = _parse(job.get("updated_at") or job["created_at"])
+                except (KeyError, TypeError, ValueError):
+                    raise AdmissionDenied("STATE_INVALID") from None
+                jobs.append((updated, created, deepcopy(job)))
+            jobs.sort(key=lambda item: (item[0], item[1], item[2]["job_id"]), reverse=True)
+            return state, [item[2] for item in jobs[:limit]]
+
+        return self.store.transact(self.state_key, operation)
+
     def claim(self, job_id: str, owner: str, *, now: datetime) -> dict:
         now = _utc(now)
         if not isinstance(owner, str) or not _OWNER.fullmatch(owner):

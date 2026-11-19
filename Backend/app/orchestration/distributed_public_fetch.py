@@ -271,6 +271,34 @@ class DistributedPublicFetch:
                     **({"transport_diagnostic": result["transport_diagnostic"]}
                        if "transport_diagnostic" in result else {}),
                 })
+        selected_sources = ([WIKIMEDIA_SOURCE_ID]
+            if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY"
+            else job.get("request_metadata", {}).get(
+                "sources", sorted(self.admission.policy.enabled_sources)))
+        progress_sources = []
+        completed_sources = 0
+        if not terminal:
+            checkpoints = job.get("source_checkpoints", {})
+            checkpoints = checkpoints if isinstance(checkpoints, dict) else {}
+            for source_id in sorted(selected_sources):
+                entry = checkpoints.get(source_id)
+                snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
+                result = snapshot.get("result") if isinstance(snapshot, dict) else None
+                complete = (isinstance(snapshot, dict)
+                            and snapshot.get("phase") == "COMPLETE"
+                            and isinstance(result, dict))
+                if complete:
+                    completed_sources += 1
+                    progress_sources.append({
+                        "source_id": source_id,
+                        "status": result.get("status", "UNKNOWN"),
+                        "record_count": result.get("record_count"),
+                        "delivery_state": result.get("delivery_state"),
+                        "error_code": result.get("error_code"),
+                        "coverage": result.get("coverage", {}),
+                    })
+                else:
+                    progress_sources.append({"source_id": source_id, "status": job["state"]})
         discovery = None
         if terminal:
             try:
@@ -311,27 +339,90 @@ class DistributedPublicFetch:
             "status": job["state"],
             "stage": job["state"],
             "request_kind": job.get("request_metadata", {}).get("kind", "LATEST"),
-            "selected_sources": ([WIKIMEDIA_SOURCE_ID]
-                if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY"
-                else job.get("request_metadata", {}).get(
-                    "sources", sorted(self.admission.policy.enabled_sources))),
+            "selected_sources": selected_sources,
             **({"history_days": job["request_metadata"]["history_days"]}
                if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY" else {}),
             "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else None,
-            "sources": visible_sources if terminal else [
-                {"source_id": source_id, "status": job["state"]}
-                for source_id in sorted(
-                    [WIKIMEDIA_SOURCE_ID]
-                    if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY"
-                    else job.get("request_metadata", {}).get(
-                        "sources", self.admission.policy.enabled_sources))
-            ],
+            "sources": visible_sources if terminal else progress_sources,
+            "progress": {
+                "completed_sources": (len(selected_sources) if terminal else completed_sources),
+                "total_sources": len(selected_sources),
+                "percent": (100 if terminal else int(completed_sources * 100 / len(selected_sources))),
+            },
             "discovery": discovery,
             "created_at": job["created_at"],
             "updated_at": job.get("updated_at") or job.get("available_at"),
             "finished_at": job.get("finished_at"),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
         }
+
+    def history(self, *, limit: int = 20) -> list[dict]:
+        """Return shared job summaries without charging the per-job poll budget."""
+        jobs = self.admission.list_jobs(limit=limit, now=self.utcnow())
+        items = []
+        for job in jobs:
+            metadata = job.get("request_metadata", {})
+            selected = ([WIKIMEDIA_SOURCE_ID]
+                if metadata.get("kind") == "WIKIMEDIA_HISTORY"
+                else metadata.get("sources", sorted(self.admission.policy.enabled_sources)))
+            if not isinstance(selected, list) or any(source not in self.admission.policy.enabled_sources
+                                                      for source in selected):
+                raise AdmissionDenied("JOB_STATE_INVALID")
+            checkpoints = job.get("source_checkpoints", {})
+            if not isinstance(checkpoints, dict):
+                raise AdmissionDenied("JOB_STATE_INVALID")
+            manifest = []
+            received = 0
+            for source_id in sorted(selected):
+                entry = checkpoints.get(source_id)
+                snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
+                result = snapshot.get("result") if isinstance(snapshot, dict) else None
+                complete = (isinstance(snapshot, dict)
+                            and snapshot.get("phase") == "COMPLETE"
+                            and isinstance(result, dict))
+                status = result.get("status") if complete else job.get("state")
+                if status not in {"QUEUED", "RUNNING", "DEFERRED", "SUCCESS", "PARTIAL",
+                                  "FAILED", "UNAVAILABLE", "COMPLETED", "EXPIRED", "ABORTED"}:
+                    status = "UNKNOWN"
+                record_count = result.get("record_count") if complete else None
+                if type(record_count) is int and record_count >= 0:
+                    received += record_count
+                coverage = result.get("coverage") if complete else {}
+                manifest.append({
+                    "source_id": source_id,
+                    "status": status,
+                    "delivery_state": result.get("delivery_state") if complete else None,
+                    "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
+                    "provider_request_count": result.get("provider_request_count") if complete else None,
+                    "error_code": result.get("error_code") if complete else None,
+                    "coverage": coverage if isinstance(coverage, dict) else {},
+                })
+            items.append({
+                "fetch_id": job["job_id"],
+                "run_type": "FETCH",
+                "status": job.get("state", "UNKNOWN"),
+                "outcome_status": job.get("state", "UNKNOWN"),
+                "mode": "LIVE" if self.data_mode == "LIVE" else self.data_mode,
+                "data_mode": "LIVE" if self.data_mode == "LIVE" else self.data_mode,
+                "sources": list(selected),
+                "source_manifest": manifest,
+                "received_record_count": received,
+                "retained_keyword_count": None,
+                "rejected_record_count": None,
+                "run_at": job.get("finished_at") or job.get("updated_at") or job.get("created_at"),
+                "created_at": job.get("created_at"),
+                "updated_at": job.get("updated_at") or job.get("created_at"),
+                "fetched_at": job.get("finished_at"),
+                "error_code": None,
+                "duration_seconds": None,
+                "progress": {
+                    "completed_sources": sum(1 for source in manifest if source["status"] in {
+                        "SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE",
+                    }),
+                    "total_sources": len(manifest),
+                },
+            })
+        return items
 
     async def run_once(self, owner: str):
         return await self.worker.run_once(owner)

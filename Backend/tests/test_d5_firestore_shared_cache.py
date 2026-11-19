@@ -1,10 +1,12 @@
 """Offline transactional contract tests for Firestore-backed shared cache blobs."""
 
 import asyncio
+import os
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +23,9 @@ from app.orchestration.firestore_shared_live_composition import (
     create_firestore_shared_live_composition,
 )
 from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.orchestration.vercel_wikimedia_live_composition import (
+    vercel_wikimedia_live_composition,
+)
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -31,6 +36,7 @@ from app.sources.catalog import (
 )
 from app.sources.guarded_collector import CollectionLimits
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
+from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
 from app.storage.firestore_shared_cache import create_firestore_shared_cache
 from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
@@ -129,6 +135,15 @@ class SharedRuntimeFakeClient(FakeClient):
         super().__init__()
         self.project = PRODUCTION_FIRESTORE_PROJECT_ID
         self._database = "(default)"
+
+
+class _LiveMockWikimediaGateway(WikimediaTopPageGateway):
+    @property
+    def data_mode(self):
+        return "LIVE"
+
+    async def fetch_day(self, **kwargs):
+        return replace(await super().fetch_day(**kwargs), data_mode="LIVE")
 
 
 def fake_transactional(callback):
@@ -556,6 +571,185 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertTrue(compositions[-1].public_fetch.firestore_shared_live)
+
+    async def test_vercel_wikimedia_composition_fetches_once_then_reuses_firestore_cache(self):
+        client = SharedRuntimeFakeClient()
+        now = [NOW]
+        provider_requests = []
+
+        def response(request):
+            provider_requests.append(request.url.path)
+            date_parts = request.url.path.rstrip("/").split("/")[-3:]
+            observation_day = datetime.strptime("/".join(date_parts), "%Y/%m/%d").date()
+            return httpx.Response(200, json={"items": [{
+                "country": "US",
+                "access": "all-access",
+                "year": observation_day.strftime("%Y"),
+                "month": observation_day.strftime("%m"),
+                "day": observation_day.strftime("%d"),
+                "articles": [{
+                    "article": "Coffee",
+                    "project": "en.wikipedia",
+                    "views_ceil": 100,
+                    "rank": 1,
+                }],
+            }]}, request=request)
+
+        async def controlled_network(_gateway_cls, approvals, runner, *, user_agent, **kwargs):
+            return _LiveMockWikimediaGateway.offline_fixture(
+                approvals,
+                runner,
+                user_agent=user_agent,
+                transport=httpx.MockTransport(response),
+                **kwargs,
+            )
+
+        transaction_patchers = [
+            patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+            patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+        ]
+        with patch.dict(os.environ, {"VERCEL": "1"}, clear=True), patch.object(
+            WikimediaTopPageGateway,
+            "controlled_network",
+            new=classmethod(controlled_network),
+        ):
+            for patcher in transaction_patchers:
+                patcher.start()
+            self.addCleanup(lambda: [patcher.stop() for patcher in reversed(transaction_patchers)])
+
+            for index, idempotency_key in enumerate((
+                "vercel-wikimedia-shared-cache-first",
+                "vercel-wikimedia-shared-cache-second",
+            )):
+                async with vercel_wikimedia_live_composition(
+                    client,
+                    user_agent="TrendScoutTest/0.1 (https://example.invalid/contact)",
+                    utcnow=lambda: now[0],
+                ) as facade:
+                    self.assertIsInstance(facade.admission.store, FirestoreAtomicStateStore)
+                    self.assertIs(facade.admission.store._client, client)
+                    self.assertIs(facade.journal.snapshot_blobs._client, client)
+                    self.assertEqual(facade.available_sources, frozenset({WIKIMEDIA_SOURCE_ID}))
+                    accepted = facade.submit(
+                        idempotency_key, source_ids=[WIKIMEDIA_SOURCE_ID]
+                    )
+                    result = await facade.run_once(f"vercel-worker-{index}")
+                    status = facade.status(accepted["job_id"])
+                    source = status["sources"][0]
+                    self.assertEqual(result["state"], "COMPLETED")
+                    self.assertEqual(source["status"], "SUCCESS")
+                    self.assertEqual(
+                        source["delivery_state"], "FRESH" if index == 0 else "CACHED"
+                    )
+                    self.assertEqual(
+                        source["provider_request_count"], None if index == 0 else 0
+                    )
+                now[0] += timedelta(seconds=2)
+
+        self.assertEqual(len(provider_requests), 1)
+
+    async def test_vercel_and_windows2_compositions_share_wikimedia_cache_and_quota(self):
+        client = SharedRuntimeFakeClient()
+        now = [NOW]
+        provider_requests = []
+
+        def response(request):
+            provider_requests.append(request.url.path)
+            date_parts = request.url.path.rstrip("/").split("/")[-3:]
+            observation_day = datetime.strptime("/".join(date_parts), "%Y/%m/%d").date()
+            return httpx.Response(200, json={"items": [{
+                "country": "US", "access": "all-access",
+                "year": observation_day.strftime("%Y"),
+                "month": observation_day.strftime("%m"),
+                "day": observation_day.strftime("%d"),
+                "articles": [{
+                    "article": "Coffee", "project": "en.wikipedia",
+                    "views_ceil": 100, "rank": 1,
+                }],
+            }]}, request=request)
+
+        async def controlled_network(_gateway_cls, approvals, runner, *, user_agent, **kwargs):
+            return _LiveMockWikimediaGateway.offline_fixture(
+                approvals, runner, user_agent=user_agent,
+                transport=httpx.MockTransport(response), **kwargs,
+            )
+
+        class NoCredentials:
+            def resolve(self, _reference):
+                return None
+
+        transaction_patchers = [
+            patch("app.storage.firestore_atomic_state.firestore.transactional", fake_transactional),
+            patch("app.storage.firestore_snapshot_blobs.firestore.transactional", fake_transactional),
+        ]
+        with patch.object(
+            WikimediaTopPageGateway,
+            "controlled_network",
+            new=classmethod(controlled_network),
+        ):
+            for patcher in transaction_patchers:
+                patcher.start()
+            self.addCleanup(lambda: [patcher.stop() for patcher in reversed(transaction_patchers)])
+
+            with patch.dict(os.environ, {"VERCEL": "1"}, clear=True):
+                async with vercel_wikimedia_live_composition(
+                    client,
+                    user_agent="TrendScoutTest/0.1 (https://example.invalid/contact)",
+                    utcnow=lambda: now[0],
+                ) as vercel:
+                    accepted = vercel.submit(
+                        "vercel-windows2-shared-cache-first",
+                        source_ids=[WIKIMEDIA_SOURCE_ID],
+                    )
+                    await vercel.run_once("vercel-runtime")
+                    vercel_status = vercel.status(accepted["job_id"])
+                    self.assertEqual(vercel_status["sources"][0]["delivery_state"], "FRESH")
+                    vercel_history = vercel.history(limit=20)
+                    self.assertEqual([item["fetch_id"] for item in vercel_history],
+                                     [accepted["job_id"]])
+                vercel_quota = vercel.admission.quota_snapshot("wikimedia", now=now[0])
+
+            now[0] += timedelta(seconds=2)
+            with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ, {}, clear=True
+            ):
+                from app.collections.store import CollectionStore
+
+                collection_store = CollectionStore(Path(directory) / "collections.sqlite")
+                async with normal_google_live_composition(
+                    user_agent="TrendScoutTest/0.1 (https://example.invalid/contact)",
+                    google_settings=GoogleLiveSettings(),
+                    credential_provider=NoCredentials(),
+                    collection_store=collection_store,
+                    preserve_expired_data=True,
+                    shared_firestore_client=client,
+                    utcnow=lambda: now[0],
+                ) as windows2:
+                    accepted = windows2.submit(
+                        "windows2-vercel-shared-cache-second",
+                        source_ids=[WIKIMEDIA_SOURCE_ID],
+                    )
+                    await windows2.run_once("windows2-runtime")
+                    windows2_status = windows2.status(accepted["job_id"])
+                    self.assertEqual(windows2_status["sources"][0]["status"], "SUCCESS")
+                    self.assertEqual(
+                        windows2_status["sources"][0]["delivery_state"], "CACHED"
+                    )
+                    self.assertEqual(
+                        windows2_status["sources"][0]["provider_request_count"], 0
+                    )
+                    shared_history = windows2.history(limit=20)
+                    self.assertEqual(
+                        {item["fetch_id"] for item in shared_history},
+                        {vercel_history[0]["fetch_id"], accepted["job_id"]},
+                    )
+                    windows2_quota = windows2.admission.quota_snapshot(
+                        "wikimedia", now=now[0]
+                    )
+
+        self.assertEqual(len(provider_requests), 1)
+        self.assertEqual(vercel_quota["daily"]["used"], 1)
+        self.assertEqual(windows2_quota["daily"]["used"], 1)
 
 
 if __name__ == "__main__":

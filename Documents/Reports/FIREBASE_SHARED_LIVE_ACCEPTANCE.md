@@ -1,14 +1,23 @@
 # TrendScout — Firebase Shared LIVE Runtime, Phase 1
 
-**Status:** Demo scope is active. Previously accepted Firestore connectivity and the bounded synthetic Production cache smoke remain PASS. The local normal Google Fetch pipeline now has an explicit Firestore Shared LIVE opt-in; SQLite remains the default and Vercel Production Fetch remains disabled. Full Shared LIVE hardening (G4 cross-host, complete IAM least privilege, and external Token Creator consumers) remains separately partial.
+**Status:** Demo scope is active. Previously accepted Firestore connectivity and the bounded synthetic Production cache smoke remain PASS. The local normal Google Fetch pipeline has an explicit Firestore Shared LIVE opt-in; SQLite remains the default. D6 Vercel Online Demo is in progress: the Wikimedia-only Firestore path is implemented behind a default-off flag; no Production Fetch has run. Full Shared LIVE hardening (G4 cross-host, complete IAM least privilege, and external Token Creator consumers) remains separately partial.
 
 **As of:** 2026-11-19
 
 **Progress:** 83% (weighted evidence below).
 
-**Firebase Demo Functional Acceptance:** COMPLETE (2026-11-19). The broader weighted Firebase acceptance remains 83%; G4 cross-host and IAM hardening remain separate partial items.
+**Firebase connectivity and prior local demo gates:** COMPLETE (2026-11-19). **D6 Vercel Online Demo:** IN PROGRESS. The broader weighted Firebase acceptance remains 83%; G4 cross-host and IAM hardening remain separate partial items.
 
 *This report is chronological. The latest dated acceptance section records current evidence and supersedes earlier checkpoint statements.*
+
+## Latest D6 Vercel Wikimedia slice (2026-11-19)
+
+- Added a separate Vercel request-scoped Wikimedia LIVE path. The global Vercel/SQLite deployment remains read-only; only the explicit Fetch route and its shared status/history/capabilities reads receive a pinned `trendscout-192e4/(default)` Firestore client. `TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` defaults to `false`; enabling it requires Vercel profile, `read_only=true`, LIVE mode, the pinned production WIF audience/project, and the existing general Fetch flag to stay false. The Vercel identity stays server-side; Vercel injects `x-vercel-oidc-token` on Function requests ([Vercel OIDC docs](https://vercel.com/docs/oidc), checked 2026-11-19). No credentials or API keys are sent to the frontend.
+- The Vercel worker exposes Wikimedia only. The API rejects other source selections; existing guarded Wikimedia approval, request limits, Firestore cache/checkpoints/quota and idempotent job admission remain in the server path. The dashboard now displays `SHARED · LIVE` / `CHIA SẺ · LIVE` and does not call the result locally verified. Run History and the shared overview read job summaries from the same Firestore job ledger.
+- Shared-state regression evidence uses a Firestore fake with a deterministic Wikimedia transport: a Vercel composition fetched once as `FRESH`; an independent Windows 2 composition read the same cache as `CACHED` with provider request count `0`; both runtimes saw both job IDs and the daily Wikimedia reservation remained `1`. This proves composition contracts against the fake only; it is not a real Firestore cross-runtime run and made no Production provider request or data write.
+- The Vercel FastAPI function now declares `maxDuration: 60` to cover the worker's 45-second provider deadline while fitting the documented Hobby maximum when Fluid Compute is off ([duration configuration](https://vercel.com/docs/functions/configuring-functions/duration), [Hobby limits](https://vercel.com/docs/plans/hobby), checked 2026-11-19). Project metadata read through Vercel reports SSO protection enabled for non-custom domains (`all_except_custom_domains`); the currently listed domains are Vercel domains. No Vercel project settings or environment variables were changed.
+- Focused evidence: Vercel shared Fetch route **5/5 PASS**; Firestore shared-cache/quota/history suite **13/13 PASS**; dashboard capability UI gate **1/1 PASS**; run-history/dashboard regressions **23/23 PASS**; normal Wikimedia LIVE regressions **11/11 PASS**; local SQLite Fetch HTTP regressions **5/5 PASS**; frontend Node suite **22/22 PASS**; Ruff, Python compilation, JavaScript syntax, Vercel JSON parsing, and `git diff --check` **PASS**. All provider transports and Firestore data in this continuation were mocked. No accepted Emulator or Production gate was repeated.
+- Rollback is to leave `TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED=false`; the default remains false in code. Production Fetch is still disabled, no Production application data was written, and no IAM, WIF, Rules, billing, paid API, or Vercel environment setting changed. D6 live acceptance therefore remains **IN PROGRESS**, and weighted progress stays **83%**. The next acceptance evidence must come from a separately authorized Vercel Wikimedia Fetch and an owner-run Windows 2 cache/history read against the existing database. Other three Vercel providers remain disabled until that shared-state step is accepted.
 
 ## Latest code-first demo continuation (2026-11-19)
 

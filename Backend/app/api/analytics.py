@@ -93,7 +93,74 @@ def _scheduler_status(request: Request):
 
 @router.get("/analytics/overview")
 def overview(request: Request):
-    service = _service(request)
+    service = getattr(request.app.state, "collection_service", None)
+    if service is None:
+        distributed = _request_distributed_fetch(request)
+        if distributed is not None and getattr(distributed, "firestore_shared_live", False):
+            try:
+                operations = distributed.history(limit=30)
+            except Exception:
+                raise HTTPException(503, {"code": "SHARED_ANALYTICS_UNAVAILABLE"}) from None
+            latest = operations[0] if operations else None
+            latest_dataset = None
+            last_successful = next((item for item in operations
+                                    if item.get("status") in {"COMPLETED", "PARTIAL"}), None)
+            if latest is not None:
+                latest_dataset = {
+                    "dataset_id": latest.get("fetch_id"),
+                    "status": latest.get("status"),
+                    "data_mode": latest.get("data_mode"),
+                    "source_manifest": latest.get("source_manifest", []),
+                    "provider_record_count": None,
+                    "received_record_count": latest.get("received_record_count"),
+                    "retained_keyword_count": None,
+                    "rejected_record_count": None,
+                    "fetched_at": latest.get("fetched_at") or latest.get("run_at"),
+                    "quality_flags": [],
+                    "processing_status": "NOT_CONFIGURED",
+                }
+            return {
+                "keyword_totals": {
+                    "unique": None, "eligible": None, "excluded": None,
+                    "classified": None, "ambiguous": None, "unknown": None,
+                    "ineligible": None, "unclassified": None,
+                },
+                "active_sources": [
+                    {"source_id": source_id}
+                    for source_id in sorted(getattr(distributed, "available_sources", ()))
+                ],
+                "source_volume": [],
+                "algorithm_distribution": [],
+                "algorithm_effectiveness": {
+                    "status": "NOT_YET_EVALUATED",
+                    "reason": "Shared Fetch records have not been processed into keyword analysis.",
+                },
+                "source_operations": operations,
+                "multi_source_coverage": {
+                    "status": "INSUFFICIENT_SOURCES", "sources": [],
+                    "shared_keyword_overlap": None,
+                },
+                "observations_over_time": [],
+                "top_observed": [],
+                "top_observed_context": None,
+                "latest_dataset": latest_dataset,
+                "last_successful_fetch": ({
+                    "dataset_id": last_successful.get("fetch_id"),
+                    "status": last_successful.get("status"),
+                    "data_mode": last_successful.get("data_mode"),
+                    "source_manifest": last_successful.get("source_manifest", []),
+                    "fetched_at": last_successful.get("fetched_at")
+                        or last_successful.get("run_at"),
+                    "age_seconds": None,
+                    "quality_flags": [],
+                } if last_successful else None),
+                "membership_keyword_count": None,
+                "shared_fetch_history": {
+                    "status": "AVAILABLE",
+                    "items": len(operations),
+                },
+            }
+        raise HTTPException(503, {"code": "ANALYTICS_UNAVAILABLE"})
     mode = service.store.data_mode_scope
     parameters = (mode,) if mode else ()
     keyword_filter = " AND k.data_mode=?" if mode else ""
@@ -300,6 +367,8 @@ def overview(request: Request):
 
 def _history_storage(request):
     if getattr(request.app.state, "read_only", False):
+        if _request_distributed_fetch(request) is not None:
+            return None
         factory = getattr(request.app.state, "read_storage_factory", None)
         if not factory:
             return None
@@ -311,13 +380,18 @@ def _history_storage(request):
     return getattr(service, "storage", None)
 
 
+def _request_distributed_fetch(request):
+    return (getattr(request.state, "distributed_public_fetch", None)
+            or getattr(request.app.state, "distributed_public_fetch", None))
+
+
 def _iso(value):
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 def _history_cursor_decode(token, filters):
     if not token:
-        return {"local": None, "manual": None}
+        return {"local": None, "manual": None, "shared": None}
     try:
         raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
         value = json.loads(raw)
@@ -328,16 +402,19 @@ def _history_cursor_decode(token, filters):
         raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
     local = value.get("local")
     manual = value.get("manual")
+    shared = value.get("shared")
     if local is not None and (not isinstance(local, list) or len(local) != 2
                               or not all(isinstance(part, str) and part for part in local)):
         raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
     if manual is not None and (not isinstance(manual, str) or not manual or len(manual) > 1500):
         raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
-    return {"local": local, "manual": manual}
+    if shared is not None and (not isinstance(shared, str) or not shared or len(shared) > 64):
+        raise HTTPException(422, {"code": "INVALID_RUN_HISTORY_CURSOR"})
+    return {"local": local, "manual": manual, "shared": shared}
 
 
-def _history_cursor_encode(filters, local, manual):
-    value = {"v": 1, **filters, "local": local, "manual": manual}
+def _history_cursor_encode(filters, local, manual, shared=None):
+    value = {"v": 1, **filters, "local": local, "manual": manual, "shared": shared}
     raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -424,6 +501,25 @@ def _history_item_from_manual(run):
     }
 
 
+def _history_item_from_distributed(run):
+    manifest = run.get("source_manifest") or []
+    if not isinstance(manifest, list):
+        manifest = []
+    item = dict(run)
+    item["source_manifest"] = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+    item["sources"] = [source["source_id"] for source in manifest
+                       if isinstance(source, dict) and isinstance(source.get("source_id"), str)]
+    item["stage"] = item.get("status")
+    item["created_at"] = _iso(item.get("created_at"))
+    item["updated_at"] = _iso(item.get("updated_at"))
+    item["run_at"] = _iso(item.get("run_at") or item.get("finished_at") or item.get("updated_at"))
+    item["fetched_at"] = _iso(item.get("fetched_at"))
+    item["duration_seconds"] = None
+    item["_cursor_shared"] = str(item.get("fetch_id") or "")
+    _attach_run_outcome(item, manifest)
+    return item
+
+
 async def _run_history_cursor_page(request, q, status, mode, limit, token):
     filters = {"q": q, "status": status, "mode": mode}
     positions = _history_cursor_decode(token, filters)
@@ -487,11 +583,38 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
     else:
         history_status = "LOCAL_LEDGER_ONLY"
 
+    distributed = _request_distributed_fetch(request)
+    shared_page = []
+    shared_has_more = False
+    if distributed is not None and getattr(distributed, "firestore_shared_live", False):
+        try:
+            shared_runs = distributed.history(limit=100)
+        except Exception:
+            history_status = "PARTIAL"
+            shared_runs = []
+        shared_start = 0
+        if positions["shared"]:
+            matching_cursor = next((index for index, item in enumerate(shared_runs)
+                                    if item.get("fetch_id") == positions["shared"]), None)
+            shared_start = matching_cursor + 1 if matching_cursor is not None else len(shared_runs)
+        remaining_shared = shared_runs[shared_start:]
+        shared_page = remaining_shared[:limit + 1]
+        shared_has_more = len(remaining_shared) > len(shared_page)
+        history_truncated = history_truncated or len(shared_runs) == 100
+        for item in shared_page:
+            item["_cursor_shared"] = item["fetch_id"]
+
     local_ids = {item["fetch_id"] for item in local_page}
     manual_page = [item for item in manual_page if item["fetch_id"] not in local_ids]
+    existing_ids = local_ids | {item["fetch_id"] for item in manual_page}
+    shared_by_id = {item["fetch_id"]: item for item in shared_page}
+    for item in local_page + manual_page:
+        if item["fetch_id"] in shared_by_id:
+            item["_cursor_shared"] = item["fetch_id"]
+    shared_page = [item for item in shared_page if item["fetch_id"] not in existing_ids]
     for item in manual_page:
         item["_cursor_manual"] = item["fetch_id"]
-    candidates = sorted(local_page + manual_page,
+    candidates = sorted(local_page + manual_page + shared_page,
                         key=lambda item: (str(item.get("created_at") if item["run_type"] == "MANUAL_ANALYSIS"
                                               else item.get("_cursor_local", [item.get("run_at") or ""])[0]
                                               or item.get("run_at") or item.get("updated_at") or ""), item["fetch_id"]),
@@ -504,17 +627,22 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
     else:
         consumed = candidates
     next_local, next_manual = positions["local"], positions["manual"]
+    next_shared = positions["shared"]
     for item in consumed:
         if item["run_type"] == "MANUAL_ANALYSIS":
             next_manual = item["_cursor_manual"]
         else:
-            next_local = item["_cursor_local"]
+            if item.get("_cursor_local"):
+                next_local = item["_cursor_local"]
+        if item.get("_cursor_shared"):
+            next_shared = item["_cursor_shared"]
     has_unconsumed = len(consumed) < len(candidates)
-    more = has_unconsumed or local_has_more or manual_has_more
+    more = has_unconsumed or local_has_more or manual_has_more or shared_has_more
     for item in selected:
         item.pop("_cursor_local", None)
         item.pop("_cursor_manual", None)
-    next_cursor = _history_cursor_encode(filters, next_local, next_manual) if more else None
+        item.pop("_cursor_shared", None)
+    next_cursor = _history_cursor_encode(filters, next_local, next_manual, next_shared) if more else None
     return {
         "items": selected,
         "total": None,
@@ -523,7 +651,10 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
         "next_offset": None,
         "next_cursor": next_cursor,
         "duration_available": False,
-        "history_source": "local_sqlite_and_analysis_storage" if storage is not None else "local_sqlite_fetch_jobs",
+        "history_source": ("local_sqlite_and_shared_firestore" if distributed is not None
+                           and getattr(distributed, "firestore_shared_live", False)
+                           else "local_sqlite_and_analysis_storage" if storage is not None
+                           else "local_sqlite_fetch_jobs"),
         "manual_history_status": history_status,
         "history_truncated": history_truncated,
         "cursor_unavailable": history_status == "CURSOR_UNAVAILABLE",
@@ -641,7 +772,26 @@ async def run_history(
             existing.add(run_id)
     else:
         history_status = "LOCAL_LEDGER_ONLY"
+    distributed = _request_distributed_fetch(request)
+    if distributed is not None and getattr(distributed, "firestore_shared_live", False):
+        try:
+            shared_runs = distributed.history(limit=100)
+        except Exception:
+            shared_runs = []
+            history_status = "PARTIAL"
+        history_truncated = history_truncated or len(shared_runs) == 100
+        existing = {str(item.get("fetch_id")) for item in items}
+        for run in shared_runs:
+            item = _history_item_from_distributed(run)
+            if item["fetch_id"] in existing:
+                continue
+            if not _history_matches(item, q, status, mode):
+                continue
+            items.append(item)
+            existing.add(item["fetch_id"])
     items.sort(key=lambda item: str(item.get("run_at") or item.get("updated_at") or ""), reverse=True)
+    for item in items:
+        item.pop("_cursor_shared", None)
     return {
         "items": items[offset : offset + limit],
         "total": len(items),
@@ -649,7 +799,10 @@ async def run_history(
         "limit": limit,
         "next_offset": offset + limit if offset + limit < len(items) else None,
         "duration_available": False,
-        "history_source": "local_sqlite_and_analysis_storage" if history_status == "AVAILABLE" else "local_sqlite_fetch_jobs",
+        "history_source": ("local_sqlite_and_shared_firestore" if distributed is not None
+                           and getattr(distributed, "firestore_shared_live", False)
+                           else "local_sqlite_and_analysis_storage" if history_status == "AVAILABLE"
+                           else "local_sqlite_fetch_jobs"),
         "manual_history_status": history_status,
         "history_truncated": history_truncated,
     }
@@ -659,6 +812,17 @@ async def run_history(
 async def run_history_detail(fetch_id: str, request: Request):
     if not fetch_id or len(fetch_id) > 64:
         raise HTTPException(404, "Run not found")
+    distributed = _request_distributed_fetch(request)
+    shared_result = None
+    if distributed is not None and getattr(distributed, "firestore_shared_live", False):
+        try:
+            shared_result = next(
+                (item for item in distributed.history(limit=100)
+                 if item.get("fetch_id") == fetch_id),
+                None,
+            )
+        except Exception:
+            shared_result = None
     service = getattr(request.app.state, "collection_service", None)
     if service:
         with service.store.connect() as db:
@@ -671,6 +835,34 @@ async def run_history_detail(fetch_id: str, request: Request):
             ).fetchone()
     else:
         row = None
+    if row is None and shared_result is not None:
+        result = shared_result
+        manifest = result.get("source_manifest", [])
+        received = sum(source.get("record_count", 0) for source in manifest
+                       if isinstance(source, dict)
+                       and type(source.get("record_count")) is int
+                       and source.get("record_count") >= 0)
+        return {"item": {
+            "fetch_id": fetch_id,
+            "run_type": "FETCH",
+            "status": result.get("status"),
+            "outcome_status": result.get("status"),
+            "stage": result.get("status"),
+            "data_mode": result.get("data_mode"),
+            "mode": result.get("data_mode"),
+            "sources": result.get("sources", []),
+            "source_manifest": manifest,
+            "received_record_count": received,
+            "retained_keyword_count": None,
+            "rejected_record_count": None,
+            "quality_flags": [],
+            "error_code": next((source.get("error_code") for source in manifest
+                                 if isinstance(source, dict) and source.get("error_code")), None),
+            "created_at": result.get("created_at"),
+            "updated_at": result.get("updated_at"),
+            "fetched_at": result.get("fetched_at"),
+            "duration_seconds": None,
+        }, "duration_available": False}
     if row is None:
         storage = _history_storage(request)
         if storage is None or len(fetch_id) != 32 or any(character not in "0123456789abcdef" for character in fetch_id):

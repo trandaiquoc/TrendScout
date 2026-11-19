@@ -21,7 +21,13 @@ Quota pool D4 chỉ process-local, không bảo vệ nhiều host/restart; khôn
 
 Để cài đặt và khởi động từ Windows PowerShell tại repository root, chạy `.\setup.ps1` một lần rồi `.\start.ps1`; xem [README chính](../README.md). `start.ps1` chạy profile LIVE đa nguồn đã mô tả ở trên; các runtime legacy bên dưới tách biệt với launcher này.
 
-Quy tắc không cần Firebase/ADC ở trên áp dụng cho SQLite mặc định. Để chọn Shared LIVE bằng Firestore hiện có cho demo local, chạy `..\start.ps1 -FirestoreSharedLive`. Chế độ này chỉ chạy loopback, pin `trendscout-192e4/(default)` và chỉ chấp nhận ADC impersonate `trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com`; không chấp nhận service-account key. Quota, cache, checkpoint và snapshot dùng database chung; Fetch vẫn đi qua approval/quota guards hiện có. Bỏ switch để rollback về SQLite. Vercel Production routes vẫn read-only; mode này không deploy hay bật Vercel Production Fetch.
+Quy tắc không cần Firebase/ADC ở trên áp dụng cho SQLite mặc định. Để chọn Shared LIVE bằng Firestore hiện có cho demo local, chạy `..\start.ps1 -FirestoreSharedLive`. Chế độ này chỉ chạy loopback, pin `trendscout-192e4/(default)` và chỉ chấp nhận ADC impersonate `trendscout-vercel-backend@trendscout-192e4.iam.gserviceaccount.com`; không chấp nhận service-account key. Quota, cache, checkpoint và snapshot dùng database chung; Fetch vẫn đi qua approval/quota guards hiện có. Bỏ switch để rollback về SQLite. Vercel Shared LIVE có feature flag riêng, mặc định tắt, mô tả bên dưới.
+
+### Vercel Shared LIVE — Wikimedia slice
+
+`TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` mặc định `false`. Khi được cấu hình rõ ràng trên Vercel Production, backend vẫn giữ `read_only=true` cho SQLite và chỉ cấp Firestore client theo request cho Fetch Wikimedia, trạng thái/history và capabilities. Client bị pin vào `trendscout-192e4/(default)` qua Vercel OIDC và backend service account hiện có; token không được chuyển xuống frontend. Các nguồn Google, Bing và YouTube chưa được Vercel cho chọn. Không bật general `TREND_SCOUT_PUBLIC_FETCH_ENABLED` trên Vercel. Rollback bằng cách để/tắt cờ Shared LIVE; SQLite mặc định và các route đọc hiện tại không đổi.
+
+Function dùng `maxDuration: 60` trong `vercel.json`; Wikimedia worker có deadline tối đa 45 giây. Preview không được IAM production subject cho phép impersonate; không xem Preview error là bằng chứng Fetch online hoạt động. Không bật cờ Production, deploy Production, gọi Wikimedia thật hoặc ghi dữ liệu Production khi chưa có ủy quyền cho lần chạy cụ thể.
 
 Repository còn có legacy Firestore-backed run API riêng, tách biệt với Shared LIVE Fetch. Chỉ theo hướng dẫn bên dưới khi làm việc riêng với runtime legacy.
 

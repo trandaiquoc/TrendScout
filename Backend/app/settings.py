@@ -86,6 +86,7 @@ class Settings:
     wikimedia_user_agent: str
     allowed_fetch_operations: frozenset[str]
     public_fetch_enabled: bool = False
+    vercel_shared_live_enabled: bool = False
     public_fetch_deadline_seconds: float = 60.0
     scheduler_enabled: bool = False
 
@@ -125,6 +126,20 @@ class Settings:
             raise ValueError("Run cooldown must be between 0 and 86400 seconds")
         if type(self.public_fetch_enabled) is not bool:
             raise ValueError("Public Fetch setting must be boolean")
+        if type(self.vercel_shared_live_enabled) is not bool:
+            raise ValueError("Vercel shared LIVE setting must be boolean")
+        if self.vercel_shared_live_enabled and (
+            self.environment_profile != "vercel"
+            or not self.read_only
+            or self.run_mode != "live"
+            or self.public_fetch_enabled
+            or self.google_cloud_project != "trendscout-192e4"
+            or self.google_wif_audience != (
+                "//iam.googleapis.com/projects/556422620769/locations/global/"
+                "workloadIdentityPools/trendscout-vercel/providers/vercel-production"
+            )
+        ):
+            raise ValueError("Vercel shared LIVE requires the pinned production WIF identity")
         if (
             isinstance(self.public_fetch_deadline_seconds, bool)
             or not isinstance(self.public_fetch_deadline_seconds, (int, float))
@@ -260,6 +275,9 @@ class Settings:
         public_fetch_enabled = _boolean(
             environment, "TREND_SCOUT_PUBLIC_FETCH_ENABLED", False
         )
+        vercel_shared_live_enabled = _boolean(
+            environment, "TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED", False
+        )
         public_fetch_deadline_seconds = _bounded_float(
             environment, "TREND_SCOUT_PUBLIC_FETCH_DEADLINE_SECONDS", 60.0, 1.0, 300.0
         )
@@ -295,6 +313,7 @@ class Settings:
             wikimedia_user_agent=user_agent,
             allowed_fetch_operations=allowed_fetch_operations,
             public_fetch_enabled=public_fetch_enabled,
+            vercel_shared_live_enabled=vercel_shared_live_enabled,
             public_fetch_deadline_seconds=public_fetch_deadline_seconds,
             scheduler_enabled=scheduler_enabled,
         )

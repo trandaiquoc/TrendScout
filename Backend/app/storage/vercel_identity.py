@@ -124,7 +124,15 @@ class VercelCredentials(impersonated_credentials.Credentials):
 
 
 def storage_for_request(oidc_token, *, project_id=None, audience=None, settings=None):
-    """Construct a request-scoped Firestore reader without any ADC fallback."""
+    """Construct request-scoped Firestore storage without any ADC fallback."""
+    client = firestore_client_for_request(
+        oidc_token, project_id=project_id, audience=audience, settings=settings
+    )
+    return FirestoreStorage(client)
+
+
+def firestore_client_for_request(oidc_token, *, project_id=None, audience=None, settings=None):
+    """Return a pinned request-scoped Firestore client without any ADC fallback."""
     if settings is None and (project_id is None or audience is None):
         settings = Settings.from_environment()
     project = project_id if project_id is not None else (settings.google_cloud_project or "")
@@ -141,4 +149,4 @@ def storage_for_request(oidc_token, *, project_id=None, audience=None, settings=
         database="(default)",
         credentials=credentials,
     )
-    return FirestoreStorage(client)
+    return client

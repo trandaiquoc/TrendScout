@@ -11,7 +11,7 @@ class DashboardCapabilityTests(unittest.TestCase):
     def test_local_live_gate_and_discovery_modes(self):
         script = """
 import assert from 'node:assert/strict';
-import {canStartFetch, acceptsDiscovery} from './Frontend/public/modules/capabilities.js';
+import {canStartFetch, acceptsDiscovery, isVercelSharedLive} from './Frontend/public/modules/capabilities.js';
 const base = {public_fetch_enabled: true, fetch_enabled: true, authentication_required: false,
   environment_mode: 'local', read_only: false, local_live_demo: true, data_mode: 'LIVE',
   sources: [{enabled_for_current_operation: true}]};
@@ -27,6 +27,18 @@ const synthetic = {...base, data_mode:'SYNTHETIC', local_live_demo:false};
 assert.equal(canStartFetch(synthetic), true);
 assert.equal(acceptsDiscovery(synthetic, {data_mode:'LIVE'}), false);
 assert.equal(acceptsDiscovery(synthetic, {data_mode:'SYNTHETIC'}), true);
+const vercelShared = {...base, environment_mode:'vercel', read_only:true,
+  local_live_demo:false, vercel_shared_live:true};
+assert.equal(isVercelSharedLive(vercelShared), true);
+assert.equal(canStartFetch(vercelShared), true);
+assert.equal(acceptsDiscovery(vercelShared, {data_mode:'LIVE'}), true);
+assert.equal(acceptsDiscovery(vercelShared, {data_mode:'MIXED'}), true);
+assert.equal(acceptsDiscovery(vercelShared, {data_mode:'SYNTHETIC'}), false);
+for (const changes of [{vercel_shared_live:false}, {read_only:false},
+  {environment_mode:'local'}, {fetch_enabled:false}]) {
+  assert.equal(canStartFetch({...vercelShared, ...changes}), false);
+}
+assert.equal(isVercelSharedLive({...vercelShared, data_mode:'SYNTHETIC'}), false);
 """
         subprocess.run(["node", "--input-type=module", "-e", script],
                        cwd=ROOT, check=True, timeout=10, capture_output=True, text=True)
