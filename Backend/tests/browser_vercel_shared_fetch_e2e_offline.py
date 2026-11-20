@@ -49,6 +49,7 @@ def main():
     capabilities = {
         "contract_version": "1.0",
         "environment_mode": "vercel",
+        "deployment_environment": "production",
         "read_only": False,
         "authentication_required": False,
         "public_fetch_enabled": True,
@@ -79,13 +80,20 @@ const fetchId = '__FETCH_ID__';
 const discovery = __DISCOVERY__;
 const capabilities = __CAPABILITIES__;
 const source = __SOURCE__;
+const dataset = {
+  status: 'PARTIAL', sources: [source.source_id], fetched_at: '2026-11-19T12:21:00Z',
+  snapshot_retained_keyword_count: 1, retained_keyword_count: 1,
+  assigned_keyword_count: 0, eligible_keyword_count: 1, unassigned_keyword_count: 1,
+  provider_record_count: 1, source_manifest: [source],
+};
 window.fetchRequests = [];
 window.statusReads = 0;
 window.collectionsReads = 0;
+window.collectionRecoveryPosts = Number(localStorage.getItem('collectionRecoveryPosts') || 0);
 window.fetch = (path, options = {}) => {
   const value = String(path).split('?')[0];
   const method = options.method || 'GET';
-  window.fetchRequests.push({path: value, method});
+  window.fetchRequests.push({path: value, method, headers: options.headers || {}, body: options.body || null});
   let body = {};
   if (value === '/api/health') body = {status: 'ok'};
   else if (value === '/api/v1/capabilities') body = capabilities;
@@ -93,17 +101,45 @@ window.fetch = (path, options = {}) => {
     body = {fetch_id: fetchId, status: 'QUEUED', data_mode: 'LIVE'};
   } else if (value === '/api/v1/fetches/' + fetchId) {
     window.statusReads += 1;
-    if (window.statusReads === 1) {
-      return Promise.resolve(new Response(JSON.stringify({detail: {code: 'STATUS_POLL_LIMIT'}}),
-        {status: 429, headers: {'content-type': 'application/json'}}));
+    if (window.statusReads <= 3) {
+      return Promise.resolve(new Response(JSON.stringify({detail: {code: 'TEMPORARY_STATUS_FAILURE'}}),
+        {status: 503, headers: {'content-type': 'application/json'}}));
     }
     body = {fetch_id: fetchId, status: 'COMPLETED', terminal: true,
-      data_mode: 'LIVE', discovery, sources: [source],
+      data_mode: 'LIVE', discovery, sources: [
+        source,
+        {source_id: 'google_web_serp', status: 'SUCCESS'},
+        {source_id: 'bing_web_serp', status: 'UNAVAILABLE'},
+        {source_id: 'youtube_video_search', status: 'SUCCESS'},
+      ],
       finished_at: '2026-11-19T12:21:00Z'};
+  } else if (value === '/api/v1/runs/history') {
+    body = {items: []};
+  } else if (value === '/api/v1/datasets/latest') {
+    body = {item: window.collectionRecoveryPosts ? dataset : null};
+  } else if (value === '/api/v1/analytics/overview') {
+    body = {keyword_totals: {unique: 1, classified: 0, unclassified: 1}, active_sources: [],
+      source_volume: [], algorithm_distribution: []};
+  } else if (value === '/api/v1/algorithms') {
+    body = {algorithms: []};
+  } else if (value === '/api/v1/collections/jobs/' + fetchId) {
+    body = {status: window.collectionRecoveryPosts ? 'COMPLETED' : 'NOT_PROCESSED',
+      eligible: 1, processed: 1, assigned: 0, created_collections: 0,
+      cached_embeddings: 0, unassigned: 1, skipped: 0};
+  } else if (value === '/api/v1/fetches/' + fetchId + '/collections' && method === 'POST') {
+    window.collectionRecoveryPosts += 1;
+    localStorage.setItem('collectionRecoveryPosts', String(window.collectionRecoveryPosts));
+    body = {status: 'COMPLETED'};
   } else if (value === '/api/v1/collections') {
     window.collectionsReads += 1;
-    return Promise.resolve(new Response(JSON.stringify({detail: {code: 'STORAGE_NOT_READY'}}),
-      {status: 503, headers: {'content-type': 'application/json'}}));
+    body = {items: [], suggestions: [], mode: 'AUTO_CREATE', summary: {
+      eligible_keywords: 1, assigned_keywords: 0, unclassified_keywords: 1,
+      excluded_keywords: 0, classified_keywords: 0, ambiguous_keywords: 0,
+      unknown_keywords: 1, ineligible_topic_keywords: 0, ai_assigned_keywords: 0,
+      manually_managed_keywords: 0, ai_created_collections: 0, sources: [source.source_id],
+    }};
+  } else if (value.startsWith('/api/v1/datasets/latest/keywords')) {
+    body = {items: [], total: 1, next_offset: null};
   }
   return Promise.resolve(new Response(JSON.stringify(body),
     {status: 200, headers: {'content-type': 'application/json', 'cache-control': 'no-store'}}));
@@ -119,32 +155,54 @@ window.fetch = (path, options = {}) => {
   const errors = [];
   const check = (value, message) => { if (!value) errors.push(message); };
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  if (sessionStorage.getItem('vercel-shared-fetch-reload-verified') === '1') {
+    const reloadDeadline = Date.now() + 4000;
+    while (Date.now() < reloadDeadline
+      && document.querySelector('#keyword-count').textContent.trim() !== '1') await wait(100);
+    check(document.querySelector('#keyword-count').textContent.trim() === '1',
+      'saved dataset remains visible after a full page reload');
+    check(window.collectionRecoveryPosts === 1,
+      'reload reads the existing snapshot without replaying recovery');
+    check(!window.fetchRequests.some((request) => request.method === 'POST'),
+      'reload does not start another Fetch or Collections recovery POST');
+    document.body.setAttribute('data-vercel-shared-fetch-result',
+      errors.length ? 'FAIL: ' + errors.join('; ') : 'PASS');
+    return;
+  }
   await wait(200);
   const button = document.querySelector('#open-fetch');
   check(Boolean(button && !button.disabled), 'Vercel Shared LIVE Fetch is enabled');
-  const initialCollectionsReads = window.collectionsReads;
   button?.click();
-  await wait(250);
-  check(window.statusReads === 1, 'first status check reaches the bounded polling limit');
-  check(Boolean(button && !button.disabled && button.textContent.includes('Kiểm tra trạng thái')),
-    'bounded polling exposes a Check status action');
-  button?.click();
-  await wait(400);
-  check(window.statusReads === 2, 'Check status resumes the existing Fetch');
-  check(window.fetchRequests.filter((request) =>
-    request.path === '/api/v1/fetches' && request.method === 'POST').length === 1,
-  'Check status does not submit a duplicate Fetch');
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline && window.statusReads < 4) await wait(100);
+  while (Date.now() < deadline && document.querySelector('#keyword-count').textContent.trim() !== '1') await wait(100);
+  check(window.statusReads === 4, 'Fetch automatically resumes after transient status failures');
+  const submissions = window.fetchRequests.filter((request) =>
+    request.path === '/api/v1/fetches' && request.method === 'POST');
+  check(submissions.length === 2, 'same durable Fetch is safely reattached');
+  check(submissions.length === 2
+    && submissions[0].headers['Idempotency-Key'] === submissions[1].headers['Idempotency-Key'],
+  'automatic continuation reuses the idempotency key');
+  check(window.collectionRecoveryPosts === 1, 'saved source checkpoints are persisted without provider calls');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
-  check(window.collectionsReads === initialCollectionsReads,
-    'Fetch completion does not open SQLite Collections');
-  check(document.querySelector('#rows').textContent.includes('Shared cache result'),
-    'cached LIVE result is visible in keyword rows');
+  check(window.collectionsReads >= 1, 'persisted Collections snapshot is readable');
+  check(document.querySelector('#keyword-count').textContent.trim() === '1',
+    'recovered cached result remains visible in the dashboard');
   check(document.querySelector('#demo-discovery-list').textContent.includes('Shared cache result'),
     'cached LIVE discovery evidence is visible');
   check(!document.querySelector('[data-view="overview"]').hidden,
     'Overview remains the active page');
-  document.body.setAttribute('data-vercel-shared-fetch-result',
-    errors.length ? 'FAIL: ' + errors.join('; ') : 'PASS');
+  if (errors.length) {
+    document.body.setAttribute('data-vercel-shared-fetch-result',
+      'FAIL: ' + errors.join('; ') + ' | debug: ' + JSON.stringify({
+      statusReads: window.statusReads, collectionRecoveryPosts: window.collectionRecoveryPosts,
+      buttonDisabled: button?.disabled,
+      requests: window.fetchRequests.map((request) => [request.method, request.path]),
+      }));
+    return;
+  }
+  sessionStorage.setItem('vercel-shared-fetch-reload-verified', '1');
+  window.location.reload();
 })();
 </script>
 """
@@ -166,7 +224,7 @@ window.fetch = (path, options = {}) => {
             "--no-first-run",
             f"--user-data-dir={directory}/profile",
             "--window-size=1280,900",
-            "--virtual-time-budget=5000",
+            "--virtual-time-budget=15000",
             "--dump-dom",
             page.as_uri(),
         ]
@@ -179,7 +237,7 @@ window.fetch = (path, options = {}) => {
             timeout=30,
         )
         if result.returncode or 'data-vercel-shared-fetch-result="PASS"' not in result.stdout:
-            marker = result.stdout[result.stdout.find("data-vercel-shared-fetch-result=") - 200:][:900]
+            marker = result.stdout[result.stdout.find("data-vercel-shared-fetch-result=") - 200:][:2400]
             raise SystemExit(
                 f"Vercel Shared LIVE Fetch Chrome E2E failed: {marker}; "
                 f"browser stderr={result.stderr[-700:]}"

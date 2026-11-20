@@ -317,6 +317,55 @@ test('retries transient status failures through one bounded same-key continuatio
   }
 });
 
+test('automatically continues through multiple transient status outages without another provider submission', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let statusFailures = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (statusFailures < 15) {
+      statusFailures += 1;
+      return new Response(JSON.stringify({ detail: { code: 'TEMPORARY_STATUS_FAILURE' } }), {
+        status: 503, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ status: 'PARTIAL', terminal: true }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => ['google_web_serp'],
+    });
+    await controller.activate();
+
+    const posts = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(posts.length, 6);
+    assert.equal(new Set(posts.map((request) => request.headers['Idempotency-Key'])).size, 1);
+    assert.equal(new Set(posts.map((request) => request.body)).size, 1);
+    assert.equal(statusFailures, 15);
+    assert.equal(states.filter((kind) => kind === 'auto-resuming').length, 5);
+    assert.equal(states.at(-1), 'partial');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test('automatically reattaches after a durable worker lease expires', async () => {
   const previousFetch = globalThis.fetch;
   const previousWindow = globalThis.window;

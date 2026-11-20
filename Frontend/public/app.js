@@ -66,7 +66,8 @@ const state = {
 let schedulerListSequence = 0;
 let schedulerEditId = null;
 let analyticsSequence = 0;
-let collectionRecoveryAttemptedRunId = null;
+const collectionRecoveryInFlight = new Map();
+const collectionRecoverySucceeded = new Set();
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
@@ -1349,6 +1350,10 @@ function retryCapabilityCheck() {
 function handleFetchState(presentation) {
     state.fetchPresentation = presentation;
     renderFetchPresentation();
+    if (['retryable', 'poll-error', 'poll-limit'].includes(presentation.kind)
+        && isVercelSharedLive(state.capabilities) && !state.persistedDatasetAvailable) {
+      void recoverLatestVercelCollectionSnapshot(presentation.fetch || null);
+    }
     if (presentation.kind === 'policy-not-approved'
         || presentation.kind === 'policy-consent-required') {
       void loadPublicCapabilities();
@@ -1365,6 +1370,24 @@ function handleFetchTerminal(runId, fetchStatus) {
       state.publicFetchSources = [];
       state.publicFetchFinishedAt = null;
       loadRun(runId);
+    } else if (isVercelSharedLive(state.capabilities)) {
+      const hasDiscovery = acceptsDiscovery(state.capabilities, fetchStatus?.discovery);
+      refreshCollectionJob(fetchStatus?.fetch_id);
+      state.publicFetchDiscovery = hasDiscovery ? fetchStatus.discovery : null;
+      state.publicFetchSources = Array.isArray(fetchStatus?.sources) ? fetchStatus.sources : [];
+      state.publicFetchFinishedAt = typeof fetchStatus?.finished_at === 'string'
+        ? fetchStatus.finished_at : null;
+      state.runId = null;
+      state.dataRunId = null;
+      state.run = null;
+      state.offset = 0;
+      showView('overview');
+      window.location.hash = 'overview';
+      renderPublicFetchDiscovery();
+      void loadLatestDataset().then((item) => {
+        if (item) loadKeywords();
+        else void recoverLatestVercelCollectionSnapshot(fetchStatus);
+      });
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
       refreshCollectionJob(fetchStatus.fetch_id);
       const localLive = isLocalLiveDemo(state.capabilities);
@@ -1863,54 +1886,74 @@ async function loadLatestDataset() {
   }
 }
 
-async function recoverLatestVercelCollectionSnapshot() {
+async function recoverLatestVercelCollectionSnapshot(terminalFetch = null) {
   if (!isVercelSharedLive(state.capabilities)
       || state.capabilities.deployment_environment !== 'production'
       || state.persistedDatasetAvailable) return;
   try {
-    const history = await getJson('/api/v1/runs/history?limit=1&cursor=', {
-      locale: getLocale(),
-    });
-    const latest = history.items?.[0];
     const terminalStatuses = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED']);
-    if (!latest?.fetch_id || latest.run_type !== 'FETCH'
-        || latest.data_mode !== 'LIVE'
-        || !terminalStatuses.has(latest.outcome_status || latest.status)
-        || collectionRecoveryAttemptedRunId === latest.fetch_id) return;
-    collectionRecoveryAttemptedRunId = latest.fetch_id;
+    let latest = terminalFetch;
+    if (!latest?.fetch_id) {
+      const history = await getJson('/api/v1/runs/history?limit=1&cursor=', {
+        locale: getLocale(),
+      });
+      latest = history.items?.[0];
+      if (latest?.run_type !== 'FETCH') return false;
+    }
+    const fetchId = latest?.fetch_id;
+    const status = latest?.outcome_status || latest?.status;
+    if (!fetchId || latest.data_mode !== 'LIVE' || !terminalStatuses.has(status)) return false;
+    if (collectionRecoverySucceeded.has(fetchId)) return true;
+    const inFlight = collectionRecoveryInFlight.get(fetchId);
+    if (inFlight) return await inFlight;
 
-    const job = await getJson(
-      `/api/v1/collections/jobs/${encodeURIComponent(latest.fetch_id)}`,
-      { locale: getLocale() },
-    );
-    if (job.status !== 'NOT_PROCESSED') return;
-
-    // This endpoint only replays the already retained LIVE source checkpoints.
-    // It does not admit a Fetch, reserve quota, or contact a provider.
-    let recovered = false;
-    for (let attempt = 0; attempt < 3 && !recovered; attempt += 1) {
-      try {
-        await requestJson(
-          `/api/v1/fetches/${encodeURIComponent(latest.fetch_id)}/collections`,
-          { method: 'POST', locale: getLocale() },
-        );
-        recovered = true;
-      } catch (error) {
-        const transient = error instanceof ApiError
-          && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status)
-            || error.status === 409
-              && (error.body?.detail?.code || error.body?.code)
-                === 'COLLECTIONS_CONCURRENT_UPDATE');
-        if (!transient || attempt === 2) throw error;
-        await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1000));
+    const recovery = (async () => {
+      const job = await getJson(
+        `/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`,
+        { locale: getLocale() },
+      );
+      if (job.status === 'NOT_PROCESSED') {
+        // This endpoint only replays the already retained LIVE source checkpoints.
+        // It does not admit a Fetch, reserve quota, or contact a provider.
+        let recovered = false;
+        for (let attempt = 0; attempt < 3 && !recovered; attempt += 1) {
+          try {
+            await requestJson(
+              `/api/v1/fetches/${encodeURIComponent(fetchId)}/collections`,
+              { method: 'POST', locale: getLocale() },
+            );
+            recovered = true;
+          } catch (error) {
+            const transient = error instanceof ApiError
+              && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status)
+                || error.status === 409
+                  && (error.body?.detail?.code || error.body?.code)
+                    === 'COLLECTIONS_CONCURRENT_UPDATE');
+            if (!transient || attempt === 2) throw error;
+            await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1000));
+          }
+        }
+      }
+      await loadLatestDataset();
+      await loadAnalytics();
+      if (state.persistedDatasetAvailable) {
+        collectionRecoverySucceeded.add(fetchId);
+        loadKeywords();
+        return true;
+      }
+      return false;
+    })();
+    collectionRecoveryInFlight.set(fetchId, recovery);
+    try {
+      return await recovery;
+    } finally {
+      if (collectionRecoveryInFlight.get(fetchId) === recovery) {
+        collectionRecoveryInFlight.delete(fetchId);
       }
     }
-    await loadLatestDataset();
-    await loadAnalytics();
-    if (state.persistedDatasetAvailable) loadKeywords();
   } catch {
-    // The next page load can retry; never convert a failed persistence attempt
-    // into a new source Fetch.
+    // A later bounded continuation or page load can retry without a new source Fetch.
+    return false;
   }
 }
 

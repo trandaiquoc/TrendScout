@@ -5,7 +5,7 @@ const POLL_INTERVAL_MS = 3000;
 const MAX_POLLS_PER_ATTEMPT = 110;
 const MAX_STATUS_POLLS_PER_FETCH = 110;
 const MAX_TRANSIENT_STATUS_RETRIES = 3;
-const MAX_AUTOMATIC_CONTINUATIONS = 3;
+const MAX_AUTOMATIC_CONTINUATIONS = 8;
 const UNCERTAIN_SUBMISSION_RETRY_MS = 2000;
 const STALLED_QUEUE_DISPATCH_MS = 6000;
 const WIKIMEDIA_SOURCE_ID = 'wikimedia_pageviews_top_per_country';
@@ -271,6 +271,7 @@ export class PublicFetchController {
           if (this.key && this.requestBody
               && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
             this.automaticContinuations += 1;
+            this.statusErrorRetries = 0;
             this.lastAutomaticDispatchAt = Date.now();
             this.resumeNeeded = true;
             this.emit({ kind: 'auto-resuming', busy: true, error, fetch: status });
