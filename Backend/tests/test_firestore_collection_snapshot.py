@@ -1,6 +1,7 @@
 """Collections Firestore snapshots are bounded, versioned and offline-testable."""
 
 import copy
+import random
 import sqlite3
 import tempfile
 import unittest
@@ -150,6 +151,90 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         self.assertEqual(error.cause_class, "RuntimeError")
         self.assertIsNone(error.confirmation_exception_class)
         self.assertNotIn("credential-value-must-not-escape", str(error))
+
+    def test_oversized_snapshot_compacts_freelist_without_mutating_working_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT)")
+                db.execute("CREATE TABLE obsolete_rows (payload BLOB NOT NULL)")
+                db.execute("INSERT INTO collections VALUES ('c1', 'Demo')")
+                db.executemany("INSERT INTO obsolete_rows VALUES(?)",
+                               [(b"x" * 8192,) for _ in range(64)])
+                db.commit()
+                db.execute("DELETE FROM obsolete_rows")
+                db.commit()
+            original_size = path.stat().st_size
+            self.assertGreater(original_size, 64 * 1024)
+
+            with patch("app.collections.firestore_snapshot._MAX_DATABASE_BYTES", 64 * 1024):
+                snapshot = self._snapshot(path)
+                snapshot.load()
+                self.assertEqual(snapshot.save(), 1)
+
+            self.assertEqual(path.stat().st_size, original_size)
+            restored_path = Path(directory) / "restored.sqlite"
+            restored = self._snapshot(restored_path)
+            restored.load()
+            with closing(sqlite3.connect(restored_path)) as db:
+                self.assertEqual(db.execute("SELECT name FROM collections WHERE id='c1'").fetchone(),
+                                 ("Demo",))
+                self.assertEqual(db.execute("SELECT count(*) FROM obsolete_rows").fetchone()[0], 0)
+
+    def test_oversized_snapshot_drops_only_recomputable_embedding_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT)")
+                db.execute("CREATE TABLE cache (fingerprint TEXT PRIMARY KEY, vector BLOB NOT NULL)")
+                db.execute("INSERT INTO collections VALUES ('c1', 'Demo')")
+                db.executemany("INSERT INTO cache VALUES(?,?)",
+                               [(str(index), bytes([index]) * 8192) for index in range(32)])
+                db.commit()
+            original_size = path.stat().st_size
+            self.assertGreater(original_size, 64 * 1024)
+
+            with patch("app.collections.firestore_snapshot._MAX_DATABASE_BYTES", 64 * 1024):
+                snapshot = self._snapshot(path)
+                snapshot.load()
+                self.assertEqual(snapshot.save(), 1)
+
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 32)
+            restored_path = Path(directory) / "restored.sqlite"
+            restored = self._snapshot(restored_path)
+            restored.load()
+            with closing(sqlite3.connect(restored_path)) as db:
+                self.assertEqual(db.execute("SELECT name FROM collections WHERE id='c1'").fetchone(),
+                                 ("Demo",))
+                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 0)
+
+    def test_compressed_size_fallback_drops_only_recomputable_embedding_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT)")
+                db.execute("CREATE TABLE cache (fingerprint TEXT PRIMARY KEY, vector BLOB NOT NULL)")
+                db.execute("INSERT INTO collections VALUES ('c1', 'Demo')")
+                db.execute("INSERT INTO cache VALUES ('cached',?)",
+                           (random.Random(90210).randbytes(96_000),))
+                db.commit()
+            self.assertLess(path.stat().st_size, 20_000_000)
+
+            with patch("app.collections.firestore_snapshot._MAX_COMPRESSED_BYTES", 64 * 1024):
+                snapshot = self._snapshot(path)
+                snapshot.load()
+                self.assertEqual(snapshot.save(), 1)
+
+            with closing(sqlite3.connect(path)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 1)
+            restored_path = Path(directory) / "restored.sqlite"
+            restored = self._snapshot(restored_path)
+            restored.load()
+            with closing(sqlite3.connect(restored_path)) as db:
+                self.assertEqual(db.execute("SELECT name FROM collections WHERE id='c1'").fetchone(),
+                                 ("Demo",))
+                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

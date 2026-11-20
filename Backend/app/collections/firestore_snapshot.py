@@ -174,6 +174,22 @@ class FirestoreCollectionSnapshot:
         finally:
             database.close()
 
+    @staticmethod
+    def _compact_backup(path: Path, *, discard_embedding_cache: bool = False) -> None:
+        """Compact a temporary snapshot, optionally dropping recomputable vectors."""
+        database = sqlite3.connect(str(path), timeout=10)
+        try:
+            if discard_embedding_cache:
+                cache_table = database.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache'"
+                ).fetchone()
+                if cache_table:
+                    database.execute("DELETE FROM cache")
+                    database.commit()
+            database.execute("VACUUM")
+        finally:
+            database.close()
+
     def save(self) -> int:
         """Publish a compressed SQLite image only if its base version is current."""
         if not self._loaded or self.path.is_symlink() or not self.path.is_file():
@@ -197,12 +213,31 @@ class FirestoreCollectionSnapshot:
                 source.close()
             raw = backup_path.read_bytes()
             if len(raw) > _MAX_DATABASE_BYTES:
+                self._compact_backup(backup_path)
+                raw = backup_path.read_bytes()
+            if len(raw) > _MAX_DATABASE_BYTES:
+                # Embedding vectors are a performance cache and can be rebuilt.
+                # Prune them only from this temporary copy when required to keep
+                # the shared, bounded snapshot within its storage contract.
+                self._compact_backup(backup_path, discard_embedding_cache=True)
+                raw = backup_path.read_bytes()
+            if len(raw) > _MAX_DATABASE_BYTES:
                 raise CollectionSnapshotUnavailable(
                     "Collections database exceeds its storage limit",
                     failure_reason="DATABASE_TOO_LARGE",
                 )
             content_digest = self._content_digest(backup_path)
             compressed = gzip.compress(raw, mtime=0)
+            if len(compressed) > _MAX_COMPRESSED_BYTES:
+                self._compact_backup(backup_path, discard_embedding_cache=True)
+                raw = backup_path.read_bytes()
+                if len(raw) > _MAX_DATABASE_BYTES:
+                    raise CollectionSnapshotUnavailable(
+                        "Collections database exceeds its storage limit",
+                        failure_reason="DATABASE_TOO_LARGE",
+                    )
+                content_digest = self._content_digest(backup_path)
+                compressed = gzip.compress(raw, mtime=0)
         except (OSError, sqlite3.Error) as error:
             raise CollectionSnapshotUnavailable(
                 "Collections database could not be snapshotted",
