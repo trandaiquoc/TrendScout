@@ -172,6 +172,48 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["state"], "COMPLETED")
         self.assertEqual(seen, list(order))
 
+    async def test_source_admission_failure_is_saved_and_later_sources_finish(self):
+        job_id = self.admit()
+        order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        seen = []
+
+        def handler(context):
+            seen.append(context.source_id)
+            if context.source_id == WIKIMEDIA_SOURCE_ID:
+                raise AdmissionDenied("RESULT_PERSISTENCE_FAILED")
+            return self.source_result(1)
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={source: handler for source in SOURCES},
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+            source_order=order,
+        )
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+
+        outcome = await worker.run_once("worker-source-failure")
+        status = service.status(job_id)
+
+        self.assertEqual(seen, list(order))
+        self.assertEqual(outcome["state"], "PARTIAL")
+        self.assertEqual(outcome["sources"][WIKIMEDIA_SOURCE_ID]["status"], "FAILED")
+        self.assertEqual(
+            outcome["sources"][WIKIMEDIA_SOURCE_ID]["error_code"],
+            "RESULT_PERSISTENCE_FAILED",
+        )
+        self.assertTrue(status["terminal"])
+        self.assertEqual(status["progress"]["completed_sources"], 4)
+        self.assertEqual(
+            next(source for source in status["sources"]
+                 if source["source_id"] == YOUTUBE_SOURCE_ID)["status"],
+            "SUCCESS",
+        )
+
     async def test_sanitized_transport_diagnostic_survives_result_validation_and_status(self):
         job_id = self.admit()
         diagnostic = {

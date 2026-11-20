@@ -155,8 +155,18 @@ class DistributedFetchWorker:
                 if inspect.isawaitable(result):
                     result = await result
                 result = self._validate_result(result, expected_mode=grant.data_mode)
-            except AdmissionDenied:
-                raise
+            except AdmissionDenied as exc:
+                # A source-level admission/persistence failure must not strand
+                # the whole durable Fetch before later independent sources run.
+                # Lease loss is different: this worker no longer owns the job
+                # and must not write a terminal result under a stale fence.
+                if exc.code == "LEASE_LOST":
+                    raise
+                code = exc.code if isinstance(exc.code, str) and _SAFE_CODE.fullmatch(
+                    exc.code
+                ) else "SOURCE_EXECUTION_FAILED"
+                result = {"status": "FAILED", "data_mode": grant.data_mode,
+                          "records": [], "record_count": 0, "error_code": code}
             except Exception as exc:
                 code = getattr(exc, "code", "SOURCE_EXECUTION_FAILED")
                 if not isinstance(code, str) or not _SAFE_CODE.fullmatch(code):
