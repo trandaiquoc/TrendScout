@@ -324,9 +324,10 @@ class VercelSharedLiveMiddleware:
                 scope.get("method", ""), scope.get("path", "")
             )
             if is_fetch_action:
-                # Starlette sends the HTTP body before awaiting BackgroundTasks.
-                # Keep this invocation alive for its bounded source slice and,
-                # on the terminal slice, Collections and snapshot persistence.
+                # Keep replay/continuation invocations alive for their bounded
+                # source slice and, on the terminal slice, Collections and
+                # snapshot persistence. The first Fetch POST deliberately has
+                # no BackgroundTask so its durable job ID can return promptly.
                 messages = []
 
                 async def capture_fetch_response(message):

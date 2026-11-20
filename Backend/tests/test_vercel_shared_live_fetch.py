@@ -9,9 +9,9 @@ from unittest.mock import Mock
 
 import httpx
 
-from app.jobs.public_admission import AdmissionDenied
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
+from app.jobs.public_admission import AdmissionDenied
 from app.main import _is_vercel_shared_live_request, _persists_vercel_collections, create_app
 from app.settings import Settings
 from app.sources.catalog import (
@@ -183,7 +183,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         )
         return application, events, client, facade, client_factory
 
-    async def test_enabled_wikimedia_fetch_keeps_worker_and_firestore_alive(self):
+    async def test_first_vercel_fetch_post_returns_before_running_source_slice(self):
         app, events, client, facade, client_factory = self.app(enabled=True)
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -203,11 +203,8 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(response.json()["sources"], [WIKIMEDIA_SOURCE_ID])
         self.assertEqual(facade.submitted_sources, [WIKIMEDIA_SOURCE_ID])
-        self.assertEqual(events, [
-            "context_entered", "worker_finished", "snapshot_saved",
-            "context_exited", "client_closed",
-        ])
-        self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
+        self.assertEqual(events, ["context_entered", "context_exited", "client_closed"])
+        self.assertEqual(facade.slice_calls, [])
         client_factory.assert_called_once_with("synthetic-test-token")
         self.assertTrue(client.closed)
 
@@ -239,31 +236,35 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(set(response.json()["sources"]), set(sources))
         self.assertEqual(facade.submitted_sources, sorted(sources))
-        self.assertIn("worker_finished", events)
+        self.assertNotIn("worker_finished", events)
+        self.assertEqual(facade.slice_calls, [])
 
     async def test_nonterminal_source_slice_skips_collection_snapshot_save(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
+        _client_factory.side_effect = lambda _token: _Client(events)
         facade.slice_state = "QUEUED"
+        headers = {
+            "Origin": "https://trend-scout.example",
+            "x-vercel-oidc-token": "synthetic-test-token",
+            "Idempotency-Key": "vercel-source-slice-test-0001",
+        }
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app),
                 base_url="https://trend-scout.example",
             ) as browser:
-                response = await browser.post(
-                    "/api/v1/fetches",
-                    headers={
-                        "Origin": "https://trend-scout.example",
-                        "x-vercel-oidc-token": "synthetic-test-token",
-                        "Idempotency-Key": "vercel-source-slice-test-0001",
-                    },
-                    json={},
-                )
+                accepted = await browser.post("/api/v1/fetches", headers=headers, json={})
+                response = await browser.post("/api/v1/fetches", headers=headers, json={})
 
+        self.assertEqual(accepted.status_code, 202, accepted.text)
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
         self.assertNotIn("collections_processed", events)
         self.assertNotIn("snapshot_saved", events)
-        self.assertLess(events.index("worker_finished"), events.index("context_exited"))
+        self.assertEqual(events.count("worker_finished"), 1)
+        last_context_exit = max(index for index, event in enumerate(events)
+                                if event == "context_exited")
+        self.assertLess(events.index("worker_finished"), last_context_exit)
 
     async def test_idempotent_recovery_post_dispatches_a_new_vercel_worker(self):
         app, events, _client, facade, client_factory = self.app(enabled=True)
@@ -294,7 +295,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.json()["fetch_id"], resumed.json()["fetch_id"])
         self.assertEqual(resumed.headers["idempotent-replay"], "true")
         self.assertEqual(facade.submitted_keys, [headers["Idempotency-Key"]] * 2)
-        self.assertEqual(events.count("worker_finished"), 2)
+        self.assertEqual(events.count("worker_finished"), 1)
         self.assertEqual(events.count("context_entered"), 2)
         self.assertEqual(events.count("context_exited"), 2)
 
@@ -679,7 +680,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(response.json()["shared_state_policy_sync"], "RECONCILED")
         self.assertLess(events.index("policy_reconciled"), events.index("fetch_submitted"))
-        self.assertLess(events.index("fetch_submitted"), events.index("worker_finished"))
+        self.assertNotIn("worker_finished", events)
 
     async def test_recognized_policy_mismatch_is_actionable_in_capabilities(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)

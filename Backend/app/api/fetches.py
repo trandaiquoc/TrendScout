@@ -371,23 +371,43 @@ async def create_fetch(
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
             raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
-        # Vercel's request-scoped middleware keeps Firestore resources alive
-        # through this worker; the durable queue remains authoritative on retry.
+        # Do not attach a worker to the first Vercel POST. FastAPI runs
+        # BackgroundTasks before the ASGI app returns, and the Vercel shared
+        # middleware buffers that response while it keeps Firestore alive.
+        # The browser must receive the durable job ID first; its same-key
+        # continuation POST then runs exactly one bounded source slice.
+        vercel_shared_live = (
+            getattr(distributed, "firestore_shared_live", False)
+            and request.app.state.settings.environment_profile == "vercel"
+        )
         if accepted["status"] in {"QUEUED", "RUNNING"}:
-            background_tasks.add_task(
-                _run_fetch_and_collections, request, distributed, accepted["job_id"],
-                f"api-{secrets.token_hex(12)}"
-            )
+            if vercel_shared_live:
+                if accepted.get("result") == "REPLAY":
+                    await _run_fetch_and_collections(
+                        request, distributed, accepted["job_id"],
+                        f"api-{secrets.token_hex(12)}",
+                    )
+            else:
+                background_tasks.add_task(
+                    _run_fetch_and_collections, request, distributed, accepted["job_id"],
+                    f"api-{secrets.token_hex(12)}"
+                )
         elif (accepted.get("result") == "REPLAY"
               and accepted["status"] in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED", "EXPIRED"}
               and getattr(distributed, "firestore_shared_live", False)):
             # A completed source job can still need Collections persistence
             # after a function was interrupted. Re-read its fenced checkpoints;
             # never start another source worker for a terminal Fetch.
-            background_tasks.add_task(
-                _run_fetch_and_collections, request, distributed, accepted["job_id"],
-                f"api-{secrets.token_hex(12)}", run_worker=False,
-            )
+            if vercel_shared_live:
+                await _run_fetch_and_collections(
+                    request, distributed, accepted["job_id"],
+                    f"api-{secrets.token_hex(12)}", run_worker=False,
+                )
+            else:
+                background_tasks.add_task(
+                    _run_fetch_and_collections, request, distributed, accepted["job_id"],
+                    f"api-{secrets.token_hex(12)}", run_worker=False,
+                )
         fetch_id = accepted["job_id"]
         response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
         return {
