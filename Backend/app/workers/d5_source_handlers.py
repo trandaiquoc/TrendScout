@@ -203,7 +203,7 @@ class D5SourceHandlers:
         setattr(unavailable, "__trendscout_data_mode__", self.unavailable_mode)
         return unavailable
 
-    def read_cached_source_result(self, source_id):
+    def read_cached_source_result(self, source_id, *, observation_date=None):
         """Replay a retained source cache entry without starting provider work."""
         if (source_id not in _ALL_SOURCES or self.shared_cache is None
                 or self.resolve_cache_grant is None):
@@ -213,30 +213,57 @@ class D5SourceHandlers:
             grant = self.resolve_cache_grant(source_id, now)
             if not isinstance(grant, CacheGrant) or grant.allowed is not True:
                 return None
-            cached = self.shared_cache.get(
-                self._cache_scope(source_id, grant), grant=grant, now=now,
-            )
         except Exception:
             return None
-        cache_status = cached.get("status") if isinstance(cached, dict) else None
-        if cache_status not in {"CACHED", "STALE"}:
-            return None
-        payload = cached.get("payload")
-        if (not isinstance(payload, dict)
-                or payload.get("data_mode") != cached.get("origin")
-                or payload.get("data_mode") != "LIVE"
-                or payload.get("status") not in {"SUCCESS", "PARTIAL"}
-                or not isinstance(payload.get("records"), list)
-                or type(payload.get("record_count")) is not int
-                or payload["record_count"] != len(payload["records"])):
-            return None
-        delivery_state = "CACHED" if cache_status == "CACHED" else "STALE_CACHE"
-        return {
-            "source_id": source_id,
-            **self._cache_delivery(
-                payload, delivery_state, now, cache_fetched_at=cached.get("fetched_at"),
-            ),
-        }
+        query_scopes = [None]
+        if source_id == WIKIMEDIA_SOURCE_ID:
+            if observation_date is not None:
+                try:
+                    selected_date = date.fromisoformat(observation_date)
+                except (TypeError, ValueError):
+                    return None
+                query_scopes = [f"{self.plan.fingerprint}:{selected_date.isoformat()}"]
+            else:
+                # Wikimedia cache keys include the observation date. Try only
+                # the same bounded date window used by the source adapter.
+                latest_date = self.observation_date()
+                query_scopes = [
+                    f"{self.plan.fingerprint}:{latest_date - timedelta(days=offset)}"
+                    for offset in range(self.max_wikimedia_date_attempts)
+                ]
+
+        for query_scope in query_scopes:
+            try:
+                cached = self.shared_cache.get(
+                    self._cache_scope(source_id, grant, query_scope=query_scope),
+                    grant=grant, now=now,
+                )
+            except Exception:
+                continue
+            cache_status = cached.get("status") if isinstance(cached, dict) else None
+            if cache_status not in {"CACHED", "STALE"}:
+                continue
+            payload = cached.get("payload")
+            if (not isinstance(payload, dict)
+                    or payload.get("data_mode") != cached.get("origin")
+                    or payload.get("data_mode") != "LIVE"
+                    or payload.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or not isinstance(payload.get("records"), list)
+                    or type(payload.get("record_count")) is not int
+                    or payload["record_count"] != len(payload["records"])):
+                continue
+            if source_id == WIKIMEDIA_SOURCE_ID and observation_date is not None:
+                cached_date = (payload.get("coverage") or {}).get("observation_date")
+                if cached_date != observation_date:
+                    continue
+            delivery_state = "CACHED" if cache_status == "CACHED" else "STALE_CACHE"
+            return {
+                "source_id": source_id,
+                **self._cache_delivery(
+                    payload, delivery_state, now, cache_fetched_at=cached.get("fetched_at"),
+                ),
+            }
+        return None
 
     def _query_handler(self, source_id):
         collector = self.query_collectors[source_id]
