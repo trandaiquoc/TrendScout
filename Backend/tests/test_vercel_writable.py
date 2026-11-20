@@ -99,7 +99,7 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(events.index("snapshot_saved"), events.index("response_started"))
         self.assertEqual(events[-2:], ["context_exited", "client_closed"])
 
-    async def test_fetch_keeps_202_response_early_and_saves_after_background_work(self):
+    async def test_fetch_response_waits_for_background_work_and_snapshot_commit(self):
         settings = self.settings()
         events = []
         client = _Client(events)
@@ -141,12 +141,70 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
         async def send(message):
             if message["type"] == "http.response.start":
                 events.append("client_received_202")
+            sent.append(message)
 
+        sent = []
         await middleware(scope, receive, send)
-        self.assertLess(events.index("client_received_202"),
-                        events.index("background_finished"))
         self.assertLess(events.index("background_finished"),
                         events.index("snapshot_saved"))
+        self.assertLess(events.index("snapshot_saved"),
+                        events.index("client_received_202"))
+        self.assertEqual([message.get("status") for message in sent
+                          if message["type"] == "http.response.start"], [202])
+
+    async def test_fetch_snapshot_failure_returns_sanitized_persistence_error(self):
+        settings = self.settings()
+        events = []
+        client = _Client(events)
+
+        def fail_save():
+            raise ValueError("private-token-must-not-be-logged")
+
+        facade = SimpleNamespace(
+            available_sources=set(), collection_snapshot=SimpleNamespace(save=fail_save),
+        )
+
+        @asynccontextmanager
+        async def context_factory(_client, *, user_agent):
+            yield facade
+
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 202, "headers": []})
+            await send({"type": "http.response.body", "body": b"accepted"})
+
+        middleware = VercelSharedLiveMiddleware(
+            app, settings=settings, enabled=True,
+            client_factory=lambda _token: client,
+            context_factory=context_factory,
+        )
+        scope = {
+            "type": "http", "method": "POST", "path": "/api/v1/fetches",
+            "headers": [
+                (b"host", b"trend-scout.example"),
+                (b"origin", b"https://trend-scout.example"),
+                (b"x-vercel-oidc-token", b"synthetic-test-token"),
+            ],
+            "state": {}, "scheme": "https", "query_string": b"",
+            "server": ("trend-scout.example", 443),
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        with self.assertLogs("app.main", level="ERROR") as captured:
+            await middleware(scope, receive, send)
+        body = next(message["body"] for message in sent
+                    if message["type"] == "http.response.body")
+        self.assertIn(b"COLLECTIONS_PERSISTENCE_FAILED", body)
+        self.assertTrue(any("failure_phase=COLLECTION_SNAPSHOT_COMMIT" in line
+                            and "exception_class=ValueError" in line
+                            for line in captured.output))
+        self.assertNotIn("private-token-must-not-be-logged", "\n".join(captured.output))
 
     def test_shared_middleware_routes_collection_reads_and_writes(self):
         settings = self.settings()

@@ -1139,6 +1139,54 @@ class PublicAdmission:
             metadata["owner_fresh_acceptance"] = OWNER_FRESH_ACCEPTANCE_MARKER
         return metadata
 
+    def lookup_idempotency(self, idempotency_key: str, *, now: datetime,
+                           request_metadata=None) -> dict | None:
+        """Read an existing idempotency receipt without admitting new work."""
+        now = _utc(now)
+        if not isinstance(idempotency_key, str) or not _KEY.fullmatch(idempotency_key):
+            raise ValueError("invalid idempotency key")
+        request_metadata = self._request_metadata(request_metadata)
+        if not self.policy.enabled:
+            raise AdmissionDenied("FEATURE_DISABLED")
+        digest = hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
+
+        def operation(state):
+            if not state:
+                return state, None
+            if state.get("schema") != 1:
+                raise AdmissionDenied("STATE_VERSION_UNSUPPORTED")
+            if state.get("policy_digest") != self.policy_digest:
+                raise AdmissionDenied("POLICY_MISMATCH")
+            if state.get("operational_enabled") is not True:
+                raise AdmissionDenied("FEATURE_DISABLED")
+            jobs, keys = state.get("jobs"), state.get("keys")
+            if not isinstance(jobs, dict) or not isinstance(keys, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            receipt = keys.get(digest)
+            if receipt is None:
+                return state, None
+            if not isinstance(receipt, dict) or not isinstance(receipt.get("expires_at"), str):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                if _parse(receipt["expires_at"]) <= now:
+                    return state, None
+            except (TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
+            job_id = receipt.get("job_id")
+            job = jobs.get(job_id) if isinstance(job_id, str) else None
+            if not isinstance(job, dict) or job.get("job_id") != job_id:
+                raise AdmissionDenied("STATE_INVALID")
+            stored = job.get("request_metadata", {})
+            if not isinstance(stored, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            comparable = {key: value for key, value in stored.items()
+                          if key != "owner_fresh_acceptance"}
+            if comparable != request_metadata:
+                raise AdmissionDenied("IDEMPOTENCY_KEY_CONFLICT")
+            return state, {"job_id": job_id, "status": job.get("state", "EXPIRED")}
+
+        return self.store.transact(self.state_key, operation)
+
     def admit(self, idempotency_key: str, *, now: datetime, request_metadata=None,
               owner_fresh_acceptance_once: bool = False) -> dict:
         now = _utc(now)

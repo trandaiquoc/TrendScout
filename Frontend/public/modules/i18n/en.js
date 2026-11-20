@@ -744,6 +744,7 @@ export const en = {
   'fetch.busy': 'Another fetch is already running.',
   'fetch.retryable': 'The result is uncertain. Retry uses the same request key.',
   'fetch.poll-limit': 'Status polling reached its limit. Select Continue Fetch to resubmit the same saved request.',
+  'fetch.poll-retrying': 'Status is temporarily unavailable. Retrying the same saved Fetch automatically.',
   'fetch.poll-error': 'Status could not be refreshed. Select Continue Fetch to reattach safely.',
   'fetch.recovery-available': 'The previous worker lease expired. You can continue the saved job with an explicit action.',
   'fetch.expired': 'This fetch status expired after the server restarted or its retention window ended.',

@@ -145,6 +145,14 @@ class PublicAdmissionTests(unittest.TestCase):
         self.assertEqual(replay["result"], "REPLAY")
         self.assertEqual(replay["job_id"], first["job_id"])
         self.assertTrue(replay["owner_fresh_acceptance"])
+        before_lookup = self.control.store.transact("public", lambda state: (state, state))
+        receipt = admission.lookup_idempotency(
+            "fresh-acceptance-all-00001", now=NOW + timedelta(seconds=31),
+            request_metadata=all_request,
+        )
+        after_lookup = self.control.store.transact("public", lambda state: (state, state))
+        self.assertEqual(receipt, {"job_id": first["job_id"], "status": "QUEUED"})
+        self.assertEqual(after_lookup, before_lookup)
         first_claim = admission.claim_next("fresh-worker", now=NOW + timedelta(seconds=31))
         self.assertEqual(first_claim["request_metadata"]["owner_fresh_acceptance"],
                          OWNER_FRESH_ACCEPTANCE_MARKER)

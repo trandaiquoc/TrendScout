@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import httpx
 
 from app.jobs.public_admission import AdmissionDenied
-from app.main import create_app
+from app.main import _is_vercel_shared_live_request, create_app
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -57,6 +57,9 @@ class _FetchFacade:
         self.submitted_sources = None
         self.submitted_keys = []
         self.status_calls = 0
+        self.collection_service = None
+        self.submit_status = "QUEUED"
+        self.force_replay = False
 
     @staticmethod
     def _history_item():
@@ -92,8 +95,8 @@ class _FetchFacade:
         self.submitted_sources = source_ids
         return {
             "job_id": _JOB_ID,
-            "status": "QUEUED",
-            "result": "CREATED" if len(self.submitted_keys) == 1 else "REPLAY",
+            "status": self.submit_status,
+            "result": "REPLAY" if self.force_replay or len(self.submitted_keys) > 1 else "CREATED",
             "created_at": "2026-11-19T00:00:00+00:00",
         }
 
@@ -107,9 +110,20 @@ class _FetchFacade:
         self.events.append("worker_finished")
         return None
 
-    def status(self, _fetch_id):
+    def status(self, _fetch_id, *, include_records=False):
         self.status_calls += 1
-        return self._history_item()
+        result = self._history_item()
+        result["terminal"] = True
+        result["selected_sources"] = [WIKIMEDIA_SOURCE_ID]
+        if include_records:
+            result["sources"] = [{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "data_mode": "LIVE",
+                "status": "SUCCESS",
+                "records": [{"title": "retained checkpoint record"}],
+                "record_count": 1,
+            }]
+        return result
 
     def history(self, *, limit=20):
         return [self._history_item()][:limit]
@@ -130,6 +144,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         events = []
         client = _Client(events)
         facade = _FetchFacade(events, client)
+        facade.collection_snapshot = SimpleNamespace(
+            save=lambda: events.append("snapshot_saved")
+        )
         client_factory = Mock(return_value=client)
 
         @asynccontextmanager
@@ -170,7 +187,8 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["sources"], [WIKIMEDIA_SOURCE_ID])
         self.assertEqual(facade.submitted_sources, [WIKIMEDIA_SOURCE_ID])
         self.assertEqual(events, [
-            "context_entered", "worker_finished", "context_exited", "client_closed",
+            "context_entered", "worker_finished", "snapshot_saved",
+            "context_exited", "client_closed",
         ])
         client_factory.assert_called_once_with("synthetic-test-token")
         self.assertTrue(client.closed)
@@ -297,6 +315,15 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 422)
         self.assertNotIn("worker_finished", _events)
 
+    def test_checkpoint_recovery_uses_shared_live_middleware(self):
+        settings = self.settings(enabled=True)
+        self.assertTrue(_is_vercel_shared_live_request(
+            settings, "POST", f"/api/v1/fetches/{_JOB_ID}/collections", enabled=True,
+        ))
+        self.assertFalse(_is_vercel_shared_live_request(
+            settings, "POST", "/api/v1/fetches/not-a-fetch-id/collections", enabled=True,
+        ))
+
     async def test_bing_only_request_adds_google_dependency_before_admission(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)
         facade.available_sources = frozenset({
@@ -362,6 +389,78 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overview.status_code, 200, overview.text)
         self.assertIsNone(overview.json()["keyword_totals"]["unique"])
         self.assertEqual(overview.json()["shared_fetch_history"]["items"], 1)
+
+    async def test_existing_terminal_fetch_replays_collections_without_running_worker(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.submit_status = "PARTIAL"
+        facade.force_replay = True
+        processed = []
+
+        class _Service:
+            store = SimpleNamespace(data_mode_scope="LIVE")
+
+            async def process_fetch(self, fetch_id, sources, *, cached_context_only=False):
+                processed.append((fetch_id, sources, cached_context_only))
+                events.append("collections_processed")
+                return {"status": "COMPLETED"}
+
+        facade.collection_service = _Service()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                        "Idempotency-Key": "vercel-terminal-postprocess-0001",
+                    },
+                    json={},
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["status"], "PARTIAL")
+        self.assertEqual(processed[0][0], _JOB_ID)
+        self.assertTrue(processed[0][2])
+        self.assertNotIn("worker_finished", events)
+        self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
+
+    async def test_checkpoint_recovery_endpoint_never_runs_source_worker(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        processed = []
+
+        class _Service:
+            store = SimpleNamespace(data_mode_scope="LIVE")
+
+            async def process_fetch(self, fetch_id, sources, *, cached_context_only=False):
+                processed.append((fetch_id, sources, cached_context_only))
+                events.append("collections_processed")
+                return {"status": "COMPLETED"}
+
+        facade.collection_service = _Service()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    f"/api/v1/fetches/{_JOB_ID}/collections",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "COMPLETED")
+        self.assertEqual(processed[0][0], _JOB_ID)
+        self.assertEqual(processed[0][1][0]["records"][0]["title"],
+                         "retained checkpoint record")
+        self.assertTrue(processed[0][2])
+        self.assertNotIn("worker_finished", events)
+        self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
 
     async def test_recognized_policy_mismatch_exposes_explicit_sync_then_fetch(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)

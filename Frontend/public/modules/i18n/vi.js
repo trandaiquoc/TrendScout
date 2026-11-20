@@ -744,6 +744,7 @@ export const vi = {
   'fetch.busy': 'Đang có Fetch khác chạy.',
   'fetch.retryable': 'Chưa rõ máy chủ đã nhận yêu cầu. Thử lại sẽ dùng cùng khóa yêu cầu.',
   'fetch.poll-limit': 'Đã đạt giới hạn kiểm tra trạng thái. Chọn Tiếp tục Fetch để gửi lại cùng yêu cầu đã lưu.',
+  'fetch.poll-retrying': 'Trạng thái tạm thời chưa phản hồi. Đang tự thử lại cùng Fetch đã lưu.',
   'fetch.poll-error': 'Chưa cập nhật được trạng thái. Chọn Tiếp tục Fetch để nối lại an toàn.',
   'fetch.recovery-available': 'Worker trước đã hết lease. Có thể tiếp tục công việc đã lưu bằng thao tác rõ ràng của bạn.',
   'fetch.expired': 'Trạng thái Fetch đã hết hạn do máy chủ khởi động lại hoặc hết thời gian lưu.',

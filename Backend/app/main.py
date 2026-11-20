@@ -8,6 +8,7 @@ import inspect
 import logging
 import mimetypes
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -51,6 +52,7 @@ from app.sources.catalog import (
 )
 
 _logger = logging.getLogger(__name__)
+_SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS = 60 * 60
 
 
@@ -82,6 +84,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
     method = method.upper()
     return (
         method == "POST" and path == "/api/v1/fetches"
+        or method == "POST" and _is_vercel_fetch_collections_recovery(path)
         or method == "GET" and (
             path.startswith("/api/v1/fetches/")
             or path == "/api/v1/runs/history"
@@ -106,6 +109,55 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
 
 def _is_vercel_fetch_submission(method, path):
     return method.upper() == "POST" and path == "/api/v1/fetches"
+
+
+def _is_vercel_fetch_collections_recovery(path):
+    parts = path.split("/")
+    return (len(parts) == 6 and parts[:3] == ["", "api", "v1"]
+            and parts[3] == "fetches" and re.fullmatch(r"[a-f0-9]{32}", parts[4])
+            and parts[5] == "collections")
+
+
+def _is_vercel_fetch_collection_action(method, path):
+    return (method.upper() == "POST"
+            and (_is_vercel_fetch_submission(method, path)
+                 or _is_vercel_fetch_collections_recovery(path)))
+
+
+def _safe_exception_class(error):
+    value = type(error).__name__
+    return value if _SAFE_EXCEPTION_CLASS.fullmatch(value) else "UnknownError"
+
+
+async def _save_vercel_collection_snapshot(distributed, *, failure_code):
+    snapshot = getattr(distributed, "collection_snapshot", None)
+    if snapshot is None:
+        _logger.error(
+            "Vercel collection snapshot commit failed failure_phase=COLLECTION_SNAPSHOT_COMMIT exception_class=SnapshotUnavailable"
+        )
+        return JSONResponse(
+            {"detail": {"code": failure_code}}, status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        await asyncio.to_thread(snapshot.save)
+    except Exception as error:
+        from app.collections.firestore_snapshot import CollectionSnapshotConflict
+
+        if isinstance(error, CollectionSnapshotConflict):
+            return JSONResponse(
+                {"detail": {"code": "COLLECTIONS_CONCURRENT_UPDATE"}},
+                status_code=409, headers={"Cache-Control": "no-store"},
+            )
+        _logger.error(
+            "Vercel collection snapshot commit failed failure_phase=COLLECTION_SNAPSHOT_COMMIT exception_class=%s",
+            _safe_exception_class(error),
+        )
+        return JSONResponse(
+            {"detail": {"code": failure_code}}, status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return None
 
 
 def _persists_vercel_collections(method, path):
@@ -141,7 +193,8 @@ class VercelSharedLiveMiddleware:
         if (_persists_vercel_collections(scope.get("method", ""), scope.get("path", ""))
                 or _is_vercel_fetch_submission(
                     scope.get("method", ""), scope.get("path", "")
-                )):
+                )
+                or _is_vercel_fetch_collections_recovery(scope.get("path", ""))):
             try:
                 from app.api.fetches import validate_public_request_origin
                 validate_public_request_origin(request, "vercel")
@@ -225,20 +278,45 @@ class VercelSharedLiveMiddleware:
             is_collection_write = _persists_vercel_collections(
                 scope.get("method", ""), scope.get("path", "")
             )
+            is_fetch_action = _is_vercel_fetch_collection_action(
+                scope.get("method", ""), scope.get("path", "")
+            )
+            if is_fetch_action:
+                # Starlette sends the HTTP body before awaiting BackgroundTasks.
+                # Hold that response until worker checkpoints, Collections
+                # processing, and the shared Firestore snapshot have committed.
+                messages = []
+
+                async def capture_fetch_response(message):
+                    messages.append(message)
+
+                try:
+                    await self.app(scope, receive, capture_fetch_response)
+                except Exception as error:
+                    _logger.error(
+                        "Vercel Fetch execution failed failure_phase=REQUEST_EXECUTION exception_class=%s",
+                        _safe_exception_class(error),
+                    )
+                    response = JSONResponse(
+                        {"detail": {"code": "FETCH_EXECUTION_FAILED"}},
+                        status_code=503,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                    await response(scope, receive, send)
+                    return
+
+                persistence_error = await _save_vercel_collection_snapshot(
+                    distributed, failure_code="COLLECTIONS_PERSISTENCE_FAILED"
+                )
+                if persistence_error is not None:
+                    await persistence_error(scope, receive, send)
+                    return
+                for message in messages:
+                    await send_no_store(message)
+                return
+
             if not is_collection_write:
                 await self.app(scope, receive, send_no_store)
-                if _is_vercel_fetch_submission(
-                    scope.get("method", ""), scope.get("path", "")
-                ):
-                    snapshot = getattr(distributed, "collection_snapshot", None)
-                    if snapshot is not None:
-                        try:
-                            await asyncio.to_thread(snapshot.save)
-                        except Exception:
-                            # The accepted Fetch result and checkpoints have
-                            # their own Firestore ledger. Keep the async 202
-                            # contract and record only a sanitized sync error.
-                            _logger.error("Vercel Fetch Collections snapshot commit failed")
                 return
 
             # A mutation must not report success until the request-local SQLite
@@ -249,28 +327,12 @@ class VercelSharedLiveMiddleware:
                 messages.append(message)
 
             await self.app(scope, receive, capture)
-            snapshot = getattr(distributed, "collection_snapshot", None)
-            if snapshot is not None:
-                try:
-                    await asyncio.to_thread(snapshot.save)
-                except Exception as exc:
-                    from app.collections.firestore_snapshot import CollectionSnapshotConflict
-
-                    if isinstance(exc, CollectionSnapshotConflict):
-                        response = JSONResponse(
-                            {"detail": {"code": "COLLECTIONS_CONCURRENT_UPDATE"}},
-                            status_code=409,
-                            headers={"Cache-Control": "no-store"},
-                        )
-                    else:
-                        _logger.exception("Vercel Collections snapshot commit failed")
-                        response = JSONResponse(
-                            {"detail": {"code": "COLLECTIONS_PERSISTENCE_FAILED"}},
-                            status_code=503,
-                            headers={"Cache-Control": "no-store"},
-                        )
-                    await response(scope, receive, send)
-                    return
+            persistence_error = await _save_vercel_collection_snapshot(
+                distributed, failure_code="COLLECTIONS_PERSISTENCE_FAILED"
+            )
+            if persistence_error is not None:
+                await persistence_error(scope, receive, send)
+                return
             for message in messages:
                 await send_no_store(message)
         finally:

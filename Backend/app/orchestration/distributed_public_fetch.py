@@ -229,6 +229,17 @@ class DistributedPublicFetch:
             request_metadata = None
         if self.provider_retry_after_seconds is not None:
             try:
+                existing = self.admission.lookup_idempotency(
+                    idempotency_key, now=self.utcnow(), request_metadata=request_metadata
+                )
+            except AdmissionDenied:
+                raise
+            except Exception:
+                raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE") from None
+        else:
+            existing = None
+        if self.provider_retry_after_seconds is not None and existing is None:
+            try:
                 retry_after = self.provider_retry_after_seconds()
             except Exception:
                 raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE") from None
@@ -401,6 +412,9 @@ class DistributedPublicFetch:
             "fetch_id": job["job_id"],
             "status": job["state"],
             "stage": job["state"],
+            **({"lease_until": job["lease_until"]}
+               if job.get("state") == "RUNNING"
+               and isinstance(job.get("lease_until"), str) else {}),
             "request_kind": job.get("request_metadata", {}).get("kind", "LATEST"),
             "selected_sources": selected_sources,
             **({"history_days": job["request_metadata"]["history_days"]}

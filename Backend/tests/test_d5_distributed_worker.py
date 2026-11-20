@@ -353,8 +353,10 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             coordinator(self.path, self.config), handlers=handlers,
             resolve_grant=self.grant, utcnow=self.clock, source_order=SOURCES,
         )
+        retry_gate = [0]
         service = DistributedPublicFetch(
             self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+            provider_retry_after_seconds=lambda: retry_gate[0],
         )
         key = "fetch1-recovery-google-youtube-0001"
         accepted = service.submit(key, source_ids=list(SOURCES))
@@ -367,6 +369,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         interrupted = service.status(accepted["job_id"])
         self.assertEqual(interrupted["status"], "QUEUED")
         self.assertTrue(interrupted["recovery_available"])
+        retry_gate[0] = 30
         replay = service.submit(key, source_ids=list(SOURCES))
         self.assertEqual(replay["result"], "REPLAY")
         self.assertEqual(replay["job_id"], accepted["job_id"])

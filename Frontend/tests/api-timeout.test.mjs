@@ -40,6 +40,11 @@ test('Firestore-backed Collections reads and writes allow Vercel cold starts', a
   }
 });
 
+test('serverless Fetch submissions and checkpoint persistence wait for the Vercel deadline', async () => {
+  assert.equal(await requestedTimeout('/api/v1/fetches'), 65_000);
+  assert.equal(await requestedTimeout(`/api/v1/fetches/${'a'.repeat(32)}/collections`), 65_000);
+});
+
 test('ordinary API calls keep the standard timeout and callers may override it', async () => {
   assert.equal(await requestedTimeout('/api/v1/capabilities'), 15_000);
   assert.equal(await requestedTimeout('/api/v1/collections', { timeoutMs: 7_000 }), 7_000);

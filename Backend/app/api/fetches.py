@@ -187,23 +187,45 @@ def _require_enabled(request: Request) -> None:
         )
 
 
-async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str, owner: str):
-    """Run the admitted fetch, then classify all retained records, independent of UI caps."""
-    # The bounded one-worker queue can contain at most one admitted live Fetch at a time.
-    result = await distributed.run_once(owner)
-    if result and result.get("job_id") != fetch_id and result.get("state") in {"COMPLETED", "PARTIAL"}:
-        result = await distributed.run_once(owner)
+async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
+                                     cached_context_only: bool = False):
     service = (getattr(getattr(request, "state", None), "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
     if service is None:
         return
-    try:
-        result = distributed.status(fetch_id, include_records=True)
-        if result and result.get("terminal"):
-            await service.process_fetch(fetch_id, result.get("sources", []))
-    except Exception:
-        # Fetch success is independent from local semantic availability.
-        return
+    result = distributed.status(fetch_id, include_records=True)
+    if result and result.get("terminal"):
+        if cached_context_only:
+            processed = await service.process_fetch(
+                fetch_id, result.get("sources", []), cached_context_only=True
+            )
+        else:
+            processed = await service.process_fetch(fetch_id, result.get("sources", []))
+        if processed.get("status") == "FAILED":
+            raise RuntimeError("Fetch Collections processing failed")
+
+
+async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str,
+                                     owner: str, *, run_worker: bool = True):
+    """Run or resume a durable Fetch, then classify retained records."""
+    if run_worker:
+        # The bounded one-worker queue can contain at most one admitted live Fetch at a time.
+        try:
+            result = await distributed.run_once(owner)
+        except AdmissionDenied as exc:
+            if exc.code == "LEASE_BUSY":
+                # Another invocation still owns the fenced attempt. Its durable
+                # checkpoints remain authoritative; status polling will resume
+                # this same idempotent job after that lease expires.
+                return
+            raise
+        if (result and result.get("job_id") != fetch_id
+                and result.get("state") in {"COMPLETED", "PARTIAL"}):
+            await distributed.run_once(owner)
+    shared_live = bool(getattr(distributed, "firestore_shared_live", False))
+    await _process_fetch_collections(
+        request, distributed, fetch_id, cached_context_only=shared_live
+    )
 
 
 @router.post("/fetches", status_code=202)
@@ -273,6 +295,16 @@ async def create_fetch(
             background_tasks.add_task(
                 _run_fetch_and_collections, request, distributed, accepted["job_id"],
                 f"api-{secrets.token_hex(12)}"
+            )
+        elif (accepted.get("result") == "REPLAY"
+              and accepted["status"] in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED", "EXPIRED"}
+              and getattr(distributed, "firestore_shared_live", False)):
+            # A completed source job can still need Collections persistence
+            # after a function was interrupted. Re-read its fenced checkpoints;
+            # never start another source worker for a terminal Fetch.
+            background_tasks.add_task(
+                _run_fetch_and_collections, request, distributed, accepted["job_id"],
+                f"api-{secrets.token_hex(12)}", run_worker=False,
             )
         fetch_id = accepted["job_id"]
         response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
@@ -346,6 +378,46 @@ async def create_fetch(
         "created_at": record.created_at,
         "status_url": f"/api/v1/fetches/{record.fetch_id}",
     }
+
+
+@router.post("/fetches/{fetch_id}/collections")
+async def recover_fetch_collections(fetch_id: str, request: Request, response: Response):
+    """Persist retained LIVE source checkpoints without admitting provider work."""
+    response.headers["Cache-Control"] = "no-store"
+    _require_enabled(request)
+    validate_public_request_origin(request, request.app.state.settings.environment_profile)
+    if not FETCH_ID_RE.fullmatch(fetch_id):
+        raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
+    distributed = _distributed_for_request(request)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
+    if (distributed is None
+            or not getattr(distributed, "firestore_shared_live", False)
+            or getattr(distributed, "data_mode", None) != "LIVE"
+            or service is None
+            or getattr(service.store, "data_mode_scope", None) != "LIVE"):
+        raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
+    try:
+        result = distributed.status(fetch_id, include_records=True)
+    except AdmissionDenied as exc:
+        _raise_distributed_admission_error(exc.code, distributed)
+    if result is None:
+        raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
+    if result.get("terminal") is not True:
+        raise HTTPException(409, {"code": "FETCH_NOT_TERMINAL"})
+    if result.get("data_mode") not in {None, "LIVE"} or any(
+        source.get("data_mode") not in {None, "LIVE"}
+        for source in result.get("sources", []) if isinstance(source, dict)
+    ):
+        raise HTTPException(409, {"code": "FETCH_MODE_MISMATCH"})
+
+    recovered = await service.process_fetch(
+        fetch_id, result.get("sources", []), cached_context_only=True
+    )
+    if recovered.get("status") == "FAILED":
+        raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
+    return {"fetch_id": fetch_id, "status": recovered.get("status", "FAILED"),
+            "error_code": recovered.get("error_code")}
 
 
 @router.post("/fetches/history", status_code=202)

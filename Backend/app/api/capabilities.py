@@ -1,6 +1,7 @@
 """Public, non-secret view of runtime and source capabilities."""
 
 import json
+import os
 import re
 import sqlite3
 from datetime import date, datetime, timezone
@@ -506,9 +507,15 @@ async def capabilities(request: Request, response: Response):
                 "provider_account_status": "STALE",
             }
     response.headers["Cache-Control"] = "no-store"
+    deployment_environment = None
+    if settings.environment_profile == "vercel":
+        candidate_environment = os.environ.get("VERCEL_ENV")
+        if candidate_environment in {"production", "preview", "development"}:
+            deployment_environment = candidate_environment
     return {
         "contract_version": "1.0",
         "environment_mode": settings.environment_profile,
+        "deployment_environment": deployment_environment,
         "read_only": request.app.state.read_only,
         "authentication_required": False,
         "public_fetch_supported": True,

@@ -4,6 +4,7 @@ const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED'
 const POLL_INTERVAL_MS = 3000;
 const MAX_POLLS_PER_ATTEMPT = 110;
 const MAX_STATUS_POLLS_PER_FETCH = 110;
+const MAX_TRANSIENT_STATUS_RETRIES = 3;
 const MAX_AUTOMATIC_CONTINUATIONS = 3;
 const UNCERTAIN_SUBMISSION_RETRY_MS = 2000;
 const STALLED_QUEUE_DISPATCH_MS = 6000;
@@ -48,21 +49,28 @@ const WIKIMEDIA_HISTORY_MESSAGE_KEYS = {
   failed: 'fetch.history-failed-live',
 };
 
+function isTransientStatusError(error) {
+  return error instanceof ApiError
+    && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status));
+}
+
 export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = [], runtimeScope = 'LOCAL') {
   if (requestKind === 'history') {
     return WIKIMEDIA_HISTORY_MESSAGE_KEYS[kind] || null;
   }
   const wikimediaOnly = Array.isArray(sourceIds)
     && sourceIds.length === 1 && sourceIds[0] === WIKIMEDIA_SOURCE_ID;
-  const messages = wikimediaOnly ? WIKIMEDIA_LIVE_MESSAGE_KEYS
-    : runtimeScope === 'VERCEL_SHARED_LIVE'
-      ? VERCEL_SHARED_LIVE_MESSAGE_KEYS : LOCAL_LIVE_MESSAGE_KEYS;
+  const messages = runtimeScope === 'VERCEL_SHARED_LIVE'
+    ? VERCEL_SHARED_LIVE_MESSAGE_KEYS
+    : wikimediaOnly ? WIKIMEDIA_LIVE_MESSAGE_KEYS : LOCAL_LIVE_MESSAGE_KEYS;
   return messages[kind] || null;
 }
 
 function isUncertainSubmissionError(error) {
-  return error instanceof ApiError
-    && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status));
+  if (!(error instanceof ApiError)) return false;
+  const code = error.body?.detail?.code || error.body?.code;
+  return error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status)
+    || error.status === 409 && code === 'COLLECTIONS_CONCURRENT_UPDATE';
 }
 
 function submissionRetryDelay(error) {
@@ -113,6 +121,7 @@ export class PublicFetchController {
     this.retryTimer = null;
     this.automaticContinuations = 0;
     this.statusPolls = 0;
+    this.statusErrorRetries = 0;
     this.lastAutomaticDispatchAt = 0;
   }
 
@@ -144,6 +153,7 @@ export class PublicFetchController {
           this.key = newIdempotencyKey();
           this.automaticContinuations = 0;
           this.statusPolls = 0;
+          this.statusErrorRetries = 0;
           this.lastAutomaticDispatchAt = 0;
         }
         this.activeYoutubePolicyVersion = this.includesYouTube ? policyVersion : null;
@@ -161,6 +171,7 @@ export class PublicFetchController {
         this.key = newIdempotencyKey();
         this.automaticContinuations = 0;
         this.statusPolls = 0;
+        this.statusErrorRetries = 0;
         this.lastAutomaticDispatchAt = 0;
       }
       const headers = { 'Idempotency-Key': this.key };
@@ -225,6 +236,7 @@ export class PublicFetchController {
     this.stopped = false;
     this.automaticContinuations = 0;
     this.statusPolls = 0;
+    this.statusErrorRetries = 0;
     this.lastAutomaticDispatchAt = 0;
     await this.activate();
     return true;
@@ -236,12 +248,44 @@ export class PublicFetchController {
     try {
       for (let attempt = 0; attempt < MAX_POLLS_PER_ATTEMPT
           && this.statusPolls < MAX_STATUS_POLLS_PER_FETCH && !this.stopped; attempt += 1) {
-        status = await getJson('/api/v1/fetches/' + encodeURIComponent(this.fetchId), {
-          headers: this.activeYoutubePolicyVersion
-            ? { [YOUTUBE_POLICY_VERSION_HEADER]: this.activeYoutubePolicyVersion } : {},
-          locale: this.locale(),
-        });
         this.statusPolls += 1;
+        try {
+          status = await getJson('/api/v1/fetches/' + encodeURIComponent(this.fetchId), {
+            headers: this.activeYoutubePolicyVersion
+              ? { [YOUTUBE_POLICY_VERSION_HEADER]: this.activeYoutubePolicyVersion } : {},
+            locale: this.locale(),
+          });
+          this.statusErrorRetries = 0;
+        } catch (error) {
+          if (!isTransientStatusError(error)) throw error;
+          this.statusErrorRetries += 1;
+          if (this.statusErrorRetries < MAX_TRANSIENT_STATUS_RETRIES) {
+            this.emit({ kind: 'poll-retrying', busy: true, error, fetch: status });
+            await wait(UNCERTAIN_SUBMISSION_RETRY_MS);
+            if (this.stopped) {
+              this.busy = false;
+              return;
+            }
+            continue;
+          }
+          if (this.key && this.requestBody
+              && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+            this.automaticContinuations += 1;
+            this.lastAutomaticDispatchAt = Date.now();
+            this.resumeNeeded = true;
+            this.emit({ kind: 'auto-resuming', busy: true, error, fetch: status });
+            await wait(UNCERTAIN_SUBMISSION_RETRY_MS);
+            if (this.stopped) {
+              this.busy = false;
+              return;
+            }
+            this.fetchId = null;
+            this.busy = false;
+            await this.activate();
+            return;
+          }
+          throw error;
+        }
         this.emit({ kind: 'running', busy: true, fetch: status });
         if (TERMINAL.has(status.status)) {
           this.busy = false;
@@ -253,12 +297,17 @@ export class PublicFetchController {
           this.resumeNeeded = false;
           this.automaticContinuations = 0;
           this.statusPolls = 0;
+          this.statusErrorRetries = 0;
           this.lastAutomaticDispatchAt = 0;
           this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
           return;
         }
-        if (status.recovery_available === true && status.status === 'QUEUED') {
+        const leaseUntil = Date.parse(status.lease_until || '');
+        const leaseExpired = status.status === 'RUNNING'
+          && Number.isFinite(leaseUntil) && leaseUntil <= Date.now();
+        if ((status.recovery_available === true && status.status === 'QUEUED')
+            || leaseExpired) {
           this.resumeNeeded = true;
           if (this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
             this.automaticContinuations += 1;

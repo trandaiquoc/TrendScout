@@ -1,8 +1,13 @@
 const REQUEST_TIMEOUT_MS = 15000;
 const COLLECTIONS_TIMEOUT_MS = 65000;
+const FETCH_TIMEOUT_MS = 65000;
 
 function requestTimeoutMs(path, requestedTimeoutMs) {
   if (Number.isFinite(requestedTimeoutMs)) return requestedTimeoutMs;
+  if (path === '/api/v1/fetches'
+      || /^\/api\/v1\/fetches\/[a-f0-9]{32}\/collections(?:\?|$)/.test(path)) {
+    return FETCH_TIMEOUT_MS;
+  }
   if (path === '/api/v1/collections' || path.startsWith('/api/v1/collections/')
       || path === '/api/v1/datasets/latest'
       || path.startsWith('/api/v1/datasets/latest/')) {
