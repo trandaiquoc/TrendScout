@@ -837,6 +837,8 @@ const FETCH_STATE_MESSAGES = {
   'poll-limit': 'fetch.poll-limit',
   'poll-error': 'fetch.poll-error',
   'recovery-available': 'fetch.recovery-available',
+  'auto-resuming': 'fetch.auto-resuming',
+  'retry-wait': 'fetch.retry-waiting',
   expired: 'fetch.expired',
   'policy-not-approved': 'fetch.youtube-policy-pending',
   'policy-consent-required': 'fetch.youtube-consent-required',
@@ -906,6 +908,16 @@ function renderFetchSourceOutcomes(fetchStatus) {
       }
       if (source.error_code) {
         fields.push(t(errorKey) !== errorKey ? t(errorKey) : source.error_code);
+      }
+      const diagnostic = coverage.persistence_diagnostic
+        || coverage.worker_failure_diagnostic || coverage.transport_diagnostic;
+      if (diagnostic && typeof diagnostic === 'object') {
+        const diagnosticParts = [diagnostic.failure_phase, diagnostic.failure_reason,
+          diagnostic.exception_class].filter((value) => typeof value === 'string'
+          && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value));
+        if (diagnosticParts.length) {
+          fields.push(t('fetch.source-diagnostic', { details: diagnosticParts.join(' · ') }));
+        }
       }
       const googleSummary = googleFetchSummary(source);
       if (googleSummary) fields.push(googleSummary);
@@ -1166,7 +1178,8 @@ function liveFetchMessage(kind, requestKind = 'latest') {
     .map((source) => source.source_id)
     .filter((sourceId) => typeof sourceId === 'string');
   const sourceIds = selectedSource ? [selectedSource] : enabledSources;
-  return liveFetchMessageKey(kind, requestKind, sourceIds);
+  return liveFetchMessageKey(kind, requestKind, sourceIds,
+    isVercelSharedLive(state.capabilities) ? 'VERCEL_SHARED_LIVE' : 'LOCAL');
 }
 
 function effectiveFetchSourceIds() {

@@ -297,6 +297,168 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(result["sources"][GOOGLE_SOURCE_ID]["record_count"], 0)
         self.assertEqual(job_id, result["job_id"])
 
+    async def test_fetch1_recovery_preserves_receipt_and_source_diagnostics(self):
+        provider_calls = {source: 0 for source in SOURCES}
+        persistence_diagnostic = {
+            "source_id": GOOGLE_SOURCE_ID,
+            "failure_phase": "RESULT_PERSISTENCE",
+            "failure_reason": "CALLBACK_ERROR",
+            "exception_class": "OSError",
+            "attempt_id": "a" * 64,
+            "error_code": "RESULT_PERSISTENCE_FAILED",
+        }
+
+        def wikimedia(context):
+            saved = (context.resume_snapshot or {}).get("progress", {}).get("receipt")
+            if isinstance(saved, dict):
+                return saved["result"]
+            provider_calls[WIKIMEDIA_SOURCE_ID] += 1
+            result = {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "delivery_state": "FRESH", "records": [{"evidence_id": "wiki"}],
+                "record_count": 1, "provider_request_count": 1,
+                "coverage": {"provider_request_count": 1},
+            }
+            context.checkpoint({"receipt": {"result": result}})
+            raise SimulatedProcessCrash()
+
+        def google(_context):
+            provider_calls[GOOGLE_SOURCE_ID] += 1
+            return {
+                "status": "FAILED", "data_mode": "SYNTHETIC", "records": [],
+                "record_count": 0, "error_code": "RESULT_PERSISTENCE_FAILED",
+                "coverage": {"persistence_diagnostic": persistence_diagnostic},
+            }
+
+        def bing(_context):
+            provider_calls[BING_SOURCE_ID] += 1
+            return {
+                "status": "UNAVAILABLE", "data_mode": "SYNTHETIC", "records": [],
+                "record_count": 0, "error_code": "NO_SAVED_CANDIDATE",
+            }
+
+        def youtube(_context):
+            provider_calls[YOUTUBE_SOURCE_ID] += 1
+            raise RuntimeError("private credential-like text must not be retained")
+
+        handlers = {
+            WIKIMEDIA_SOURCE_ID: wikimedia,
+            GOOGLE_SOURCE_ID: google,
+            BING_SOURCE_ID: bing,
+            YOUTUBE_SOURCE_ID: youtube,
+        }
+        for handler in handlers.values():
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config), handlers=handlers,
+            resolve_grant=self.grant, utcnow=self.clock, source_order=SOURCES,
+        )
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        key = "fetch1-recovery-google-youtube-0001"
+        accepted = service.submit(key, source_ids=list(SOURCES))
+
+        with self.assertRaises(SimulatedProcessCrash):
+            await worker.run_once("fetch1-worker-first")
+        self.assertEqual(provider_calls[WIKIMEDIA_SOURCE_ID], 1)
+
+        self.clock.value += timedelta(seconds=self.config.lease_seconds + 1)
+        interrupted = service.status(accepted["job_id"])
+        self.assertEqual(interrupted["status"], "QUEUED")
+        self.assertTrue(interrupted["recovery_available"])
+        replay = service.submit(key, source_ids=list(SOURCES))
+        self.assertEqual(replay["result"], "REPLAY")
+        self.assertEqual(replay["job_id"], accepted["job_id"])
+
+        outcome = await worker.run_once("fetch1-worker-recovery")
+        status = service.status(accepted["job_id"])
+        by_source = {item["source_id"]: item for item in status["sources"]}
+        history = service.history(limit=1)[0]
+        history_by_source = {item["source_id"]: item for item in history["source_manifest"]}
+
+        self.assertEqual(outcome["state"], "PARTIAL")
+        self.assertTrue(status["terminal"])
+        self.assertEqual(set(by_source), set(SOURCES))
+        self.assertEqual(by_source[WIKIMEDIA_SOURCE_ID]["status"], "SUCCESS")
+        self.assertEqual(by_source[WIKIMEDIA_SOURCE_ID]["provider_request_count"], 1)
+        self.assertEqual(by_source[GOOGLE_SOURCE_ID]["status"], "FAILED")
+        self.assertEqual(by_source[GOOGLE_SOURCE_ID]["coverage"]["persistence_diagnostic"],
+                         persistence_diagnostic)
+        self.assertEqual(by_source[BING_SOURCE_ID]["status"], "UNAVAILABLE")
+        self.assertEqual(by_source[YOUTUBE_SOURCE_ID]["status"], "FAILED")
+        self.assertEqual(by_source[YOUTUBE_SOURCE_ID]["coverage"]["worker_failure_diagnostic"], {
+            "source_id": YOUTUBE_SOURCE_ID,
+            "failure_phase": "SOURCE_EXECUTION",
+            "failure_reason": "HANDLER_EXCEPTION",
+            "exception_class": "RuntimeError",
+            "error_code": "SOURCE_EXECUTION_FAILED",
+        })
+        self.assertNotIn("credential-like", repr(status))
+        self.assertEqual(provider_calls, {
+            WIKIMEDIA_SOURCE_ID: 1, GOOGLE_SOURCE_ID: 1,
+            BING_SOURCE_ID: 1, YOUTUBE_SOURCE_ID: 1,
+        })
+        self.assertEqual(history_by_source[GOOGLE_SOURCE_ID]["coverage"]["persistence_diagnostic"],
+                         persistence_diagnostic)
+        self.assertEqual(history_by_source[YOUTUBE_SOURCE_ID]["coverage"]["worker_failure_diagnostic"],
+                         by_source[YOUTUBE_SOURCE_ID]["coverage"]["worker_failure_diagnostic"])
+
+    async def test_terminal_failed_recovery_keeps_completed_wikimedia_result(self):
+        provider_calls = {source: 0 for source in SOURCES}
+
+        def wikimedia(_context):
+            provider_calls[WIKIMEDIA_SOURCE_ID] += 1
+            return {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "delivery_state": "FRESH", "records": [{"evidence_id": "wiki"}],
+                "record_count": 1, "provider_request_count": 1,
+            }
+
+        def crash_google(_context):
+            provider_calls[GOOGLE_SOURCE_ID] += 1
+            raise SimulatedProcessCrash()
+
+        def untouched(context):
+            provider_calls[context.source_id] += 1
+            return self.source_result(1)
+
+        for handler in (wikimedia, crash_google, untouched):
+            handler.__trendscout_data_mode__ = "SYNTHETIC"
+
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={WIKIMEDIA_SOURCE_ID: wikimedia, GOOGLE_SOURCE_ID: crash_google,
+                      BING_SOURCE_ID: untouched, YOUTUBE_SOURCE_ID: untouched},
+            resolve_grant=self.grant, utcnow=self.clock, source_order=SOURCES,
+        )
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        key = "fetch1-terminal-recovery-wikimedia-0001"
+        accepted = service.submit(key, source_ids=list(SOURCES))
+
+        for attempt in range(self.config.max_attempts):
+            with self.assertRaises(SimulatedProcessCrash):
+                await worker.run_once(f"fetch1-crash-{attempt}")
+            self.clock.value += timedelta(seconds=self.config.lease_seconds + 1)
+            if attempt + 1 < self.config.max_attempts:
+                interrupted = service.status(accepted["job_id"])
+                self.assertTrue(interrupted["recovery_available"])
+                replay = service.submit(key, source_ids=list(SOURCES))
+                self.assertEqual(replay["result"], "REPLAY")
+
+        status = service.status(accepted["job_id"])
+        by_source = {item["source_id"]: item for item in status["sources"]}
+        self.assertEqual(status["status"], "PARTIAL")
+        self.assertEqual(set(by_source), set(SOURCES))
+        self.assertEqual(by_source[WIKIMEDIA_SOURCE_ID]["status"], "SUCCESS")
+        self.assertEqual(by_source[WIKIMEDIA_SOURCE_ID]["provider_request_count"], 1)
+        self.assertTrue(all(by_source[source]["status"] == "FAILED"
+                            for source in (GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID)))
+        self.assertEqual(provider_calls[WIKIMEDIA_SOURCE_ID], 1)
+        self.assertEqual(provider_calls[GOOGLE_SOURCE_ID], self.config.max_attempts)
+
     async def test_deferred_source_releases_lease_without_shortening_retry(self):
         self.admit()
         calls = []
@@ -372,10 +534,56 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = self.worker({source: leaks for source in SOURCES})
         result = await worker.run_once("worker-one")
         self.assertEqual(result["state"], "PARTIAL")
-        expected = {"status": "FAILED", "data_mode": "SYNTHETIC", "records": [],
-                    "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED"}
-        self.assertTrue(all(item == expected
-                            for item in result["sources"].values()))
+        for source_id, item in result["sources"].items():
+            self.assertEqual(item, {
+                "status": "FAILED", "data_mode": "SYNTHETIC", "records": [],
+                "record_count": 0, "error_code": "SOURCE_EXECUTION_FAILED",
+                "coverage": {"worker_failure_diagnostic": {
+                    "source_id": source_id,
+                    "failure_phase": "RESULT_VALIDATION",
+                    "failure_reason": "INVALID_SOURCE_RESULT",
+                    "exception_class": "ValueError",
+                    "error_code": "SOURCE_EXECUTION_FAILED",
+                }},
+            })
+
+    async def test_non_finite_google_result_gets_safe_serialization_diagnostic(self):
+        def handler(context):
+            if context.source_id == GOOGLE_SOURCE_ID:
+                return {
+                    "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                    "records": [{"value": float("nan")}], "record_count": 1,
+                }
+            return self.source_result(1)
+
+        handlers = {source: handler for source in SOURCES}
+        for source_handler in handlers.values():
+            source_handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config), handlers=handlers,
+            resolve_grant=self.grant, utcnow=self.clock,
+        )
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        accepted = service.submit(
+            "google-non-finite-result-serialization-0001", source_ids=list(SOURCES),
+        )
+        outcome = await worker.run_once("google-serialization-worker")
+        status = service.status(accepted["job_id"])
+        google = next(item for item in status["sources"]
+                      if item["source_id"] == GOOGLE_SOURCE_ID)
+
+        self.assertEqual(outcome["state"], "PARTIAL")
+        self.assertEqual(google["status"], "FAILED")
+        self.assertEqual(google["error_code"], "RESULT_SERIALIZATION_FAILED")
+        self.assertEqual(google["coverage"]["worker_failure_diagnostic"], {
+            "source_id": GOOGLE_SOURCE_ID,
+            "failure_phase": "RESULT_SERIALIZATION",
+            "failure_reason": "RESULT_NOT_SERIALIZABLE",
+            "exception_class": "ValueError",
+            "error_code": "RESULT_SERIALIZATION_FAILED",
+        })
 
     async def test_wikimedia_page_receipt_recovers_after_crash_before_settlement(self):
         class SimulatedProcessCrash(BaseException):

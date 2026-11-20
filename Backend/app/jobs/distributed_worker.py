@@ -6,6 +6,7 @@ separate opt-in decisions; offline tests use local or injected Firestore stores.
 """
 
 import inspect
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,7 +18,20 @@ from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_MAX_SOURCE_RESULT_BYTES = 4_900_000
 _TERMINAL_STATUSES = frozenset({"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"})
+_SOURCE_FAILURE_PHASES = frozenset({
+    "SOURCE_ADMISSION", "SOURCE_EXECUTION", "RESULT_VALIDATION",
+    "RESULT_SERIALIZATION",
+})
+_SOURCE_FAILURE_REASONS = frozenset({
+    "ADMISSION_DENIED", "HANDLER_EXCEPTION", "INVALID_SOURCE_RESULT",
+    "RESULT_NOT_SERIALIZABLE",
+})
+_PERSISTENCE_FAILURE_REASONS = frozenset({
+    "CALLBACK_ERROR", "CALLBACK_TIMEOUT", "DEADLINE_EXPIRED",
+})
 _TRANSPORT_FAILURE_PHASES = frozenset({
     "REQUEST_DISPATCH", "RESPONSE_HEADERS", "BODY_STREAM", "JSON_DECODE", "SCHEMA_VALIDATION",
 })
@@ -27,6 +41,12 @@ _TRANSPORT_EXCEPTION_CLASSES = frozenset({
     "RequestError", "TimeoutException", "HttpDeadlineExceeded", "TimeoutError",
     "JSONDecodeError", "ValueError", "TypeError", "RecursionError",
 })
+
+
+class _SourceResultSerializationError(ValueError):
+    def __init__(self, exception_class):
+        super().__init__("source result is not serializable")
+        self.exception_class = exception_class
 
 
 @dataclass(frozen=True)
@@ -154,7 +174,6 @@ class DistributedFetchWorker:
                 result = self.handlers[source_id](context)
                 if inspect.isawaitable(result):
                     result = await result
-                result = self._validate_result(result, expected_mode=grant.data_mode)
             except AdmissionDenied as exc:
                 # A source-level admission/persistence failure must not strand
                 # the whole durable Fetch before later independent sources run.
@@ -162,17 +181,30 @@ class DistributedFetchWorker:
                 # and must not write a terminal result under a stale fence.
                 if exc.code == "LEASE_LOST":
                     raise
-                code = exc.code if isinstance(exc.code, str) and _SAFE_CODE.fullmatch(
-                    exc.code
-                ) else "SOURCE_EXECUTION_FAILED"
-                result = {"status": "FAILED", "data_mode": grant.data_mode,
-                          "records": [], "record_count": 0, "error_code": code}
+                result = self._source_failure_result(
+                    source_id, grant.data_mode, exc,
+                    phase="SOURCE_ADMISSION", reason="ADMISSION_DENIED",
+                )
             except Exception as exc:
-                code = getattr(exc, "code", "SOURCE_EXECUTION_FAILED")
-                if not isinstance(code, str) or not _SAFE_CODE.fullmatch(code):
-                    code = "SOURCE_EXECUTION_FAILED"
-                result = {"status": "FAILED", "data_mode": grant.data_mode,
-                          "records": [], "record_count": 0, "error_code": code}
+                result = self._source_failure_result(
+                    source_id, grant.data_mode, exc,
+                    phase="SOURCE_EXECUTION", reason="HANDLER_EXCEPTION",
+                )
+            else:
+                try:
+                    result = self._validate_result(
+                        result, expected_mode=grant.data_mode,
+                        expected_source_id=source_id,
+                    )
+                except Exception as exc:
+                    serialization_error = isinstance(exc, _SourceResultSerializationError)
+                    result = self._source_failure_result(
+                        source_id, grant.data_mode, exc,
+                        phase=("RESULT_SERIALIZATION" if serialization_error
+                               else "RESULT_VALIDATION"),
+                        reason=("RESULT_NOT_SERIALIZABLE" if serialization_error
+                                else "INVALID_SOURCE_RESULT"),
+                    )
 
             if result["status"] == "DEFERRED":
                 retry_at = result["retry_at"]
@@ -212,7 +244,31 @@ class DistributedFetchWorker:
                 "sources": outcomes}
 
     @staticmethod
-    def _validate_result(value, *, expected_mode):
+    def _source_failure_result(source_id, data_mode, error, *, phase, reason):
+        code = getattr(error, "code", None)
+        if hasattr(code, "value"):
+            code = code.value
+        if not isinstance(code, str) or not _SAFE_CODE.fullmatch(code):
+            code = ("RESULT_SERIALIZATION_FAILED"
+                    if phase == "RESULT_SERIALIZATION" else "SOURCE_EXECUTION_FAILED")
+        exception_class = getattr(error, "exception_class", None) or type(error).__name__
+        if not _SAFE_EXCEPTION_CLASS.fullmatch(exception_class):
+            exception_class = "UnknownError"
+        diagnostic = {
+            "source_id": source_id,
+            "failure_phase": phase,
+            "failure_reason": reason,
+            "exception_class": exception_class,
+            "error_code": code,
+        }
+        return {
+            "status": "FAILED", "data_mode": data_mode,
+            "records": [], "record_count": 0, "error_code": code,
+            "coverage": {"worker_failure_diagnostic": diagnostic},
+        }
+
+    @staticmethod
+    def _validate_result(value, *, expected_mode, expected_source_id=None):
         if not isinstance(value, dict) or value.get("status") not in _TERMINAL_STATUSES | {"DEFERRED"}:
             raise ValueError("source handler returned an invalid status")
         if value["status"] == "DEFERRED":
@@ -268,6 +324,45 @@ class DistributedFetchWorker:
             raise ValueError("invalid quality flags")
         if "coverage" in value and not isinstance(value["coverage"], dict):
             raise ValueError("coverage must be a bounded object")
+        coverage = value.get("coverage", {})
+        worker_diagnostic = coverage.get("worker_failure_diagnostic")
+        if worker_diagnostic is not None:
+            expected_fields = {
+                "source_id", "failure_phase", "failure_reason", "exception_class", "error_code",
+            }
+            if (not isinstance(worker_diagnostic, dict)
+                    or set(worker_diagnostic) != expected_fields
+                    or worker_diagnostic.get("source_id") != expected_source_id
+                    or worker_diagnostic.get("failure_phase") not in _SOURCE_FAILURE_PHASES
+                    or worker_diagnostic.get("failure_reason") not in _SOURCE_FAILURE_REASONS
+                    or not isinstance(worker_diagnostic.get("exception_class"), str)
+                    or not _SAFE_EXCEPTION_CLASS.fullmatch(worker_diagnostic["exception_class"])
+                    or worker_diagnostic.get("error_code") != value.get("error_code")
+                    or not isinstance(worker_diagnostic.get("error_code"), str)
+                    or not _SAFE_CODE.fullmatch(worker_diagnostic["error_code"])):
+                raise ValueError("invalid worker failure diagnostic")
+        persistence_diagnostic = coverage.get("persistence_diagnostic")
+        if persistence_diagnostic is not None:
+            expected_fields = {
+                "source_id", "failure_phase", "failure_reason", "exception_class",
+                "attempt_id", "error_code",
+            }
+            if (not isinstance(persistence_diagnostic, dict)
+                    or set(persistence_diagnostic) != expected_fields
+                    or persistence_diagnostic.get("source_id") != expected_source_id
+                    or persistence_diagnostic.get("failure_phase") != "RESULT_PERSISTENCE"
+                    or persistence_diagnostic.get("failure_reason") is not None
+                    and persistence_diagnostic.get("failure_reason") not in _PERSISTENCE_FAILURE_REASONS
+                    or persistence_diagnostic.get("exception_class") is not None
+                    and (not isinstance(persistence_diagnostic.get("exception_class"), str)
+                         or not _SAFE_EXCEPTION_CLASS.fullmatch(
+                             persistence_diagnostic["exception_class"]))
+                    or not isinstance(persistence_diagnostic.get("attempt_id"), str)
+                    or not _SAFE_ATTEMPT_ID.fullmatch(persistence_diagnostic["attempt_id"])
+                    or persistence_diagnostic.get("error_code") != value.get("error_code")
+                    or not isinstance(persistence_diagnostic.get("error_code"), str)
+                    or not _SAFE_CODE.fullmatch(persistence_diagnostic["error_code"])):
+                raise ValueError("invalid persistence diagnostic")
         if "transport_diagnostic" in value:
             diagnostic = value["transport_diagnostic"]
             expected_diagnostic_fields = {
@@ -295,4 +390,12 @@ class DistributedFetchWorker:
                     or not _SAFE_CODE.fullmatch(diagnostic["error_code"])
                     or diagnostic["error_code"] != value.get("error_code")):
                 raise ValueError("invalid transport diagnostic values")
+        try:
+            serialized = json.dumps(
+                value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise _SourceResultSerializationError(type(exc).__name__) from None
+        if len(serialized) > _MAX_SOURCE_RESULT_BYTES:
+            raise _SourceResultSerializationError("ValueError")
         return value

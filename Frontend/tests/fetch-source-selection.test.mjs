@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { isVercelSharedLive } from '../public/modules/capabilities.js';
 import { liveFetchMessageKey, PublicFetchController } from '../public/modules/fetch.js';
 
 const COMPLETED_ID = 'a'.repeat(32);
@@ -163,6 +164,31 @@ test('preserves Wikimedia-only and Wikimedia-history LIVE messages', () => {
     'fetch.history-failed-live');
 });
 
+test('uses Vercel runtime wording for shared LIVE Fetches', () => {
+  assert.equal(liveFetchMessageKey('running', 'latest', [
+    'google_web_serp', 'bing_web_serp',
+  ], 'VERCEL_SHARED_LIVE'), 'fetch.running-vercel-live');
+  assert.equal(liveFetchMessageKey('auto-resuming', 'latest', [
+    'google_web_serp', 'bing_web_serp',
+  ], 'VERCEL_SHARED_LIVE'), 'fetch.auto-resuming-vercel-live');
+  assert.equal(liveFetchMessageKey('running', 'latest', [
+    'wikimedia_pageviews_top_per_country',
+  ], 'VERCEL_SHARED_LIVE'), 'fetch.running-live');
+});
+
+test('selects Vercel wording from the published runtime capability', () => {
+  const capabilities = {
+    data_mode: 'LIVE', vercel_shared_live: true,
+    environment_mode: 'vercel', read_only: false,
+  };
+  assert.equal(isVercelSharedLive(capabilities), true);
+  assert.equal(liveFetchMessageKey('running', 'latest', [
+    'google_web_serp', 'bing_web_serp', 'youtube_video_search',
+  ], isVercelSharedLive(capabilities) ? 'VERCEL_SHARED_LIVE' : 'LOCAL'),
+  'fetch.running-vercel-live');
+  assert.equal(isVercelSharedLive({ ...capabilities, environment_mode: 'local' }), false);
+});
+
 test('reports a status-poll allowance separately from provider rate limits', async () => {
   const previousFetch = globalThis.fetch;
   const kinds = [];
@@ -192,11 +218,16 @@ test('reports a status-poll allowance separately from provider rate limits', asy
   }
 });
 
-test('explicitly resumes a recovered durable job with the same idempotent request', async () => {
+test('automatically resumes a recovered durable job with the same idempotent request', async () => {
   const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
   const requests = [];
   const states = [];
   let statusReads = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path: String(path), ...options });
     if (path === '/api/v1/fetches') {
@@ -221,20 +252,222 @@ test('explicitly resumes a recovered durable job with the same idempotent reques
       sourceIds: () => ['google_web_serp'],
     });
     await controller.activate();
-    assert.equal(states.at(-1), 'recovery-available');
-    assert.equal(requests.filter((request) => request.path === '/api/v1/fetches').length, 1);
-    assert.equal(statusReads, 1);
-
-    // This second call represents the user's explicit Continue Fetch click.
-    await controller.activate();
     const submissions = requests.filter((request) => request.path === '/api/v1/fetches');
     assert.equal(submissions.length, 2);
     assert.equal(submissions[0].headers['Idempotency-Key'], submissions[1].headers['Idempotency-Key']);
     assert.equal(submissions[0].body, submissions[1].body);
+    assert.equal(states.includes('auto-resuming'), true);
     assert.equal(statusReads, 2);
     assert.equal(states.at(-1), 'completed');
   } finally {
     globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('automatically resumes a recovered job and reaches four final source states', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let statusReads = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({
+        fetch_id: COMPLETED_ID, data_mode: 'LIVE', status: 'QUEUED',
+      }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    }
+    statusReads += 1;
+    const body = statusReads === 1
+      ? { status: 'QUEUED', recovery_available: true, terminal: false }
+      : {
+        status: 'PARTIAL', recovery_available: false, terminal: true,
+        sources: [
+          { source_id: 'wikimedia_pageviews_top_per_country', status: 'SUCCESS', provider_request_count: 1 },
+          { source_id: 'google_web_serp', status: 'FAILED', error_code: 'RESULT_PERSISTENCE_FAILED' },
+          { source_id: 'bing_web_serp', status: 'UNAVAILABLE', error_code: 'NO_SAVED_CANDIDATE' },
+          { source_id: 'youtube_video_search', status: 'FAILED', error_code: 'SOURCE_EXECUTION_FAILED' },
+        ],
+      };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind),
+      onTerminal: () => {},
+      locale: () => 'en',
+      sourceIds: () => [
+        'wikimedia_pageviews_top_per_country', 'google_web_serp',
+        'bing_web_serp', 'youtube_video_search',
+      ],
+      youtubePolicyVersion: () => 'd6-youtube-v2',
+    });
+    await controller.activate();
+
+    const submissions = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[0].headers['Idempotency-Key'], submissions[1].headers['Idempotency-Key']);
+    assert.equal(submissions[0].body, submissions[1].body);
+    assert.equal(submissions[0].headers['X-YouTube-Policy-Version'], 'd6-youtube-v2');
+    assert.ok(states.includes('auto-resuming'));
+    assert.equal(states.at(-1), 'partial');
+    assert.equal(statusReads, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('redispatches a stalled queued Vercel job with the same idempotency key', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let statusReads = 0;
+  const createdAt = new Date(Date.now() - 10_000).toISOString();
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({
+        fetch_id: COMPLETED_ID, data_mode: 'LIVE', status: 'QUEUED',
+      }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    }
+    statusReads += 1;
+    const body = statusReads === 1
+      ? { status: 'QUEUED', created_at: createdAt, updated_at: createdAt, terminal: false }
+      : { status: 'COMPLETED', terminal: true };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind),
+      onTerminal: () => {},
+      locale: () => 'en',
+      sourceIds: () => ['wikimedia_pageviews_top_per_country', 'google_web_serp'],
+    });
+    await controller.activate();
+
+    const posts = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].headers['Idempotency-Key'], posts[1].headers['Idempotency-Key']);
+    assert.equal(posts[0].body, posts[1].body);
+    assert.equal(states.includes('auto-resuming'), true);
+    assert.equal(statusReads, 2);
+    assert.equal(states.at(-1), 'completed');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('continues a deferred Fetch when its persisted retry time arrives', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let statusReads = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    statusReads += 1;
+    const body = statusReads === 1
+      ? { status: 'QUEUED', retry_at: new Date(Date.now() - 1).toISOString(), terminal: false }
+      : { status: 'COMPLETED', terminal: true };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind),
+      onTerminal: () => {},
+      locale: () => 'en',
+      sourceIds: () => ['wikimedia_pageviews_top_per_country'],
+    });
+    await controller.activate();
+
+    const posts = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].headers['Idempotency-Key'], posts[1].headers['Idempotency-Key']);
+    assert.equal(states.includes('retry-wait'), true);
+    assert.equal(statusReads, 2);
+    assert.equal(states.at(-1), 'completed');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('retries an uncertain Vercel submission with the same idempotency key', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  let submissions = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      submissions += 1;
+      if (submissions === 1) {
+        return new Response(JSON.stringify({ detail: { code: 'FUNCTION_TIMEOUT' } }), {
+          status: 504, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ status: 'COMPLETED', terminal: true }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => ['google_web_serp'],
+    });
+    await controller.activate();
+    const posts = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].headers['Idempotency-Key'], posts[1].headers['Idempotency-Key']);
+    assert.equal(posts[0].body, posts[1].body);
+    assert.equal(requests.at(-1).path, '/api/v1/fetches/' + COMPLETED_ID);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
   }
 });
 

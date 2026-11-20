@@ -122,6 +122,11 @@ function renderRunHistoryDetail(item, errorMessage = null) {
       source.cacheDeliveryAt ? `${t('runs.cache-delivery-time')}: ${timestamp(source.cacheDeliveryAt)}` : null,
       source.nextEligibleAt ? `${t('runs.source-next-refresh')}: ${timestamp(source.nextEligibleAt)}` : null,
       sourceError ? `${t('runs.source-error')}: ${sourceError}` : null,
+      source.failureDiagnostic ? `${t('runs.failure-diagnostic')}: ${[
+        source.failureDiagnostic.failurePhase,
+        source.failureDiagnostic.failureReason,
+        source.failureDiagnostic.exceptionClass,
+      ].filter(Boolean).join(' · ')}` : null,
       source.providerMethod ? `${t('runs.provider-method')}: ${source.providerMethod}` : null,
       source.query ? `${t('runs.source-query')}: ${source.query}` : null,
       source.queryScopes.length ? `${t('runs.source-scope')}: ${source.queryScopes.join(', ')}` : null,

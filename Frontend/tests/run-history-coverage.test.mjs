@@ -224,3 +224,56 @@ test('preserves unavailable YouTube diagnostics and stale cache delivery', () =>
   assert.equal(result.sources[1].deliveryState, 'STALE_CACHE');
   assert.equal(result.sources[1].cacheFreshness, 'STALE_CACHE');
 });
+
+test('projects only safe failure diagnostic fields into Run History', () => {
+  const result = extractRunSourceCoverage({ source_manifest: [{
+    source_id: 'google_web_serp',
+    status: 'FAILED',
+    error_code: 'RESULT_PERSISTENCE_FAILED',
+    coverage: {
+      persistence_diagnostic: {
+        source_id: 'google_web_serp',
+        failure_phase: 'RESULT_PERSISTENCE',
+        failure_reason: 'CALLBACK_ERROR',
+        exception_class: 'OSError',
+        attempt_id: 'private-attempt-id',
+        message: 'private credential-like text',
+      },
+    },
+  }, {
+    source_id: 'youtube_video_search',
+    status: 'FAILED',
+    coverage: {
+      worker_failure_diagnostic: {
+        source_id: 'google_web_serp',
+        failure_phase: 'UNSAFE_PHASE_WITH_SECRET',
+        failure_reason: 'CALLBACK_ERROR',
+        exception_class: 'RuntimeError',
+      },
+    },
+  }, {
+    source_id: 'bing_web_serp',
+    status: 'FAILED',
+    coverage: {
+      worker_failure_diagnostic: {
+        source_id: 'bing_web_serp',
+        failure_phase: 'RESULT_SERIALIZATION',
+        failure_reason: 'RESULT_NOT_SERIALIZABLE',
+        exception_class: 'ValueError',
+      },
+    },
+  }] });
+
+  assert.deepEqual(result.sources[0].failureDiagnostic, {
+    failurePhase: 'RESULT_PERSISTENCE',
+    failureReason: 'CALLBACK_ERROR',
+    exceptionClass: 'OSError',
+  });
+  assert.equal('failureDiagnostic' in result.sources[1], false);
+  assert.deepEqual(result.sources[2].failureDiagnostic, {
+    failurePhase: 'RESULT_SERIALIZATION',
+    failureReason: 'RESULT_NOT_SERIALIZABLE',
+    exceptionClass: 'ValueError',
+  });
+  assert.equal(JSON.stringify(result).includes('private'), false);
+});

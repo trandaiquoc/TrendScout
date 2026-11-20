@@ -55,6 +55,7 @@ class _FetchFacade:
             operationally_enabled=lambda: True,
         )
         self.submitted_sources = None
+        self.submitted_keys = []
         self.status_calls = 0
 
     @staticmethod
@@ -86,17 +87,22 @@ class _FetchFacade:
             "progress": {"completed_sources": 1, "total_sources": 1},
         }
 
-    def submit(self, _idempotency_key, *, source_ids):
+    def submit(self, idempotency_key, *, source_ids):
+        self.submitted_keys.append(idempotency_key)
         self.submitted_sources = source_ids
         return {
             "job_id": _JOB_ID,
             "status": "QUEUED",
-            "result": "CREATED",
+            "result": "CREATED" if len(self.submitted_keys) == 1 else "REPLAY",
             "created_at": "2026-11-19T00:00:00+00:00",
         }
 
     async def run_once(self, _owner):
-        if self.client.closed or "context_exited" in self.events:
+        entered = max((index for index, event in enumerate(self.events)
+                       if event == "context_entered"), default=-1)
+        exited = max((index for index, event in enumerate(self.events)
+                      if event == "context_exited"), default=-1)
+        if self.client.closed or entered < exited:
             raise AssertionError("request resources closed before the background worker finished")
         self.events.append("worker_finished")
         return None
@@ -129,6 +135,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def context_factory(_client, *, user_agent):
             self.assertTrue(user_agent)
+            facade.client = _client
             events.append("context_entered")
             try:
                 yield facade
@@ -197,6 +204,39 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(response.json()["sources"]), set(sources))
         self.assertEqual(facade.submitted_sources, sorted(sources))
         self.assertIn("worker_finished", events)
+
+    async def test_idempotent_recovery_post_dispatches_a_new_vercel_worker(self):
+        app, events, _client, facade, client_factory = self.app(enabled=True)
+        client_factory.side_effect = lambda _token: _Client(events)
+        sources = [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]
+        facade.available_sources = frozenset(sources)
+        facade.admission.policy.enabled_sources = facade.available_sources
+        headers = {
+            "Origin": "https://trend-scout.example",
+            "x-vercel-oidc-token": "synthetic-test-token",
+            "Idempotency-Key": "vercel-recovery-test-0001",
+            "X-YouTube-Policy-Version": "test-policy-v1",
+        }
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                first = await browser.post(
+                    "/api/v1/fetches", headers=headers, json={"sources": sources},
+                )
+                resumed = await browser.post(
+                    "/api/v1/fetches", headers=headers, json={"sources": sources},
+                )
+
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(resumed.status_code, 202, resumed.text)
+        self.assertEqual(first.json()["fetch_id"], resumed.json()["fetch_id"])
+        self.assertEqual(resumed.headers["idempotent-replay"], "true")
+        self.assertEqual(facade.submitted_keys, [headers["Idempotency-Key"]] * 2)
+        self.assertEqual(events.count("worker_finished"), 2)
+        self.assertEqual(events.count("context_entered"), 2)
+        self.assertEqual(events.count("context_exited"), 2)
 
     async def test_feature_gate_off_never_constructs_identity_or_worker(self):
         app, events, _client, _facade, client_factory = self.app(enabled=False)

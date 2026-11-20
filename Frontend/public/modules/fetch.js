@@ -1,8 +1,12 @@
 import { ApiError, getJson, requestJson } from './api.js';
 
 const TERMINAL = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED']);
-const POLL_INTERVAL_MS = 1000;
-const MAX_POLLS_PER_ATTEMPT = 90;
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLLS_PER_ATTEMPT = 110;
+const MAX_STATUS_POLLS_PER_FETCH = 110;
+const MAX_AUTOMATIC_CONTINUATIONS = 3;
+const UNCERTAIN_SUBMISSION_RETRY_MS = 2000;
+const STALLED_QUEUE_DISPATCH_MS = 6000;
 const WIKIMEDIA_SOURCE_ID = 'wikimedia_pageviews_top_per_country';
 const YOUTUBE_SOURCE_ID = 'youtube_video_search';
 const YOUTUBE_POLICY_VERSION_HEADER = 'X-YouTube-Policy-Version';
@@ -22,6 +26,18 @@ const LOCAL_LIVE_MESSAGE_KEYS = {
   partial: 'fetch.partial-local-live',
   completed: 'fetch.completed-local-live',
   failed: 'fetch.failed-local-live',
+  'auto-resuming': 'fetch.auto-resuming-local-live',
+  'retry-wait': 'fetch.retry-wait-local-live',
+};
+const VERCEL_SHARED_LIVE_MESSAGE_KEYS = {
+  submitting: 'fetch.submitting-vercel-live',
+  queued: 'fetch.queued-vercel-live',
+  running: 'fetch.running-vercel-live',
+  partial: 'fetch.partial-vercel-live',
+  completed: 'fetch.completed-vercel-live',
+  failed: 'fetch.failed-vercel-live',
+  'auto-resuming': 'fetch.auto-resuming-vercel-live',
+  'retry-wait': 'fetch.retry-wait-vercel-live',
 };
 const WIKIMEDIA_HISTORY_MESSAGE_KEYS = {
   submitting: 'fetch.history-submitting-live',
@@ -32,14 +48,28 @@ const WIKIMEDIA_HISTORY_MESSAGE_KEYS = {
   failed: 'fetch.history-failed-live',
 };
 
-export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = []) {
+export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = [], runtimeScope = 'LOCAL') {
   if (requestKind === 'history') {
     return WIKIMEDIA_HISTORY_MESSAGE_KEYS[kind] || null;
   }
   const wikimediaOnly = Array.isArray(sourceIds)
     && sourceIds.length === 1 && sourceIds[0] === WIKIMEDIA_SOURCE_ID;
-  const messages = wikimediaOnly ? WIKIMEDIA_LIVE_MESSAGE_KEYS : LOCAL_LIVE_MESSAGE_KEYS;
+  const messages = wikimediaOnly ? WIKIMEDIA_LIVE_MESSAGE_KEYS
+    : runtimeScope === 'VERCEL_SHARED_LIVE'
+      ? VERCEL_SHARED_LIVE_MESSAGE_KEYS : LOCAL_LIVE_MESSAGE_KEYS;
   return messages[kind] || null;
+}
+
+function isUncertainSubmissionError(error) {
+  return error instanceof ApiError
+    && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status));
+}
+
+function submissionRetryDelay(error) {
+  const retryAfter = Number(error?.retryAfterSeconds);
+  return Number.isFinite(retryAfter) && retryAfter > 0
+    ? Math.min(Math.max(retryAfter * 1000, UNCERTAIN_SUBMISSION_RETRY_MS), 10_000)
+    : UNCERTAIN_SUBMISSION_RETRY_MS;
 }
 
 function newIdempotencyKey() {
@@ -81,6 +111,9 @@ export class PublicFetchController {
     this.busy = false;
     this.stopped = false;
     this.retryTimer = null;
+    this.automaticContinuations = 0;
+    this.statusPolls = 0;
+    this.lastAutomaticDispatchAt = 0;
   }
 
   async activate() {
@@ -107,7 +140,12 @@ export class PublicFetchController {
           error.code = 'YOUTUBE_POLICY_CONSENT_REQUIRED';
           throw error;
         }
-        this.key = this.key || newIdempotencyKey();
+        if (!this.key) {
+          this.key = newIdempotencyKey();
+          this.automaticContinuations = 0;
+          this.statusPolls = 0;
+          this.lastAutomaticDispatchAt = 0;
+        }
         this.activeYoutubePolicyVersion = this.includesYouTube ? policyVersion : null;
         this.requestBody = this.historyDays !== null
           ? { days: this.historyDays }
@@ -119,18 +157,38 @@ export class PublicFetchController {
         error.code = 'YOUTUBE_POLICY_CONSENT_REQUIRED';
         throw error;
       }
-      this.key = this.key || newIdempotencyKey();
+      if (!this.key) {
+        this.key = newIdempotencyKey();
+        this.automaticContinuations = 0;
+        this.statusPolls = 0;
+        this.lastAutomaticDispatchAt = 0;
+      }
       const headers = { 'Idempotency-Key': this.key };
       if (this.activeYoutubePolicyVersion) {
         headers[YOUTUBE_POLICY_VERSION_HEADER] = this.activeYoutubePolicyVersion;
       }
-      const accepted = await requestJson(this.historyDays === null
-        ? '/api/v1/fetches' : '/api/v1/fetches/history', {
-        method: 'POST',
-        body: this.requestBody,
-        headers,
-        locale: this.locale(),
-      });
+      let accepted;
+      while (!accepted) {
+        try {
+          accepted = await requestJson(this.historyDays === null
+            ? '/api/v1/fetches' : '/api/v1/fetches/history', {
+            method: 'POST',
+            body: this.requestBody,
+            headers,
+            locale: this.locale(),
+          });
+        } catch (error) {
+          if (!isUncertainSubmissionError(error)
+              || this.automaticContinuations >= MAX_AUTOMATIC_CONTINUATIONS) throw error;
+          this.automaticContinuations += 1;
+          this.emit({ kind: 'submitting', busy: true, error });
+          await wait(submissionRetryDelay(error));
+          if (this.stopped) {
+            this.busy = false;
+            return;
+          }
+        }
+      }
       this.fetchId = accepted.fetch_id;
       this.resumeNeeded = false;
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
@@ -165,6 +223,9 @@ export class PublicFetchController {
     this.fetchId = null;
     this.resumeNeeded = false;
     this.stopped = false;
+    this.automaticContinuations = 0;
+    this.statusPolls = 0;
+    this.lastAutomaticDispatchAt = 0;
     await this.activate();
     return true;
   }
@@ -173,12 +234,14 @@ export class PublicFetchController {
     this.busy = true;
     let status = null;
     try {
-      for (let attempt = 0; attempt < MAX_POLLS_PER_ATTEMPT && !this.stopped; attempt += 1) {
+      for (let attempt = 0; attempt < MAX_POLLS_PER_ATTEMPT
+          && this.statusPolls < MAX_STATUS_POLLS_PER_FETCH && !this.stopped; attempt += 1) {
         status = await getJson('/api/v1/fetches/' + encodeURIComponent(this.fetchId), {
           headers: this.activeYoutubePolicyVersion
             ? { [YOUTUBE_POLICY_VERSION_HEADER]: this.activeYoutubePolicyVersion } : {},
           locale: this.locale(),
         });
+        this.statusPolls += 1;
         this.emit({ kind: 'running', busy: true, fetch: status });
         if (TERMINAL.has(status.status)) {
           this.busy = false;
@@ -188,15 +251,76 @@ export class PublicFetchController {
           this.activeYoutubePolicyVersion = null;
           this.includesYouTube = false;
           this.resumeNeeded = false;
+          this.automaticContinuations = 0;
+          this.statusPolls = 0;
+          this.lastAutomaticDispatchAt = 0;
           this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
           return;
         }
         if (status.recovery_available === true && status.status === 'QUEUED') {
-          this.busy = false;
           this.resumeNeeded = true;
+          if (this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+            this.automaticContinuations += 1;
+            this.lastAutomaticDispatchAt = Date.now();
+            this.emit({ kind: 'auto-resuming', busy: true, fetch: status });
+            await wait(UNCERTAIN_SUBMISSION_RETRY_MS);
+            if (this.stopped) {
+              this.busy = false;
+              return;
+            }
+            this.busy = false;
+            await this.activate();
+            return;
+          }
+          this.busy = false;
           this.emit({ kind: 'recovery-available', busy: false, fetch: status });
           return;
+        }
+        if (status.status === 'QUEUED' && typeof status.retry_at === 'string') {
+          const retryAt = Date.parse(status.retry_at);
+          if (Number.isFinite(retryAt)) {
+            this.resumeNeeded = true;
+            if (this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+              this.automaticContinuations += 1;
+              this.lastAutomaticDispatchAt = Date.now();
+              this.emit({ kind: 'retry-wait', busy: true, fetch: status });
+              await wait(Math.max(0, retryAt - Date.now()));
+              if (this.stopped) {
+                this.busy = false;
+                return;
+              }
+              this.busy = false;
+              await this.activate();
+              return;
+            }
+            this.busy = false;
+            this.emit({ kind: 'recovery-available', busy: false, fetch: status });
+            return;
+          }
+        }
+        if (status.status === 'QUEUED' && status.recovery_available !== true
+            && typeof status.retry_at !== 'string') {
+          const updatedAt = Date.parse(status.updated_at || status.created_at || '');
+          const stalledSince = Math.max(
+            Number.isFinite(updatedAt) ? updatedAt : 0,
+            this.lastAutomaticDispatchAt,
+          );
+          if (stalledSince > 0 && Date.now() - stalledSince >= STALLED_QUEUE_DISPATCH_MS
+              && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+            this.resumeNeeded = true;
+            this.automaticContinuations += 1;
+            this.lastAutomaticDispatchAt = Date.now();
+            this.emit({ kind: 'auto-resuming', busy: true, fetch: status });
+            await wait(UNCERTAIN_SUBMISSION_RETRY_MS);
+            if (this.stopped) {
+              this.busy = false;
+              return;
+            }
+            this.busy = false;
+            await this.activate();
+            return;
+          }
         }
         await wait(POLL_INTERVAL_MS);
       }

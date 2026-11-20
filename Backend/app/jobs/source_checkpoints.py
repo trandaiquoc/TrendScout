@@ -175,7 +175,9 @@ class SourceCheckpointJournal:
         """Validate and return a terminal source result within the retention grant."""
         now = _utc(now)
         self._authorize(source_id, grant, now)
-        if (not isinstance(job, dict) or job.get("state") not in {"COMPLETED", "PARTIAL"}
+        if (not isinstance(job, dict) or job.get("state") not in {
+                    "COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED",
+                }
                 or job.get("plan_fingerprint") != self.admission.policy.plan_fingerprint):
             return None
         entry = job.get("source_checkpoints", {}).get(source_id)

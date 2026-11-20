@@ -10,6 +10,34 @@ function firstCount(...values) {
   return null;
 }
 
+const FAILURE_PHASES = new Set([
+  'REQUEST_DISPATCH', 'RESPONSE_HEADERS', 'BODY_STREAM', 'JSON_DECODE',
+  'SCHEMA_VALIDATION', 'RESULT_PERSISTENCE', 'SOURCE_ADMISSION',
+  'SOURCE_EXECUTION', 'RESULT_VALIDATION', 'RESULT_SERIALIZATION', 'WORKER_RECOVERY',
+]);
+const FAILURE_REASONS = new Set([
+  'CALLBACK_ERROR', 'CALLBACK_TIMEOUT', 'DEADLINE_EXPIRED', 'ADMISSION_DENIED',
+  'HANDLER_EXCEPTION', 'INVALID_SOURCE_RESULT', 'RECOVERY_ATTEMPTS_EXHAUSTED',
+  'RESULT_NOT_SERIALIZABLE', 'JOB_DEADLINE_EXPIRED', 'JOB_ABORTED',
+  'TERMINAL_RESULT_MISSING',
+]);
+const SAFE_IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+
+function failureDiagnostic(sourceId, coverage) {
+  for (const key of ['persistence_diagnostic', 'worker_failure_diagnostic', 'transport_diagnostic']) {
+    const value = coverage[key];
+    if (!value || typeof value !== 'object' || value.source_id !== sourceId) continue;
+    const result = {};
+    if (FAILURE_PHASES.has(value.failure_phase)) result.failurePhase = value.failure_phase;
+    if (FAILURE_REASONS.has(value.failure_reason)) result.failureReason = value.failure_reason;
+    if (typeof value.exception_class === 'string' && SAFE_IDENTIFIER.test(value.exception_class)) {
+      result.exceptionClass = value.exception_class;
+    }
+    if (Object.keys(result).length) return result;
+  }
+  return null;
+}
+
 export function extractRunSourceCoverage(item) {
   const manifests = Array.isArray(item?.source_manifest) ? item.source_manifest : [];
   const sources = manifests.map(source => {
@@ -71,6 +99,8 @@ export function extractRunSourceCoverage(item) {
       marketFilter: typeof coverage.market_filter === 'string' ? coverage.market_filter : null,
       languageFilter: typeof coverage.language_filter === 'string' ? coverage.language_filter : null,
     };
+    const diagnostic = failureDiagnostic(sourceId, coverage);
+    if (diagnostic) sourceCoverage.failureDiagnostic = diagnostic;
     if (typeof source?.error_code === 'string') sourceCoverage.errorCode = source.error_code;
     const providerRequestCount = firstCount(
       source?.provider_request_count,

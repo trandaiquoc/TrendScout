@@ -17,6 +17,34 @@ from app.jobs.source_checkpoints import CheckpointGrant
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 
+def _terminal_missing_source_result(job_state, source_id, data_mode):
+    failure = {
+        "FAILED": ("RECOVERY_ATTEMPTS_EXHAUSTED", "RECOVERY_ATTEMPTS_EXHAUSTED"),
+        "EXPIRED": ("JOB_DEADLINE_EXPIRED", "FETCH_DEADLINE_EXCEEDED"),
+        "ABORTED": ("JOB_ABORTED", "FETCH_ABORTED"),
+    }.get(job_state, ("TERMINAL_RESULT_MISSING", "SOURCE_RESULT_MISSING"))
+    reason, error_code = failure
+    diagnostic = {
+        "source_id": source_id,
+        "failure_phase": "WORKER_RECOVERY",
+        "failure_reason": reason,
+        "exception_class": None,
+        "error_code": error_code,
+    }
+    return {
+        "source_id": source_id,
+        "status": "FAILED",
+        "data_mode": data_mode,
+        "delivery_state": None,
+        "record_count": 0,
+        "records": [],
+        "coverage": {"worker_failure_diagnostic": diagnostic},
+        "provider_request_count": None,
+        "error_code": error_code,
+        "quality_flags": [],
+    }
+
+
 def _public_youtube_record(record):
     """Project a validated video into the fields the Fetch UI displays."""
     if not isinstance(record, dict):
@@ -227,13 +255,27 @@ class DistributedPublicFetch:
             return None
         source_results = []
         modes = set()
-        terminal = job["state"] in {"COMPLETED", "PARTIAL"}
+        terminal = job["state"] in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
         if terminal:
             request_metadata = job.get("request_metadata", {})
             selected_sources = ([WIKIMEDIA_SOURCE_ID]
                 if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
                 else request_metadata.get("sources", sorted(self.admission.policy.enabled_sources)))
             for source_id in sorted(selected_sources):
+                checkpoint = job.get("source_checkpoints", {}).get(source_id)
+                checkpoint_snapshot = (checkpoint.get("snapshot")
+                                       if isinstance(checkpoint, dict) else None)
+                checkpoint_complete = (
+                    isinstance(checkpoint_snapshot, dict)
+                    and checkpoint_snapshot.get("phase") == "COMPLETE"
+                )
+                if not checkpoint_complete:
+                    missing = _terminal_missing_source_result(
+                        job["state"], source_id, self.data_mode
+                    )
+                    source_results.append(missing)
+                    modes.add(self.data_mode)
+                    continue
                 try:
                     grant = self.resolve_grant(source_id, now)
                 except Exception:
@@ -345,6 +387,16 @@ class DistributedPublicFetch:
                     visible_sources.append({
                         key: value for key, value in item.items() if key != "records"
                     })
+        retry_at = None
+        if job.get("state") == "QUEUED" and job.get("recovery_available") is not True:
+            try:
+                available_at = datetime.fromisoformat(job["available_at"])
+                created_at = datetime.fromisoformat(job["created_at"])
+                if (available_at.tzinfo is not None and created_at.tzinfo is not None
+                        and available_at > created_at):
+                    retry_at = available_at.isoformat()
+            except (KeyError, TypeError, ValueError):
+                retry_at = None
         return {
             "fetch_id": job["job_id"],
             "status": job["state"],
@@ -366,6 +418,7 @@ class DistributedPublicFetch:
             "finished_at": job.get("finished_at"),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
             "recovery_available": job.get("recovery_available") is True,
+            **({"retry_at": retry_at} if retry_at is not None else {}),
         }
 
     def history(self, *, limit: int = 20) -> list[dict]:
@@ -393,20 +446,30 @@ class DistributedPublicFetch:
                             and snapshot.get("phase") == "COMPLETE"
                             and isinstance(result, dict))
                 status = result.get("status") if complete else job.get("state")
+                error_code = result.get("error_code") if complete else None
+                coverage = result.get("coverage") if complete else {}
+                if not complete and job.get("state") in {
+                    "COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED",
+                }:
+                    missing = _terminal_missing_source_result(
+                        job["state"], source_id, self.data_mode
+                    )
+                    status = missing["status"]
+                    error_code = missing["error_code"]
+                    coverage = missing["coverage"]
                 if status not in {"QUEUED", "RUNNING", "DEFERRED", "SUCCESS", "PARTIAL",
                                   "FAILED", "UNAVAILABLE", "COMPLETED", "EXPIRED", "ABORTED"}:
                     status = "UNKNOWN"
                 record_count = result.get("record_count") if complete else None
                 if type(record_count) is int and record_count >= 0:
                     received += record_count
-                coverage = result.get("coverage") if complete else {}
                 manifest.append({
                     "source_id": source_id,
                     "status": status,
                     "delivery_state": result.get("delivery_state") if complete else None,
                     "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
                     "provider_request_count": result.get("provider_request_count") if complete else None,
-                    "error_code": result.get("error_code") if complete else None,
+                    "error_code": error_code,
                     "coverage": coverage if isinstance(coverage, dict) else {},
                 })
             items.append({
