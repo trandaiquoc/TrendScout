@@ -22,10 +22,10 @@ from app.storage.local_file_security import secure_private_directory
 
 _STATE_KEY = "collections-live-snapshot-v1"
 _RETENTION = timedelta(days=3650)
-# Leave room for base64 and the JSON envelope inside the existing bounded
-# Firestore snapshot-blob adapter's four-megabyte record budget.
-_MAX_COMPRESSED_BYTES = 2_900_000
-_MAX_DATABASE_BYTES = 20_000_000
+# Leave room for base64 and the JSON envelope inside the existing five-megabyte
+# Firestore snapshot-blob budget. The adapter stores that payload in small chunks.
+_MAX_COMPRESSED_BYTES = 3_700_000
+_MAX_DATABASE_BYTES = 80_000_000
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _SNAPSHOT_FAILURE_REASONS = frozenset({
     "INVALID_SHARED_POINTER",
@@ -50,7 +50,9 @@ class CollectionSnapshotUnavailable(RuntimeError):
 
     def __init__(self, message: str, *, failure_reason: str,
                  cause_class: str | None = None,
-                 confirmation_exception_class: str | None = None):
+                 confirmation_exception_class: str | None = None,
+                 database_size_bytes: int | None = None,
+                 compressed_size_bytes: int | None = None):
         if failure_reason not in _SNAPSHOT_FAILURE_REASONS:
             raise ValueError("invalid Collections snapshot failure reason")
         super().__init__(message)
@@ -59,12 +61,18 @@ class CollectionSnapshotUnavailable(RuntimeError):
         self.confirmation_exception_class = self._safe_exception_class(
             confirmation_exception_class
         )
+        self.database_size_bytes = self._safe_size(database_size_bytes)
+        self.compressed_size_bytes = self._safe_size(compressed_size_bytes)
 
     @staticmethod
     def _safe_exception_class(value):
         if value is None:
             return None
         return value if isinstance(value, str) and _SAFE_EXCEPTION_CLASS.fullmatch(value) else "UnknownError"
+
+    @staticmethod
+    def _safe_size(value):
+        return value if type(value) is int and value >= 0 else None
 
 
 def _exception_class(error: Exception) -> str:
@@ -225,6 +233,7 @@ class FirestoreCollectionSnapshot:
                 raise CollectionSnapshotUnavailable(
                     "Collections database exceeds its storage limit",
                     failure_reason="DATABASE_TOO_LARGE",
+                    database_size_bytes=len(raw),
                 )
             content_digest = self._content_digest(backup_path)
             compressed = gzip.compress(raw, mtime=0)
@@ -235,6 +244,7 @@ class FirestoreCollectionSnapshot:
                     raise CollectionSnapshotUnavailable(
                         "Collections database exceeds its storage limit",
                         failure_reason="DATABASE_TOO_LARGE",
+                        database_size_bytes=len(raw),
                     )
                 content_digest = self._content_digest(backup_path)
                 compressed = gzip.compress(raw, mtime=0)
@@ -252,6 +262,8 @@ class FirestoreCollectionSnapshot:
             raise CollectionSnapshotUnavailable(
                 "Collections snapshot exceeds its storage limit",
                 failure_reason="COMPRESSED_SNAPSHOT_TOO_LARGE",
+                database_size_bytes=len(raw),
+                compressed_size_bytes=len(compressed),
             )
 
         now = _utc(self._utcnow())

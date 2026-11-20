@@ -178,12 +178,19 @@ async def _save_vercel_collection_snapshot(distributed, *, failure_code):
         if (not isinstance(confirmation_exception_class, str)
                 or not _SAFE_EXCEPTION_CLASS.fullmatch(confirmation_exception_class)):
             confirmation_exception_class = "None"
+        database_size_bytes = getattr(error, "database_size_bytes", None)
+        if type(database_size_bytes) is not int or database_size_bytes < 0:
+            database_size_bytes = "None"
+        compressed_size_bytes = getattr(error, "compressed_size_bytes", None)
+        if type(compressed_size_bytes) is not int or compressed_size_bytes < 0:
+            compressed_size_bytes = "None"
         _logger.error(
             "Vercel collection snapshot commit failed "
             "failure_phase=COLLECTION_SNAPSHOT_COMMIT failure_reason=%s "
-            "exception_class=%s cause_class=%s confirmation_exception_class=%s",
+            "exception_class=%s cause_class=%s confirmation_exception_class=%s "
+            "database_size_bytes=%s compressed_size_bytes=%s",
             failure_reason, _safe_exception_class(error), cause_class,
-            confirmation_exception_class,
+            confirmation_exception_class, database_size_bytes, compressed_size_bytes,
         )
         return JSONResponse(
             {"detail": {"code": failure_code}}, status_code=503,

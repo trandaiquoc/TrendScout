@@ -1,6 +1,7 @@
 """Collections Firestore snapshots are bounded, versioned and offline-testable."""
 
 import copy
+import json
 import random
 import sqlite3
 import tempfile
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from app.collections import firestore_snapshot
 from app.collections.firestore_snapshot import (
     CollectionSnapshotConflict,
     CollectionSnapshotUnavailable,
@@ -75,6 +77,15 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             FakeFirestoreClient(), path,
             utcnow=lambda: datetime(2026, 11, 19, tzinfo=timezone.utc),
         )
+
+    def test_compressed_limit_fits_existing_firestore_blob_budget(self):
+        envelope = json.dumps(
+            [{"encoding": "sqlite-gzip-base64-v1", "payload": ""}],
+            separators=(",", ":"),
+        ).encode("utf-8")
+        payload_chars = 4 * ((firestore_snapshot._MAX_COMPRESSED_BYTES + 2) // 3)
+        encoded_record_size = len(envelope) + payload_chars
+        self.assertLessEqual(encoded_record_size, firestore_snapshot_blobs._MAX_BLOB_BYTES)
 
     def test_round_trip_and_unchanged_image_does_not_write_again(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -150,7 +161,49 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         self.assertEqual(error.failure_reason, "BLOB_UPLOAD_FAILED")
         self.assertEqual(error.cause_class, "RuntimeError")
         self.assertIsNone(error.confirmation_exception_class)
+        self.assertIsNone(error.database_size_bytes)
+        self.assertIsNone(error.compressed_size_bytes)
         self.assertNotIn("credential-value-must-not-escape", str(error))
+
+    def test_round_trips_database_above_previous_expanded_limit(self):
+        payload_size = 22_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE source_data (id TEXT PRIMARY KEY, payload BLOB NOT NULL)")
+                db.execute("INSERT INTO source_data VALUES ('saved',?)", (b"x" * payload_size,))
+                db.commit()
+
+            snapshot = self._snapshot(path)
+            snapshot.load()
+            self.assertEqual(snapshot.save(), 1)
+            self.assertEqual(self.blobs.writes, 1)
+
+            restored_path = Path(directory) / "restored.sqlite"
+            restored = self._snapshot(restored_path)
+            restored.load()
+            with closing(sqlite3.connect(restored_path)) as db:
+                row = db.execute("SELECT length(payload) FROM source_data WHERE id='saved'").fetchone()
+                self.assertEqual(row, (payload_size,))
+
+    def test_oversized_active_data_reports_bounded_size_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE user_data (payload BLOB NOT NULL)")
+                db.execute("INSERT INTO user_data VALUES(?)", (b"x" * (128 * 1024),))
+                db.commit()
+
+            with patch("app.collections.firestore_snapshot._MAX_DATABASE_BYTES", 64 * 1024):
+                snapshot = self._snapshot(path)
+                snapshot.load()
+                with self.assertRaises(CollectionSnapshotUnavailable) as captured:
+                    snapshot.save()
+
+            self.assertEqual(captured.exception.failure_reason, "DATABASE_TOO_LARGE")
+            self.assertGreater(captured.exception.database_size_bytes, 64 * 1024)
+            self.assertIsNone(captured.exception.compressed_size_bytes)
+            self.assertEqual(self.blobs.writes, 0)
 
     def test_oversized_snapshot_compacts_freelist_without_mutating_working_database(self):
         with tempfile.TemporaryDirectory() as directory:
