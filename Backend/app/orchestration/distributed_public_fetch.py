@@ -523,3 +523,9 @@ class DistributedPublicFetch:
 
     async def run_once(self, owner: str):
         return await self.worker.run_once(owner)
+
+    async def run_slice(self, owner: str, fetch_id: str, *, max_sources: int = 1):
+        """Continue one requested shared Fetch through a bounded source slice."""
+        return await self.worker.run_once(
+            owner, job_id=fetch_id, max_sources=max_sources,
+        )

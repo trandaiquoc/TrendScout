@@ -105,15 +105,24 @@ class DistributedFetchWorker:
         self.utcnow = utcnow
         self.journal = SourceCheckpointJournal(admission, snapshot_blobs=snapshot_blobs)
 
-    async def run_once(self, owner: str) -> dict | None:
+    async def run_once(self, owner: str, *, job_id: str | None = None,
+                       max_sources: int | None = None) -> dict | None:
+        if (job_id is not None and (not isinstance(job_id, str) or not job_id)
+                or max_sources is not None and (
+                    type(max_sources) is not int or not 1 <= max_sources <= len(self.handlers)
+                )
+                or max_sources is not None and job_id is None):
+            raise ValueError("a valid job and bounded source slice are required")
         now = self.utcnow()
-        claim = self.admission.claim_next(owner, now=now)
+        claim = (self.admission.claim_job(job_id, owner, now=now) if job_id is not None
+                 else self.admission.claim_next(owner, now=now))
         if claim is None:
             return None
         job_id, fence = claim["job_id"], claim["fence"]
         job_expires_at = datetime.fromisoformat(claim["expires_at"])
         outcomes = {}
         deferred_until = None
+        processed_sources = 0
         request_metadata = claim.get("request_metadata", {})
         selected_sources = ([WIKIMEDIA_SOURCE_ID]
             if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
@@ -126,6 +135,11 @@ class DistributedFetchWorker:
         for source_id in self.source_order:
             if source_id not in selected:
                 continue
+            if max_sources is not None and processed_sources >= max_sources:
+                self.admission.yield_for_continuation(
+                    job_id, owner, fence, now=self.utcnow(),
+                )
+                return {"job_id": job_id, "state": "QUEUED", "sources": outcomes}
             now = self.utcnow()
             try:
                 grant = self.resolve_grant(source_id, now)
@@ -232,6 +246,7 @@ class DistributedFetchWorker:
                               now=self.utcnow(), expected_revision=revision_box[0],
                               snapshot=snapshot)
             outcomes[source_id] = result
+            processed_sources += 1
 
         if deferred_until is not None:
             self.admission.defer(job_id, owner, fence, now=self.utcnow(),

@@ -172,6 +172,39 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["state"], "COMPLETED")
         self.assertEqual(seen, list(order))
 
+    async def test_bounded_source_slices_resume_one_job_without_repeating_sources(self):
+        job_id = self.admit()
+        order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        seen = []
+
+        def handler(context):
+            seen.append(context.source_id)
+            return self.source_result(1)
+
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={source: handler for source in SOURCES},
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+            source_order=order,
+        )
+        states = []
+        for index, source_id in enumerate(order):
+            outcome = await worker.run_once(
+                f"slice-worker-{index}", job_id=job_id, max_sources=1,
+            )
+            states.append(outcome["state"])
+            self.assertEqual(seen, list(order[:index + 1]))
+            self.assertEqual(outcome["job_id"], job_id)
+            self.assertEqual(
+                outcome["state"], "COMPLETED" if index == len(order) - 1 else "QUEUED",
+            )
+
+        status = self.admission.read_job(job_id, now=self.clock())
+        self.assertEqual(states, ["QUEUED", "QUEUED", "QUEUED", "COMPLETED"])
+        self.assertEqual(status["attempts"], 1)
+
     async def test_source_admission_failure_is_saved_and_later_sources_finish(self):
         job_id = self.admit()
         order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
@@ -1021,10 +1054,13 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         def cache_scope(source_id):
             capability = source_capability(source_id)
+            query_scope = DEFAULT_QUERY_PLAN.fingerprint
+            if source_id == WIKIMEDIA_SOURCE_ID:
+                query_scope += f":{NOW.date().isoformat()}"
             return CacheScope(
                 source_id=source_id,
                 provider_id=capability.provider_id,
-                query=DEFAULT_QUERY_PLAN.fingerprint,
+                query=query_scope,
                 plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
                 market=DEFAULT_QUERY_PLAN.market,
                 language=DEFAULT_QUERY_PLAN.language or "all",
@@ -1054,6 +1090,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(max_queries=1, max_pages_per_query=1,
                                     max_requests=1),
+            observation_date=lambda: NOW.date(),
             shared_cache=cache,
             resolve_cache_grant=cache_grant,
             unavailable_mode="LIVE",

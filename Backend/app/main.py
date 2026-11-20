@@ -104,6 +104,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             or path.startswith("/api/v1/analytics/")
             or path == "/api/v1/algorithms/results"
             or path == "/api/v1/capabilities"
+            or path == "/api/v1/research"
             # The Collections workbench reads keyword rows through these
             # legacy dataset routes. They must share its request-scoped
             # Firestore-backed CollectionService instead of the empty Vercel
@@ -116,6 +117,8 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
         or path == "/api/v1/collections" and method in {"GET", "POST"}
         or path.startswith("/api/v1/collections/")
         and method in {"GET", "POST", "PATCH", "PUT", "DELETE"}
+        or path == "/api/v1/research" and method == "POST"
+        or path.startswith("/api/v1/research/") and method == "PATCH"
     )
 
 
@@ -194,6 +197,9 @@ def _persists_vercel_collections(method, path):
     return (
         (path == "/api/v1/collections" or path.startswith("/api/v1/collections/"))
         and method in {"POST", "PATCH", "PUT", "DELETE"}
+    ) or (
+        path == "/api/v1/research" and method == "POST"
+        or path.startswith("/api/v1/research/") and method == "PATCH"
     )
 
 
@@ -312,8 +318,8 @@ class VercelSharedLiveMiddleware:
             )
             if is_fetch_action:
                 # Starlette sends the HTTP body before awaiting BackgroundTasks.
-                # Hold that response until worker checkpoints, Collections
-                # processing, and the shared Firestore snapshot have committed.
+                # Keep this invocation alive for its bounded source slice and,
+                # on the terminal slice, Collections and snapshot persistence.
                 messages = []
 
                 async def capture_fetch_response(message):
@@ -334,12 +340,23 @@ class VercelSharedLiveMiddleware:
                     await response(scope, receive, send)
                     return
 
-                persistence_error = await _save_vercel_collection_snapshot(
-                    distributed, failure_code="COLLECTIONS_PERSISTENCE_FAILED"
+                # Source checkpoints and shared provider caches commit to their
+                # Firestore stores inside each slice. The larger Collections
+                # SQLite snapshot is needed after terminal Fetch processing.
+                needs_snapshot = not (
+                    _is_vercel_fetch_submission(
+                        scope.get("method", ""), scope.get("path", "")
+                    )
+                    and getattr(distributed, "firestore_shared_live", False)
+                    and not getattr(request.state, "vercel_fetch_snapshot_required", False)
                 )
-                if persistence_error is not None:
-                    await persistence_error(scope, receive, send)
-                    return
+                if needs_snapshot:
+                    persistence_error = await _save_vercel_collection_snapshot(
+                        distributed, failure_code="COLLECTIONS_PERSISTENCE_FAILED"
+                    )
+                    if persistence_error is not None:
+                        await persistence_error(scope, receive, send)
+                        return
                 for message in messages:
                     await send_no_store(message)
                 return

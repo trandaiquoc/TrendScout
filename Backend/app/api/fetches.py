@@ -259,6 +259,8 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
         return
     result = distributed.status(fetch_id, include_records=True)
     if result and result.get("terminal"):
+        if getattr(distributed, "firestore_shared_live", False):
+            request.state.vercel_fetch_snapshot_required = True
         if cached_context_only:
             processed = await service.process_fetch(
                 fetch_id, result.get("sources", []), cached_context_only=True
@@ -272,21 +274,37 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
 async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str,
                                      owner: str, *, run_worker: bool = True):
     """Run or resume a durable Fetch, then classify retained records."""
-    if run_worker:
-        # The bounded one-worker queue can contain at most one admitted live Fetch at a time.
-        try:
-            result = await distributed.run_once(owner)
-        except AdmissionDenied as exc:
-            if exc.code == "LEASE_BUSY":
-                # Another invocation still owns the fenced attempt. Its durable
-                # checkpoints remain authoritative; status polling will resume
-                # this same idempotent job after that lease expires.
-                return
-            raise
-        if (result and result.get("job_id") != fetch_id
-                and result.get("state") in {"COMPLETED", "PARTIAL"}):
-            await distributed.run_once(owner)
     shared_live = bool(getattr(distributed, "firestore_shared_live", False))
+    vercel_shared_live = (
+        shared_live
+        and request.app.state.settings.environment_profile == "vercel"
+    )
+    if run_worker:
+        terminal_race = False
+        # Vercel runs one source per Function invocation. The next same-key POST
+        # continues this exact job from its durable source checkpoints.
+        try:
+            result = (await distributed.run_slice(owner, fetch_id, max_sources=1)
+                      if vercel_shared_live else await distributed.run_once(owner))
+        except AdmissionDenied as exc:
+            if (exc.code == "LEASE_BUSY"
+                    or vercel_shared_live and exc.code == "JOB_DEFERRED"):
+                # Another invocation owns the lease, or the source has a
+                # scheduled retry. The same idempotent job will resume later.
+                return
+            if not (vercel_shared_live and exc.code in {"JOB_TERMINAL", "JOB_EXPIRED"}):
+                raise
+            terminal_race = True
+            result = None
+        if vercel_shared_live:
+            if (result is not None and result.get("job_id") == fetch_id
+                    and result.get("state") in {"COMPLETED", "PARTIAL"}):
+                request.state.vercel_fetch_snapshot_required = True
+            elif not terminal_race:
+                return
+        elif (result and result.get("job_id") != fetch_id
+              and result.get("state") in {"COMPLETED", "PARTIAL"}):
+            await distributed.run_once(owner)
     await _process_fetch_collections(
         request, distributed, fetch_id, cached_context_only=shared_live
     )

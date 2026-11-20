@@ -955,7 +955,7 @@ class PublicAdmission:
     def _finish_recovered_job(job, state, now):
         job.update(state=state, owner=None, lease_until=None,
                    recovery_available=False, updated_at=now.isoformat(),
-                   finished_at=now.isoformat())
+                   continuation_available=False, finished_at=now.isoformat())
 
     def _repair_job_lifecycle(self, job, now):
         """Make expired durable jobs observable without starting a worker."""
@@ -964,7 +964,9 @@ class PublicAdmission:
         try:
             expires_at = _parse(job["expires_at"])
             attempts = job["attempts"]
-            if type(attempts) is not int or attempts < 0:
+            continuation_available = job.get("continuation_available", False)
+            if (type(attempts) is not int or attempts < 0
+                    or type(continuation_available) is not bool):
                 raise ValueError("invalid job attempt count")
         except (KeyError, TypeError, ValueError):
             raise AdmissionDenied("JOB_STATE_INVALID") from None
@@ -998,7 +1000,8 @@ class PublicAdmission:
             available_at = _parse(job["available_at"])
         except (KeyError, TypeError, ValueError):
             raise AdmissionDenied("JOB_STATE_INVALID") from None
-        if available_at <= now and attempts >= self.policy.max_attempts:
+        if (available_at <= now and attempts >= self.policy.max_attempts
+                and not continuation_available):
             fallback = "FAILED"
             self._finish_recovered_job(
                 job, self._terminal_state_for_job(job, fallback), now
@@ -1274,6 +1277,7 @@ class PublicAdmission:
                                 "expires_at": (now + timedelta(seconds=self.policy.max_job_seconds)).isoformat(),
                                 "plan_fingerprint": self.policy.plan_fingerprint,
                                 "request_metadata": stored_metadata, "status_polls": 0,
+                                "recovery_available": False, "continuation_available": False,
                                 "receipts": {}}
                 starts.append(now.isoformat())
             keys[digest] = {"job_id": job_id,
@@ -1357,6 +1361,53 @@ class PublicAdmission:
             return self._claim_job(job, owner, now)
         return self._transaction(op)
 
+    def claim_job(self, job_id: str, owner: str, *, now: datetime) -> dict:
+        """Claim one named job and persist terminal lifecycle repair atomically."""
+        now = _utc(now)
+        if not isinstance(owner, str) or not _OWNER.fullmatch(owner):
+            raise ValueError("invalid worker identity")
+
+        def op(state):
+            self._guard_clock(state, now)
+            job = state["jobs"].get(job_id)
+            if not job:
+                return {"denied": "JOB_EXPIRED"}
+            if job.get("state") not in {"QUEUED", "RUNNING"}:
+                return {"denied": "JOB_TERMINAL"}
+            expires_at = _parse(job["expires_at"])
+            if expires_at <= now:
+                self._finish_recovered_job(
+                    job, self._terminal_state_for_job(job, "EXPIRED"), now,
+                )
+                return {"denied": "JOB_EXPIRED"}
+            if now < _parse(job["created_at"]):
+                return {"denied": "JOB_EXPIRED"}
+            if job["state"] == "RUNNING":
+                if _parse(job["lease_until"]) > now:
+                    raise AdmissionDenied("LEASE_BUSY")
+            elif job["state"] == "QUEUED":
+                if _parse(job["available_at"]) > now:
+                    raise AdmissionDenied("JOB_DEFERRED")
+            else:
+                return {"denied": "JOB_TERMINAL"}
+
+            attempts = job.get("attempts")
+            continuation_available = job.get("continuation_available", False)
+            if (type(attempts) is not int or attempts < 0
+                    or type(continuation_available) is not bool):
+                raise AdmissionDenied("JOB_STATE_INVALID")
+            if attempts >= self.policy.max_attempts and not continuation_available:
+                self._finish_recovered_job(
+                    job, self._terminal_state_for_job(job, "FAILED"), now,
+                )
+                return {"denied": "JOB_TERMINAL"}
+            return {"claim": self._claim_job(job, owner, now)}
+
+        result = self._transaction(op)
+        if "denied" in result:
+            raise AdmissionDenied(result["denied"])
+        return result["claim"]
+
     def _claim_job(self, job, owner, now):
         if not job or _parse(job["expires_at"]) <= now or now < _parse(job["created_at"]):
             raise AdmissionDenied("JOB_EXPIRED")
@@ -1366,13 +1417,17 @@ class PublicAdmission:
             raise AdmissionDenied("JOB_TERMINAL")
         if job["state"] == "QUEUED" and _parse(job["available_at"]) > now:
             raise AdmissionDenied("JOB_DEFERRED")
-        if job["attempts"] >= self.policy.max_attempts:
+        continuation_available = job.get("continuation_available", False)
+        if type(continuation_available) is not bool:
+            raise AdmissionDenied("JOB_STATE_INVALID")
+        if job["attempts"] >= self.policy.max_attempts and not continuation_available:
             raise AdmissionDenied("ATTEMPTS_EXHAUSTED")
         job.update(state="RUNNING", owner=owner, fence=job["fence"] + 1,
-                   attempts=job["attempts"] + 1,
+                   attempts=job["attempts"] + (0 if continuation_available else 1),
                    lease_until=min(now + timedelta(seconds=self.policy.lease_seconds),
                                    _parse(job["expires_at"])).isoformat(),
-                   recovery_available=False, updated_at=now.isoformat())
+                   recovery_available=False, continuation_available=False,
+                   updated_at=now.isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
                 "lease_until": job["lease_until"], "expires_at": job["expires_at"],
                 "request_metadata": deepcopy(job.get("request_metadata", {}))}
@@ -1394,7 +1449,11 @@ class PublicAdmission:
                     continue
                 due = (job["state"] == "QUEUED" and _parse(job["available_at"]) <= now
                        or job["state"] == "RUNNING" and _parse(job["lease_until"]) <= now)
-                if due and job["attempts"] >= self.policy.max_attempts:
+                continuation_available = job.get("continuation_available", False)
+                if type(continuation_available) is not bool:
+                    raise AdmissionDenied("JOB_STATE_INVALID")
+                if (due and job["attempts"] >= self.policy.max_attempts
+                        and not continuation_available):
                     self._finish_recovered_job(
                         job, self._terminal_state_for_job(job, "FAILED"), now
                     )
@@ -1418,7 +1477,23 @@ class PublicAdmission:
                 raise AdmissionDenied("RETRY_OUTSIDE_DEADLINE")
             job.update(state="QUEUED", owner=None, lease_until=None,
                        available_at=not_before.isoformat(), recovery_available=False,
+                       continuation_available=False,
                        updated_at=now.isoformat())
+        self._transaction(op)
+
+    def yield_for_continuation(self, job_id: str, owner: str, fence: int, *,
+                               now: datetime) -> None:
+        """Release a fenced source slice without consuming a retry attempt."""
+        now = _utc(now)
+
+        def op(state):
+            self._guard_clock(state, now)
+            job = state["jobs"].get(job_id)
+            self._require_lease(job, owner, fence, now)
+            job.update(state="QUEUED", owner=None, lease_until=None,
+                       available_at=now.isoformat(), recovery_available=True,
+                       continuation_available=True, updated_at=now.isoformat())
+
         self._transaction(op)
 
     def heartbeat(self, job_id: str, owner: str, fence: int, *, now: datetime) -> str:
@@ -1651,6 +1726,7 @@ class PublicAdmission:
             self._require_lease(job, owner, fence, now)
             job.update(state="PARTIAL" if partial else "COMPLETED", owner=None,
                        recovery_available=False,
+                       continuation_available=False,
                        lease_until=None, updated_at=now.isoformat(), finished_at=now.isoformat())
         self._transaction(op)
 

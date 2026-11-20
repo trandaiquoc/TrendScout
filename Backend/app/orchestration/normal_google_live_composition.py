@@ -230,13 +230,17 @@ def _candidate_history(collection_store, *, now):
     return frozenset(observed), frozenset(verified), prior_verification
 
 
+def _is_owner_acceptance_slot(value):
+    return (value == "INITIAL_ACCEPTANCE"
+            or isinstance(value, str) and value.startswith(OWNER_ACCEPTANCE_SLOT_PREFIX))
+
+
 def _youtube_scope_anchor(schedule):
     """Use the real attempt time when the owner authorizes initial acceptance."""
     if not isinstance(schedule, dict):
         raise ValueError("YouTube schedule metadata is invalid")
     value = schedule.get("last_slot")
-    if (value == "INITIAL_ACCEPTANCE"
-            or isinstance(value, str) and value.startswith(OWNER_ACCEPTANCE_SLOT_PREFIX)):
+    if _is_owner_acceptance_slot(value):
         value = schedule.get("last_attempt_at")
     if not isinstance(value, str) or not value:
         raise ValueError("YouTube schedule has no reserved slot")
@@ -255,8 +259,8 @@ def _youtube_query_scopes_for_reserved_schedule(schedule, *, plan, max_queries):
         reserved_slot = _youtube_scope_anchor(schedule)
     except ValueError:
         raise AdmissionDenied("YOUTUBE_SCHEDULE_STATE_INVALID") from None
-    mode = (OWNER_MANUAL_LIVE
-            if schedule.get("last_slot") == "INITIAL_ACCEPTANCE" else NORMAL_DEMO)
+    mode = (OWNER_MANUAL_LIVE if _is_owner_acceptance_slot(schedule.get("last_slot"))
+            else NORMAL_DEMO)
     return select_youtube_query_scopes(
         now=reserved_slot, plan=plan, max_queries=max_queries, mode=mode,
     )
@@ -829,6 +833,9 @@ async def normal_google_live_composition(*, user_agent,
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
                              if youtube_gateway is not None else None)
+        # Leave time inside Vercel's existing 60-second Function ceiling for
+        # Firestore checkpoint commits and request cleanup after provider work.
+        source_deadline_seconds = 45 if vercel_shared_live else 60
 
         source_handlers = D5SourceHandlers(
             query_collectors={
@@ -842,7 +849,7 @@ async def normal_google_live_composition(*, user_agent,
             plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(
                 max_queries=1, max_pages_per_query=1, max_requests=3,
-                max_retries_per_page=0, deadline_seconds=60,
+                max_retries_per_page=0, deadline_seconds=source_deadline_seconds,
             ),
             observation_date=lambda: (
                 utcnow().astimezone(timezone.utc) - timedelta(days=2)
@@ -852,7 +859,8 @@ async def normal_google_live_composition(*, user_agent,
             source_limits={YOUTUBE_SOURCE_ID: CollectionLimits(
                 max_queries=youtube_max_queries, max_pages_per_query=1,
                 max_requests=youtube_max_queries,
-                max_retries_per_page=0, deadline_seconds=60, max_results=50,
+                max_retries_per_page=0, deadline_seconds=source_deadline_seconds,
+                max_results=50,
             )},
             resolve_provider_batch=resolve_youtube_provider_batch,
             resolve_query_scopes=resolve_youtube_query_scopes,

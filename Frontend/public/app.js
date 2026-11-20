@@ -1860,10 +1860,6 @@ function renderCollectionFilters() {
 }
 
 async function loadLatestDataset() {
-  if (!isLocalLiveDemo(state.capabilities) && !isVercelSharedLive(state.capabilities)) {
-    renderAnalysisSourceVolume(null);
-    return null;
-  }
   try {
     const response = await getJson('/api/v1/datasets/latest', { locale: getLocale() });
     state.persistedDataset = response.item || null;
@@ -2983,7 +2979,10 @@ showView(window.location.hash.slice(1));
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();
-void loadPublicCapabilities().then(() => Promise.all([loadLatestDataset(), loadAnalytics()])).then(() => {
-  if (state.persistedDatasetAvailable) loadKeywords();
+const startupCapabilities = loadPublicCapabilities();
+const startupDataset = loadLatestDataset();
+void loadAnalytics();
+void Promise.all([startupCapabilities, startupDataset]).then(([, item]) => {
+  if (item) loadKeywords();
   else void recoverLatestVercelCollectionSnapshot();
 });

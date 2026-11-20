@@ -13,7 +13,7 @@ PUBLIC = ROOT / "Frontend" / "public"
 RUN_A = "a" * 32
 
 FAKE = r"""<script>
-window.testRequests=[];window.pwned=false;window.fixtureResearch=[];window.fixtureSchedules=[];
+window.testRequests=[];window.pwned=false;window.fixtureResearch=[];window.fixtureSchedules=[];window.holdCapabilities=true;window.releaseCapabilities=null;
 window.fetch=(path,opts={})=>{
   const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
   testRequests.push(request);
@@ -49,7 +49,8 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/status-500')return Promise.resolve(new Response('{}',{status:500}));
   if(p==='/api/status-503')return Promise.resolve(new Response('{}',{status:503}));
   if(p==='/api/invalid-json')return Promise.resolve(new Response('{',{status:200}));
-  if(p==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({
+  if(p==='/api/v1/capabilities'){
+    const response=new Response(JSON.stringify({
     data_mode:'LIVE',local_live_demo:true,environment_mode:'local',read_only:false,
     fetch_enabled:false,public_fetch_enabled:false,authentication_required:false,
     sources:[
@@ -57,7 +58,10 @@ window.fetch=(path,opts={})=>{
       {source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
-    ]}),{status:200}));
+    ]}),{status:200});
+    if(window.holdCapabilities)return new Promise(resolve=>{window.releaseCapabilities=()=>{window.holdCapabilities=false;resolve(response);};});
+    return Promise.resolve(response);
+  }
   if(p==='/api/v1/sources/library')return Promise.resolve(new Response(JSON.stringify({audit_date:'2026-11-13',items:[
     {source_id:'youtube_video_search',display_name:'YouTube Search',category:'Video'},
     {source_id:'google_web_serp',display_name:'Google Search',category:'Search'},
@@ -150,6 +154,14 @@ CHECK = r"""<script>
   const errors=[];const check=(value,message)=>{if(!value)errors.push(message)};
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   try{
+    await wait(300);
+    check(!document.documentElement.classList.contains('js-pending'),'dashboard renders while capabilities are pending');
+    check(typeof window.releaseCapabilities==='function','capabilities response is still held for the independent-loading check');
+    check(testRequests.some(request=>request.path==='/api/v1/capabilities'),'startup requests capabilities');
+    check(testRequests.some(request=>request.path==='/api/v1/datasets/latest'),'latest dataset GET starts before capabilities finish');
+    check(testRequests.some(request=>request.path==='/api/v1/analytics/overview'),'analytics GET starts before capabilities finish');
+    check(!testRequests.some(request=>request.path==='/api/v1/fetches'&&request.method==='POST'),'reload does not auto-submit a Fetch');
+    window.releaseCapabilities?.();
     await wait(300);
     if(RELOAD_TEST&&window.name!=='d2-reload'){
       document.querySelector('[data-theme-toggle]').click();

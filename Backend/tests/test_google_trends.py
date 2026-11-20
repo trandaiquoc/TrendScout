@@ -58,7 +58,10 @@ from app.sources.live_gateway import (
     LiveGatewayFailureDiagnostic,
 )
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
-from app.sources.refresh_eligibility import GOOGLE_REFRESH_STATE_KEY
+from app.sources.refresh_eligibility import (
+    GOOGLE_REFRESH_STATE_KEY,
+    OWNER_ACCEPTANCE_SLOT_PREFIX,
+)
 from app.sources.serpapi.account import (
     SerpApiAccountClient,
     parse_account_response,
@@ -906,6 +909,17 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             "fashion", "home_living", "beauty_personal_care",
             "travel_lifestyle", "technology",
         })
+
+    def test_youtube_owner_acceptance_prefix_uses_owner_mode_outside_schedule(self):
+        scopes = _youtube_query_scopes_for_reserved_schedule(
+            {
+                "last_slot": f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{'a' * 32}",
+                "last_attempt_at": "2026-11-16T16:53:18+00:00",
+            },
+            plan=DEFAULT_QUERY_PLAN,
+            max_queries=1,
+        )
+        self.assertEqual(len(scopes), 1)
 
     async def test_enabled_youtube_initial_acceptance_is_reported(self):
         with tempfile.TemporaryDirectory() as temporary:

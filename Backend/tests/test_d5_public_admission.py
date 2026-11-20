@@ -317,6 +317,36 @@ class PublicAdmissionTests(unittest.TestCase):
         self.assertEqual(reclaimed["job_id"], job_id)
         self.assertEqual(reclaimed["fence"], 2)
 
+    def test_source_continuation_does_not_consume_retry_budget(self):
+        path = str(Path(self.directory.name) / "continuation.sqlite")
+        control = coordinator(path, policy(max_attempts=1))
+        job_id = control.admit("one-source-slice", now=NOW)["job_id"]
+        first = control.claim(job_id, "worker-one", now=NOW)
+        control.yield_for_continuation(
+            job_id, "worker-one", first["fence"], now=NOW,
+        )
+
+        queued = control.read_job(job_id, now=NOW)
+        self.assertEqual(queued["state"], "QUEUED")
+        self.assertTrue(queued["recovery_available"])
+        self.assertTrue(queued["continuation_available"])
+        second = control.claim_job(job_id, "worker-two", now=NOW)
+        running = control.read_job(job_id, now=NOW)
+        self.assertEqual(second["fence"], 2)
+        self.assertEqual(running["attempts"], 1)
+        control.finish(job_id, "worker-two", second["fence"], now=NOW)
+
+    def test_exact_claim_marks_exhausted_lease_terminal(self):
+        path = str(Path(self.directory.name) / "exhausted-continuation.sqlite")
+        control = coordinator(path, policy(max_attempts=1))
+        job_id = control.admit("exhausted-source-slice", now=NOW)["job_id"]
+        control.claim_job(job_id, "worker-one", now=NOW)
+
+        with self.assertRaisesRegex(AdmissionDenied, "JOB_TERMINAL"):
+            control.claim_job(job_id, "worker-two", now=NOW + timedelta(seconds=11))
+        status = control.read_job(job_id, now=NOW + timedelta(seconds=11))
+        self.assertEqual(status["state"], "FAILED")
+
     def test_cooldown_kill_switch_and_mismatched_policy_fail_closed(self):
         job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
         fence = self.control.claim(job, "worker", now=NOW)["fence"]

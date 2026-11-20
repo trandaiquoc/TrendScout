@@ -2,13 +2,17 @@
 
 import unittest
 from contextlib import asynccontextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
 
 from app.jobs.public_admission import AdmissionDenied
-from app.main import _is_vercel_shared_live_request, create_app
+from app.collections.service import CollectionService
+from app.collections.store import CollectionStore
+from app.main import _is_vercel_shared_live_request, _persists_vercel_collections, create_app
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -60,6 +64,8 @@ class _FetchFacade:
         self.collection_service = None
         self.submit_status = "QUEUED"
         self.force_replay = False
+        self.slice_state = "PARTIAL"
+        self.slice_calls = []
 
     @staticmethod
     def _history_item():
@@ -109,6 +115,17 @@ class _FetchFacade:
             raise AssertionError("request resources closed before the background worker finished")
         self.events.append("worker_finished")
         return None
+
+    async def run_slice(self, _owner, fetch_id, *, max_sources):
+        entered = max((index for index, event in enumerate(self.events)
+                       if event == "context_entered"), default=-1)
+        exited = max((index for index, event in enumerate(self.events)
+                      if event == "context_exited"), default=-1)
+        if self.client.closed or entered < exited:
+            raise AssertionError("request resources closed before the source slice finished")
+        self.slice_calls.append((fetch_id, max_sources))
+        self.events.append("worker_finished")
+        return {"job_id": fetch_id, "state": self.slice_state, "sources": {}}
 
     def status(self, _fetch_id, *, include_records=False):
         self.status_calls += 1
@@ -190,6 +207,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             "context_entered", "worker_finished", "snapshot_saved",
             "context_exited", "client_closed",
         ])
+        self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
         client_factory.assert_called_once_with("synthetic-test-token")
         self.assertTrue(client.closed)
 
@@ -222,6 +240,30 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(response.json()["sources"]), set(sources))
         self.assertEqual(facade.submitted_sources, sorted(sources))
         self.assertIn("worker_finished", events)
+
+    async def test_nonterminal_source_slice_skips_collection_snapshot_save(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.slice_state = "QUEUED"
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                        "Idempotency-Key": "vercel-source-slice-test-0001",
+                    },
+                    json={},
+                )
+
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
+        self.assertNotIn("collections_processed", events)
+        self.assertNotIn("snapshot_saved", events)
+        self.assertLess(events.index("worker_finished"), events.index("context_exited"))
 
     async def test_idempotent_recovery_post_dispatches_a_new_vercel_worker(self):
         app, events, _client, facade, client_factory = self.app(enabled=True)
@@ -323,6 +365,55 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(_is_vercel_shared_live_request(
             settings, "POST", "/api/v1/fetches/not-a-fetch-id/collections", enabled=True,
         ))
+
+    def test_research_routes_use_shared_live_middleware(self):
+        settings = self.settings(enabled=True)
+        for method, path in (
+            ("GET", "/api/v1/research"),
+            ("POST", "/api/v1/research"),
+            ("PATCH", "/api/v1/research/research-id"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertTrue(_is_vercel_shared_live_request(
+                    settings, method, path, enabled=True,
+                ))
+        self.assertTrue(_persists_vercel_collections("POST", "/api/v1/research"))
+        self.assertTrue(_persists_vercel_collections(
+            "PATCH", "/api/v1/research/research-id",
+        ))
+
+    async def test_research_reads_and_mutations_use_and_persist_request_store(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        with TemporaryDirectory() as directory:
+            facade.collection_service = CollectionService(CollectionStore(
+                Path(directory) / "collections.sqlite", data_mode_scope="LIVE",
+            ))
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="https://trend-scout.example",
+                ) as browser:
+                    headers = {"x-vercel-oidc-token": "synthetic-test-token"}
+                    before = await browser.get("/api/v1/research", headers=headers)
+                    created = await browser.post(
+                        "/api/v1/research",
+                        headers={**headers, "Origin": "https://trend-scout.example"},
+                        json={"subject": "Fixture", "hypothesis": "A testable idea."},
+                    )
+                    updated = await browser.patch(
+                        f"/api/v1/research/{created.json()['id']}",
+                        headers={**headers, "Origin": "https://trend-scout.example"},
+                        json={"status": "RESEARCHING"},
+                    )
+                    after = await browser.get("/api/v1/research", headers=headers)
+
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(after.json()["total"], 1)
+        self.assertEqual(after.json()["items"][0]["status"], "RESEARCHING")
+        self.assertEqual(events.count("snapshot_saved"), 2)
 
     async def test_bing_only_request_adds_google_dependency_before_admission(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)
