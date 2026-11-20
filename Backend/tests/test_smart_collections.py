@@ -832,7 +832,11 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(result["unassigned"], 1)
         with self.store.connect() as db:
             saved = db.execute("SELECT keyword,eligible FROM keywords").fetchone()
+            snapshot = db.execute("SELECT data_mode,received_record_count,processing_status "
+                                  "FROM dataset_snapshots WHERE dataset_id='offline'").fetchone()
         self.assertEqual(tuple(saved), ("Mars Rover", 1))
+        self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
+        self.assertEqual(self.store.latest_dataset()["dataset_id"], "offline")
 
     def test_bulk_feedback_actions_are_atomic_and_durable(self):
         target = self.store.create({"name": "Space", "auto_match": False})

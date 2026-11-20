@@ -453,8 +453,7 @@ async def capabilities(request: Request, response: Response):
         request.state, "public_fetch_source_ids", request.app.state.public_fetch_source_ids
     )
     vercel_shared_live = bool(
-        enabled
-        and settings.environment_profile == "vercel"
+        settings.environment_profile == "vercel"
         and settings.vercel_shared_live_enabled
         and not request.app.state.read_only
         and distributed is not None

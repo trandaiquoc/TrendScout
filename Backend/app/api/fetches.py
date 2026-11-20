@@ -1,5 +1,6 @@
 """Manual Fetch API; the active backend composition owns its data mode."""
 
+import asyncio
 import ipaddress
 import json
 import secrets
@@ -185,6 +186,69 @@ def _require_enabled(request: Request) -> None:
             },
             headers={"Cache-Control": "no-store"},
         )
+
+
+async def _recover_expired_source_checkpoints(distributed, fetch_id: str, sources) -> list[dict]:
+    """Use retained LIVE source caches only when a terminal checkpoint expired."""
+    if not isinstance(sources, list):
+        return []
+    recovered = [dict(source) for source in sources if isinstance(source, dict)]
+    cache_reader = getattr(distributed, "read_cached_source_result", None)
+    if not callable(cache_reader):
+        return recovered
+
+    history_manifest = {}
+    try:
+        history_item = next((item for item in distributed.history(limit=100)
+                             if isinstance(item, dict) and item.get("fetch_id") == fetch_id), None)
+        manifest = history_item.get("source_manifest", []) if history_item else []
+        if isinstance(manifest, str):
+            manifest = json.loads(manifest)
+        if isinstance(manifest, list):
+            history_manifest = {
+                item["source_id"]: item for item in manifest
+                if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+            }
+    except Exception:
+        history_manifest = {}
+
+    for index, source in enumerate(recovered):
+        if source.get("error_code") != "RESULT_UNAVAILABLE":
+            continue
+        source_id = source.get("source_id")
+        if not isinstance(source_id, str):
+            continue
+        try:
+            cached = await asyncio.to_thread(cache_reader, source_id)
+        except Exception:
+            cached = None
+        records = cached.get("records") if isinstance(cached, dict) else None
+        if (isinstance(cached, dict)
+                and cached.get("source_id") == source_id
+                and cached.get("data_mode") == "LIVE"
+                and cached.get("status") in {"SUCCESS", "PARTIAL"}
+                and cached.get("delivery_state") in {"CACHED", "STALE_CACHE"}
+                and isinstance(records, list)
+                and type(cached.get("record_count")) is int
+                and cached["record_count"] == len(records)):
+            recovered[index] = cached
+            continue
+
+        # Keep the terminal reason for sources that were already unavailable
+        # without records. A successful old result with no retained payload stays
+        # explicitly RESULT_UNAVAILABLE instead of being advertised as saved.
+        previous = history_manifest.get(source_id)
+        if (isinstance(previous, dict)
+                and previous.get("status") in {"FAILED", "UNAVAILABLE"}
+                and previous.get("record_count") in {None, 0}):
+            source["status"] = previous["status"]
+            source["error_code"] = previous.get("error_code") or source["error_code"]
+            source["delivery_state"] = previous.get("delivery_state")
+            source["coverage"] = previous.get("coverage", {})
+        source["data_mode"] = "LIVE"
+        source["record_count"] = 0
+        source["records"] = []
+    return recovered
 
 
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
@@ -411,9 +475,10 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     ):
         raise HTTPException(409, {"code": "FETCH_MODE_MISMATCH"})
 
-    recovered = await service.process_fetch(
-        fetch_id, result.get("sources", []), cached_context_only=True
+    sources = await _recover_expired_source_checkpoints(
+        distributed, fetch_id, result.get("sources", [])
     )
+    recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
     if recovered.get("status") == "FAILED":
         raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
     return {"fetch_id": fetch_id, "status": recovered.get("status", "FAILED"),

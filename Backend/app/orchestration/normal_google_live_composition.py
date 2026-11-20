@@ -830,7 +830,7 @@ async def normal_google_live_composition(*, user_agent,
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
                              if youtube_gateway is not None else None)
 
-        handlers = D5SourceHandlers(
+        source_handlers = D5SourceHandlers(
             query_collectors={
                 "google_web_serp": None,
                 "bing_web_serp": None,
@@ -862,7 +862,8 @@ async def normal_google_live_composition(*, user_agent,
             youtube_query_mode=(OWNER_MANUAL_LIVE if youtube_manual_live else NORMAL_DEMO),
             force_youtube_refresh_once=youtube_force_fresh_test_once,
             utcnow=utcnow,
-        ).build()
+        )
+        handlers = source_handlers.build()
         worker = DistributedFetchWorker(
             admission,
             handlers={source: handlers[source] for source in policy.enabled_sources},
@@ -888,6 +889,10 @@ async def normal_google_live_composition(*, user_agent,
         if uses_firestore:
             facade.normal_google_live_sources = frozenset(policy.enabled_sources)
         facade.entity_lookup_before_request = pace_request.wait_sync
+        # The terminal replay endpoint may read a retained source cache when a
+        # short-lived worker checkpoint has expired. This path is read-only with
+        # respect to providers and never reserves quota or consumes acceptance.
+        facade.read_cached_source_result = source_handlers.read_cached_source_result
         facade.normal_bing_live = bing_gateway is not None
         facade.normal_youtube_live = youtube_gateway is not None
         facade.google_account_quota_state = quota_state

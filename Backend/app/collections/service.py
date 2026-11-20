@@ -103,15 +103,14 @@ class CollectionService:
                     replay_available = existing_snapshot["received_record_count"]
                     replay_skipped = existing_snapshot["rejected_record_count"]
                 if not existing_snapshot:
-                    # A prior local model failure can happen before source data
-                    # is persisted. Allow its retry only when this call carries
-                    # successful records with explicit provenance for this
-                    # store's mode; an existing snapshot from another mode is
-                    # always a conflict.
+                    # A prior processing attempt can fail before its source
+                    # manifest is snapshotted. Retry only with terminal source
+                    # receipts explicitly scoped to this store; empty and
+                    # unavailable receipts still matter for durable run history.
                     replayable_sources = [source for source in sources
                         if source.get("data_mode") == self.store.data_mode_scope
-                        and source.get("status") in {"SUCCESS", "PARTIAL"}
-                        and isinstance(source.get("records"), list) and source["records"]]
+                        and source.get("status") in {"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"}
+                        and isinstance(source.get("records"), list)]
                     if (prior["status"] not in {"FAILED", "MODEL_UNAVAILABLE"}
                             or not replayable_sources):
                         return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "FETCH_ID_MODE_CONFLICT"}

@@ -1,5 +1,6 @@
 """Normal LIVE composition contracts verified only with Wikimedia MockTransport."""
 
+import json
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
@@ -356,6 +357,40 @@ class NormalWikimediaLiveTests(unittest.IsolatedAsyncioTestCase):
             fetch_job = db.execute("SELECT available,skipped FROM fetch_jobs WHERE fetch_id=?",
                 (accepted["job_id"],)).fetchone()
             self.assertEqual(tuple(fetch_job), (1, 0))
+
+    async def test_unavailable_live_receipts_are_snapshotted_without_running_model(self):
+        from app.collections.service import CollectionService
+
+        fetch_id = "f" * 32
+        local_store = CollectionStore(Path(self.directory.name) / "unavailable-collections.sqlite",
+                                      data_mode_scope="LIVE")
+        with local_store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at,stage) "
+                       "VALUES(?,'MODEL_UNAVAILABLE','LOCAL_MODEL_UNAVAILABLE',?,'MODEL_UNAVAILABLE')",
+                       (fetch_id, self.now.isoformat()))
+
+        result = await CollectionService(local_store, NoEntityContext(local_store)).process_fetch(
+            fetch_id, [{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "status": "UNAVAILABLE",
+                "data_mode": "LIVE",
+                "record_count": 0,
+                "records": [],
+                "error_code": "RESULT_UNAVAILABLE",
+            }], cached_context_only=True,
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        snapshot = local_store.latest_dataset()
+        self.assertEqual(snapshot["dataset_id"], fetch_id)
+        self.assertEqual(snapshot["data_mode"], "LIVE")
+        self.assertEqual(snapshot["status"], "FAILED")
+        self.assertEqual(snapshot["received_record_count"], 0)
+        with local_store.connect() as db:
+            manifest = db.execute("SELECT source_manifest,processing_status FROM dataset_snapshots "
+                                  "WHERE dataset_id=?", (fetch_id,)).fetchone()
+        self.assertEqual(manifest[1], "COMPLETED")
+        self.assertEqual(json.loads(manifest[0])[0]["error_code"], "RESULT_UNAVAILABLE")
 
     def test_policy_has_repeating_user_budget_without_lifetime_ceiling(self):
         self.assertEqual(self.policy.enabled_sources, frozenset({WIKIMEDIA_SOURCE_ID}))

@@ -203,6 +203,41 @@ class D5SourceHandlers:
         setattr(unavailable, "__trendscout_data_mode__", self.unavailable_mode)
         return unavailable
 
+    def read_cached_source_result(self, source_id):
+        """Replay a retained source cache entry without starting provider work."""
+        if (source_id not in _ALL_SOURCES or self.shared_cache is None
+                or self.resolve_cache_grant is None):
+            return None
+        now = self.utcnow()
+        try:
+            grant = self.resolve_cache_grant(source_id, now)
+            if not isinstance(grant, CacheGrant) or grant.allowed is not True:
+                return None
+            cached = self.shared_cache.get(
+                self._cache_scope(source_id, grant), grant=grant, now=now,
+            )
+        except Exception:
+            return None
+        cache_status = cached.get("status") if isinstance(cached, dict) else None
+        if cache_status not in {"CACHED", "STALE"}:
+            return None
+        payload = cached.get("payload")
+        if (not isinstance(payload, dict)
+                or payload.get("data_mode") != cached.get("origin")
+                or payload.get("data_mode") != "LIVE"
+                or payload.get("status") not in {"SUCCESS", "PARTIAL"}
+                or not isinstance(payload.get("records"), list)
+                or type(payload.get("record_count")) is not int
+                or payload["record_count"] != len(payload["records"])):
+            return None
+        delivery_state = "CACHED" if cache_status == "CACHED" else "STALE_CACHE"
+        return {
+            "source_id": source_id,
+            **self._cache_delivery(
+                payload, delivery_state, now, cache_fetched_at=cached.get("fetched_at"),
+            ),
+        }
+
     def _query_handler(self, source_id):
         collector = self.query_collectors[source_id]
         limits = self.source_limits.get(source_id, self.limits)
@@ -365,18 +400,7 @@ class D5SourceHandlers:
             raise CacheUnavailable() from None
         scope = None
         if isinstance(grant, CacheGrant):
-            capability = source_capability(source_id)
-            scope = CacheScope(
-                source_id=source_id,
-                provider_id=capability.provider_id,
-                query=query_scope or self.plan.fingerprint,
-                plan_fingerprint=self.plan.fingerprint,
-                market=self.plan.market,
-                language=self.plan.language or "all",
-                window=self.plan.time_filter_rule,
-                parser_version=f"source-v{capability.capability_version}",
-                policy_version=grant.policy_version,
-            )
+            scope = self._cache_scope(source_id, grant, query_scope=query_scope)
             if not force_fresh and not skip_cache_read:
                 cached = self.shared_cache.get(scope, grant=grant, now=now)
                 cache_lookup = cached
@@ -552,6 +576,20 @@ class D5SourceHandlers:
                 if "CACHE_WRITE_FAILED" not in flags:
                     flags.append("CACHE_WRITE_FAILED")
         return result
+
+    def _cache_scope(self, source_id, grant, *, query_scope=None):
+        capability = source_capability(source_id)
+        return CacheScope(
+            source_id=source_id,
+            provider_id=capability.provider_id,
+            query=query_scope or self.plan.fingerprint,
+            plan_fingerprint=self.plan.fingerprint,
+            market=self.plan.market,
+            language=self.plan.language or "all",
+            window=self.plan.time_filter_rule,
+            parser_version=f"source-v{capability.capability_version}",
+            policy_version=grant.policy_version,
+        )
 
     @staticmethod
     def _mark_owner_fresh_test(result):

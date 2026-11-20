@@ -303,7 +303,11 @@ class DistributedPublicFetch:
                     result = None
                 if result is None:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
-                                          "error_code": "RESULT_UNAVAILABLE"})
+                                          "data_mode": self.data_mode,
+                                          "record_count": 0, "records": [],
+                                          "error_code": "RESULT_UNAVAILABLE",
+                                          "coverage": {"checkpoint_status": "RESULT_UNAVAILABLE"}})
+                    modes.add(self.data_mode)
                     continue
                 if result["status"] != "UNAVAILABLE":
                     modes.add(result["data_mode"])

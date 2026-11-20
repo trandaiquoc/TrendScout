@@ -1009,6 +1009,72 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached["records"][0]["video_id"], "video-forced-refresh")
         self.assertEqual(len(forced_calls), 1)
 
+    async def test_expired_checkpoint_can_replay_wikimedia_and_youtube_cache_only(self):
+        cache = SharedCache(SqliteTestStore(self.path))
+
+        def cache_grant(source_id, now):
+            return CacheGrant(
+                source_id, "cache-only-recovery-v1", now + timedelta(days=7),
+                24 * 3600 if source_id == WIKIMEDIA_SOURCE_ID else 8 * 3600,
+                7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            )
+
+        def cache_scope(source_id):
+            capability = source_capability(source_id)
+            return CacheScope(
+                source_id=source_id,
+                provider_id=capability.provider_id,
+                query=DEFAULT_QUERY_PLAN.fingerprint,
+                plan_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+                market=DEFAULT_QUERY_PLAN.market,
+                language=DEFAULT_QUERY_PLAN.language or "all",
+                window=DEFAULT_QUERY_PLAN.time_filter_rule,
+                parser_version=f"source-v{capability.capability_version}",
+                policy_version="cache-only-recovery-v1",
+            )
+
+        for source_id in (WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID):
+            payload = {
+                "status": "SUCCESS" if source_id == WIKIMEDIA_SOURCE_ID else "PARTIAL",
+                "data_mode": "LIVE",
+                "delivery_state": "FRESH",
+                "records": [{"source_id": source_id, "keyword": "cached evidence"}],
+                "record_count": 1,
+                "provider_request_count": 1,
+                "coverage": {"provider_request_count": 1,
+                             "owner_fresh_acceptance": True},
+            }
+            cache.put(cache_scope(source_id), grant=cache_grant(source_id, NOW),
+                      origin="LIVE", payload=payload, fetched_at=NOW, now=NOW)
+
+        handlers = D5SourceHandlers(
+            query_collectors={GOOGLE_SOURCE_ID: None, BING_SOURCE_ID: None,
+                              YOUTUBE_SOURCE_ID: None},
+            wikimedia=None,
+            plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1,
+                                    max_requests=1),
+            shared_cache=cache,
+            resolve_cache_grant=cache_grant,
+            unavailable_mode="LIVE",
+            utcnow=self.clock,
+        )
+        self.clock.value = NOW + timedelta(hours=10)
+
+        wikimedia = handlers.read_cached_source_result(WIKIMEDIA_SOURCE_ID)
+        youtube = handlers.read_cached_source_result(YOUTUBE_SOURCE_ID)
+
+        self.assertEqual(wikimedia["status"], "SUCCESS")
+        self.assertEqual(wikimedia["delivery_state"], "CACHED")
+        self.assertEqual(wikimedia["records"][0]["source_id"], WIKIMEDIA_SOURCE_ID)
+        self.assertEqual(wikimedia["provider_request_count"], 0)
+        self.assertEqual(wikimedia["coverage"]["cached_provider_request_count"], 1)
+        self.assertNotIn("owner_fresh_acceptance", wikimedia["coverage"])
+        self.assertEqual(youtube["status"], "PARTIAL")
+        self.assertEqual(youtube["delivery_state"], "STALE_CACHE")
+        self.assertEqual(youtube["provider_request_count"], 0)
+        self.assertEqual(youtube["coverage"]["cached_provider_request_count"], 1)
+
     async def test_d6_acceptance_refreshes_youtube_once_without_bypassing_provider_gate(self):
         cache = SharedCache(SqliteTestStore(self.path))
         current = [NOW]

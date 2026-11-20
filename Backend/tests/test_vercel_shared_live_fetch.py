@@ -462,6 +462,103 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("worker_finished", events)
         self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
 
+    async def test_expired_checkpoints_replay_only_retained_live_caches(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        source_ids = [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]
+        facade.available_sources = frozenset(source_ids)
+        facade.admission.policy.enabled_sources = facade.available_sources
+        old_manifest = [
+            {"source_id": WIKIMEDIA_SOURCE_ID, "status": "SUCCESS", "record_count": 1,
+             "delivery_state": "FRESH", "coverage": {}},
+            {"source_id": GOOGLE_SOURCE_ID, "status": "UNAVAILABLE", "record_count": 0,
+             "error_code": "NOT_YET_ELIGIBLE", "coverage": {}},
+            {"source_id": BING_SOURCE_ID, "status": "UNAVAILABLE", "record_count": 0,
+             "error_code": "NO_SAVED_CANDIDATE", "coverage": {}},
+            {"source_id": YOUTUBE_SOURCE_ID, "status": "PARTIAL", "record_count": 1,
+             "delivery_state": "FRESH", "coverage": {}},
+        ]
+        facade.history = lambda limit=20: [{
+            **facade._history_item(), "source_manifest": old_manifest,
+        }][:limit]
+        facade.status = lambda _fetch_id, include_records=False: {
+            **facade._history_item(),
+            "terminal": True,
+            "data_mode": None,
+            "selected_sources": source_ids,
+            "sources": [{
+                "source_id": source_id,
+                "status": "UNAVAILABLE",
+                "data_mode": "LIVE",
+                "record_count": 0,
+                "records": [],
+                "error_code": "RESULT_UNAVAILABLE",
+                "coverage": {"checkpoint_status": "RESULT_UNAVAILABLE"},
+            } for source_id in source_ids],
+        }
+        cache_reads = []
+        cached_results = {
+            WIKIMEDIA_SOURCE_ID: {
+                "source_id": WIKIMEDIA_SOURCE_ID, "status": "SUCCESS", "data_mode": "LIVE",
+                "delivery_state": "CACHED", "record_count": 1,
+                "records": [{"title": "retained Wikimedia cache"}],
+                "provider_request_count": 0,
+                "coverage": {"cached_provider_request_count": 1},
+            },
+            YOUTUBE_SOURCE_ID: {
+                "source_id": YOUTUBE_SOURCE_ID, "status": "PARTIAL", "data_mode": "LIVE",
+                "delivery_state": "STALE_CACHE", "record_count": 1,
+                "records": [{"video_id": "retained YouTube cache"}],
+                "provider_request_count": 0,
+                "coverage": {"cached_provider_request_count": 1},
+            },
+        }
+
+        def read_cached_source_result(source_id):
+            cache_reads.append(source_id)
+            return cached_results.get(source_id)
+
+        facade.read_cached_source_result = read_cached_source_result
+        processed = []
+
+        class _Service:
+            store = SimpleNamespace(data_mode_scope="LIVE")
+
+            async def process_fetch(self, fetch_id, sources, *, cached_context_only=False):
+                processed.append((fetch_id, sources, cached_context_only))
+                events.append("collections_processed")
+                return {"status": "COMPLETED"}
+
+        facade.collection_service = _Service()
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    f"/api/v1/fetches/{_JOB_ID}/collections",
+                    headers={
+                        "Origin": "https://trend-scout.example",
+                        "x-vercel-oidc-token": "synthetic-test-token",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "COMPLETED")
+        self.assertEqual(processed[0][0], _JOB_ID)
+        self.assertTrue(processed[0][2])
+        self.assertEqual(set(cache_reads), set(source_ids))
+        restored = {source["source_id"]: source for source in processed[0][1]}
+        self.assertEqual(set(restored), set(source_ids))
+        self.assertEqual(restored[WIKIMEDIA_SOURCE_ID]["records"][0]["title"],
+                         "retained Wikimedia cache")
+        self.assertEqual(restored[WIKIMEDIA_SOURCE_ID]["delivery_state"], "CACHED")
+        self.assertEqual(restored[YOUTUBE_SOURCE_ID]["delivery_state"], "STALE_CACHE")
+        self.assertEqual(restored[GOOGLE_SOURCE_ID]["error_code"], "NOT_YET_ELIGIBLE")
+        self.assertEqual(restored[BING_SOURCE_ID]["error_code"], "NO_SAVED_CANDIDATE")
+        self.assertTrue(all(source["data_mode"] == "LIVE" for source in restored.values()))
+        self.assertNotIn("worker_finished", events)
+        self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
+
     async def test_recognized_policy_mismatch_exposes_explicit_sync_then_fetch(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         original_submit = facade.submit
@@ -552,6 +649,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["public_fetch_enabled"])
+        # Runtime identity drives UI wording even when policy currently blocks
+        # new admissions; Vercel should never be described as local LIVE.
+        self.assertTrue(response.json()["vercel_shared_live"])
         self.assertFalse(response.json()["shared_policy_reconciliation_required"])
         self.assertEqual(response.json()["fetch_block_reason"], "POLICY_MISMATCH")
 
