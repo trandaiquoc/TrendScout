@@ -276,6 +276,76 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(detail["error_code"], "SOURCE_EXECUTION_FAILED")
         self.assertEqual(detail["dataset_status"], "FAILED")
 
+    def test_run_history_restores_shared_fetch_when_collections_failed_before_snapshot(self):
+        fetch_id = "c" * 32
+        manifest = [{
+            "source_id": "wikimedia_pageviews_top_per_country",
+            "status": "SUCCESS",
+            "record_count": 999,
+            "delivery_state": "CACHED",
+        }, {
+            "source_id": "google_web_serp",
+            "status": "UNAVAILABLE",
+            "record_count": 0,
+            "error_code": "NOT_YET_ELIGIBLE",
+        }, {
+            "source_id": "bing_web_serp",
+            "status": "UNAVAILABLE",
+            "record_count": 0,
+            "error_code": "NO_SAVED_CANDIDATE",
+        }, {
+            "source_id": "youtube_video_search",
+            "status": "PARTIAL",
+            "record_count": 47,
+            "delivery_state": "STALE_CACHE",
+        }]
+        shared_run = {
+            "fetch_id": fetch_id,
+            "run_type": "FETCH",
+            "status": "PARTIAL",
+            "outcome_status": "PARTIAL",
+            "mode": "LIVE",
+            "data_mode": "LIVE",
+            "sources": [source["source_id"] for source in manifest],
+            "source_manifest": manifest,
+            "received_record_count": 1046,
+            "created_at": "2026-11-20T08:20:00+00:00",
+            "updated_at": "2026-11-20T08:20:49+00:00",
+            "run_at": "2026-11-20T08:20:49+00:00",
+        }
+
+        class _SharedHistory:
+            firestore_shared_live = True
+
+            @staticmethod
+            def history(limit=20):
+                return [shared_run][:limit]
+
+        self.app.state.distributed_public_fetch = _SharedHistory()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at,stage) "
+                       "VALUES(?,'MODEL_UNAVAILABLE','LOCAL_MODEL_UNAVAILABLE',?,'MODEL_UNAVAILABLE')",
+                       (fetch_id, "2026-11-20T10:19:22+00:00"))
+
+        cursor_item = self._request("GET", "/api/v1/runs/history",
+                                    params={"limit": 1, "cursor": ""}).json()["items"][0]
+        offset_item = self._request("GET", "/api/v1/runs/history",
+                                    params={"limit": 1}).json()["items"][0]
+        detail = self._request("GET", "/api/v1/runs/history/" + fetch_id).json()["item"]
+
+        for item in (cursor_item, offset_item, detail):
+            self.assertEqual(item["run_type"], "FETCH")
+            self.assertEqual(item["status"], "PARTIAL")
+            self.assertEqual(item["outcome_status"], "PARTIAL")
+            self.assertEqual(item["mode"], "LIVE")
+            self.assertEqual(item["received_record_count"], 1046)
+            source_manifest = item["source_manifest"]
+            if isinstance(source_manifest, str):
+                source_manifest = json.loads(source_manifest)
+            self.assertEqual(len(source_manifest), 4)
+            self.assertEqual(item["collection_processing_status"], "MODEL_UNAVAILABLE")
+            self.assertEqual(item["collection_error_code"], "LOCAL_MODEL_UNAVAILABLE")
+
     def test_run_history_detail_preserves_saved_source_count_and_observation_window(self):
         fetch_id = "d" * 32
         with self.store.connect() as db:

@@ -522,6 +522,35 @@ def _history_item_from_distributed(run):
     return item
 
 
+def _merge_orphaned_collection_with_shared_fetch(local_item, shared_item):
+    """Keep a source Fetch visible when its Collections job failed before a snapshot."""
+    if (not isinstance(local_item, dict)
+            or local_item.get("run_type") != "COLLECTION_PROCESSING"
+            or local_item.get("dataset_id") is not None
+            or not isinstance(shared_item, dict)
+            or shared_item.get("run_type") != "FETCH"
+            or not shared_item.get("source_manifest")):
+        return local_item
+    collection_processing = {
+        key: local_item.get(key)
+        for key in ("status", "error_code", "stage", "available", "processed", "skipped")
+    }
+    merged = {**local_item, **shared_item}
+    merged.update({
+        "run_type": "FETCH",
+        "collection_processing": collection_processing,
+        "collection_processing_status": local_item.get("status"),
+        "collection_error_code": local_item.get("error_code"),
+        # Keep the later local processing timestamp for Run History ordering.
+        "updated_at": local_item.get("updated_at") or shared_item.get("updated_at"),
+        "run_at": local_item.get("run_at") or shared_item.get("run_at"),
+        "dataset_id": None,
+        "dataset_status": None,
+        "processing_status": local_item.get("stage"),
+    })
+    return merged
+
+
 async def _run_history_cursor_page(request, q, status, mode, limit, token):
     filters = {"q": q, "status": status, "mode": mode}
     positions = _history_cursor_decode(token, filters)
@@ -589,12 +618,14 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
     distributed = _request_distributed_fetch(request)
     shared_page = []
     shared_has_more = False
+    all_shared_items = []
     if distributed is not None and getattr(distributed, "firestore_shared_live", False):
         try:
             shared_runs = distributed.history(limit=100)
         except Exception:
             history_status = "PARTIAL"
             shared_runs = []
+        all_shared_items = [_history_item_from_distributed(item) for item in shared_runs]
         shared_start = 0
         if positions["shared"]:
             matching_cursor = next((index for index, item in enumerate(shared_runs)
@@ -607,6 +638,13 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
         for item in shared_page:
             item["_cursor_shared"] = item["fetch_id"]
 
+    all_shared_by_id = {item["fetch_id"]: item for item in all_shared_items}
+    local_page = [
+        _merge_orphaned_collection_with_shared_fetch(
+            item, all_shared_by_id.get(item["fetch_id"])
+        )
+        for item in local_page
+    ]
     local_ids = {item["fetch_id"] for item in local_page}
     manual_page = [item for item in manual_page if item["fetch_id"] not in local_ids]
     existing_ids = local_ids | {item["fetch_id"] for item in manual_page}
@@ -678,6 +716,21 @@ async def run_history(
         if offset:
             raise HTTPException(422, {"code": "CURSOR_AND_OFFSET_CANNOT_BE_COMBINED"})
         return await _run_history_cursor_page(request, q, status, mode, limit, cursor)
+    distributed = _request_distributed_fetch(request)
+    shared_runs = []
+    history_status = "AVAILABLE"
+    history_truncated = False
+    if distributed is not None and getattr(distributed, "firestore_shared_live", False):
+        try:
+            shared_runs = distributed.history(limit=100)
+        except Exception:
+            history_status = "PARTIAL"
+        history_truncated = len(shared_runs) == 100
+    shared_by_id = {
+        item["fetch_id"]: _history_item_from_distributed(item)
+        for item in shared_runs
+        if isinstance(item, dict) and isinstance(item.get("fetch_id"), str)
+    }
     service = (getattr(getattr(request, "state", None), "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
     if service:
@@ -715,6 +768,9 @@ async def run_history(
         item["mode"] = item.pop("data_mode", None)
         item["run_at"] = item.get("fetched_at") or item.get("updated_at")
         item["duration_seconds"] = None
+        item = _merge_orphaned_collection_with_shared_fetch(
+            item, shared_by_id.get(item.get("fetch_id"))
+        )
         haystack = " ".join(
             str(item.get(key) or "")
             for key in ("fetch_id", "run_type", "status", "error_code", "mode", "source_manifest")
@@ -726,8 +782,6 @@ async def run_history(
         ):
             continue
         items.append(item)
-    history_status = "AVAILABLE"
-    history_truncated = False
     storage = _history_storage(request)
     if storage is not None and hasattr(storage, "list_runs"):
         try:
@@ -735,7 +789,7 @@ async def run_history(
         except StorageError:
             manual_runs = []
             history_status = "PARTIAL"
-        history_truncated = len(manual_runs) == 100
+        history_truncated = history_truncated or len(manual_runs) == 100
         existing = {str(item.get("fetch_id")) for item in items}
         for run in manual_runs:
             run_id = str(run.get("run_id") or "")
@@ -776,17 +830,9 @@ async def run_history(
             existing.add(run_id)
     else:
         history_status = "LOCAL_LEDGER_ONLY"
-    distributed = _request_distributed_fetch(request)
     if distributed is not None and getattr(distributed, "firestore_shared_live", False):
-        try:
-            shared_runs = distributed.history(limit=100)
-        except Exception:
-            shared_runs = []
-            history_status = "PARTIAL"
-        history_truncated = history_truncated or len(shared_runs) == 100
         existing = {str(item.get("fetch_id")) for item in items}
-        for run in shared_runs:
-            item = _history_item_from_distributed(run)
+        for item in shared_by_id.values():
             if item["fetch_id"] in existing:
                 continue
             if not _history_matches(item, q, status, mode):
@@ -902,6 +948,19 @@ async def run_history_detail(fetch_id: str, request: Request):
             item[key] = json.loads(item[key]) if item.get(key) else []
         except (TypeError, ValueError):
             item[key] = []
+    item["run_type"] = "FETCH" if item.get("dataset_id") else (
+        "COLLECTION_RECONCILIATION" if item.get("membership_reconciliation_id")
+        else "COLLECTION_PROCESSING"
+    )
+    item["mode"] = item.get("data_mode")
     _attach_run_outcome(item, item.get("source_manifest"))
+    item = _merge_orphaned_collection_with_shared_fetch(
+        item, _history_item_from_distributed(shared_result) if shared_result else None
+    )
+    if isinstance(item.get("source_manifest"), str):
+        try:
+            item["source_manifest"] = json.loads(item["source_manifest"])
+        except (TypeError, ValueError):
+            item["source_manifest"] = []
     item["duration_seconds"] = None
     return {"item": item, "duration_available": False}
