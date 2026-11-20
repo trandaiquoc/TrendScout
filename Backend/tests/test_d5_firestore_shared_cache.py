@@ -396,6 +396,53 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual(result["provider_request_count"], 0)
         self.assertEqual(provider_calls, [])
 
+    def test_successful_empty_results_are_cached_without_a_second_provider_call(self):
+        source_ids = (WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        grants = {
+            source_id: CacheGrant(
+                source_id, "empty-result-cache-policy", NOW + timedelta(days=1),
+                max_fresh_seconds=600, max_stale_seconds=1200,
+                max_retention_seconds=1800, allowed=True,
+            )
+            for source_id in source_ids
+        }
+        cache = create_firestore_shared_cache(self.client)
+        handlers = D5SourceHandlers(
+            query_collectors={GOOGLE_SOURCE_ID: None, BING_SOURCE_ID: None,
+                              YOUTUBE_SOURCE_ID: None},
+            wikimedia=None,
+            plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
+            shared_cache=cache,
+            resolve_cache_grant=lambda source_id, _now: grants.get(source_id),
+            unavailable_mode="LIVE",
+            utcnow=lambda: NOW + timedelta(seconds=5),
+        )
+
+        for source_id in source_ids:
+            with self.subTest(source_id=source_id):
+                provider_calls = []
+
+                async def provider():
+                    provider_calls.append(source_id)
+                    return {
+                        "status": "SUCCESS", "data_mode": "LIVE",
+                        "delivery_state": "FRESH", "records": [], "record_count": 0,
+                        "coverage": {"provider_request_count": 1},
+                        "provider_request_count": 1,
+                    }
+
+                first = asyncio.run(handlers._with_cache(source_id, None, provider))
+                second = asyncio.run(handlers._with_cache(source_id, None, provider))
+
+                self.assertEqual(first["delivery_state"], "FRESH")
+                self.assertEqual(first["provider_request_count"], 1)
+                self.assertEqual(second["status"], "SUCCESS")
+                self.assertEqual(second["delivery_state"], "CACHED")
+                self.assertEqual(second["provider_request_count"], 0)
+                self.assertEqual(second["coverage"]["cached_provider_request_count"], 1)
+                self.assertEqual(provider_calls, [source_id])
+
     def test_public_admission_quota_ledger_is_shared_between_adapter_instances(self):
         policy = AdmissionPolicy(
             enabled_sources=frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}),

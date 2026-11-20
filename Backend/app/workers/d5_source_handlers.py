@@ -529,9 +529,17 @@ class D5SourceHandlers:
                 max_fresh_seconds=min(grant.max_fresh_seconds, short_ttl),
                 max_stale_seconds=min(grant.max_stale_seconds, short_ttl),
                 max_retention_seconds=short_ttl)
+        records = result.get("records")
+        record_count = result.get("record_count")
+        cacheable_result = (
+            result.get("status") in {"SUCCESS", "PARTIAL"}
+            and isinstance(records, list)
+            and type(record_count) is int
+            and record_count == len(records)
+            and (record_count > 0 or result.get("status") == "SUCCESS")
+        )
         if (scope is not None and cache_grant.allowed is True
-                and (result.get("status") in {"SUCCESS", "PARTIAL"}
-                     and result.get("record_count", 0) > 0 or negative_day_cache)
+                and (cacheable_result or negative_day_cache)
                 and result.get("data_mode") in {"SYNTHETIC", "LIVE"}):
             fetched_at = cache_fetched_at or self.utcnow()
             try:
