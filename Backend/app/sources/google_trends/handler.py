@@ -448,16 +448,26 @@ class GoogleTrendsDiscoveryHandler:
                     }
                     diagnostic = getattr(error, "diagnostic", None)
                     if diagnostic is not None:
-                        coverage["transport_diagnostic"] = {
-                            "source_id": diagnostic.source_id,
-                            "failure_phase": diagnostic.failure_phase,
-                            "http_status": diagnostic.http_status,
-                            "exception_class": diagnostic.exception_class,
-                            "bytes_received": diagnostic.bytes_received,
-                            "response_size_limit": diagnostic.response_size_limit,
-                            "attempt_id": diagnostic.attempt_id,
-                            "error_code": diagnostic.error_code,
-                        }
+                        if diagnostic.failure_phase == "RESULT_PERSISTENCE":
+                            coverage["persistence_diagnostic"] = {
+                                "source_id": diagnostic.source_id,
+                                "failure_phase": diagnostic.failure_phase,
+                                "failure_reason": diagnostic.failure_reason,
+                                "exception_class": diagnostic.exception_class,
+                                "attempt_id": diagnostic.attempt_id,
+                                "error_code": diagnostic.error_code,
+                            }
+                        else:
+                            coverage["transport_diagnostic"] = {
+                                "source_id": diagnostic.source_id,
+                                "failure_phase": diagnostic.failure_phase,
+                                "http_status": diagnostic.http_status,
+                                "exception_class": diagnostic.exception_class,
+                                "bytes_received": diagnostic.bytes_received,
+                                "response_size_limit": diagnostic.response_size_limit,
+                                "attempt_id": diagnostic.attempt_id,
+                                "error_code": diagnostic.error_code,
+                            }
                     return {
                         "status": "FAILED", "data_mode": self.data_mode,
                         "records": [], "record_count": 0, "error_code": _safe_error_code(error),

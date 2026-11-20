@@ -589,6 +589,57 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             "error_code": "UPSTREAM_ERROR",
         })
 
+    async def test_google_failure_returns_safe_persistence_diagnostic(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        atomic = LocalSQLiteAtomicStateStore.for_local_live(root / "state.sqlite")
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                diagnostic = LiveGatewayFailureDiagnostic(
+                    GOOGLE_SOURCE_ID, "RESULT_PERSISTENCE", None, "OSError", 0,
+                    0, "sanitized-attempt-id", "RESULT_PERSISTENCE_FAILED",
+                    "CALLBACK_ERROR",
+                )
+                raise GatewayError("RESULT_PERSISTENCE_FAILED", diagnostic=diagnostic)
+
+        async def check_budget():
+            return {"budget_status": "AVAILABLE", "total_remaining": 10}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=TrendsGateway(), policy_fingerprint="a" * 64,
+            utcnow=lambda: NOW, cache=SharedCache(atomic),
+            resolve_cache_grant=lambda _source, now: CacheGrant(
+                GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            ),
+            atomic_store=atomic, allow_initial_acceptance=True,
+            ensure_paid_budget=check_budget,
+        )
+        context = SourceWorkContext(
+            "diagnostic-job", "test-worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+            NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+        )
+
+        try:
+            result = await handler(context)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["error_code"], "RESULT_PERSISTENCE_FAILED")
+        self.assertEqual(result["coverage"]["persistence_diagnostic"], {
+            "source_id": GOOGLE_SOURCE_ID,
+            "failure_phase": "RESULT_PERSISTENCE",
+            "failure_reason": "CALLBACK_ERROR",
+            "exception_class": "OSError",
+            "attempt_id": "sanitized-attempt-id",
+            "error_code": "RESULT_PERSISTENCE_FAILED",
+        })
+        self.assertNotIn("transport_diagnostic", result["coverage"])
+
     async def test_cache_only_google_discovery_serves_saved_records_without_paid_checks(self):
         candidate = _candidate("portable outdoor blanket", ["Home & Garden"])
         candidate.update({

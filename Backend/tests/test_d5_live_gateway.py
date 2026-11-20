@@ -383,6 +383,27 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diagnostic.error_code, "UPSTREAM_ERROR")
         self.assertNotIn(FAKE_SECRET, repr(diagnostic))
 
+    async def test_receipt_persistence_failure_has_safe_diagnostic(self):
+        payload = {
+            "search_metadata": {"status": "Success"},
+            "organic_results": [],
+        }
+        gateway = self.gateway(GOOGLE_SOURCE_ID, lambda _request: httpx.Response(200, json=payload))
+
+        def fail_receipt(_page):
+            raise OSError("private checkpoint path " + FAKE_SECRET)
+
+        with self.assertRaisesRegex(GatewayError, "RESULT_PERSISTENCE_FAILED") as caught:
+            await gateway.fetch_page(
+                **self.args(GOOGLE_SOURCE_ID), on_page_receipt=fail_receipt
+            )
+        diagnostic = caught.exception.diagnostic
+        self.assertEqual(diagnostic.failure_phase, "RESULT_PERSISTENCE")
+        self.assertEqual(diagnostic.failure_reason, "CALLBACK_ERROR")
+        self.assertEqual(diagnostic.exception_class, "OSError")
+        self.assertEqual(diagnostic.attempt_id, "physical-attempt-0001")
+        self.assertNotIn(FAKE_SECRET, repr(diagnostic))
+
     async def test_body_stream_failure_is_distinguished_from_dispatch_failure(self):
         class FailingBody(httpx.AsyncByteStream):
             async def __aiter__(self):

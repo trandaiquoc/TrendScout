@@ -85,7 +85,7 @@ class GatewayError(Exception):
 
 @dataclass(frozen=True)
 class LiveGatewayFailureDiagnostic:
-    """Safe transport facts; excludes the request URL, headers and response body."""
+    """Safe transport or receipt-persistence facts; excludes URLs, headers and bodies."""
 
     source_id: str
     failure_phase: str
@@ -95,6 +95,7 @@ class LiveGatewayFailureDiagnostic:
     response_size_limit: int
     attempt_id: str
     error_code: str
+    failure_reason: str | None = None
 
 
 def _matches_bounded_google_local_policy(policy, builder) -> bool:
@@ -653,6 +654,18 @@ class LivePageGateway:
             request=request,
             before_settle=before_settle if on_page_receipt is not None else None)
         if outcome.status != "COMPLETED":
+            if outcome.failure_phase == "RESULT_PERSISTENCE":
+                failure_diagnostic = LiveGatewayFailureDiagnostic(
+                    source_id=self.source_id,
+                    failure_phase=outcome.failure_phase,
+                    http_status=None,
+                    exception_class=outcome.exception_class,
+                    bytes_received=0,
+                    response_size_limit=0,
+                    attempt_id=attempt_id,
+                    error_code=outcome.status,
+                    failure_reason=outcome.failure_reason,
+                )
             raise GatewayError(outcome.status, diagnostic=failure_diagnostic)
         if outcome.settlement_pending and not parsed_receipt:
             raise GatewayError("SETTLEMENT_PENDING", diagnostic=failure_diagnostic)
