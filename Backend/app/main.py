@@ -53,6 +53,18 @@ from app.sources.catalog import (
 
 _logger = logging.getLogger(__name__)
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_SAFE_SNAPSHOT_FAILURE_REASONS = frozenset({
+    "INVALID_SHARED_POINTER",
+    "RESTORE_FAILED",
+    "WORKING_DATABASE_UNAVAILABLE",
+    "SNAPSHOT_PATH_EXISTS",
+    "DATABASE_TOO_LARGE",
+    "DATABASE_SNAPSHOT_FAILED",
+    "COMPRESSED_SNAPSHOT_TOO_LARGE",
+    "BLOB_UPLOAD_FAILED",
+    "SAVE_CONFIRMATION_FAILED",
+    "SNAPSHOT_COMMIT_FAILED",
+})
 _YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS = 60 * 60
 
 
@@ -133,7 +145,9 @@ async def _save_vercel_collection_snapshot(distributed, *, failure_code):
     snapshot = getattr(distributed, "collection_snapshot", None)
     if snapshot is None:
         _logger.error(
-            "Vercel collection snapshot commit failed failure_phase=COLLECTION_SNAPSHOT_COMMIT exception_class=SnapshotUnavailable"
+            "Vercel collection snapshot commit failed "
+            "failure_phase=COLLECTION_SNAPSHOT_COMMIT "
+            "failure_reason=SNAPSHOT_UNAVAILABLE exception_class=SnapshotUnavailable"
         )
         return JSONResponse(
             {"detail": {"code": failure_code}}, status_code=503,
@@ -149,9 +163,24 @@ async def _save_vercel_collection_snapshot(distributed, *, failure_code):
                 {"detail": {"code": "COLLECTIONS_CONCURRENT_UPDATE"}},
                 status_code=409, headers={"Cache-Control": "no-store"},
             )
+        failure_reason = getattr(error, "failure_reason", None)
+        if failure_reason not in _SAFE_SNAPSHOT_FAILURE_REASONS:
+            failure_reason = "UNCLASSIFIED"
+        cause_class = getattr(error, "cause_class", None)
+        if not isinstance(cause_class, str) or not _SAFE_EXCEPTION_CLASS.fullmatch(cause_class):
+            cause_class = "None"
+        confirmation_exception_class = getattr(
+            error, "confirmation_exception_class", None
+        )
+        if (not isinstance(confirmation_exception_class, str)
+                or not _SAFE_EXCEPTION_CLASS.fullmatch(confirmation_exception_class)):
+            confirmation_exception_class = "None"
         _logger.error(
-            "Vercel collection snapshot commit failed failure_phase=COLLECTION_SNAPSHOT_COMMIT exception_class=%s",
-            _safe_exception_class(error),
+            "Vercel collection snapshot commit failed "
+            "failure_phase=COLLECTION_SNAPSHOT_COMMIT failure_reason=%s "
+            "exception_class=%s cause_class=%s confirmation_exception_class=%s",
+            failure_reason, _safe_exception_class(error), cause_class,
+            confirmation_exception_class,
         )
         return JSONResponse(
             {"detail": {"code": failure_code}}, status_code=503,

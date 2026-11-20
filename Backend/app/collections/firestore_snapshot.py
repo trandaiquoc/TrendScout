@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,19 @@ _RETENTION = timedelta(days=3650)
 # Firestore snapshot-blob adapter's four-megabyte record budget.
 _MAX_COMPRESSED_BYTES = 2_900_000
 _MAX_DATABASE_BYTES = 20_000_000
+_SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_SNAPSHOT_FAILURE_REASONS = frozenset({
+    "INVALID_SHARED_POINTER",
+    "RESTORE_FAILED",
+    "WORKING_DATABASE_UNAVAILABLE",
+    "SNAPSHOT_PATH_EXISTS",
+    "DATABASE_TOO_LARGE",
+    "DATABASE_SNAPSHOT_FAILED",
+    "COMPRESSED_SNAPSHOT_TOO_LARGE",
+    "BLOB_UPLOAD_FAILED",
+    "SAVE_CONFIRMATION_FAILED",
+    "SNAPSHOT_COMMIT_FAILED",
+})
 
 
 class CollectionSnapshotConflict(RuntimeError):
@@ -33,6 +47,29 @@ class CollectionSnapshotConflict(RuntimeError):
 
 class CollectionSnapshotUnavailable(RuntimeError):
     """The shared Collections snapshot is missing, invalid, or cannot be saved."""
+
+    def __init__(self, message: str, *, failure_reason: str,
+                 cause_class: str | None = None,
+                 confirmation_exception_class: str | None = None):
+        if failure_reason not in _SNAPSHOT_FAILURE_REASONS:
+            raise ValueError("invalid Collections snapshot failure reason")
+        super().__init__(message)
+        self.failure_reason = failure_reason
+        self.cause_class = self._safe_exception_class(cause_class)
+        self.confirmation_exception_class = self._safe_exception_class(
+            confirmation_exception_class
+        )
+
+    @staticmethod
+    def _safe_exception_class(value):
+        if value is None:
+            return None
+        return value if isinstance(value, str) and _SAFE_EXCEPTION_CLASS.fullmatch(value) else "UnknownError"
+
+
+def _exception_class(error: Exception) -> str:
+    value = type(error).__name__
+    return value if _SAFE_EXCEPTION_CLASS.fullmatch(value) else "UnknownError"
 
 
 def _utc(value: datetime) -> datetime:
@@ -76,7 +113,10 @@ class FirestoreCollectionSnapshot:
                 or state["version"] < 1 or not isinstance(state.get("snapshot_ref"), dict)
                 or not isinstance(state.get("sqlite_sha256"), str)
                 or len(state["sqlite_sha256"]) != 64):
-            raise CollectionSnapshotUnavailable("shared Collections pointer is invalid")
+            raise CollectionSnapshotUnavailable(
+                "shared Collections pointer is invalid",
+                failure_reason="INVALID_SHARED_POINTER",
+            )
         try:
             records = self._blobs.get(state["snapshot_ref"], now=_utc(self._utcnow()))
             if (not isinstance(records, list) or len(records) != 1
@@ -95,8 +135,11 @@ class FirestoreCollectionSnapshot:
             with self.path.open("xb") as target:
                 target.write(raw)
             self.path.chmod(0o600)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError, gzip.BadGzipFile):
-            raise CollectionSnapshotUnavailable("shared Collections snapshot could not be restored") from None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, gzip.BadGzipFile) as error:
+            raise CollectionSnapshotUnavailable(
+                "shared Collections snapshot could not be restored",
+                failure_reason="RESTORE_FAILED", cause_class=_exception_class(error),
+            ) from None
         self.version = state["version"]
         self._sha256 = state["sqlite_sha256"]
         self._content_sha256 = self._content_digest(self.path)
@@ -134,10 +177,16 @@ class FirestoreCollectionSnapshot:
     def save(self) -> int:
         """Publish a compressed SQLite image only if its base version is current."""
         if not self._loaded or self.path.is_symlink() or not self.path.is_file():
-            raise CollectionSnapshotUnavailable("Collections working database is unavailable")
+            raise CollectionSnapshotUnavailable(
+                "Collections working database is unavailable",
+                failure_reason="WORKING_DATABASE_UNAVAILABLE",
+            )
         backup_path = self.path.with_name(self.path.name + ".snapshot")
         if backup_path.exists() or backup_path.is_symlink():
-            raise CollectionSnapshotUnavailable("Collections snapshot path already exists")
+            raise CollectionSnapshotUnavailable(
+                "Collections snapshot path already exists",
+                failure_reason="SNAPSHOT_PATH_EXISTS",
+            )
         try:
             source = sqlite3.connect(str(self.path), timeout=10)
             target = sqlite3.connect(str(backup_path), timeout=10)
@@ -148,18 +197,27 @@ class FirestoreCollectionSnapshot:
                 source.close()
             raw = backup_path.read_bytes()
             if len(raw) > _MAX_DATABASE_BYTES:
-                raise CollectionSnapshotUnavailable("Collections database exceeds its storage limit")
+                raise CollectionSnapshotUnavailable(
+                    "Collections database exceeds its storage limit",
+                    failure_reason="DATABASE_TOO_LARGE",
+                )
             content_digest = self._content_digest(backup_path)
             compressed = gzip.compress(raw, mtime=0)
-        except (OSError, sqlite3.Error):
-            raise CollectionSnapshotUnavailable("Collections database could not be snapshotted") from None
+        except (OSError, sqlite3.Error) as error:
+            raise CollectionSnapshotUnavailable(
+                "Collections database could not be snapshotted",
+                failure_reason="DATABASE_SNAPSHOT_FAILED", cause_class=_exception_class(error),
+            ) from None
         finally:
             try:
                 backup_path.unlink(missing_ok=True)
             except OSError:
                 pass
         if len(compressed) > _MAX_COMPRESSED_BYTES:
-            raise CollectionSnapshotUnavailable("Collections snapshot exceeds its storage limit")
+            raise CollectionSnapshotUnavailable(
+                "Collections snapshot exceeds its storage limit",
+                failure_reason="COMPRESSED_SNAPSHOT_TOO_LARGE",
+            )
 
         now = _utc(self._utcnow())
         digest = hashlib.sha256(raw).hexdigest()
@@ -173,8 +231,11 @@ class FirestoreCollectionSnapshot:
                 now=now,
                 retain_until=now + _RETENTION,
             )
-        except Exception:
-            raise CollectionSnapshotUnavailable("Collections snapshot could not be uploaded") from None
+        except Exception as error:
+            raise CollectionSnapshotUnavailable(
+                "Collections snapshot could not be uploaded",
+                failure_reason="BLOB_UPLOAD_FAILED", cause_class=_exception_class(error),
+            ) from None
         next_version = self.version + 1
         updated = {"schema": 1, "version": next_version,
                    "snapshot_ref": reference, "sqlite_sha256": digest,
@@ -191,16 +252,25 @@ class FirestoreCollectionSnapshot:
             self._state.transact(_STATE_KEY, operation)
         except CollectionSnapshotConflict:
             raise
-        except Exception:
+        except Exception as commit_error:
             # A network failure can leave the transaction outcome uncertain. Read
             # the pointer once and accept only this exact committed image.
             try:
                 current = self._state.transact(_STATE_KEY, lambda value: (value, value))
-            except Exception:
-                raise CollectionSnapshotUnavailable("Collections save confirmation failed") from None
+            except Exception as confirmation_error:
+                raise CollectionSnapshotUnavailable(
+                    "Collections save confirmation failed",
+                    failure_reason="SAVE_CONFIRMATION_FAILED",
+                    cause_class=_exception_class(commit_error),
+                    confirmation_exception_class=_exception_class(confirmation_error),
+                ) from None
             if not isinstance(current, dict) or current.get("version") != next_version \
                     or current.get("sqlite_sha256") != digest:
-                raise CollectionSnapshotUnavailable("Collections snapshot could not be committed") from None
+                raise CollectionSnapshotUnavailable(
+                    "Collections snapshot could not be committed",
+                    failure_reason="SNAPSHOT_COMMIT_FAILED",
+                    cause_class=_exception_class(commit_error),
+                ) from None
         self.version = next_version
         self._sha256 = digest
         self._content_sha256 = content_digest

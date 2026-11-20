@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from app.collections.firestore_snapshot import (
     CollectionSnapshotConflict,
+    CollectionSnapshotUnavailable,
     FirestoreCollectionSnapshot,
 )
 from app.storage import firestore_atomic_state, firestore_snapshot_blobs
@@ -126,6 +127,29 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             }
             with self.assertRaises(CollectionSnapshotConflict):
                 second.save()
+
+    def test_upload_failure_keeps_only_safe_failure_diagnostics(self):
+        class FailingBlobs(FakeSnapshotBlobs):
+            def put(self, *_args, **_kwargs):
+                raise RuntimeError("credential-value-must-not-escape")
+
+        self.blobs.put = FailingBlobs().put
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.commit()
+            snapshot = self._snapshot(path)
+            snapshot.load()
+
+            with self.assertRaises(CollectionSnapshotUnavailable) as captured:
+                snapshot.save()
+
+        error = captured.exception
+        self.assertEqual(error.failure_reason, "BLOB_UPLOAD_FAILED")
+        self.assertEqual(error.cause_class, "RuntimeError")
+        self.assertIsNone(error.confirmation_exception_class)
+        self.assertNotIn("credential-value-must-not-escape", str(error))
 
 
 if __name__ == "__main__":

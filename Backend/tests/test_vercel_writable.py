@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import httpx
 
+from app.collections.firestore_snapshot import CollectionSnapshotUnavailable
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.main import (
@@ -158,7 +159,11 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
         client = _Client(events)
 
         def fail_save():
-            raise ValueError("private-token-must-not-be-logged")
+            raise CollectionSnapshotUnavailable(
+                "private-token-must-not-be-logged",
+                failure_reason="BLOB_UPLOAD_FAILED",
+                cause_class="PermissionDenied",
+            )
 
         facade = SimpleNamespace(
             available_sources=set(), collection_snapshot=SimpleNamespace(save=fail_save),
@@ -202,7 +207,10 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
                     if message["type"] == "http.response.body")
         self.assertIn(b"COLLECTIONS_PERSISTENCE_FAILED", body)
         self.assertTrue(any("failure_phase=COLLECTION_SNAPSHOT_COMMIT" in line
-                            and "exception_class=ValueError" in line
+                            and "exception_class=CollectionSnapshotUnavailable" in line
+                            and "failure_reason=BLOB_UPLOAD_FAILED" in line
+                            and "cause_class=PermissionDenied" in line
+                            and "confirmation_exception_class=None" in line
                             for line in captured.output))
         self.assertNotIn("private-token-must-not-be-logged", "\n".join(captured.output))
 
