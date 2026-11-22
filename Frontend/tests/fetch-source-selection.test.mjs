@@ -303,6 +303,62 @@ test('uncertain initial submission retries once with the same key and no continu
   }
 });
 
+test('uncertain continuation polls its existing job before another source slice', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let submissions = 0;
+  let statusReads = 0;
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      submissions += 1;
+      if (submissions === 1) {
+        return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+          status: 202, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ detail: { code: 'FUNCTION_TIMEOUT' } }), {
+        status: 504, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    statusReads += 1;
+    const body = statusReads === 1
+      ? { status: 'QUEUED', recovery_available: true, terminal: false }
+      : { status: 'PARTIAL', terminal: true };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => ['google_web_serp'],
+    });
+    await controller.activate();
+
+    const posts = requests.filter((request) => request.path === '/api/v1/fetches');
+    const statusRequests = requests.filter((request) => request.path.endsWith('/' + COMPLETED_ID));
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].headers['Idempotency-Key'], posts[1].headers['Idempotency-Key']);
+    assert.equal(posts[0].headers['X-TrendScout-Fetch-Continuation'], undefined);
+    assert.equal(posts[1].headers['X-TrendScout-Fetch-Continuation'], '1');
+    assert.equal(statusRequests.length, 2);
+    assert.equal(statusReads, 2);
+    assert.equal(states.at(-1), 'partial');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test('a successful submission without a job ID retries once instead of polling an undefined ID', async () => {
   const previousFetch = globalThis.fetch;
   const previousWindow = globalThis.window;

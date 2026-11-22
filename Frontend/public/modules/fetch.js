@@ -137,6 +137,7 @@ export class PublicFetchController {
       return;
     }
     const isContinuation = this.resumeNeeded;
+    const continuationFetchId = isContinuation ? this.fetchId : null;
     if (isContinuation) this.fetchId = null;
     this.busy = true;
     this.emit({ kind: 'submitting', busy: true });
@@ -203,7 +204,7 @@ export class PublicFetchController {
           }
           accepted = submission;
         } catch (error) {
-          if (!isUncertainSubmissionError(error)
+          if (isContinuation || !isUncertainSubmissionError(error)
               || submissionRetries >= MAX_UNCERTAIN_SUBMISSION_RETRIES) throw error;
           submissionRetries += 1;
           this.emit({ kind: 'submitting', busy: true, error });
@@ -219,6 +220,16 @@ export class PublicFetchController {
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       await this.poll();
     } catch (error) {
+      if (isContinuation && continuationFetchId && isUncertainSubmissionError(error)) {
+        // A timed-out continuation may still be running on Vercel. Reattach to
+        // the existing job and poll before considering another source slice.
+        this.fetchId = continuationFetchId;
+        this.resumeNeeded = false;
+        this.lastAutomaticDispatchAt = Date.now();
+        this.busy = false;
+        await this.poll();
+        return;
+      }
       this.busy = false;
       this.emit({ kind: this.kindForError(error), busy: false, error });
     }
