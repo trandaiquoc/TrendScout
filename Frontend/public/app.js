@@ -189,8 +189,9 @@ async function loadAnalytics() {
     const latest = data.latest_dataset;
     renderQualitySnapshot(latest);
     const successful = data.last_successful_fetch;
-    if (successful?.fetched_at) {
-      $('#metric-last-fetch').textContent = compactTimestamp(successful.fetched_at);
+    const lastFetchAt = successful?.created_at || successful?.fetched_at;
+    if (lastFetchAt) {
+      $('#metric-last-fetch').textContent = compactTimestamp(lastFetchAt);
       $('#metric-last-fetch-note').textContent = t('analysis.latest-fetch-status', { status: successful.status || 'UNKNOWN' })
         + ' · ' + t('analysis.fetch-age',{age:formatAge(successful.age_seconds)});
     }
@@ -265,8 +266,8 @@ function renderQualitySnapshot(snapshot) {
         .find(value=>typeof value==='string'&&!Number.isNaN(Date.parse(value))) || null;
     }).filter(Boolean).sort((a,b)=>Date.parse(b)-Date.parse(a));
   const sourceObservationAt=sourceObservations[0] || null;
-  const fetchedAt=snapshot.fetched_at || sourceObservationAt;
-  const fetchedLabel=snapshot.fetched_at ? t('quality.fetched')
+  const fetchedAt=snapshot.created_at || snapshot.fetched_at || sourceObservationAt;
+  const fetchedLabel=snapshot.created_at || snapshot.fetched_at ? t('quality.fetched')
     : sourceObservationAt ? t('quality.source-observation-time') : t('quality.fetched');
   const qualityFlagKeys={
     YOUTUBE_KEYWORD_EXTRACTION_DISABLED:'quality.flag.youtube-extraction-disabled',
@@ -1977,7 +1978,8 @@ function renderPersistedDataset(item) {
     || item.status === 'LEGACY_CACHED' ? t('dataset.ledger-coverage-unknown') : '';
   const eligible = item.eligible_keyword_count == null ? t('common.unavailable') : number(item.eligible_keyword_count);
   const unassigned = item.unassigned_keyword_count == null ? t('common.unavailable') : number(item.unassigned_keyword_count);
-  const fetchedAt = item.fetched_at ? timestamp(item.fetched_at) : t('common.unavailable');
+  const collectionAt = item.created_at || item.fetched_at;
+  const fetchedAt = collectionAt ? timestamp(collectionAt) : t('common.unavailable');
   const googleSource = (Array.isArray(item.source_manifest) ? item.source_manifest : [])
     .find((source) => source?.source_id === 'google_web_serp');
   const googleSummary = googleSource ? googleFetchSummary(googleSource) : '';
@@ -2002,8 +2004,8 @@ function renderPersistedDataset(item) {
   $('#metric-records-stored-note').textContent = t('metric.ledger-stored');
   // Classification totals belong to analytics; eligible/assigned Collection
   // counts are different measures and must not overwrite the classified metric.
-  $('#metric-last-fetch').textContent = item.fetched_at ? compactTimestamp(item.fetched_at) : '—';
-  $('#metric-last-fetch-note').textContent = item.fetched_at
+  $('#metric-last-fetch').textContent = collectionAt ? compactTimestamp(collectionAt) : '—';
+  $('#metric-last-fetch-note').textContent = collectionAt
     ? t('metric.cached-snapshot-note') : t('metric.cached-time-unavailable');
   $('#keyword-count').textContent = item.retained_keyword_count == null ? t('common.unavailable') : number(item.retained_keyword_count);
   $('#scored-count').textContent = item.assigned_keyword_count == null ? t('common.unavailable') : number(item.assigned_keyword_count);

@@ -192,7 +192,7 @@ function renderRunHistoryDetail(item, errorMessage = null) {
     [t('runs.retained'),item.retained_record_count ?? item.processed],[t('runs.rejected'),item.rejected_record_count],
     [t('runs.outcome'),localizedRunOutcome(item)],[t('runs.quality'),quality],
     [t('runs.duration'),t('runs.duration-unavailable')],
-    [t('runs.date'),item.fetched_at || item.updated_at ? timestamp(item.fetched_at || item.updated_at) : t('common.unavailable')]];
+    [t('runs.date'),item.run_at || item.updated_at || item.fetched_at ? timestamp(item.run_at || item.updated_at || item.fetched_at) : t('common.unavailable')]];
   for(const [label,value,width] of values){const row=element('div');if(width)row.className=width;row.append(element('dt',label),element('dd',typeof value==='number'?number(value):value == null?t('common.unavailable'):value));list.append(row);}
   root.append(list);
 }

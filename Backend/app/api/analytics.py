@@ -119,6 +119,7 @@ def overview(request: Request):
                     "received_record_count": latest.get("received_record_count"),
                     "retained_keyword_count": None,
                     "rejected_record_count": None,
+                    "created_at": latest.get("created_at") or latest.get("run_at"),
                     "fetched_at": latest.get("fetched_at") or latest.get("run_at"),
                     "quality_flags": [],
                     "processing_status": "NOT_CONFIGURED",
@@ -153,6 +154,7 @@ def overview(request: Request):
                     "status": last_successful.get("status"),
                     "data_mode": last_successful.get("data_mode"),
                     "source_manifest": last_successful.get("source_manifest", []),
+                    "created_at": last_successful.get("created_at") or last_successful.get("run_at"),
                     "fetched_at": last_successful.get("fetched_at")
                         or last_successful.get("run_at"),
                     "age_seconds": None,
@@ -202,14 +204,14 @@ def overview(request: Request):
             parameters).fetchall()
         latest = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
             received_record_count,retained_keyword_count,rejected_record_count,observation_start,
-            observation_end,fetched_at,quality_flags,processing_status,eligible_keyword_count,
+            observation_end,fetched_at,created_at,quality_flags,processing_status,eligible_keyword_count,
             assigned_keyword_count,unassigned_keyword_count FROM dataset_snapshots
             """ + dataset_filter + " ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
         history = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
             received_record_count,retained_keyword_count,rejected_record_count,observation_start,
             observation_end,fetched_at,quality_flags,processing_status FROM dataset_snapshots
             """ + dataset_filter + " ORDER BY created_at DESC LIMIT 30", parameters).fetchall()
-        successful = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,fetched_at,observation_start,
+        successful = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,fetched_at,created_at,observation_start,
             observation_end,quality_flags FROM dataset_snapshots WHERE status IN ('SUCCESS','PARTIAL')
             """ + ("AND data_mode=? " if mode else "") + "ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
         membership_count = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
@@ -318,7 +320,7 @@ def overview(request: Request):
                 successful_item[key] = []
         try:
             stamp = datetime.fromisoformat(
-                (successful_item.get("fetched_at") or "").replace("Z", "+00:00")
+                (successful_item.get("created_at") or successful_item.get("fetched_at") or "").replace("Z", "+00:00")
             )
             successful_item["age_seconds"] = max(
                 0,
@@ -467,7 +469,9 @@ def _history_item_from_job(row):
         "COLLECTION_RECONCILIATION" if item.get("membership_reconciliation_id") else "COLLECTION_PROCESSING"
     )
     item["mode"] = item.pop("data_mode", None)
-    item["run_at"] = item.get("fetched_at") or item.get("updated_at")
+    # A cached snapshot can retain an older provider fetch time. Run History
+    # represents when this Fetch job finished or was last updated instead.
+    item["run_at"] = item.get("updated_at") or item.get("created_at") or item.get("fetched_at")
     item["duration_seconds"] = None
     item["_cursor_local"] = [str(item.get("history_sort_at") or item.get("updated_at") or ""), str(item["fetch_id"])]
     return item
@@ -567,11 +571,11 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
             after_sql = ""
             parameters = []
             if cursor:
-                after_sql = "WHERE (COALESCE(d.fetched_at,j.updated_at)<? OR (COALESCE(d.fetched_at,j.updated_at)=? AND j.fetch_id<?))"
+                after_sql = "WHERE (COALESCE(j.updated_at,d.fetched_at)<? OR (COALESCE(j.updated_at,d.fetched_at)=? AND j.fetch_id<?))"
                 parameters.extend((cursor[0], cursor[0], cursor[1]))
             local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
                 d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-                d.quality_flags,d.processing_status,COALESCE(d.fetched_at,j.updated_at) AS history_sort_at
+                d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
                 FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
                 {after_sql} ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""",
                 (*parameters, limit + 1)).fetchall()
@@ -769,7 +773,7 @@ async def run_history(
             )
         )
         item["mode"] = item.pop("data_mode", None)
-        item["run_at"] = item.get("fetched_at") or item.get("updated_at")
+        item["run_at"] = item.get("updated_at") or item.get("created_at") or item.get("fetched_at")
         item["duration_seconds"] = None
         item = _merge_orphaned_collection_with_shared_fetch(
             item, shared_by_id.get(item.get("fetch_id"))
@@ -915,6 +919,7 @@ async def run_history_detail(fetch_id: str, request: Request):
             "created_at": result.get("created_at"),
             "updated_at": result.get("updated_at"),
             "fetched_at": result.get("fetched_at"),
+            "run_at": result.get("run_at") or result.get("finished_at") or result.get("updated_at") or result.get("created_at"),
             "duration_seconds": None,
         }, "duration_available": False}
     if row is None:
@@ -942,6 +947,7 @@ async def run_history_detail(fetch_id: str, request: Request):
                 "created_at": _iso(run.get("created_at")),
                 "updated_at": _iso(run.get("updated_at") or run.get("finished_at")),
                 "fetched_at": _iso(run.get("finished_at")),
+                "run_at": _iso(run.get("finished_at") or run.get("updated_at") or run.get("created_at")),
             },
             "duration_available": False,
         }
@@ -965,5 +971,6 @@ async def run_history_detail(fetch_id: str, request: Request):
             item["source_manifest"] = json.loads(item["source_manifest"])
         except (TypeError, ValueError):
             item["source_manifest"] = []
+    item["run_at"] = item.get("updated_at") or item.get("created_at") or item.get("fetched_at")
     item["duration_seconds"] = None
     return {"item": item, "duration_available": False}

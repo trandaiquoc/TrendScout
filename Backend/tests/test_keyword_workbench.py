@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -368,6 +369,47 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(item["observation_end"], "2026-11-14")
         self.assertEqual(item["source_manifest"][0]["record_count"], 38)
         self.assertIsNone(item["duration_seconds"])
+
+    def test_run_history_uses_job_time_when_snapshot_is_served_from_older_cache(self):
+        cached_fetch_id = "f" * 32
+        older_fetch_id = "e" * 32
+        now = datetime.now(timezone.utc)
+        snapshot_created_at = now.isoformat()
+        source_fetched_at = (now - timedelta(hours=1)).isoformat()
+        older_job_updated_at = (now - timedelta(minutes=30)).isoformat()
+        with self.store.connect() as db:
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
+                       (cached_fetch_id, "PARTIAL", snapshot_created_at))
+            db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
+                       (older_fetch_id, "PARTIAL", older_job_updated_at))
+            db.execute("""INSERT INTO dataset_snapshots
+                (dataset_id,status,data_mode,source_manifest,provider_record_count,received_record_count,
+                retained_keyword_count,rejected_record_count,fetched_at,quality_flags,processing_status,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                    cached_fetch_id, "PARTIAL", "LIVE", json.dumps([]), 1, 1, 1, 0,
+                    source_fetched_at, "[]", "COMPLETED", snapshot_created_at))
+
+        page = self._request("GET", "/api/v1/runs/history", params={"limit": 1, "cursor": ""}).json()
+        self.assertEqual([item["fetch_id"] for item in page["items"]], [cached_fetch_id])
+        cached_item = page["items"][0]
+        self.assertEqual(cached_item["run_at"], snapshot_created_at)
+        self.assertEqual(cached_item["fetched_at"], source_fetched_at)
+        next_page = self._request("GET", "/api/v1/runs/history", params={
+            "limit": 1, "cursor": page["next_cursor"],
+        }).json()
+        self.assertEqual([item["fetch_id"] for item in next_page["items"]], [older_fetch_id])
+
+        detail = self._request("GET", "/api/v1/runs/history/" + cached_fetch_id).json()["item"]
+        self.assertEqual(detail["run_at"], snapshot_created_at)
+        self.assertEqual(detail["fetched_at"], source_fetched_at)
+
+        latest = self._request("GET", "/api/v1/datasets/latest").json()["item"]
+        self.assertEqual(latest["created_at"], snapshot_created_at)
+        self.assertLess(latest["age_seconds"], 5)
+        overview = self._request("GET", "/api/v1/analytics/overview").json()
+        self.assertEqual(overview["latest_dataset"]["created_at"], snapshot_created_at)
+        self.assertEqual(overview["last_successful_fetch"]["created_at"], snapshot_created_at)
+        self.assertLess(overview["last_successful_fetch"]["age_seconds"], 5)
 
     def test_run_history_includes_persisted_analysis_storage_runs(self):
         storage = FakeStorage()

@@ -89,7 +89,7 @@ test('capability GET allows a Vercel cold start longer than ordinary API calls',
   try {
     await loadCapabilities();
     assert.deepEqual(request, { url: '/api/v1/capabilities', method: 'GET' });
-    assert.equal(timeoutMs, 25_000);
+    assert.equal(timeoutMs, 55_000);
   } finally {
     globalThis.fetch = previous.fetch;
     globalThis.setTimeout = previous.setTimeout;

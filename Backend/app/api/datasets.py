@@ -16,10 +16,10 @@ def latest_dataset(request: Request):
     if item is None:
         return {'item': None}
     item['restoration_status'] = 'CACHED'
-    fetched_at = item.get('fetched_at')
-    if fetched_at:
+    collection_at = item.get('created_at') or item.get('fetched_at')
+    if collection_at:
         try:
-            stamp = datetime.fromisoformat(fetched_at.replace('Z', '+00:00'))
+            stamp = datetime.fromisoformat(collection_at.replace('Z', '+00:00'))
             item['age_seconds'] = max(0, int((datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds()))
         except (ValueError, TypeError):
             item['age_seconds'] = None
