@@ -18,6 +18,7 @@ function requestTimeoutMs(path, requestedTimeoutMs) {
       || path.startsWith('/api/v1/datasets/latest/')
       || path === '/api/v1/analytics/overview'
       || path.startsWith('/api/v1/runs/history')
+      || path === '/api/health'
       || path === '/api/v1/capabilities') {
     return COLLECTIONS_TIMEOUT_MS;
   }

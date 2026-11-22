@@ -43,6 +43,7 @@ test('slow Firestore-backed dashboard reads allow Vercel cold starts', async () 
     '/api/v1/analytics/overview',
     '/api/v1/runs/history?limit=5&cursor=',
     '/api/v1/runs/history/abc123',
+    '/api/health',
     '/api/v1/capabilities',
   ]) {
     assert.equal(await requestedTimeout(path), 65_000, path);
