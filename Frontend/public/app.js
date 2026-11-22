@@ -184,8 +184,6 @@ async function loadAnalytics() {
     $('#metric-topics-found-note').textContent = t('analysis.classified-keywords');
     $('#metric-unclassified').textContent = number(totals.unclassified);
     $('#metric-unclassified-note').textContent = t('analysis.unclassified-breakdown',{ambiguous:number(totals.ambiguous),unknown:number(totals.unknown)});
-    $('#metric-active-sources').textContent = number((data.active_sources || []).length);
-    $('#metric-active-sources-note').textContent = t('analysis.sources-in-ledger');
     const latest = data.latest_dataset;
     renderQualitySnapshot(latest);
     const successful = data.last_successful_fetch;
