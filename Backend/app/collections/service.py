@@ -51,10 +51,31 @@ def cosine(left, right):
 
 
 class CollectionService:
-    def __init__(self, store: CollectionStore, entity_context_resolver=None):
+    def __init__(self, store: CollectionStore, entity_context_resolver=None, *,
+                 fetch_model_inference_enabled=True):
+        if type(fetch_model_inference_enabled) is not bool:
+            raise TypeError("fetch model inference setting must be boolean")
         self.store = store
         self.entity_context_resolver = entity_context_resolver
+        self.fetch_model_inference_enabled = fetch_model_inference_enabled
         self._thread_state = local()
+
+    def _model_unavailable_result(self, fetch_id, *, available, skipped,
+                                  policy_excluded, eligible, unassigned,
+                                  error_code):
+        with self.store.connect() as db:
+            db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
+                       (fetch_id,))
+            db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
+                error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
+                VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
+                (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped + policy_excluded,
+                 error_code, now(), eligible,
+                 self._thread_state.embedding_counts["cached_embeddings"],
+                 self._thread_state.embedding_counts["inferred_embeddings"]))
+        return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
+                "processed": 0, "assigned": 0, "unassigned": unassigned,
+                "skipped": skipped + policy_excluded, "error_code": error_code}
 
     async def process_fetch(self, fetch_id: str, sources: list[dict], *, cached_context_only: bool = False):
         try:
@@ -429,6 +450,13 @@ class CollectionService:
                 for category_id in record.get("entity_category_ids", ())
                 if category_collection_ids.get(category_id)
             )
+        if not self.fetch_model_inference_enabled:
+            return self._model_unavailable_result(
+                fetch_id, available=available, skipped=skipped,
+                policy_excluded=policy_excluded, eligible=eligible,
+                unassigned=len(records), error_code="MODEL_INFERENCE_DEFERRED",
+            )
+
         # Do not claim inference succeeded if package/model is missing. Provider Fetch remains complete.
         try:
             collections = self.store.list_collections()
@@ -450,19 +478,11 @@ class CollectionService:
             exclusion_inputs = [example for item in collections for example in item["exclusions"]]
             exclusion_vectors = self._embed_cached(exclusion_inputs, [0] * len(exclusion_inputs)) if exclusion_inputs else []
         except Exception:
-            with self.store.connect() as db:
-                db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
-                           (fetch_id,))
-                db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
-                    error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
-                    VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
-                    (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped + policy_excluded,
-                     "LOCAL_MODEL_UNAVAILABLE", now(), eligible,
-                     self._thread_state.embedding_counts["cached_embeddings"],
-                     self._thread_state.embedding_counts["inferred_embeddings"]))
-            return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
-                    "processed": 0, "assigned": 0, "unassigned": len(records),
-                    "skipped": skipped + policy_excluded}
+            return self._model_unavailable_result(
+                fetch_id, available=available, skipped=skipped,
+                policy_excluded=policy_excluded, eligible=eligible,
+                unassigned=len(records), error_code="LOCAL_MODEL_UNAVAILABLE",
+            )
 
         assigned = 0
         unassigned_rows = []

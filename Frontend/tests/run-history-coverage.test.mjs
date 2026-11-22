@@ -2,6 +2,25 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { extractRunSourceCoverage } from '../public/modules/run-history-coverage.js';
+import { collectionProcessingEvidence } from '../public/modules/run-history.js';
+
+test('Run History keeps provider outcome separate from deferred Collection processing', () => {
+  assert.deepEqual(collectionProcessingEvidence({
+    run_type: 'FETCH',
+    status: 'PARTIAL',
+    collection_processing_status: 'MODEL_UNAVAILABLE',
+    collection_error_code: 'MODEL_INFERENCE_DEFERRED',
+  }), {
+    status: 'MODEL_UNAVAILABLE', errorCode: 'MODEL_INFERENCE_DEFERRED',
+  });
+  assert.deepEqual(collectionProcessingEvidence({
+    run_type: 'COLLECTION_PROCESSING', status: 'MODEL_UNAVAILABLE',
+    error_code: 'LOCAL_MODEL_UNAVAILABLE',
+  }), {
+    status: 'MODEL_UNAVAILABLE', errorCode: 'LOCAL_MODEL_UNAVAILABLE',
+  });
+  assert.equal(collectionProcessingEvidence({ run_type: 'FETCH', status: 'PARTIAL' }), null);
+});
 
 test('uses provider coverage and preserves explicit zero counts', () => {
   const result = extractRunSourceCoverage({

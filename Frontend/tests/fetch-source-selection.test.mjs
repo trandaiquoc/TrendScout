@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { ApiError } from '../public/modules/api.js';
 import { isVercelSharedLive } from '../public/modules/capabilities.js';
 import { liveFetchMessageKey, PublicFetchController } from '../public/modules/fetch.js';
 
@@ -256,8 +257,134 @@ test('automatically resumes a recovered durable job with the same idempotent req
     assert.equal(submissions.length, 2);
     assert.equal(submissions[0].headers['Idempotency-Key'], submissions[1].headers['Idempotency-Key']);
     assert.equal(submissions[0].body, submissions[1].body);
+    assert.equal(submissions[0].headers['X-TrendScout-Fetch-Continuation'], undefined);
+    assert.equal(submissions[1].headers['X-TrendScout-Fetch-Continuation'], '1');
     assert.equal(states.includes('auto-resuming'), true);
     assert.equal(statusReads, 2);
+    assert.equal(states.at(-1), 'completed');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('uncertain initial submission retries once with the same key and no continuation marker', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    return new Response(JSON.stringify({ detail: { code: 'SHARED_FETCH_UNAVAILABLE' } }), {
+      status: 503, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => [],
+    });
+    await controller.activate();
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].headers['Idempotency-Key'], requests[1].headers['Idempotency-Key']);
+    assert.equal(requests[0].headers['X-TrendScout-Fetch-Continuation'], undefined);
+    assert.equal(requests[1].headers['X-TrendScout-Fetch-Continuation'], undefined);
+    assert.equal(states.at(-1), 'retryable');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('a successful submission without a job ID retries once instead of polling an undefined ID', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    return new Response(JSON.stringify({ status: 'QUEUED' }), {
+      status: 202, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => ['google_web_serp'],
+    });
+    await controller.activate();
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].headers['Idempotency-Key'], requests[1].headers['Idempotency-Key']);
+    assert.equal(requests.every((request) => request.path === '/api/v1/fetches'), true);
+    assert.equal(requests.every((request) => !request.headers['X-TrendScout-Fetch-Continuation']), true);
+    assert.equal(states.at(-1), 'retryable');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test('definitive client errors do not claim server acceptance is uncertain', () => {
+  const controller = new PublicFetchController({
+    onState: () => {}, onTerminal: () => {}, locale: () => 'en', sourceIds: () => [],
+  });
+  assert.equal(controller.kindForError(new ApiError('Access denied', 403)), 'submission-rejected');
+  assert.equal(controller.kindForError(new ApiError('Temporary failure', 503)), 'retryable');
+});
+
+test('definitive submission rejection allows corrected options with a fresh request key', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const states = [];
+  let sources = ['unknown_source'];
+  globalThis.window = {
+    setTimeout(callback) { queueMicrotask(callback); return 1; },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      if (requests.filter((request) => request.path === path).length === 1) {
+        return new Response(JSON.stringify({ detail: { code: 'INVALID_SOURCE_SELECTION' } }), {
+          status: 422, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ status: 'COMPLETED', terminal: true }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: (state) => states.push(state.kind), onTerminal: () => {},
+      locale: () => 'en', sourceIds: () => sources,
+    });
+    await controller.activate();
+    assert.equal(states.at(-1), 'submission-rejected');
+    sources = ['google_web_serp'];
+    await controller.activate();
+    const submissions = requests.filter((request) => request.path === '/api/v1/fetches');
+    assert.deepEqual(JSON.parse(submissions[0].body), { sources: ['unknown_source'] });
+    assert.deepEqual(JSON.parse(submissions[1].body), { sources: ['google_web_serp'] });
+    assert.notEqual(submissions[0].headers['Idempotency-Key'], submissions[1].headers['Idempotency-Key']);
     assert.equal(states.at(-1), 'completed');
   } finally {
     globalThis.fetch = previousFetch;

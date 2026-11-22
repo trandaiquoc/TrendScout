@@ -15,6 +15,21 @@ const element = (tag, text = null, className = '') => {
 };
 const getErrorMessage = (error, fallback) => error && typeof error.message === 'string' ? error.message : t(fallback);
 
+export function collectionProcessingEvidence(item) {
+  if (!item || typeof item !== 'object') return null;
+  const status = item.collection_processing_status || item.processing_status
+    || (item.run_type === 'COLLECTION_PROCESSING' ? item.status : null);
+  if (typeof status !== 'string' || !status) return null;
+  const candidate = item.collection_error_code
+    || (item.run_type === 'COLLECTION_PROCESSING' ? item.error_code : null)
+    || (status === 'MODEL_UNAVAILABLE' ? item.error_code : null);
+  return {
+    status,
+    errorCode: typeof candidate === 'string' && /^[A-Z0-9_]{1,64}$/.test(candidate)
+      ? candidate : null,
+  };
+}
+
 export function initializeRunHistory({ localizedRunType, localizedRunMode, localizedRunOutcome, localizedSourceName, localizedStatus, onResumeRecovery }) {
   const state = { runHistoryOffset: 0, runHistoryCursor: null, runHistoryDetailSequence: 0, runHistoryDetailId: null, runHistoryDetailItem: null, runHistoryDetailTrigger: null };
   let searchTimer, listSequence = 0;
@@ -56,7 +71,11 @@ async function loadRunHistory({ append = false } = {}) {
       const duration=Number.isFinite(run.duration_seconds) && run.duration_seconds >= 0
         ? `${number(run.duration_seconds)} ${t('runs.duration-seconds')}` : t('runs.duration-unavailable');
       const outcomeStatus=run.outcome_status || run.status;
-      const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',outcomeStatus),recordSummary,duration,localizedRunMode(run.mode),localizedRunOutcome(run)];
+      const processing=collectionProcessingEvidence(run);
+      const processingSummary=processing
+        ? t('runs.collection-processing-summary', {status: localizedStatus('status.', processing.status)}) : null;
+      const outcome=[localizedRunOutcome(run),processingSummary].filter(Boolean).join(' · ');
+      const values=[run.run_at ? timestamp(run.run_at) : '—',localizedRunType(run.run_type), (run.sources || []).map(localizedSourceName).join(', ') || '—',localizedStatus('status.',outcomeStatus),recordSummary,duration,localizedRunMode(run.mode),outcome];
       tr.className='run-history-entry';
       values.forEach((value,index)=>{const cell=element('td',index===3?'':value);cell.dataset.label=headers[index];if(index===3){const badge=element('span',value,'run-history-status');badge.dataset.status=outcomeStatus || 'UNKNOWN';cell.append(badge);}tr.append(cell);});
       const actions=element('td');
@@ -156,8 +175,13 @@ function renderRunHistoryDetail(item, errorMessage = null) {
   const observationEnd=item.observation_end ? date(item.observation_end) : null;
   const observationWindow=observationStart&&observationEnd
     ? `${observationStart} – ${observationEnd}` : observationStart || observationEnd || t('common.unavailable');
+  const processing=collectionProcessingEvidence(item);
   const values=[[t('runs.run-id'),item.fetch_id],[t('runs.status'),localizedStatus('status.',item.outcome_status || item.status)],
     [t('runs.mode'),localizedRunMode(item.data_mode)],[t('runs.sources'),sourceSummary],
+    ...(processing ? [
+      [t('runs.collection-processing'),localizedStatus('status.',processing.status),'wide'],
+      ...(processing.errorCode ? [[t('runs.processing-error-code'),processing.errorCode,'wide']] : []),
+    ] : []),
     ...(item.recovery_available === true
       ? [[t('runs.recovery'), t('runs.recovery-available'), 'wide']] : []),
     [t('runs.source-coverage'),sourceCoverageSummary,'wide'],

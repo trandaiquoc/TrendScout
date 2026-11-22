@@ -6,6 +6,7 @@ const MAX_POLLS_PER_ATTEMPT = 110;
 const MAX_STATUS_POLLS_PER_FETCH = 110;
 const MAX_TRANSIENT_STATUS_RETRIES = 3;
 const MAX_AUTOMATIC_CONTINUATIONS = 8;
+const MAX_UNCERTAIN_SUBMISSION_RETRIES = 1;
 const UNCERTAIN_SUBMISSION_RETRY_MS = 2000;
 const STALLED_QUEUE_DISPATCH_MS = 6000;
 const WIKIMEDIA_SOURCE_ID = 'wikimedia_pageviews_top_per_country';
@@ -69,8 +70,10 @@ export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = []
 function isUncertainSubmissionError(error) {
   if (!(error instanceof ApiError)) return false;
   const code = error.body?.detail?.code || error.body?.code;
-  return error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status)
-    || error.status === 409 && code === 'COLLECTIONS_CONCURRENT_UPDATE';
+  return error.status === null
+    || (error.status >= 200 && error.status < 300)
+    || [408, 425, 500, 502, 503, 504].includes(error.status)
+    || (error.status === 409 && code === 'COLLECTIONS_CONCURRENT_UPDATE');
 }
 
 function submissionRetryDelay(error) {
@@ -133,7 +136,8 @@ export class PublicFetchController {
       await this.poll();
       return;
     }
-    if (this.resumeNeeded) this.fetchId = null;
+    const isContinuation = this.resumeNeeded;
+    if (isContinuation) this.fetchId = null;
     this.busy = true;
     this.emit({ kind: 'submitting', busy: true });
     try {
@@ -175,23 +179,33 @@ export class PublicFetchController {
         this.lastAutomaticDispatchAt = 0;
       }
       const headers = { 'Idempotency-Key': this.key };
+      if (isContinuation) headers['X-TrendScout-Fetch-Continuation'] = '1';
       if (this.activeYoutubePolicyVersion) {
         headers[YOUTUBE_POLICY_VERSION_HEADER] = this.activeYoutubePolicyVersion;
       }
       let accepted;
+      let submissionRetries = 0;
       while (!accepted) {
         try {
-          accepted = await requestJson(this.historyDays === null
+          const submission = await requestJson(this.historyDays === null
             ? '/api/v1/fetches' : '/api/v1/fetches/history', {
             method: 'POST',
             body: this.requestBody,
             headers,
             locale: this.locale(),
           });
+          if (!submission || typeof submission.fetch_id !== 'string'
+              || !/^[a-f0-9]{32}$/.test(submission.fetch_id)) {
+            const message = this.locale() === 'en'
+              ? 'The server accepted Fetch without returning a valid job ID.'
+              : 'Máy chủ nhận Fetch nhưng không trả về mã job hợp lệ.';
+            throw new ApiError(message, 202, submission);
+          }
+          accepted = submission;
         } catch (error) {
           if (!isUncertainSubmissionError(error)
-              || this.automaticContinuations >= MAX_AUTOMATIC_CONTINUATIONS) throw error;
-          this.automaticContinuations += 1;
+              || submissionRetries >= MAX_UNCERTAIN_SUBMISSION_RETRIES) throw error;
+          submissionRetries += 1;
           this.emit({ kind: 'submitting', busy: true, error });
           await wait(submissionRetryDelay(error));
           if (this.stopped) {
@@ -424,6 +438,16 @@ export class PublicFetchController {
       this.requestBody = null;
       this.resumeNeeded = false;
       return 'expired';
+    }
+    if (error instanceof ApiError && error.status >= 400 && error.status < 500
+        && ![408, 425].includes(error.status)) {
+      this.fetchId = null;
+      this.key = null;
+      this.requestBody = null;
+      this.activeYoutubePolicyVersion = null;
+      this.includesYouTube = false;
+      this.resumeNeeded = false;
+      return 'submission-rejected';
     }
     return this.fetchId ? 'poll-error' : 'retryable';
   }

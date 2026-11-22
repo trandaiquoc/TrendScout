@@ -59,3 +59,42 @@ G1–G6 đều PASS. Vercel Production chạy code đã push lên `main`; Owner 
 
 - The Production deployment used for Owner acceptance was `dpl_GtB6SWCR6Qfint8qLuyCLpzaVh5F`, built by Git from app-code commit `36a380e` and assigned to the single Owner-provided alias. Report-only commit `83a613e` was later auto-deployed by Vercel as `dpl_FQFycNry5azPUTB8aXCR3nyU6yHE`, `READY`. No Fetch POST or provider request was sent during deployment verification.
 - Rollback target is previous Git-backed Production deployment `dpl_8KHV54j2qC74eUQCmzJAHKsDEroS` at D6 code commit `6f374e5aa8cc5a3c0eb64ef810cad82432429652`. If a release issue appears, use Vercel `request_rollback` for project `prj_dB1JIG2hJG8NUukGPAaqvyI1Pk3R` with that deployment ID, then verify `trend-scout-mu.vercel.app` points back to it. No rollback request was sent.
+
+## Owner follow-up — Fetch All retry report (2026-11-23)
+
+**State:** local code changes and focused checks pass; new Production deployment and Owner's live acceptance are pending. This follow-up does not change the historical G1–G6 result above and does not claim the current Fetch All flow has passed live acceptance.
+
+### Owner report and verified Production evidence
+
+Owner reported that Fetch All stayed on “Đang gửi Fetch LIVE tới Vercel…” for more than five minutes, then showed “Chưa rõ máy chủ đã nhận yêu cầu. Thử lại sẽ dùng cùng khóa yêu cầu.” Repeating the button did not change that message. The dashboard summary shared by Owner showed 47 provider records, 0 unique keywords, 0 classified keywords, and a PARTIAL run from 2026-11-19.
+
+Read-only Production API checks on 2026-11-22 found the old Git deployment `dpl_7Q3EeJebTwZFur9ueK7Woj54GdMX` (commit `aa77764c3fd493b8e59f0cbe7a53e81ab664d0d3`). `GET /api/v1/runtime` returned 503 `COLLECTIONS_UNAVAILABLE`; `GET /api/v1/analytics/overview` returned 200 with 929 saved unique keywords, 79 classified and 850 unclassified. Its latest snapshot was PARTIAL: 1,046 provider records received, 929 retained, and `MODEL_UNAVAILABLE`. The source outcomes were Wikimedia SUCCESS/CACHED (999 records), YouTube PARTIAL/STALE_CACHE (47 of 50 provider records retained), Google UNAVAILABLE/NOT_YET_ELIGIBLE (0 provider calls), and Bing UNAVAILABLE/NO_SAVED_CANDIDATE (0 requests).
+
+The Owner's dashboard summary and the read-only overview disagree (47 received versus 1,046, and 0 versus 929 retained). Their scope or timing has not been resolved. The old Production runtime logs did not retain the reported POST, so its exact HTTP failure cannot be attributed to a specific request. No new Fetch POST or provider call was sent during this follow-up.
+
+### Confirmed code-path failures and changes
+
+The exact historical Production request remains unconfirmed, but review of the deployed code confirmed these failure modes:
+
+1. The Fetch POST timeout was 65 seconds while `Backend/vercel.json` caps each Function at 60 seconds.
+2. Uncertain initial POSTs shared the source continuation allowance of eight attempts. A same-key replay also started a source slice without distinguishing a lost initial response from an intentional continuation. Together these paths could keep the UI waiting for minutes before a job ID reached the browser.
+3. Most definite client errors were presented as an uncertain server acknowledgement, and an HTTP-success response with no valid Fetch ID could be polled as `undefined`.
+4. Exact `GET /api/v1/runtime` was missing from the Firestore request-scoped route list, even though its handler reads `CollectionService`.
+5. Vercel Fetch attempted local embedding inference inline. Lazy FastEmbed initialization could download the model during a bounded Fetch invocation.
+
+The follow-up changes now bound Fetch POSTs to 55 seconds, allow one automatic retry for an uncertain submission with the same idempotency key and no continuation marker, and require a valid 32-character Fetch ID before polling. Only a replay explicitly marked `X-TrendScout-Fetch-Continuation: 1` starts one source slice. Definite 4xx errors are shown as rejections; a corrected attempt uses the current source selection and a fresh key. Existing automatic job continuations stay bounded and keep the durable source checkpoints.
+
+The exact runtime GET now uses the request-scoped Firestore context. Vercel Fetch collection processing stores the raw keyword snapshot and records `MODEL_UNAVAILABLE` with `MODEL_INFERENCE_DEFERRED` without loading FastEmbed. Run History keeps provider status separate from Collection processing status and exposes the processing error code in Vietnamese and English.
+
+The pre-existing four-source rules remain in place: Google is admitted before Bing when Bing needs a saved candidate; saved source caches and original timestamps are preserved; YouTube still requires the approved policy version and does not become a keyword source. The focused Vercel source tests continue to use fake adapters and do not call providers.
+
+### Local validation and data migration
+
+- Focused backend regression: 87 passed, 10 subtests passed across `test_vercel_shared_live_fetch.py`, `test_smart_collections.py`, `test_keyword_workbench.py`, and `test_normal_wikimedia_live.py`.
+- Frontend suite: 49 passed. After the final Fetch ID regex adjustment, the affected Fetch suite was rerun: 27 passed.
+- Ruff, Python compile, JavaScript syntax and `git diff --check`: passed. `prepare_vercel.py` packaged 22 static assets and included the updated Fetch, Run History and localization modules.
+- Local LIVE SQLite remains 72,351,744 bytes; `integrity_check=ok`, no foreign-key errors, 2,665 keywords, 62 Collections, 399 memberships, 24 dataset snapshots and 29 Fetch jobs.
+- The Firestore import script's default dry-run was attempted on 2026-11-23 and stopped before reading or writing a snapshot with `DefaultCredentialsError`. No IAM, credentials or Firestore data were changed. The current Firestore snapshot, table differences and identity collisions remain unverified. The local import doc records this attempt and the latest known Production keyword count.
+- Applying the local database merge remains prohibited until a credentialed dry-run succeeds and the Owner confirms the displayed per-table counts and identity checks.
+
+The authorized code commit will be pushed directly to `main`; Vercel's Git integration must produce a READY Production deployment before the updated alias/API response bodies can be verified. The Owner must then perform one live acceptance round: reload, Fetch All once, wait for its terminal state, Fetch All again, and inspect Run History. Until that acceptance is observed, Fetch All remains **not yet accepted** for this follow-up.

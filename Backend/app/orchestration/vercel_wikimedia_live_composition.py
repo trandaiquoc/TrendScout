@@ -466,6 +466,7 @@ async def vercel_shared_live_composition(
                     collection_store,
                     before_request=facade.entity_lookup_before_request,
                 ),
+                fetch_model_inference_enabled=False,
             )
             facade.collection_snapshot = collection_snapshot
             yield facade

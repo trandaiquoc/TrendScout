@@ -239,7 +239,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("worker_finished", events)
         self.assertEqual(facade.slice_calls, [])
 
-    async def test_nonterminal_source_slice_skips_collection_snapshot_save(self):
+    async def test_same_key_submission_replay_waits_for_explicit_source_continuation(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         _client_factory.side_effect = lambda _token: _Client(events)
         facade.slice_state = "QUEUED"
@@ -254,10 +254,18 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                 base_url="https://trend-scout.example",
             ) as browser:
                 accepted = await browser.post("/api/v1/fetches", headers=headers, json={})
-                response = await browser.post("/api/v1/fetches", headers=headers, json={})
+                retry = await browser.post("/api/v1/fetches", headers=headers, json={})
+                response = await browser.post(
+                    "/api/v1/fetches",
+                    headers={**headers, "X-TrendScout-Fetch-Continuation": "1"},
+                    json={},
+                )
 
         self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertEqual(retry.status_code, 202, retry.text)
         self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(accepted.json()["fetch_id"], retry.json()["fetch_id"])
+        self.assertEqual(retry.headers["idempotent-replay"], "true")
         self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
         self.assertNotIn("collections_processed", events)
         self.assertNotIn("snapshot_saved", events)
@@ -287,7 +295,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                     "/api/v1/fetches", headers=headers, json={"sources": sources},
                 )
                 resumed = await browser.post(
-                    "/api/v1/fetches", headers=headers, json={"sources": sources},
+                    "/api/v1/fetches",
+                    headers={**headers, "X-TrendScout-Fetch-Continuation": "1"},
+                    json={"sources": sources},
                 )
 
         self.assertEqual(first.status_code, 202, first.text)
@@ -382,6 +392,30 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_persists_vercel_collections(
             "PATCH", "/api/v1/research/research-id",
         ))
+
+    async def test_runtime_route_uses_request_scoped_collection_service(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        with TemporaryDirectory() as directory:
+            facade.collection_service = CollectionService(
+                CollectionStore(Path(directory) / "collections.sqlite", data_mode_scope="LIVE"),
+                fetch_model_inference_enabled=False,
+            )
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="https://trend-scout.example",
+                ) as browser:
+                    response = await browser.get(
+                        "/api/v1/runtime",
+                        headers={"x-vercel-oidc-token": "synthetic-test-token"},
+                    )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["storage"]["status"], "AVAILABLE")
+        self.assertEqual(response.json()["storage"]["keyword_records"], 0)
+        self.assertEqual(response.json()["embedding"]["model_load_status"], "DISABLED_FOR_FETCH")
+        self.assertIn("context_entered", events)
+        self.assertIn("context_exited", events)
 
     async def test_research_reads_and_mutations_use_and_persist_request_store(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)

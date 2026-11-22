@@ -836,6 +836,7 @@ const FETCH_STATE_MESSAGES = {
   'rate-limited': 'fetch.rate-limited',
   'busy-error': 'fetch.busy',
   retryable: 'fetch.retryable',
+  'submission-rejected': 'fetch.submission-rejected',
   'poll-limit': 'fetch.poll-limit',
   'poll-retrying': 'fetch.poll-retrying',
   'poll-error': 'fetch.poll-error',
@@ -957,7 +958,7 @@ function renderFetchPresentation() {
   const status = $('#fetch-status');
   const capabilityNote = $('#fetch-capabilities-note');
   const capabilityRetry = $('#fetch-capabilities-retry');
-  const canRetry = ['retryable', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
+  const canRetry = ['retryable', 'submission-rejected', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const canResume = ['poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const busy = Boolean(presentation.busy);
   const youtubeSelected = effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID);
@@ -985,7 +986,7 @@ function renderFetchPresentation() {
     || youtubePolicyPending;
   const sourceSelect = $('#fetch-source-select');
   if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
-  const buttonKey = presentation.kind === 'retryable'
+  const buttonKey = ['retryable', 'submission-rejected'].includes(presentation.kind)
     ? 'fetch.retry'
     : canResume ? 'fetch.resume'
     : state.capabilities?.shared_policy_reconciliation_required === true
@@ -1028,8 +1029,10 @@ function renderFetchPresentation() {
   status.replaceChildren();
   if (isActionState) {
     const message = document.createElement('p');
-    message.textContent = t(liveFetch
-      ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey);
+    message.textContent = presentation.kind === 'submission-rejected'
+      ? presentation.error?.message || t(messageKey)
+      : t(liveFetch
+        ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey);
     status.append(message);
     const sourceOutcomes = renderFetchSourceOutcomes(presentation.fetch);
     if (sourceOutcomes) status.append(sourceOutcomes);

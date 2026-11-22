@@ -316,6 +316,9 @@ async def create_fetch(
     response: Response,
     background_tasks: BackgroundTasks,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    fetch_continuation: bool = Header(
+        default=False, alias="X-TrendScout-Fetch-Continuation"
+    ),
 ):
     response.headers["Cache-Control"] = "no-store"
     _require_enabled(request)
@@ -382,7 +385,8 @@ async def create_fetch(
         )
         if accepted["status"] in {"QUEUED", "RUNNING"}:
             if vercel_shared_live:
-                if accepted.get("result") == "REPLAY":
+                if (accepted.get("result") == "REPLAY"
+                        and fetch_continuation):
                     await _run_fetch_and_collections(
                         request, distributed, accepted["job_id"],
                         f"api-{secrets.token_hex(12)}",

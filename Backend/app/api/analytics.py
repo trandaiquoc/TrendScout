@@ -50,7 +50,10 @@ def runtime_status(request: Request):
             "cache_vectors": cache["vectors"] or 0,
             "cached_dimensions_total": cache["dimensions"] or 0,
             "vector_dimensions": cache["vector_dimensions"],
-            "model_load_status": "LAZY_ON_DEMAND",
+            "model_load_status": (
+                "DISABLED_FOR_FETCH" if not service.fetch_model_inference_enabled
+                else "LAZY_ON_DEMAND"
+            ),
             "classification_policy_version": CLASSIFICATION_POLICY_VERSION,
             "taxonomy_version": TAXONOMY_VERSION,
         },

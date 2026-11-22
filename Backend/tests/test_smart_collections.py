@@ -838,6 +838,33 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
         self.assertEqual(self.store.latest_dataset()["dataset_id"], "offline")
 
+    def test_deferred_fetch_model_keeps_raw_keyword_and_skips_embedding(self):
+        source = live_source([
+            {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
+             "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
+        service = CollectionService(self.store, fetch_model_inference_enabled=False)
+        with patch.object(embeddings, "embed", side_effect=AssertionError("model inference must not run")):
+            result = service._process_fetch("deferred-model", source)
+
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(result["error_code"], "MODEL_INFERENCE_DEFERRED")
+        self.assertEqual(result["available"], 1)
+        self.assertEqual(result["unassigned"], 1)
+        with self.store.connect() as db:
+            keyword = db.execute(
+                "SELECT keyword,eligible FROM keywords WHERE keyword='Mars Rover'"
+            ).fetchone()
+            job = db.execute(
+                "SELECT status,error_code FROM fetch_jobs WHERE fetch_id='deferred-model'"
+            ).fetchone()
+            snapshot = db.execute(
+                "SELECT data_mode,received_record_count,processing_status FROM dataset_snapshots "
+                "WHERE dataset_id='deferred-model'"
+            ).fetchone()
+        self.assertEqual(tuple(keyword), ("Mars Rover", 1))
+        self.assertEqual(tuple(job), ("MODEL_UNAVAILABLE", "MODEL_INFERENCE_DEFERRED"))
+        self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
+
     def test_bulk_feedback_actions_are_atomic_and_durable(self):
         target = self.store.create({"name": "Space", "auto_match": False})
         rows = [{"article_display": name, "article_original": name.replace(" ", "_"),

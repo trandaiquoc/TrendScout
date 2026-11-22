@@ -104,6 +104,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             or path.startswith("/api/v1/analytics/")
             or path == "/api/v1/algorithms/results"
             or path == "/api/v1/capabilities"
+            or path == "/api/v1/runtime"
             or path == "/api/v1/research"
             # The Collections workbench reads keyword rows through these
             # legacy dataset routes. They must share its request-scoped
