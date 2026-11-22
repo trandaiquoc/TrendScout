@@ -1,6 +1,6 @@
 import { getJson } from './api.js';
 
-const CAPABILITIES_REQUEST_TIMEOUT_MS = 25_000;
+const CAPABILITIES_REQUEST_TIMEOUT_MS = 55_000;
 const CAPABILITY_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000, 10_000]);
 const CAPABILITIES_CACHE_KEY = 'trendscout.public-capabilities.v1';
 

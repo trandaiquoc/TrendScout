@@ -12,7 +12,10 @@ function requestTimeoutMs(path, requestedTimeoutMs) {
   }
   if (path === '/api/v1/collections' || path.startsWith('/api/v1/collections/')
       || path === '/api/v1/datasets/latest'
-      || path.startsWith('/api/v1/datasets/latest/')) {
+      || path.startsWith('/api/v1/datasets/latest/')
+      || path === '/api/v1/analytics/overview'
+      || path.startsWith('/api/v1/runs/history')
+      || path === '/api/v1/capabilities') {
     return COLLECTIONS_TIMEOUT_MS;
   }
   return REQUEST_TIMEOUT_MS;
