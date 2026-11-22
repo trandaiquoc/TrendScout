@@ -10,6 +10,9 @@ function requestTimeoutMs(path, requestedTimeoutMs) {
   if (/^\/api\/v1\/fetches\/[a-f0-9]{32}\/collections(?:\?|$)/.test(path)) {
     return COLLECTIONS_TIMEOUT_MS;
   }
+  if (/^\/api\/v1\/fetches\/[a-f0-9]{32}(?:\?|$)/.test(path)) {
+    return FETCH_TIMEOUT_MS;
+  }
   if (path === '/api/v1/collections' || path.startsWith('/api/v1/collections/')
       || path === '/api/v1/datasets/latest'
       || path.startsWith('/api/v1/datasets/latest/')

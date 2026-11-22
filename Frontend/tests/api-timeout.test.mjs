@@ -51,6 +51,7 @@ test('slow Firestore-backed dashboard reads allow Vercel cold starts', async () 
 
 test('Fetch submissions stop before Vercel while checkpoint persistence keeps its snapshot allowance', async () => {
   assert.equal(await requestedTimeout('/api/v1/fetches'), 55_000);
+  assert.equal(await requestedTimeout(`/api/v1/fetches/${'a'.repeat(32)}`), 55_000);
   assert.equal(await requestedTimeout(`/api/v1/fetches/${'a'.repeat(32)}/collections`), 65_000);
 });
 
