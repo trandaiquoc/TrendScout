@@ -219,3 +219,23 @@ Both runs predate the `ec3ede0` Production deployment at 14:36 UTC and therefore
 **Focused verification:** The Vercel Fetch controller suite passed (30 tests), the Vercel Shared LIVE route suite passed (23 tests), the offline browser continuation/reload scenario passed, and `git diff --check` passed. The controller test confirms a mocked four-slice run now uses one terminal status read instead of four status reads. All network responses were mocked; no provider API or Production Fetch was called.
 
 **Limit:** The removed status reads should reduce Firestore traffic and avoid their request latency at normal source boundaries, but the change has not been measured against a Production Fetch because this objective prohibits another Production Fetch. Provider response time, the 45-second source deadline, Firestore latency, and any failure within a provider handler remain unchanged.
+
+### Post-deployment read-only latency sample (2026-11-23, Asia/Bangkok)
+
+The latest source commit `b9678a5265c72b05886daa6a8035013c26f95d21` is deployed as Production deployment `dpl_Ae9mzgd8zuGaSaSfyTsn21UCJCab`, state `READY`, with alias `https://trend-scout-mu.vercel.app`. Read-only authenticated requests returned HTTP 200:
+
+| GET path | Client-observed time |
+|---|---:|
+| `/api/v1/datasets/latest` | 9.23 s |
+| `/api/v1/collections` | 9.86 s |
+| `/api/v1/analytics/overview` | 9.89 s |
+| `/api/v1/algorithms/results?limit=5` | 9.62 s |
+| `/api/v1/capabilities` | 9.81 s |
+| `/api/v1/runs/history?limit=5` | 4.63 s |
+| `/api/health` | 1.43 s |
+
+Each timing is a single client-side measurement around the authenticated Vercel URL-fetch connector. It includes connector and request overhead, is not browser RUM, and does not establish a latency distribution. The browser and API checks made GET requests only; they did not submit Fetch work or call providers.
+
+The capability route defers the Collections SQLite restore but still took 9.81 seconds. This shows that snapshot restoration is not the only contributor to slow API reads. The code also constructs the complete request-scoped Shared LIVE composition for this read, and the capability handler reads durable runtime state. The history route defers the snapshot and took 4.63 seconds, while health returned in 1.43 seconds without the Shared LIVE middleware. These results are consistent with request identity/Firestore access and Shared LIVE composition adding material latency, but connector timing alone cannot isolate their exact costs. The four Collection-backed routes remain around 9–10 seconds; no new claim of local-equivalent latency is made.
+
+No app code change followed `b9678a5` in this sample. The all-source fresh Fetch followed by a complete provider-free cached Fetch remains unverified; this follow-up sent no Production Fetch POST and made no provider requests.
