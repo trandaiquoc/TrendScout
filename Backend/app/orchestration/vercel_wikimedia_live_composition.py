@@ -83,6 +83,9 @@ class _VercelWikimediaPolicySync:
         self.utcnow = utcnow
 
     def _read(self):
+        read_many = getattr(self.store, "read_many", None)
+        if callable(read_many):
+            return read_many([self.state_key])[self.state_key]
         return self.store.transact(self.state_key, lambda state: (state, state))
 
     def status(self):

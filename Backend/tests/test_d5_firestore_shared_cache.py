@@ -691,6 +691,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(facade.journal.snapshot_blobs._client, client)
                 self.assertTrue(facade.firestore_shared_live)
                 self.assertFalse(facade.normal_google_live)
+                self.assertGreaterEqual(client.batch_gets, 1)
                 self.assertEqual(
                     facade.normal_google_live_sources,
                     frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}),

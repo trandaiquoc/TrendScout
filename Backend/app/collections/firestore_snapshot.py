@@ -115,7 +115,11 @@ class FirestoreCollectionSnapshot:
 
     def load(self) -> int:
         """Restore the last committed image; leave a missing ledger as an empty DB."""
-        state = self._state.transact(_STATE_KEY, lambda current: (current, current))
+        read_many = getattr(self._state, "read_many", None)
+        if callable(read_many):
+            state = read_many([_STATE_KEY])[_STATE_KEY]
+        else:
+            state = self._state.transact(_STATE_KEY, lambda current: (current, current))
         if not state:
             self.version = 0
             self._sha256 = None

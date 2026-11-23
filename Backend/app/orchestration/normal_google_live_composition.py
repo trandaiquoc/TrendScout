@@ -373,7 +373,10 @@ async def normal_google_live_composition(*, user_agent,
         store, policy, state_key=GOOGLE_STATE_KEY,
         owner_manual_youtube_live=youtube_manual_live,
     )
-    existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
+    if uses_firestore:
+        existing_state = store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
+    else:
+        existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
     # First launch has no quota state to migrate; any populated ledger must
     # still match one of the explicit migration paths below.
     if (uses_firestore and existing_state

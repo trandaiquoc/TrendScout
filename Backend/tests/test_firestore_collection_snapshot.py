@@ -31,13 +31,20 @@ class FakeFirestoreClient:
 class FakeStateStore:
     def __init__(self):
         self.values = {}
+        self.read_many_calls = 0
+        self.transact_calls = 0
 
     def transact(self, key, operation):
+        self.transact_calls += 1
         current = copy.deepcopy(self.values.get(key, {}))
         updated, result = operation(current)
         if updated != current:
             self.values[key] = copy.deepcopy(updated)
         return result
+
+    def read_many(self, keys):
+        self.read_many_calls += 1
+        return {key: copy.deepcopy(self.values.get(key, {})) for key in keys}
 
 
 class FakeSnapshotBlobs:
@@ -86,6 +93,14 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         payload_chars = 4 * ((firestore_snapshot._MAX_COMPRESSED_BYTES + 2) // 3)
         encoded_record_size = len(envelope) + payload_chars
         self.assertLessEqual(encoded_record_size, firestore_snapshot_blobs._MAX_BLOB_BYTES)
+
+    def test_load_reads_pointer_without_opening_a_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(Path(directory) / "restored.sqlite")
+            self.assertEqual(snapshot.load(), 0)
+
+        self.assertEqual(self.state.read_many_calls, 1)
+        self.assertEqual(self.state.transact_calls, 0)
 
     def test_round_trip_and_unchanged_image_does_not_write_again(self):
         with tempfile.TemporaryDirectory() as directory:

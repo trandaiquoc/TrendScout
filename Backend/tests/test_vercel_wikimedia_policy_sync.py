@@ -19,8 +19,11 @@ class _MemoryAtomicStateStore:
     def __init__(self, state):
         self.state = deepcopy(state)
         self.writes = 0
+        self.read_many_calls = 0
+        self.transact_calls = 0
 
     def transact(self, key, operation):
+        self.transact_calls += 1
         if key != GOOGLE_STATE_KEY:
             raise AssertionError("unexpected state key")
         updated, result = operation(deepcopy(self.state))
@@ -28,6 +31,12 @@ class _MemoryAtomicStateStore:
             self.state = deepcopy(updated)
             self.writes += 1
         return deepcopy(result)
+
+    def read_many(self, keys):
+        self.read_many_calls += 1
+        if keys != [GOOGLE_STATE_KEY]:
+            raise AssertionError("unexpected state keys")
+        return {GOOGLE_STATE_KEY: deepcopy(self.state)}
 
 
 class VercelWikimediaPolicySyncTests(unittest.TestCase):
@@ -83,6 +92,8 @@ class VercelWikimediaPolicySyncTests(unittest.TestCase):
         sync = self.sync(store)
 
         self.assertEqual(sync.status(), "READY_TO_SYNC")
+        self.assertEqual(store.read_many_calls, 1)
+        self.assertEqual(store.transact_calls, 0)
         self.assertEqual(sync.prepare_for_fetch(), "RECONCILED")
         self.assertEqual(store.writes, 1)
         self.assertEqual(
