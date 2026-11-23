@@ -70,3 +70,26 @@ class FirestoreAtomicStateStore:
             if callback_completed[0]:
                 raise CommitOutcomeUnknown("coordination commit outcome unknown") from exc
             raise
+
+    def read_many(self, keys):
+        """Read several coordination documents in one read-only Firestore batch."""
+        if (not isinstance(keys, (tuple, list)) or not keys
+                or any(not isinstance(key, str) or not _ID.fullmatch(key) or key in {".", ".."}
+                       or (key.startswith("__") and key.endswith("__")) for key in keys)
+                or len(keys) != len(set(keys))):
+            raise ValueError("unique valid state keys required")
+
+        collection = self._client.collection("_ts_d5_coordination")
+        references = {key: collection.document(key) for key in keys}
+        values = {}
+        for snapshot in self._client.get_all(list(references.values())):
+            key = getattr(snapshot, "id", None)
+            if key not in references or key in values:
+                raise ValueError("Firestore batch returned an unexpected document")
+            value = snapshot.to_dict() if snapshot.exists else {}
+            if not isinstance(value, dict):
+                raise ValueError("coordination state must be a mapping")
+            values[key] = deepcopy(value)
+        if set(values) != set(references):
+            raise ValueError("Firestore batch omitted a requested document")
+        return values

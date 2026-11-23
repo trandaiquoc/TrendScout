@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from app.jobs.public_admission import AdmissionDenied
 from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
+    GOOGLE_REFRESH_STATE_KEY,
     YOUTUBE_REFRESH_STATE_KEY,
     eligible_slot,
     manual_candidate_slot,
@@ -14,6 +15,7 @@ from app.sources.refresh_eligibility import (
     reserve_manual_source_slot,
     reserve_source_slot,
     schedule_metadata,
+    schedule_metadata_for_sources,
 )
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
@@ -75,6 +77,77 @@ class RefreshEligibilityTests(unittest.TestCase):
         self.assertEqual(metadata["slots"], ["07:00", "15:00", "23:00"])
         self.assertEqual(metadata["max_attempts_per_day"], 3)
         self.assertEqual(metadata["next_eligible_at"], "2026-11-16T08:00:00+00:00")
+
+    def test_schedule_metadata_batches_read_only_states_and_keeps_source_errors_separate(self):
+        class BatchStore:
+            def __init__(self):
+                self.read_many_calls = 0
+                self.transact_calls = 0
+
+            def read_many(self, keys):
+                self.read_many_calls += 1
+                values = {
+                    GOOGLE_REFRESH_STATE_KEY: {},
+                    BING_REFRESH_STATE_KEY: {},
+                    YOUTUBE_REFRESH_STATE_KEY: {
+                        "schema": 1, "last_attempt_at": "invalid", "last_slot": "slot",
+                    },
+                }
+                return {key: values[key] for key in reversed(keys)}
+
+            def transact(self, key, operation):
+                self.transact_calls += 1
+                value, result = operation({})
+                self.assert_unchanged(value)
+                return result
+
+            @staticmethod
+            def assert_unchanged(value):
+                if value != {}:
+                    raise AssertionError("schedule metadata must remain read-only")
+
+        store = BatchStore()
+        now = datetime(2026, 11, 16, 10, 11, tzinfo=LOCAL)
+
+        result = schedule_metadata_for_sources(store, (
+            ("google", GOOGLE_REFRESH_STATE_KEY, "GOOGLE_SCHEDULE_STATE_INVALID", True),
+            ("bing", BING_REFRESH_STATE_KEY, "BING_SCHEDULE_STATE_INVALID", False),
+            ("youtube", YOUTUBE_REFRESH_STATE_KEY, "YOUTUBE_SCHEDULE_STATE_INVALID", False),
+        ), now)
+
+        self.assertTrue(result["google"]["initial_acceptance_available"])
+        self.assertEqual(result["bing"]["next_eligible_at"], "2026-11-16T08:00:00+00:00")
+        self.assertEqual(result["youtube"], {
+            "status": "UNAVAILABLE", "error_code": "YOUTUBE_SCHEDULE_STATE_INVALID",
+        })
+        self.assertEqual(store.read_many_calls, 1)
+        self.assertEqual(store.transact_calls, 0)
+
+    def test_schedule_metadata_falls_back_to_individual_reads_if_batch_fails(self):
+        class BatchFailureStore:
+            def __init__(self):
+                self.transact_calls = 0
+
+            def read_many(self, _keys):
+                raise RuntimeError("batch unavailable")
+
+            def transact(self, key, operation):
+                self.transact_calls += 1
+                value = {}
+                updated, result = operation(value)
+                if updated != value:
+                    raise AssertionError("schedule metadata must remain read-only")
+                return result
+
+        store = BatchFailureStore()
+        result = schedule_metadata_for_sources(store, (
+            ("google", GOOGLE_REFRESH_STATE_KEY, "GOOGLE_SCHEDULE_STATE_INVALID", True),
+            ("bing", BING_REFRESH_STATE_KEY, "BING_SCHEDULE_STATE_INVALID", False),
+        ), datetime(2026, 11, 16, 10, 11, tzinfo=LOCAL))
+
+        self.assertTrue(result["google"]["initial_acceptance_available"])
+        self.assertEqual(result["bing"]["next_eligible_at"], "2026-11-16T08:00:00+00:00")
+        self.assertEqual(store.transact_calls, 2)
 
     def test_schedule_state_corruption_fails_closed(self):
         self.store.transact(

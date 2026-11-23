@@ -9,8 +9,9 @@ from app.storage.firestore_atomic_state import CommitOutcomeUnknown, FirestoreAt
 
 
 class FakeSnapshot:
-    def __init__(self, value):
+    def __init__(self, value, document_id=None):
         self.value, self.exists = value, value is not None
+        self.id = document_id
 
     def to_dict(self):
         return self.value
@@ -35,6 +36,7 @@ class FakeCollection:
 class FakeClient:
     def __init__(self):
         self.data, self.pending = {}, None
+        self.read_many_calls = 0
 
     def collection(self, name):
         if name != "_ts_d5_coordination":
@@ -43,6 +45,13 @@ class FakeClient:
 
     def transaction(self, max_attempts):
         return FakeTransaction(self)
+
+    def get_all(self, references):
+        self.read_many_calls += 1
+        return iter(
+            FakeSnapshot(self.data.get(reference), reference)
+            for reference in reversed(references)
+        )
 
 
 def fake_transactional(callback):
@@ -81,6 +90,27 @@ class FirestoreAtomicStateTests(unittest.TestCase):
             )
             self.assertIsNone(client.pending)
         self.assertEqual(client.data["public"], {"count": 1})
+
+    def test_read_many_uses_one_batch_and_maps_unordered_documents(self):
+        client = FakeClient()
+        client.data.update({"first": {"count": 1}, "second": {"count": 2}})
+
+        result = FirestoreAtomicStateStore(client).read_many(["first", "second"])
+
+        self.assertEqual(result, {"first": {"count": 1}, "second": {"count": 2}})
+        self.assertEqual(client.read_many_calls, 1)
+        self.assertEqual(client.data, {"first": {"count": 1}, "second": {"count": 2}})
+
+    def test_read_many_validates_keys_and_complete_batch_results(self):
+        client = FakeClient()
+        store = FirestoreAtomicStateStore(client)
+        for keys in ([], ["same", "same"], ["bad/key"]):
+            with self.assertRaises(ValueError):
+                store.read_many(keys)
+
+        client.get_all = lambda _references: iter([FakeSnapshot({}, "unexpected")])
+        with self.assertRaises(ValueError):
+            store.read_many(["expected"])
 
     def test_ambiguous_commit_is_never_reported_successful(self):
         client = FakeClient()

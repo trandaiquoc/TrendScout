@@ -38,11 +38,7 @@ def eligible_slot(now: datetime, *, last_attempt_at: datetime | None = None) -> 
     return None
 
 
-def _schedule_state(atomic_store, state_key: str, *, error_code: str) -> dict:
-    try:
-        state = atomic_store.transact(state_key, lambda value: (value, value))
-    except Exception:
-        raise AdmissionDenied(error_code) from None
+def _normalize_schedule_state(state, *, error_code: str) -> dict:
     if not state:
         return {"schema": 1, "last_attempt_at": None, "last_slot": None}
     if not isinstance(state, dict) or state.get("schema") != 1:
@@ -61,6 +57,14 @@ def _schedule_state(atomic_store, state_key: str, *, error_code: str) -> dict:
     if parsed.tzinfo is None or parsed.utcoffset() is None or not last_slot:
         raise AdmissionDenied(error_code)
     return {"schema": 1, "last_attempt_at": parsed, "last_slot": last_slot}
+
+
+def _schedule_state(atomic_store, state_key: str, *, error_code: str) -> dict:
+    try:
+        state = atomic_store.transact(state_key, lambda value: (value, value))
+    except Exception:
+        raise AdmissionDenied(error_code) from None
+    return _normalize_schedule_state(state, error_code=error_code)
 
 
 def candidate_slot(atomic_store, state_key: str, now: datetime, *, error_code: str,
@@ -255,12 +259,14 @@ def manual_schedule_metadata(atomic_store, state_key: str, now: datetime, *,
     }
 
 
-def schedule_metadata(atomic_store, state_key: str, now: datetime, *, error_code: str,
-                      allow_initial_acceptance: bool = False) -> dict:
-    """Describe the next manual refresh opportunity without reserving it."""
+def _validate_schedule_now(now: datetime, *, error_code: str) -> None:
     if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
         raise AdmissionDenied(error_code)
-    state = _schedule_state(atomic_store, state_key, error_code=error_code)
+
+
+def _schedule_metadata(state, now: datetime, *, error_code: str,
+                       allow_initial_acceptance: bool) -> dict:
+    _validate_schedule_now(now, error_code=error_code)
     last_attempt = state["last_attempt_at"]
     next_at = None
     if last_attempt is None and allow_initial_acceptance:
@@ -298,3 +304,61 @@ def schedule_metadata(atomic_store, state_key: str, now: datetime, *, error_code
             if next_at else None,
         "last_slot": state["last_slot"],
     }
+
+
+def schedule_metadata_from_state(raw_state, now: datetime, *, error_code: str,
+                                 allow_initial_acceptance: bool = False) -> dict:
+    """Describe a source schedule from a previously fetched state document."""
+    _validate_schedule_now(now, error_code=error_code)
+    state = _normalize_schedule_state(raw_state, error_code=error_code)
+    return _schedule_metadata(
+        state, now, error_code=error_code,
+        allow_initial_acceptance=allow_initial_acceptance,
+    )
+
+
+def schedule_metadata(atomic_store, state_key: str, now: datetime, *, error_code: str,
+                      allow_initial_acceptance: bool = False) -> dict:
+    """Describe the next manual refresh opportunity without reserving it."""
+    _validate_schedule_now(now, error_code=error_code)
+    state = _schedule_state(atomic_store, state_key, error_code=error_code)
+    return _schedule_metadata(
+        state, now, error_code=error_code,
+        allow_initial_acceptance=allow_initial_acceptance,
+    )
+
+
+def schedule_metadata_for_sources(atomic_store, schedules, now: datetime) -> dict:
+    """Read independent source schedules together when the store supports batching."""
+    schedules = tuple(schedules)
+    if schedules:
+        _validate_schedule_now(now, error_code=schedules[0][2])
+    keys = tuple(item[1] for item in schedules)
+    read_many = getattr(atomic_store, "read_many", None)
+    states = None
+    if schedules and callable(read_many):
+        try:
+            candidate = read_many(keys)
+            if isinstance(candidate, dict) and set(candidate) == set(keys):
+                states = candidate
+        except Exception:
+            # Preserve the prior per-source behavior if the optional batch read fails.
+            states = None
+
+    result = {}
+    for source_id, state_key, error_code, allow_initial_acceptance in schedules:
+        try:
+            if states is None:
+                value = schedule_metadata(
+                    atomic_store, state_key, now, error_code=error_code,
+                    allow_initial_acceptance=allow_initial_acceptance,
+                )
+            else:
+                value = schedule_metadata_from_state(
+                    states[state_key], now, error_code=error_code,
+                    allow_initial_acceptance=allow_initial_acceptance,
+                )
+            result[source_id] = value
+        except AdmissionDenied as error:
+            result[source_id] = {"status": "UNAVAILABLE", "error_code": error.code}
+    return result

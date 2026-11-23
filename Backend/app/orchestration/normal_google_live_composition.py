@@ -57,10 +57,11 @@ from app.sources.refresh_eligibility import (
     candidate_slot,
     manual_candidate_slot,
     manual_schedule_metadata,
-    reserve_owner_acceptance_slot,
     reserve_manual_source_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
     schedule_metadata,
+    schedule_metadata_for_sources,
 )
 from app.sources.serpapi.account import SerpApiAccountClient
 from app.sources.serpapi.errors import SerpApiError
@@ -72,11 +73,11 @@ from app.sources.youtube.query_planner import (
     OWNER_MANUAL_LIVE,
     select_youtube_query_scopes,
 )
-from app.sources.youtube.storage_budget import MAX_YOUTUBE_BATCH_BYTES
 from app.sources.youtube.retention import (
     purge_expired_youtube_cache,
     purge_expired_youtube_checkpoints,
 )
+from app.sources.youtube.storage_budget import MAX_YOUTUBE_BATCH_BYTES
 from app.storage.local_file_security import secure_private_directory
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_sqlite_snapshot_blobs import LocalSQLiteSnapshotBlobs
@@ -1030,6 +1031,7 @@ async def normal_google_live_composition(*, user_agent,
 
         def refresh_schedule_metadata():
             sources = {}
+            schedules = []
             for source_id, state_key, initial_allowed in (
                 (GOOGLE_SOURCE_ID, GOOGLE_REFRESH_STATE_KEY,
                  allow_initial_google_acceptance),
@@ -1044,14 +1046,13 @@ async def normal_google_live_composition(*, user_agent,
                         "user_triggered_only": True,
                     }
                     continue
-                try:
-                    sources[source_id] = schedule_metadata(
-                        store, state_key, utcnow(),
-                        error_code=f"{source_id.upper()}_SCHEDULE_STATE_INVALID",
-                        allow_initial_acceptance=initial_allowed,
-                    )
-                except AdmissionDenied as error:
-                    sources[source_id] = {"status": "UNAVAILABLE", "error_code": error.code}
+                schedules.append((
+                    source_id,
+                    state_key,
+                    f"{source_id.upper()}_SCHEDULE_STATE_INVALID",
+                    initial_allowed,
+                ))
+            sources.update(schedule_metadata_for_sources(store, schedules, utcnow()))
             return {
                 "timezone": str(SCHEDULE_TIMEZONE),
                 "slots": [slot.strftime("%H:%M") for slot in SCHEDULE_SLOTS],
