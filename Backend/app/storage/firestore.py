@@ -1,13 +1,12 @@
-"""Firestore storage using Firebase Admin SDK and Application Default Credentials."""
+"""Firestore storage with injected clients and an optional Firebase Admin constructor."""
 
 import asyncio
 from typing import Any, Mapping
 from uuid import uuid4
 
-import firebase_admin
-from firebase_admin import firestore
 from google.api_core.exceptions import AlreadyExists, GoogleAPICallError, NotFound
 from google.auth.exceptions import GoogleAuthError
+from google.cloud import firestore as google_firestore
 
 from app.ports.storage import Record, RecordAlreadyExists, RecordKind, RecordNotFound, StorageError
 from app.settings import Settings
@@ -27,10 +26,13 @@ class FirestoreStorage:
     def from_project(cls, project_id: str) -> "FirestoreStorage":
         if not project_id or not project_id.strip():
             raise ValueError("GOOGLE_CLOUD_PROJECT must be set")
+        import firebase_admin
+        from firebase_admin import firestore as admin_firestore
+
         # A distinct named Firebase app avoids silently reusing another project's client.
         app = firebase_admin.initialize_app(options={"projectId": project_id}, name=f"trendscout-{uuid4().hex}")
         try:
-            return cls(firestore.client(app=app, database_id="(default)"))
+            return cls(admin_firestore.client(app=app, database_id="(default)"))
         except Exception:
             firebase_admin.delete_app(app)
             raise
@@ -67,7 +69,7 @@ class FirestoreStorage:
             raise ValueError("Invalid run history page")
         query = (
             self._client.collection("analysis_runs")
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .order_by("created_at", direction=google_firestore.Query.DESCENDING)
             .offset(offset)
             .limit(limit)
         )
@@ -77,7 +79,7 @@ class FirestoreStorage:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Invalid run history page")
         collection = self._client.collection("analysis_runs")
-        query = collection.order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
+        query = collection.order_by("created_at", direction=google_firestore.Query.DESCENDING).limit(limit)
         if after_run_id is not None:
             validate_id(after_run_id)
             snapshot = await self._call(collection.document(after_run_id).get)

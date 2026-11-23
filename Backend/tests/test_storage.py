@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from google.api_core.exceptions import AlreadyExists, NotFound, PermissionDenied
 
@@ -45,6 +45,17 @@ class FakeStorageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FirestoreMappingTests(unittest.IsolatedAsyncioTestCase):
+    def test_local_firebase_admin_constructor_stays_available(self):
+        client = object()
+        with patch('firebase_admin.initialize_app') as initialize_app, \
+                patch('firebase_admin.firestore.client', return_value=client) as firestore_client:
+            storage = FirestoreStorage.from_project('project-id')
+        self.assertIs(storage._client, client)
+        initialize_app.assert_called_once()
+        firestore_client.assert_called_once_with(
+            app=initialize_app.return_value, database_id='(default)'
+        )
+
     async def test_write_read_update_and_nested_path(self):
         client = MagicMock()
         doc = client.collection.return_value.document.return_value
