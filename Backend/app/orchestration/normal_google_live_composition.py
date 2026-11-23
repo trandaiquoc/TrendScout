@@ -753,6 +753,11 @@ async def normal_google_live_composition(*, user_agent,
             snapshot = admission.quota_snapshot("serpapi", now=utcnow())
             return min(snapshot["daily"]["remaining"], snapshot["monthly"]["remaining"])
 
+        paid_budget_preflight = (
+            budget.ensure_attempt_allowed
+            if budget is not None and not vercel_shared_live else None
+        )
+
         trends_handler = GoogleTrendsDiscoveryHandler(
             trends_gateway=trends_gateway,
             data_mode="LIVE",
@@ -764,7 +769,7 @@ async def normal_google_live_composition(*, user_agent,
             force_refresh=force_refresh_trends,
             atomic_store=store,
             allow_initial_acceptance=allow_initial_google_acceptance,
-            ensure_paid_budget=budget.ensure_attempt_allowed if budget else None,
+            ensure_paid_budget=paid_budget_preflight,
             remaining_paid_attempts=remaining_paid_attempts,
             previously_observed=previously_observed,
             recently_verified=recently_verified,
@@ -777,7 +782,7 @@ async def normal_google_live_composition(*, user_agent,
             cache=cache,
             resolve_cache_grant=resolve_cache_grant,
             serp_gateway=serp_gateway,
-            ensure_paid_budget=budget.ensure_attempt_allowed if budget else None,
+            ensure_paid_budget=paid_budget_preflight,
             previously_observed=previously_observed,
             recently_verified=recently_verified,
             previous_verification=previous_verification,
@@ -790,10 +795,11 @@ async def normal_google_live_composition(*, user_agent,
             collection_store=collection_store,
             atomic_store=store,
             policy_fingerprint=policy.plan_fingerprint,
-            # The Bing page request itself reserves the shared Firestore quota
-            # atomically through GuardedAttemptRunner. Do not let a transient
-            # SerpApi Account API read failure disable Bing before that gate.
-            ensure_paid_budget=None,
+            # Every Bing call reserves the shared Firestore quota atomically
+            # through GuardedAttemptRunner. Vercel LIVE uses that durable gate
+            # directly so Account API availability cannot block the provider call.
+            ensure_paid_budget=(None if vercel_shared_live else
+                                budget.ensure_attempt_allowed),
             utcnow=utcnow,
             allow_initial_acceptance=allow_initial_bing_acceptance,
             shared_cache=cache,
@@ -821,10 +827,17 @@ async def normal_google_live_composition(*, user_agent,
                 quota = admission.quota_snapshot("youtube", now=now)
             except Exception:
                 return {"allowed": False, "error_code": "QUOTA_STATE_UNAVAILABLE"}
-            if (not youtube_manual_live and (quota["daily"]["remaining"] <= 0
-                    or quota["monthly"]["remaining"] <= 0
-                    or quota["daily"]["units_remaining"] <= 0
-                    or quota["monthly"]["units_remaining"] <= 0)):
+            daily_quota_exhausted = (
+                quota["daily"]["remaining"] <= 0
+                or quota["daily"]["units_remaining"] <= 0
+            )
+            monthly_quota_exhausted = (
+                quota["monthly"]["remaining"] <= 0
+                or quota["monthly"]["units_remaining"] <= 0
+            )
+            if (not youtube_manual_live
+                    and (monthly_quota_exhausted or
+                         (daily_quota_exhausted and not owner_fresh_acceptance))):
                 return {"allowed": False, "error_code": "QUOTA_EXHAUSTED"}
             if youtube_manual_live:
                 return {"allowed": True, "mode": OWNER_MANUAL_LIVE}

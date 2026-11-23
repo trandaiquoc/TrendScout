@@ -1719,19 +1719,39 @@ class PublicAdmission:
             allocation_monthly = (quota.setdefault(allocation_keys[1], {"requests": 0, "cost": 0})
                                   if allocation is not None else None)
             manual_youtube = self.owner_manual_youtube_live and source_id == YOUTUBE_SOURCE_ID
-            if (not manual_youtube and (daily["requests"] >= limit.daily_requests
-                    or monthly["requests"] >= limit.monthly_requests
-                    or daily["cost"] + limit.cost_per_attempt > limit.daily_cost_units
-                    or monthly["cost"] + limit.cost_per_attempt > limit.monthly_cost_units)):
+            # The one-time all-source acceptance may overrun daily application
+            # caps, but the attempt still increments every ledger bucket and
+            # monthly provider/source allocations remain hard limits.
+            owner_fresh_acceptance = (
+                isinstance(job.get("request_metadata"), dict)
+                and job["request_metadata"].get("owner_fresh_acceptance")
+                == OWNER_FRESH_ACCEPTANCE_MARKER
+            )
+            daily_exhausted = (
+                daily["requests"] >= limit.daily_requests
+                or daily["cost"] + limit.cost_per_attempt > limit.daily_cost_units
+            )
+            monthly_exhausted = (
+                monthly["requests"] >= limit.monthly_requests
+                or monthly["cost"] + limit.cost_per_attempt > limit.monthly_cost_units
+            )
+            if (not manual_youtube and (
+                    monthly_exhausted or (daily_exhausted and not owner_fresh_acceptance))):
                 raise AdmissionDenied("QUOTA_EXHAUSTED")
-            if allocation is not None and (
+            if allocation is not None:
+                allocation_daily_exhausted = (
                     allocation_daily["requests"] >= allocation.daily_requests
-                    or allocation_monthly["requests"] >= allocation.monthly_requests
                     or allocation_daily["cost"] + allocation.cost_per_attempt
                     > allocation.daily_cost_units
+                )
+                allocation_monthly_exhausted = (
+                    allocation_monthly["requests"] >= allocation.monthly_requests
                     or allocation_monthly["cost"] + allocation.cost_per_attempt
-                    > allocation.monthly_cost_units):
-                raise AdmissionDenied("SOURCE_ALLOCATION_EXHAUSTED")
+                    > allocation.monthly_cost_units
+                )
+                if (allocation_monthly_exhausted
+                        or (allocation_daily_exhausted and not owner_fresh_acceptance)):
+                    raise AdmissionDenied("SOURCE_ALLOCATION_EXHAUSTED")
             inflight = state["inflight"]
             for key in list(inflight):
                 if _parse(inflight[key]["expires_at"]) <= now:

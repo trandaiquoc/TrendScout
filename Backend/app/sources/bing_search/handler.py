@@ -386,7 +386,7 @@ class BingSavedCandidateHandler:
 
         candidate, serp_context = plan.candidates[0], plan.contexts[0]
         shared_stale_result = None
-        if not acceptance_fresh and not manual_refresh and self.shared_cache is not None:
+        if not acceptance_fresh and self.shared_cache is not None:
             cache_status, shared_result = self._shared_cached_result(candidate, now)
             if cache_status == "CACHED":
                 context.checkpoint({"bing_receipt": {"result": shared_result}})

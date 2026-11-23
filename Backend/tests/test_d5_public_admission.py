@@ -252,6 +252,75 @@ class PublicAdmissionTests(unittest.TestCase):
         second_claim = admission.claim_next("second-worker", now=NOW + timedelta(seconds=62))
         self.assertNotIn("owner_fresh_acceptance", second_claim["request_metadata"])
 
+    def test_owner_fresh_acceptance_bypasses_daily_caps_once_but_keeps_ledger_and_monthly_cap(self):
+        all_sources = frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID})
+        config = policy(
+            enabled_sources=all_sources,
+            pools={
+                "serpapi": PoolLimit(1, 2, 1, 2, 1),
+                "youtube": PoolLimit(1, 3, 1, 3, 1),
+                "wikimedia": PoolLimit(1, 3, 1, 3, 1),
+            },
+        )
+        admission = PublicAdmission(SqliteTestStore(self.path), config, state_key="public")
+
+        ordinary = admission.admit(
+            "daily-budget-first-run", now=NOW,
+            request_metadata={"sources": [GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID]},
+        )
+        ordinary_claim = admission.claim_next("ordinary-worker", now=NOW)
+        for source_id, attempt_id in (
+            (GOOGLE_SOURCE_ID, "ordinary-google-attempt-0001"),
+            (YOUTUBE_SOURCE_ID, "ordinary-youtube-attempt-0001"),
+        ):
+            admission.reserve_attempt(
+                ordinary["job_id"], "ordinary-worker", ordinary_claim["fence"],
+                source_id=source_id, attempt_id=attempt_id, now=NOW,
+            )
+            admission.settle_attempt(
+                ordinary["job_id"], "ordinary-worker", ordinary_claim["fence"],
+                attempt_id=attempt_id, now=NOW,
+            )
+        admission.finish(ordinary["job_id"], "ordinary-worker",
+                         ordinary_claim["fence"], now=NOW)
+
+        accepted_at = NOW + timedelta(seconds=31)
+        fresh = admission.admit(
+            "daily-budget-owner-acceptance", now=accepted_at,
+            request_metadata={"sources": sorted(all_sources)},
+            owner_fresh_acceptance_once=True,
+        )
+        self.assertTrue(fresh["owner_fresh_acceptance"])
+        claim = admission.claim_next("fresh-worker", now=accepted_at)
+        self.assertEqual(claim["request_metadata"]["owner_fresh_acceptance"],
+                         OWNER_FRESH_ACCEPTANCE_MARKER)
+
+        for source_id, attempt_id in (
+            (GOOGLE_SOURCE_ID, "fresh-google-attempt-0001"),
+            (YOUTUBE_SOURCE_ID, "fresh-youtube-attempt-0001"),
+        ):
+            admission.reserve_attempt(
+                fresh["job_id"], "fresh-worker", claim["fence"],
+                source_id=source_id, attempt_id=attempt_id, now=accepted_at,
+            )
+            admission.settle_attempt(
+                fresh["job_id"], "fresh-worker", claim["fence"],
+                attempt_id=attempt_id, now=accepted_at,
+            )
+
+        serpapi = admission.quota_snapshot("serpapi", now=accepted_at)
+        youtube = admission.quota_snapshot("youtube", now=accepted_at)
+        self.assertEqual(serpapi["daily"]["used"], 2)
+        self.assertEqual(youtube["daily"]["used"], 2)
+        self.assertEqual(serpapi["monthly"]["used"], 2)
+        with self.assertRaisesRegex(AdmissionDenied, "QUOTA_EXHAUSTED"):
+            admission.reserve_attempt(
+                fresh["job_id"], "fresh-worker", claim["fence"],
+                source_id=GOOGLE_SOURCE_ID,
+                attempt_id="fresh-google-monthly-block-0001", now=accepted_at,
+            )
+
     def test_independent_processes_coalesce_and_share_provider_budget(self):
         context = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=8, mp_context=context) as processes:

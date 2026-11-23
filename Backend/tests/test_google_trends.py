@@ -439,7 +439,10 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(budget_checks), 1)
 
             current[0] += timedelta(minutes=1)
-            second = await handler(context("2" * 32, {"sources": all_sources}))
+            second = await handler(context("2" * 32, {
+                "sources": all_sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }))
 
             self.assertEqual(second["delivery_state"], "CACHED")
             self.assertEqual(second["provider_request_count"], 0)

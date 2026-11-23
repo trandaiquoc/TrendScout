@@ -437,7 +437,9 @@ class D5SourceHandlers:
         )
         owner_manual_fresh = (source_id == YOUTUBE_SOURCE_ID
                               and self._youtube_force_fresh_once)
-        force_fresh = acceptance_fresh or owner_manual_fresh or manual_source_refresh
+        # A manual button press is cache-first. Only the explicit one-time
+        # owner acceptance or local test flag forces fresh provider requests.
+        force_fresh = acceptance_fresh or owner_manual_fresh
         if owner_manual_fresh:
             # This local-launcher one-shot is consumed by the next user-triggered
             # YouTube handler, even when admission later rejects the attempt.

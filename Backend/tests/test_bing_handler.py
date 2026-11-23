@@ -388,7 +388,10 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         current[0] += timedelta(minutes=1)
         second = await handler(work_context(
-            current[0], request_metadata={"sources": sources}, job_id="2" * 32,
+            current[0], request_metadata={
+                "sources": sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }, job_id="2" * 32,
         ))
 
         self.assertEqual(second["delivery_state"], "CACHED")
@@ -398,7 +401,7 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["records"][0]["bing_verification"]["fetched_at"],
                          first["records"][0]["bing_verification"]["fetched_at"])
 
-        current[0] = NOW + timedelta(hours=9)
+        current[0] = NOW + timedelta(hours=25)
         third = await handler(work_context(
             current[0], request_metadata={
                 "sources": sources,

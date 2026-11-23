@@ -17,6 +17,7 @@ from test_d5_wikimedia_gateway import response as wikimedia_response
 
 from app.jobs.distributed_worker import DistributedFetchWorker, SourceWorkContext
 from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
     OWNER_FRESH_ACCEPTANCE_MARKER,
     AdmissionDenied,
     PoolLimit,
@@ -1194,7 +1195,10 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         current[0] += timedelta(minutes=1)
         second = await registry._with_cache(
-            YOUTUBE_SOURCE_ID, context("2" * 32, {"sources": all_sources}), collect,
+            YOUTUBE_SOURCE_ID, context("2" * 32, {
+                "sources": all_sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }), collect,
         )
         self.assertEqual(second["delivery_state"], "CACHED")
         self.assertEqual(second["records"][0]["provider_video_id"], "fresh-video")
