@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.collections.service import CollectionService
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import AdmissionDenied, AdmissionPolicy, PoolLimit, PublicAdmission
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
@@ -26,6 +27,9 @@ from app.orchestration.firestore_shared_live_composition import (
 from app.orchestration.normal_google_live_composition import (
     _shared_google_candidate_rows,
     normal_google_live_composition,
+)
+from app.orchestration.vercel_collection_read_composition import (
+    vercel_collection_read_composition,
 )
 from app.orchestration.vercel_wikimedia_live_composition import (
     vercel_shared_live_composition,
@@ -520,6 +524,26 @@ class FirestoreSharedCacheTests(unittest.TestCase):
 
 
 class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collection_read_composition_loads_saved_snapshot_without_worker(self):
+        client = SharedRuntimeFakeClient()
+        with patch.dict(os.environ, {"VERCEL": "1"}):
+            async with vercel_collection_read_composition(
+                client,
+                user_agent="TrendScoutTest/0.1",
+                utcnow=lambda: NOW,
+            ) as facade:
+                self.assertIsInstance(facade.collection_service, CollectionService)
+                self.assertEqual(facade.collection_snapshot.version, 0)
+                self.assertEqual(facade.available_sources, frozenset({
+                    WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+                    BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+                }))
+                self.assertFalse(hasattr(facade, "admission"))
+                self.assertFalse(hasattr(facade, "worker"))
+
+        self.assertEqual(client.batch_gets, 1)
+        self.assertEqual(client.document_gets, 0)
+
     async def test_vercel_capabilities_expose_all_four_shared_live_sources(self):
         client = SharedRuntimeFakeClient()
         environment = {

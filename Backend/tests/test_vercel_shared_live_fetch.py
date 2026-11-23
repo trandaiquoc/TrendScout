@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 from fastapi import FastAPI
@@ -17,6 +17,7 @@ from app.main import (
     VercelSharedLiveMiddleware,
     _is_vercel_shared_live_request,
     _persists_vercel_collections,
+    _vercel_collection_read_composition_required,
     _vercel_collection_snapshot_required,
     _vercel_timing_route,
     create_app,
@@ -54,6 +55,29 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
         ):
             with self.subTest(method=method, path=path):
                 self.assertTrue(_vercel_collection_snapshot_required(method, path))
+
+    def test_read_only_collection_routes_use_the_lightweight_context(self):
+        for path in (
+            "/api/v1/runtime",
+            "/api/v1/analytics/overview",
+            "/api/v1/algorithms/results",
+            "/api/v1/research",
+            "/api/v1/collections",
+            "/api/v1/collections/jobs/" + _JOB_ID,
+            "/api/v1/datasets/latest",
+            "/api/v1/datasets/latest/keywords",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(_vercel_collection_read_composition_required("GET", path))
+        for method, path in (
+            ("POST", "/api/v1/collections"),
+            ("POST", "/api/v1/fetches"),
+            ("GET", "/api/v1/capabilities"),
+            ("GET", "/api/v1/runs/history"),
+            ("GET", "/api/v1/fetches/" + _JOB_ID),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(_vercel_collection_read_composition_required(method, path))
 
     def test_capabilities_history_and_fetch_status_skip_the_sqlite_snapshot(self):
         for method, path in (
@@ -132,6 +156,69 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
             _vercel_timing_route({"path": "/api/v1/capabilities"}),
             "/api/v1/capabilities",
         )
+
+    async def test_collection_get_uses_read_composition_without_distributed_worker(self):
+        events = []
+        service = object()
+        sources = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                             YOUTUBE_SOURCE_ID})
+        settings = SimpleNamespace(
+            environment_profile="vercel",
+            vercel_shared_live_enabled=True,
+            wikimedia_user_agent="TrendScoutTest/0.1",
+        )
+
+        @asynccontextmanager
+        async def read_context(_client, *, user_agent, defer_collection_snapshot):
+            self.assertEqual(user_agent, settings.wikimedia_user_agent)
+            self.assertFalse(defer_collection_snapshot)
+            events.append("read_context")
+            yield SimpleNamespace(collection_service=service, available_sources=sources)
+
+        async def unused_live_context(*_args, **_kwargs):
+            raise AssertionError("collection GET must not construct LIVE workers")
+
+        observed = {}
+
+        async def endpoint(scope, _receive, send):
+            observed.update(scope["state"])
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = VercelSharedLiveMiddleware(
+            endpoint,
+            settings=settings,
+            enabled=True,
+            client_factory=lambda _token: SimpleNamespace(close=lambda: None),
+        )
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/datasets/latest",
+            "headers": [(b"x-vercel-oidc-token", b"test-token")],
+        }
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        with patch(
+            "app.orchestration.vercel_collection_read_composition.vercel_collection_read_composition",
+            new=read_context,
+        ), patch(
+            "app.orchestration.vercel_wikimedia_live_composition.vercel_shared_live_composition",
+            new=unused_live_context,
+        ):
+            await middleware(scope, receive, send)
+
+        self.assertEqual(events, ["read_context"])
+        self.assertEqual(messages[0]["status"], 200)
+        self.assertIs(observed["collection_service"], service)
+        self.assertIsNone(observed["distributed_public_fetch"])
+        self.assertEqual(observed["public_fetch_source_ids"], tuple(sorted(sources)))
 
 
 class _Client:

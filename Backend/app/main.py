@@ -164,6 +164,12 @@ def _vercel_collection_snapshot_required(method, path):
     return False
 
 
+def _vercel_collection_read_composition_required(method, path):
+    """Use the read-only Collections context instead of building source workers."""
+    return (method.upper() in {"GET", "HEAD"}
+            and _vercel_collection_snapshot_required(method, path))
+
+
 def _is_vercel_fetch_collections_recovery(path):
     parts = path.split("/")
     return (len(parts) == 6 and parts[:3] == ["", "api", "v1"]
@@ -372,11 +378,21 @@ class VercelSharedLiveMiddleware:
         try:
             context_factory = self.context_factory
             use_default_context = context_factory is None
+            use_collection_read_context = False
             if context_factory is None:
-                from app.orchestration.vercel_wikimedia_live_composition import (
-                    vercel_shared_live_composition,
-                )
-                context_factory = vercel_shared_live_composition
+                if _vercel_collection_read_composition_required(
+                    scope.get("method", ""), scope.get("path", "")
+                ):
+                    from app.orchestration.vercel_collection_read_composition import (
+                        vercel_collection_read_composition,
+                    )
+                    context_factory = vercel_collection_read_composition
+                    use_collection_read_context = True
+                else:
+                    from app.orchestration.vercel_wikimedia_live_composition import (
+                        vercel_shared_live_composition,
+                    )
+                    context_factory = vercel_shared_live_composition
             request_method = scope.get("method", "")
             request_path = scope.get("path", "")
             defer_collection_snapshot = (
@@ -403,7 +419,9 @@ class VercelSharedLiveMiddleware:
             return
 
         state = scope.setdefault("state", {})
-        state["distributed_public_fetch"] = distributed
+        state["distributed_public_fetch"] = (
+            None if use_collection_read_context else distributed
+        )
         state["collection_service"] = getattr(distributed, "collection_service", None)
         state["public_fetch_source_ids"] = tuple(sorted(
             getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})
