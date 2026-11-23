@@ -63,7 +63,8 @@ include = ["app*"]
 entrypoint = "app.main:app"
 
 [tool.vercel.fastapi.static]
-cdn = false
+cdn = true
+exclude = true
 
 [tool.ruff]
 target-version = "py312"

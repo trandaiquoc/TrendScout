@@ -22,11 +22,12 @@ from app.storage.local_file_security import secure_private_directory
 
 _STATE_KEY = "collections-live-snapshot-v1"
 _RETENTION = timedelta(days=3650)
-# Leave room for base64 and the JSON envelope inside the existing five-megabyte
-# Firestore snapshot-blob budget. The adapter stores that payload in small chunks.
-_MAX_COMPRESSED_BYTES = 3_700_000
+# Leave room for base64 and the JSON envelope inside the 5.7 MB chunked-blob
+# budget. The encoded chunks remain below Firestore's 10 MiB transaction limit.
+_MAX_COMPRESSED_BYTES = 4_200_000
 _MAX_DATABASE_BYTES = 80_000_000
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SNAPSHOT_FAILURE_REASONS = frozenset({
     "INVALID_SHARED_POINTER",
     "RESTORE_FAILED",
@@ -120,7 +121,7 @@ class FirestoreCollectionSnapshot:
                 or state.get("schema") != 1 or type(state.get("version")) is not int
                 or state["version"] < 1 or not isinstance(state.get("snapshot_ref"), dict)
                 or not isinstance(state.get("sqlite_sha256"), str)
-                or len(state["sqlite_sha256"]) != 64):
+                or not _SHA256.fullmatch(state["sqlite_sha256"])):
             raise CollectionSnapshotUnavailable(
                 "shared Collections pointer is invalid",
                 failure_reason="INVALID_SHARED_POINTER",
@@ -150,7 +151,12 @@ class FirestoreCollectionSnapshot:
             ) from None
         self.version = state["version"]
         self._sha256 = state["sqlite_sha256"]
-        self._content_sha256 = self._content_digest(self.path)
+        content_digest = state.get("sqlite_content_sha256")
+        self._content_sha256 = (
+            content_digest if isinstance(content_digest, str)
+            and _SHA256.fullmatch(content_digest)
+            else self._content_digest(self.path)
+        )
         self._loaded = True
         return self.version
 

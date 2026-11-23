@@ -76,6 +76,7 @@ class FakeDocument:
         return FakeCollection(self.client, f"{self.path}/{name}")
 
     def get(self):
+        self.client.document_gets += 1
         return FakeSnapshot(self.client.data.get(self.path))
 
 
@@ -129,12 +130,22 @@ class FakeTransaction:
 class FakeClient:
     def __init__(self):
         self.data, self.fail_write_at = {}, None
+        self.document_gets = 0
+        self.batch_gets = 0
 
     def collection(self, name):
         return FakeCollection(self, name)
 
     def transaction(self, max_attempts):
         return FakeTransaction(self)
+
+    def get_all(self, references):
+        self.batch_gets += 1
+        snapshots = [
+            FakeSnapshot(self.data.get(reference.path), reference.path.rsplit("/", 1)[-1])
+            for reference in references
+        ]
+        return iter(reversed(snapshots))
 
 
 class SharedRuntimeFakeClient(FakeClient):
@@ -194,6 +205,17 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual(reopened.get(ref, now=NOW + timedelta(seconds=35)), records)
         with self.assertRaisesRegex(ValueError, "expired"):
             reopened.get(ref, now=NOW + timedelta(seconds=40))
+
+    def test_chunk_reads_use_one_order_independent_batch_get(self):
+        records = [{"text": "x" * 500_000}]
+        reference = self.blobs.put(
+            records, now=NOW, retain_until=NOW + timedelta(seconds=30)
+        )
+
+        self.assertEqual(self.blobs.get(reference, now=NOW), records)
+        self.assertEqual(self.client.batch_gets, 1)
+        # The manifest is read once; chunk documents use one batch read.
+        self.assertEqual(self.client.document_gets, 1)
 
     def test_snapshot_within_checkpoint_budget_round_trips_across_multiple_chunks(self):
         records = [{"text": "x" * 4_100_000, "record_count": 1}]

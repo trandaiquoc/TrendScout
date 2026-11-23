@@ -104,7 +104,11 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
 
             restored_path = Path(directory) / "restored.sqlite"
             restored = self._snapshot(restored_path)
-            self.assertEqual(restored.load(), 1)
+            with patch.object(
+                FirestoreCollectionSnapshot, "_content_digest",
+                side_effect=AssertionError("restore must reuse the stored digest"),
+            ):
+                self.assertEqual(restored.load(), 1)
             with closing(sqlite3.connect(restored_path)) as db:
                 self.assertEqual(db.execute("SELECT id, name FROM collections").fetchall(),
                                  [("c1", "Demo")])
@@ -114,6 +118,28 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
                 db.commit()
             self.assertEqual(restored.save(), 2)
             self.assertEqual(self.blobs.writes, 2)
+
+    def test_legacy_pointer_without_content_digest_is_still_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.sqlite"
+            with closing(sqlite3.connect(source)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT)")
+                db.execute("INSERT INTO collections VALUES ('c1', 'Demo')")
+                db.commit()
+
+            writer = self._snapshot(source)
+            writer.load()
+            writer.save()
+            pointer = self.state.values["collections-live-snapshot-v1"]
+            pointer.pop("sqlite_content_sha256")
+
+            restored = self._snapshot(Path(directory) / "restored.sqlite")
+            with patch.object(
+                FirestoreCollectionSnapshot, "_content_digest",
+                wraps=FirestoreCollectionSnapshot._content_digest,
+            ) as digest:
+                self.assertEqual(restored.load(), 1)
+            digest.assert_called_once_with(restored.path)
 
     def test_stale_writer_cannot_replace_newer_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

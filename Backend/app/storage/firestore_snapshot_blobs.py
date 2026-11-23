@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from google.cloud import firestore
 
 _COLLECTION = "_ts_d5_cache_blobs"
-_MAX_BLOB_BYTES = 5_000_000
+_MAX_BLOB_BYTES = 5_700_000
 _MAX_ITEMS = 5000
 _CHUNK_BYTES = 196_608
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
@@ -140,11 +140,21 @@ class FirestoreSnapshotBlobs:
         if manifest["expiry"] <= now:
             raise ValueError("snapshot blob is expired")
 
+        chunk_refs = [
+            self._chunk_ref(digest, index) for index in range(manifest["chunk_count"])
+        ]
+        chunk_snapshots = {}
+        for chunk in self._client.get_all(chunk_refs):
+            chunk_id = getattr(chunk, "id", None)
+            if not isinstance(chunk_id, str) or chunk_id in chunk_snapshots:
+                raise ValueError("snapshot blob chunk is missing or invalid")
+            chunk_snapshots[chunk_id] = chunk
+
         pieces = []
         byte_count = 0
         for index in range(manifest["chunk_count"]):
-            chunk = self._chunk_ref(digest, index).get()
-            value = chunk.to_dict() if chunk.exists else None
+            chunk = chunk_snapshots.get(f"{index:08d}")
+            value = chunk.to_dict() if chunk is not None and chunk.exists else None
             if (not isinstance(value, dict) or type(value.get("schema")) is not int
                     or value.get("schema") != 1 or value.get("digest") != digest
                     or type(value.get("index")) is not int or value.get("index") != index

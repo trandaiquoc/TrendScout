@@ -46,6 +46,7 @@ const state = {
   fetchBlockReason: null,
   fetchPresentation: { kind: 'disabled', busy: false },
   collections: [],
+  collectionsLoaded: false,
   collectionInbox: [],
   collectionSuggestions: [],
   collectionQuery: '',
@@ -69,6 +70,7 @@ let schedulerEditId = null;
 let analyticsSequence = 0;
 const collectionRecoveryInFlight = new Map();
 const collectionRecoverySucceeded = new Set();
+let collectionFiltersPromise = null;
 state.query = new URLSearchParams(window.location.search).get('q') || '';
 
 function number(value) {
@@ -172,10 +174,6 @@ async function loadAnalytics() {
   const sequence = ++analyticsSequence;
   try {
     const data = await getJson('/api/v1/analytics/overview', { locale: getLocale() });
-    if (!state.algorithmCatalog) {
-      try { state.algorithmCatalog = await getJson('/api/v1/algorithms', { locale: getLocale() }); }
-      catch { state.algorithmCatalog = null; }
-    }
     if (sequence !== analyticsSequence) return;
     state.analytics = data;
     const totals = data.keyword_totals || {};
@@ -312,7 +310,7 @@ function localizedAlgorithmName(id) {
   const key = `algorithms.name.${String(id || '').toLowerCase()}`;
   const translated = t(key);
   if (translated !== key) return translated;
-  return method?.name || t('algorithms.unknown-name');
+  return method?.name || id || t('algorithms.unknown-name');
 }
 
 function localizedAlgorithmMetadata(item, field) {
@@ -1928,6 +1926,28 @@ function renderCollectionFilters() {
   }
 }
 
+async function loadCollectionFilters() {
+  if (state.collectionsLoaded) {
+    renderCollectionFilters();
+    return;
+  }
+  if (collectionFiltersPromise) return collectionFiltersPromise;
+  collectionFiltersPromise = (async () => {
+    try {
+      const response = await getJson('/api/v1/collections', { locale: getLocale() });
+      if (!Array.isArray(response.items)) throw new Error(t('error.keyword-invalid'));
+      state.collections = response.items;
+      state.collectionsLoaded = true;
+      renderCollectionFilters();
+    } catch (error) {
+      setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'));
+    } finally {
+      collectionFiltersPromise = null;
+    }
+  })();
+  return collectionFiltersPromise;
+}
+
 async function loadLatestDataset() {
   try {
     const response = await getJson('/api/v1/datasets/latest', { locale: getLocale() });
@@ -1936,8 +1956,6 @@ async function loadLatestDataset() {
     if (response.item) {
       const item = response.item;
       renderPersistedDataset(item);
-      await loadCollections();
-      renderCollectionFilters();
       return item;
     }
     $('#overview-context').textContent = t('overview.no-fetch-context');
@@ -2507,6 +2525,8 @@ function updateNavigationLabels() {
 async function loadCollections({ appendInbox = false } = {}) {
   await workbench.refresh();
   state.collections = workbench.items();
+  state.collectionsLoaded = true;
+  renderCollectionFilters();
 }
 
 function isMobileNav() {
@@ -2728,6 +2748,9 @@ function addAlgorithmDetail(list, label, value) {
 function bindEvents() {
   $('#source-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
   $('#fetch-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
+  $('#keyword-collection-filter-toggle').addEventListener('toggle', (event) => {
+    if (event.currentTarget.open) void loadCollectionFilters();
+  });
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
   $('#sidebar-collapse').addEventListener('click', () => {
     if (isMobileNav()) return;
@@ -3015,7 +3038,7 @@ checkBackend();
 const startupCapabilities = loadPublicCapabilities();
 const startupDataset = loadLatestDataset();
 void loadAnalytics();
-void Promise.all([startupCapabilities, startupDataset]).then(([, item]) => {
-  if (item) loadKeywords();
-  else void recoverLatestVercelCollectionSnapshot();
+void startupDataset.then((item) => {
+  if (item) void loadKeywords();
+  else void startupCapabilities.then(() => recoverLatestVercelCollectionSnapshot());
 });

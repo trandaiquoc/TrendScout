@@ -23,6 +23,7 @@ class FrontendTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(page.status_code, 200)
                     self.assertIn('data-theme="light"', page.text)
                     self.assertIn('id="open-fetch"', page.text)
+                    self.assertIn('id="keyword-collection-filter-toggle"', page.text)
                     self.assertIn('value="non_topic" data-i18n="dataset.state-non-topic"', page.text)
                     self.assertNotIn('operator-token', page.text)
                     self.assertEqual((await client.get('/dashboard/app.js')).status_code, 200)

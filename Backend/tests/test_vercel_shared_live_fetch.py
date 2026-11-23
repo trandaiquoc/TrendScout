@@ -12,7 +12,12 @@ import httpx
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.jobs.public_admission import AdmissionDenied
-from app.main import _is_vercel_shared_live_request, _persists_vercel_collections, create_app
+from app.main import (
+    _is_vercel_shared_live_request,
+    _persists_vercel_collections,
+    _vercel_collection_snapshot_required,
+    create_app,
+)
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -27,6 +32,36 @@ _AUDIENCE = (
 )
 _PROJECT = "trendscout-192e4"
 _JOB_ID = "a" * 32
+
+
+class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
+    def test_only_collection_data_routes_restore_the_sqlite_snapshot(self):
+        for method, path in (
+            ("GET", "/api/v1/runtime"),
+            ("GET", "/api/v1/analytics/overview"),
+            ("GET", "/api/v1/algorithms/results"),
+            ("GET", "/api/v1/research"),
+            ("GET", "/api/v1/collections"),
+            ("GET", "/api/v1/collections/inbox"),
+            ("GET", "/api/v1/datasets/latest"),
+            ("GET", "/api/v1/datasets/latest/keywords"),
+            ("POST", "/api/v1/collections"),
+            ("PATCH", "/api/v1/research/record-1"),
+            ("POST", f"/api/v1/fetches/{_JOB_ID}/collections"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertTrue(_vercel_collection_snapshot_required(method, path))
+
+    def test_capabilities_history_and_fetch_status_skip_the_sqlite_snapshot(self):
+        for method, path in (
+            ("GET", "/api/v1/capabilities"),
+            ("GET", "/api/v1/runs/history"),
+            ("GET", f"/api/v1/runs/history/{_JOB_ID}"),
+            ("GET", f"/api/v1/fetches/{_JOB_ID}"),
+            ("POST", "/api/v1/fetches"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(_vercel_collection_snapshot_required(method, path))
 
 
 class _Client:

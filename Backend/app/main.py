@@ -6,15 +6,14 @@ import binascii
 import hmac
 import inspect
 import logging
-import mimetypes
 import os
 import re
 from contextlib import asynccontextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.algorithms import router as algorithms_router
@@ -125,6 +124,32 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
 
 def _is_vercel_fetch_submission(method, path):
     return method.upper() == "POST" and path == "/api/v1/fetches"
+
+
+def _vercel_collection_snapshot_required(method, path):
+    """Limit the large SQLite restore to routes that actually read or write it."""
+    method = method.upper()
+    if method in {"GET", "HEAD"}:
+        return (
+            path == "/api/v1/runtime"
+            or path.startswith("/api/v1/analytics/")
+            or path == "/api/v1/algorithms/results"
+            or path == "/api/v1/research"
+            or path.startswith("/api/v1/research/")
+            or path == "/api/v1/collections"
+            or path.startswith("/api/v1/collections/")
+            or path == "/api/v1/datasets/latest"
+            or path.startswith("/api/v1/datasets/latest/")
+        )
+    if method in {"POST", "PATCH", "PUT", "DELETE"}:
+        return (
+            path == "/api/v1/collections"
+            or path.startswith("/api/v1/collections/")
+            or path == "/api/v1/research"
+            or path.startswith("/api/v1/research/")
+            or _is_vercel_fetch_collections_recovery(path)
+        )
+    return False
 
 
 def _is_vercel_fetch_collections_recovery(path):
@@ -285,10 +310,11 @@ class VercelSharedLiveMiddleware:
                     vercel_shared_live_composition,
                 )
                 context_factory = vercel_shared_live_composition
+            request_method = scope.get("method", "")
+            request_path = scope.get("path", "")
             defer_collection_snapshot = (
-                _is_vercel_fetch_submission(scope.get("method", ""), scope.get("path", ""))
-                or scope.get("method", "").upper() == "GET"
-                and scope.get("path", "").startswith("/api/v1/fetches/")
+                _is_vercel_fetch_submission(request_method, request_path)
+                or not _vercel_collection_snapshot_required(request_method, request_path)
             )
             context_options = {"user_agent": self.settings.wikimedia_user_agent}
             if use_default_context:
@@ -747,32 +773,13 @@ def create_app(
             client_factory=vercel_firestore_client_factory,
             context_factory=vercel_live_context_factory,
         )
-    frontend = Path(__file__).resolve().parents[2] / "Frontend" / "public"
-    if read_only or settings.environment_profile == "vercel":
-
-        @application.get("/dashboard/")
-        @application.get("/dashboard/{asset:path}")
-        async def dashboard(asset: str = "index.html"):
-            asset = asset or "index.html"
-            requested = PurePosixPath(asset)
-            if requested.is_absolute() or any(part in ("", ".", "..") for part in requested.parts):
-                return Response(status_code=404)
-            try:
-                from app.dashboard_assets import ASSETS
-
-                content = ASSETS[requested.as_posix()]
-            except ImportError:
-                if settings.environment_profile == "vercel":
-                    return Response(status_code=503)
-                candidate = (frontend / requested).resolve()
-                if frontend.resolve() not in candidate.parents or not candidate.is_file():
-                    return Response(status_code=404)
-                content = candidate.read_bytes()
-            except KeyError:
-                return Response(status_code=404)
-            media_type = mimetypes.guess_type(requested.name)[0] or "application/octet-stream"
-            return Response(content=content, media_type=media_type)
-    elif frontend.is_dir():
+    frontend_source = Path(__file__).resolve().parents[2] / "Frontend" / "public"
+    vercel_frontend = Path(__file__).resolve().parents[1] / "public" / "dashboard"
+    frontend = (
+        vercel_frontend if settings.environment_profile == "vercel" and vercel_frontend.is_dir()
+        else frontend_source
+    )
+    if frontend.is_dir():
         application.mount(
             "/dashboard", StaticFiles(directory=frontend, html=True), name="dashboard"
         )

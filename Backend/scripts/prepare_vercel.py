@@ -1,10 +1,10 @@
-"""Bundle every dashboard static asset into an importable Vercel module."""
+"""Stage dashboard files as standalone Vercel static assets."""
 
 from pathlib import Path
 
 script = Path(__file__).resolve()
 backend = script.parents[1]
-target = backend / "app" / "dashboard_assets.py"
+target = backend / "public" / "dashboard"
 roots = [*script.parents, *Path.cwd().resolve().parents, Path.cwd().resolve()]
 source = next(
     (
@@ -16,23 +16,23 @@ source = next(
 )
 
 if source is None:
-    # Vercel's project root can omit sibling frontend files from the build
-    # workspace even when they were included in the deployment upload. Keep a
-    # prebundled copy when one is supplied with the source files; never emit an
-    # empty ASSETS map that makes every dashboard route return 404.
-    if target.is_file() and "ASSETS = " in target.read_text(encoding="utf-8"):
-        raise SystemExit(0)
     raise FileNotFoundError("Frontend/public/index.html is unavailable for the Vercel dashboard bundle")
 
 assets = {
-    path.relative_to(source).as_posix(): path.read_bytes()
+    path.relative_to(source).as_posix(): path
     for path in sorted(source.rglob("*"))
     if path.is_file() and not any(part.startswith(".") for part in path.relative_to(source).parts)
 }
-if not assets.get("index.html"):
+if "index.html" not in assets:
     raise FileNotFoundError("Frontend/public/index.html was not included in the Vercel dashboard bundle")
 
-target.write_text(
-    '"""Generated during the Vercel build; do not edit."""\nASSETS = ' + repr(assets) + "\n",
-    encoding="utf-8",
-)
+target.mkdir(parents=True, exist_ok=True)
+expected = set(assets)
+for existing in target.rglob("*"):
+    if existing.is_file() and existing.relative_to(target).as_posix() not in expected:
+        existing.unlink()
+for relative, path in assets.items():
+    destination = target / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(path.read_bytes())
+print(f"Staged {len(assets)} dashboard assets in {target}")

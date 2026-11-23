@@ -1,8 +1,14 @@
 {
   "buildCommand": "python3 scripts/prepare_vercel.py",
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/dashboard/",
+      "permanent": false
+    }
+  ],
   "functions": {
     "app/main.py": {
-      "includeFiles": "app/dashboard_assets.py",
       "maxDuration": 120
     }
   }
