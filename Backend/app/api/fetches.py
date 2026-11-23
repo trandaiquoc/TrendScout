@@ -1,7 +1,6 @@
 """Manual Fetch API; the active backend composition owns its data mode."""
 
 import asyncio
-import hmac
 import ipaddress
 import json
 import secrets
@@ -51,20 +50,6 @@ def _require_youtube_policy_consent(request: Request, distributed) -> None:
     if (not isinstance(version, str) or not version
             or request.headers.get(YOUTUBE_POLICY_VERSION_HEADER.lower()) != version):
         raise HTTPException(428, {"code": "YOUTUBE_POLICY_CONSENT_REQUIRED"})
-
-
-def _require_manual_live_operator(request: Request) -> None:
-    """Authenticate manual provider refresh with the existing server operator token."""
-    token = getattr(request.app.state, "operator_token", None)
-    if not isinstance(token, str) or len(token) < 24:
-        raise HTTPException(503, {"code": "OPERATOR_AUTH_UNAVAILABLE"})
-    authorization = request.headers.get("authorization", "")
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(401, {"code": "OPERATOR_AUTH_REQUIRED"})
-    supplied = authorization[7:]
-    if (len(supplied) != len(token)
-            or not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))):
-        raise HTTPException(401, {"code": "OPERATOR_AUTH_REQUIRED"})
 
 
 def _origin_tuple(value: str):
@@ -383,8 +368,8 @@ async def create_fetch(
         manual_source_refresh = vercel_shared_live and bool(
             effective_sources & {GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
         )
-        if manual_source_refresh:
-            _require_manual_live_operator(request)
+        # Vercel SSO Deployment Protection is the authentication boundary for
+        # every Production route. Provider and operator secrets stay server-side.
         if YOUTUBE_SOURCE_ID in effective_sources:
             _require_youtube_policy_consent(request, distributed)
         shared_state_policy_sync = None

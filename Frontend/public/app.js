@@ -15,7 +15,6 @@ const GOOGLE_SOURCE_ID = 'google_web_serp';
 const BING_SOURCE_ID = 'bing_web_serp';
 const YOUTUBE_SOURCE_ID = 'youtube_video_search';
 const YOUTUBE_POLICY_STORAGE_KEY = 'trendscout.youtube-policy.version';
-let pendingYoutubePolicyVersion = null;
 const activeStatuses = new Set(['QUEUED', 'FETCHING', 'NORMALIZING', 'ANALYZING', 'PERSISTING']);
 const workbench = initializeKeywordWorkbench();
 const state = {
@@ -838,7 +837,6 @@ const FETCH_STATE_MESSAGES = {
   'busy-error': 'fetch.busy',
   retryable: 'fetch.retryable',
   'submission-rejected': 'fetch.submission-rejected',
-  'operator-auth-failed': 'fetch.operator-auth-failed',
   'poll-limit': 'fetch.poll-limit',
   'poll-retrying': 'fetch.poll-retrying',
   'poll-error': 'fetch.poll-error',
@@ -960,7 +958,7 @@ function renderFetchPresentation() {
   const status = $('#fetch-status');
   const capabilityNote = $('#fetch-capabilities-note');
   const capabilityRetry = $('#fetch-capabilities-retry');
-  const canRetry = ['retryable', 'submission-rejected', 'operator-auth-failed', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
+  const canRetry = ['retryable', 'submission-rejected', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const canResume = ['poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const busy = Boolean(presentation.busy);
   const youtubeSelected = effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID);
@@ -988,7 +986,7 @@ function renderFetchPresentation() {
     || youtubePolicyPending;
   const sourceSelect = $('#fetch-source-select');
   if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
-  const buttonKey = ['retryable', 'submission-rejected', 'operator-auth-failed'].includes(presentation.kind)
+  const buttonKey = ['retryable', 'submission-rejected'].includes(presentation.kind)
     ? 'fetch.retry'
     : canResume ? 'fetch.resume'
     : state.capabilities?.shared_policy_reconciliation_required === true
@@ -1219,77 +1217,92 @@ function controllerFetchSourceIds(controller, fallback = effectiveFetchSourceIds
     ? controller.requestBody.sources : fallback;
 }
 
-function activateFetchWithPolicyConsent(controller) {
-  if (!state.fetchReady) return;
-  const sourceIds = controllerFetchSourceIds(controller);
-  if (!sourceIds.includes(YOUTUBE_SOURCE_ID)) {
-    activateWithOperatorAuthorization(controller, sourceIds,
-      () => { void controller.activate(); });
-    return;
-  }
+function renderYoutubePolicySettings(feedbackKey = null) {
+  const section = $('#youtube-policy-settings');
+  if (!section) return;
+  const workflow = state.capabilities?.youtube_workflow || {};
+  const version = typeof workflow.policy_version === 'string' ? workflow.policy_version : '';
+  const approved = workflow.policy_status === 'APPROVED' && Boolean(version);
+  const accepted = approved && acceptedYoutubePolicyVersion() === version;
+  const checkbox = $('#settings-youtube-policy-consent');
+  const status = $('#settings-youtube-policy-status');
+  const policyVersion = $('#settings-youtube-policy-version');
+  const feedback = $('#settings-youtube-policy-feedback');
 
+  section.hidden = workflow.policy_agreement_required !== true;
+  if (checkbox) {
+    checkbox.checked = accepted;
+    checkbox.disabled = !approved;
+  }
+  if (policyVersion) policyVersion.textContent = version || '—';
+  if (status) {
+    status.textContent = t(!approved ? 'settings.youtube-policy-pending'
+      : accepted ? 'settings.youtube-policy-accepted' : 'settings.youtube-policy-required');
+    status.classList.toggle('pill--green', accepted);
+    status.classList.toggle('pill--amber', approved && !accepted);
+    status.classList.toggle('pill--gray', !approved);
+  }
+  if (feedback && feedbackKey) {
+    feedback.dataset.i18n = feedbackKey;
+    feedback.textContent = t(feedbackKey);
+    feedback.classList.toggle('youtube-policy-error',
+      feedbackKey === 'fetch.youtube-consent-storage-error');
+  }
+}
+
+function openYoutubePolicySettings() {
+  showView('settings');
+  window.location.hash = 'settings';
+  renderYoutubePolicySettings('fetch.youtube-consent-required');
+  $('#settings-youtube-policy-consent')?.focus();
+}
+
+function sourceSelectionHasYoutube(sourceIds) {
+  return Array.isArray(sourceIds) && sourceIds.includes(YOUTUBE_SOURCE_ID);
+}
+
+function hasCurrentYoutubeConsent(sourceIds) {
+  if (!sourceSelectionHasYoutube(sourceIds)) return true;
   const workflow = state.capabilities?.youtube_workflow || {};
   if (workflow.policy_status !== 'APPROVED'
       || typeof workflow.policy_version !== 'string' || !workflow.policy_version) {
     renderFetchPresentation();
-    return;
+    return false;
   }
-  if (acceptedYoutubePolicyVersion()) {
-    activateWithOperatorAuthorization(controller, sourceIds,
-      () => { void controller.activate(); });
-    return;
+  if (!acceptedYoutubePolicyVersion()) {
+    openYoutubePolicySettings();
+    return false;
   }
-
-  const dialog = $('#youtube-policy-dialog');
-  if (!dialog || typeof dialog.showModal !== 'function') {
-    $('#fetch-readiness').textContent = t('fetch.youtube-consent-required');
-    return;
-  }
-  $('#youtube-policy-consent').checked = false;
-  $('#youtube-policy-accept').disabled = true;
-  $('#youtube-policy-error').hidden = true;
-  const policyVersion = $('#youtube-policy-version');
-  if (policyVersion) policyVersion.textContent = workflow.policy_version;
-  pendingYoutubeFetchController = controller;
-  pendingYoutubePolicyVersion = workflow.policy_version;
-  dialog.showModal();
-  $('#youtube-policy-consent').focus();
+  return true;
 }
 
-let pendingYoutubeFetchController = null;
-
-let pendingOperatorFetchController = null;
-let pendingOperatorFetchStart = null;
-
-function requiresVercelManualFetchAuthorization(sourceIds) {
-  return isVercelSharedLive(state.capabilities)
-    && Array.isArray(sourceIds)
-    && sourceIds.some((sourceId) => [GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]
-      .includes(sourceId));
+function activateFetchWithPolicyConsent(controller) {
+  if (!state.fetchReady) return;
+  if (!hasCurrentYoutubeConsent(controllerFetchSourceIds(controller))) return;
+  void controller.activate();
 }
 
-function activateWithOperatorAuthorization(controller, sourceIds, start) {
-  if (!requiresVercelManualFetchAuthorization(sourceIds)) {
-    controller.setOperatorToken(null);
-    start();
+function saveYoutubePolicySetting(event) {
+  const workflow = state.capabilities?.youtube_workflow || {};
+  const checkbox = $('#settings-youtube-policy-consent');
+  const version = workflow.policy_version;
+  if (!checkbox || workflow.policy_status !== 'APPROVED'
+      || workflow.policy_agreement_required !== true
+      || typeof version !== 'string' || !version) {
+    renderYoutubePolicySettings('settings.youtube-policy-pending');
     return;
   }
-  if (controller.operatorToken) {
-    start();
+  try {
+    if (checkbox.checked) localStorage.setItem(YOUTUBE_POLICY_STORAGE_KEY, version);
+    else localStorage.removeItem(YOUTUBE_POLICY_STORAGE_KEY);
+  } catch {
+    checkbox.checked = acceptedYoutubePolicyVersion() === version;
+    renderYoutubePolicySettings('fetch.youtube-consent-storage-error');
     return;
   }
-  const dialog = $('#operator-auth-dialog');
-  const input = $('#operator-auth-token');
-  if (!dialog || !input || typeof dialog.showModal !== 'function') {
-    $('#fetch-readiness').textContent = t('fetch.operator-auth-required');
-    return;
-  }
-  input.value = '';
-  $('#operator-auth-error').hidden = true;
-  pendingOperatorFetchController = controller;
-  pendingOperatorFetchStart = start;
-  dialog.showModal();
-  input.focus();
+  renderYoutubePolicySettings(checkbox.checked
+    ? 'settings.youtube-policy-saved' : 'settings.youtube-policy-revoked');
+  renderFetchPresentation();
 }
 
 function scheduleCapabilityRefresh(delayMs) {
@@ -1302,6 +1315,7 @@ function scheduleCapabilityRefresh(delayMs) {
 
 function applyPublicCapabilities(capabilities) {
   state.capabilities = capabilities;
+  renderYoutubePolicySettings();
   const sourceSelect = $('#fetch-source-select');
   const sourceControl = $('#fetch-source-control');
   const enabledSources = (Array.isArray(capabilities.sources) ? capabilities.sources : [])
@@ -1489,13 +1503,12 @@ async function resumeRecoveredFetch(run) {
     ? historyFetchController : fetchController;
   showView('overview');
   window.location.hash = 'overview';
-  activateWithOperatorAuthorization(controller, run.sources, () => {
-    void controller.resumeAvailableJob({
-      sources: run.sources,
-      requestKind,
-      historyDays: run.history_days,
-      fetchId: requestKind === 'WIKIMEDIA_HISTORY' ? null : run.fetch_id,
-    });
+  if (!hasCurrentYoutubeConsent(run.sources)) return;
+  void controller.resumeAvailableJob({
+    sources: run.sources,
+    requestKind,
+    historyDays: run.history_days,
+    fetchId: requestKind === 'WIKIMEDIA_HISTORY' ? null : run.fetch_id,
   });
 }
 
@@ -2809,86 +2822,8 @@ function bindEvents() {
     else { showView('overview'); window.location.hash = 'overview'; }
   });
   $('#fetch-source-select').addEventListener('change', renderFetchPresentation);
-  const operatorAuthDialog = $('#operator-auth-dialog');
-  const closeOperatorAuthDialog = () => {
-    pendingOperatorFetchController = null;
-    pendingOperatorFetchStart = null;
-    $('#operator-auth-token').value = '';
-    operatorAuthDialog.close();
-  };
-  $('#operator-auth-cancel-top').addEventListener('click', closeOperatorAuthDialog);
-  $('#operator-auth-cancel').addEventListener('click', closeOperatorAuthDialog);
-  $('#operator-auth-confirm').addEventListener('click', () => {
-    const input = $('#operator-auth-token');
-    const error = $('#operator-auth-error');
-    const token = input.value;
-    if (!token.trim() || !pendingOperatorFetchController
-        || !pendingOperatorFetchStart) {
-      error.textContent = t('fetch.operator-auth-required');
-      error.hidden = false;
-      return;
-    }
-    const controller = pendingOperatorFetchController;
-    const start = pendingOperatorFetchStart;
-    pendingOperatorFetchController = null;
-    pendingOperatorFetchStart = null;
-    controller.setOperatorToken(token);
-    input.value = '';
-    operatorAuthDialog.close();
-    start();
-  });
-  $('#operator-auth-token').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      $('#operator-auth-confirm').click();
-    }
-  });
-  operatorAuthDialog.addEventListener('close', () => {
-    pendingOperatorFetchController = null;
-    pendingOperatorFetchStart = null;
-    $('#operator-auth-token').value = '';
-  });
-  const youtubePolicyDialog = $('#youtube-policy-dialog');
-  const closeYoutubePolicyDialog = () => {
-    pendingYoutubeFetchController = null;
-    pendingYoutubePolicyVersion = null;
-    youtubePolicyDialog.close();
-  };
-  $('#youtube-policy-cancel-top').addEventListener('click', closeYoutubePolicyDialog);
-  $('#youtube-policy-cancel').addEventListener('click', closeYoutubePolicyDialog);
-  $('#youtube-policy-consent').addEventListener('change', (event) => {
-    $('#youtube-policy-accept').disabled = !event.currentTarget.checked;
-  });
-  $('#youtube-policy-accept').addEventListener('click', () => {
-    const workflow = state.capabilities?.youtube_workflow || {};
-    const checkbox = $('#youtube-policy-consent');
-    const error = $('#youtube-policy-error');
-    if (!checkbox.checked || !pendingYoutubeFetchController) return;
-    if (workflow.policy_status !== 'APPROVED'
-        || workflow.policy_version !== pendingYoutubePolicyVersion) {
-      error.textContent = t('youtube-policy.changed');
-      error.hidden = false;
-      return;
-    }
-    try {
-      localStorage.setItem(YOUTUBE_POLICY_STORAGE_KEY, workflow.policy_version);
-    } catch {
-      error.textContent = t('fetch.youtube-consent-storage-error');
-      error.hidden = false;
-      return;
-    }
-    const controller = pendingYoutubeFetchController;
-    pendingYoutubeFetchController = null;
-    pendingYoutubePolicyVersion = null;
-    youtubePolicyDialog.close();
-    renderFetchPresentation();
-    activateWithOperatorAuthorization(controller, controllerFetchSourceIds(controller),
-      () => { void controller.activate(); });
-  });
-  youtubePolicyDialog.addEventListener('close', () => {
-    pendingYoutubeFetchController = null;
-    pendingYoutubePolicyVersion = null;
-  });
+  $('#settings-youtube-policy-consent')
+    .addEventListener('change', saveYoutubePolicySetting);
   $('#run-id').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       loadRun(event.currentTarget.value);
@@ -3031,6 +2966,7 @@ function bindEvents() {
     if (state.persistedDataset) renderPersistedDataset(state.persistedDataset);
     if (state.analytics) loadAnalytics();
     runHistory.relocalize();
+    renderYoutubePolicySettings();
     if (window.location.hash === '#sources') sourceLibrary.load();
     if (window.location.hash === '#settings') loadRuntimeStatus();
     if (window.location.hash === '#research') researchWorkspace.load();

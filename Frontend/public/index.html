@@ -242,6 +242,18 @@
 
         <section class="view-panel" data-view="settings" hidden aria-labelledby="settings-heading">
           <div class="page-heading"><div><p class="section-kicker" data-i18n="settings.kicker"></p><h1 id="settings-heading" data-i18n="nav.settings"></h1><p data-i18n="settings.description"></p></div><span class="page-heading-mark" aria-hidden="true">⚙</span></div>
+          <article id="youtube-policy-settings" class="panel youtube-policy-settings" hidden aria-labelledby="settings-youtube-policy-title">
+            <div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.youtube-policy-kicker"></p><h2 id="settings-youtube-policy-title" data-i18n="settings.youtube-policy-title"></h2></div><span id="settings-youtube-policy-status" class="pill pill--gray" role="status" aria-live="polite" data-i18n="settings.youtube-policy-pending"></span></div>
+            <p data-i18n="settings.youtube-policy-help"></p>
+            <p class="youtube-policy-version"><span data-i18n="youtube-policy.version-label"></span> <code id="settings-youtube-policy-version">—</code></p>
+            <nav class="youtube-policy-links" aria-label="YouTube policy documents">
+              <a href="/dashboard/privacy.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.privacy-link"></a>
+              <a href="/dashboard/terms.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.terms-link"></a>
+              <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.youtube-terms-link"></a>
+            </nav>
+            <label class="youtube-policy-consent"><input id="settings-youtube-policy-consent" type="checkbox" disabled><span data-i18n="youtube-policy.agreement"></span></label>
+            <p id="settings-youtube-policy-feedback" class="fine-print youtube-policy-feedback" role="status" aria-live="polite"></p>
+          </article>
           <div class="settings-grid"><article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.display-kicker"></p><h2 data-i18n="settings.display-title"></h2></div></div><div class="setting-row"><div><strong data-i18n="settings.theme"></strong><small data-i18n="settings.theme-help"></small></div><button class="button button-secondary" type="button" data-theme-toggle><span class="toggle-icon" aria-hidden="true">☼</span><span data-theme-label>Light</span></button></div><div class="setting-row"><div><strong data-i18n="settings.language"></strong><small data-i18n="settings.language-help"></small></div><button class="button button-secondary" type="button" data-locale-toggle><span data-locale-label>VI</span><span class="toggle-chevron" aria-hidden="true">⌄</span></button></div></article>
           <article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.ai-kicker"></p><h2 data-i18n="settings.ai-title"></h2></div><span id="settings-llm-state" class="pill pill--gray" data-i18n="settings.llm-unconfigured"></span></div><details class="settings-details"><summary data-i18n="phoenix.settings-details"></summary><dl id="settings-runtime-details" class="detail-list"><div><dt data-i18n="settings.runtime-status"></dt><dd data-i18n="common.loading"></dd></div></dl><p class="fine-print" data-i18n="settings.ai-help"></p></details></article>
           <article class="panel"><div class="panel-heading"><div><p class="section-kicker" data-i18n="settings.operations-kicker"></p><h2 data-i18n="settings.scheduler-title"></h2></div><span id="settings-scheduler-status" class="pill pill--gray" data-i18n="settings.scheduler-disabled"></span></div><p id="settings-scheduler-reason" data-i18n="settings.scheduler-help"></p><form id="settings-schedule-form" class="schedule-form"><div class="schedule-form-fields"><label><span data-i18n="settings.schedule-name"></span><input name="name" maxlength="80" required></label><label><span data-i18n="settings.schedule-frequency"></span><select name="frequency"><option value="DAILY" data-i18n="settings.schedule-daily"></option><option value="WEEKLY" data-i18n="settings.schedule-weekly"></option></select></label><label><span data-i18n="settings.schedule-timezone"></span><input name="timezone" maxlength="64" required></label><label><span data-i18n="settings.schedule-time"></span><input name="time" type="time" value="09:00" required></label></div><label class="schedule-token-label"><span data-i18n="settings.schedule-operator-key"></span><input name="operator-key" type="password" autocomplete="off" spellcheck="false"></label><p class="fine-print" data-i18n="settings.schedule-key-help"></p><div class="research-form-actions"><button class="button button-primary" type="submit" data-i18n="settings.schedule-create"></button><button id="settings-schedule-cancel" class="button button-secondary" type="button" data-i18n="settings.schedule-cancel-edit" hidden></button></div><p id="settings-schedule-feedback" role="status" aria-live="polite"></p></form><ul id="settings-schedules" class="settings-schedule-list" aria-live="polite"></ul></article>
@@ -253,23 +265,6 @@
     </main>
   </div>
 
-  <dialog id="youtube-policy-dialog" class="youtube-policy-dialog" aria-labelledby="youtube-policy-title" aria-describedby="youtube-policy-description">
-    <div class="dialog-head"><div><p class="section-kicker" data-i18n="youtube-policy.kicker"></p><h2 id="youtube-policy-title" data-i18n="youtube-policy.title"></h2><p id="youtube-policy-description" data-i18n="youtube-policy.description"></p><p class="youtube-policy-version"><span data-i18n="youtube-policy.version-label"></span> <code id="youtube-policy-version">—</code></p></div><button id="youtube-policy-cancel-top" class="icon-button dialog-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button></div>
-    <nav class="youtube-policy-links" aria-label="YouTube policy documents">
-      <a href="/dashboard/privacy.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.privacy-link"></a>
-      <a href="/dashboard/terms.html" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.terms-link"></a>
-      <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer" data-i18n="youtube-policy.youtube-terms-link"></a>
-    </nav>
-    <label class="youtube-policy-consent"><input id="youtube-policy-consent" type="checkbox"><span data-i18n="youtube-policy.agreement"></span></label>
-    <p id="youtube-policy-error" class="youtube-policy-error" role="status" aria-live="polite" hidden></p>
-    <div class="youtube-policy-actions"><button id="youtube-policy-cancel" class="button button-secondary" type="button" data-i18n="youtube-policy.cancel"></button><button id="youtube-policy-accept" class="button button-primary" type="button" disabled data-i18n="youtube-policy.accept"></button></div>
-  </dialog>
-  <dialog id="operator-auth-dialog" class="operator-auth-dialog" aria-labelledby="operator-auth-title" aria-describedby="operator-auth-description">
-    <div class="dialog-head"><div><p class="section-kicker" data-i18n="fetch.operator-auth-kicker"></p><h2 id="operator-auth-title" data-i18n="fetch.operator-auth-title"></h2><p id="operator-auth-description" data-i18n="fetch.operator-auth-description"></p></div><button id="operator-auth-cancel-top" class="icon-button dialog-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button></div>
-    <label class="operator-auth-field"><span data-i18n="fetch.operator-auth-label"></span><input id="operator-auth-token" type="password" autocomplete="off" spellcheck="false" required></label>
-    <p id="operator-auth-error" class="youtube-policy-error" role="status" aria-live="polite" hidden></p>
-    <div class="youtube-policy-actions"><button id="operator-auth-cancel" class="button button-secondary" type="button" data-i18n="fetch.operator-auth-cancel"></button><button id="operator-auth-confirm" class="button button-primary" type="button" data-i18n="fetch.operator-auth-confirm"></button></div>
-  </dialog>
   <dialog id="detail-dialog" aria-labelledby="detail-title">
     <div class="dialog-head"><div><p class="section-kicker" data-i18n="detail.kicker"></p><h2 id="detail-title" data-i18n="detail.loading"></h2><p id="detail-subtitle"></p></div><button class="icon-button dialog-close" type="button" data-close="detail-dialog" data-i18n-aria="common.close" aria-label="Close">×</button></div>
     <div id="detail-content" class="detail-content"></div>

@@ -655,6 +655,29 @@ class PublicAdmission:
 
         return self.store.transact(self.state_key, read)
 
+    @staticmethod
+    def _serpapi_unattributed_usage(state, cycle_end: str | None) -> dict:
+        """Read external provider usage reserved only against the shared pool."""
+        zero = {"requests": 0, "cost": 0}
+        value = state.get("serpapi_account_usage_unattributed")
+        if value is None:
+            return zero
+        if not isinstance(value, dict):
+            raise AdmissionDenied("STATE_INVALID")
+        recorded_cycle = value.get("cycle_ends_at")
+        requests, cost = value.get("requests"), value.get("cost")
+        try:
+            parsed_cycle = date.fromisoformat(recorded_cycle)
+        except (TypeError, ValueError):
+            raise AdmissionDenied("STATE_INVALID") from None
+        if (parsed_cycle.isoformat() != recorded_cycle
+                or type(requests) is not int or requests < 0
+                or type(cost) is not int or cost < 0):
+            raise AdmissionDenied("STATE_INVALID")
+        if recorded_cycle != cycle_end:
+            return zero
+        return {"requests": requests, "cost": cost}
+
     def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:
         """Return bounded local reservation counts for one configured pool."""
         now = _utc(now)
@@ -668,7 +691,7 @@ class PublicAdmission:
                                and (pool_name == "serpapi"
                                     or pool_name in self.policy.source_allocations.values()))
 
-        def result(daily, monthly, *, cycle_end=None):
+        def result(daily, monthly, *, cycle_end=None, unattributed=None):
             monthly_value = {
                 "limit": limit.monthly_requests,
                 "used": monthly["requests"],
@@ -678,6 +701,10 @@ class PublicAdmission:
                 "units_remaining": max(0, limit.monthly_cost_units - monthly["cost"]),
                 "timezone": "UTC",
             }
+            if pool_name == "serpapi":
+                external = unattributed or {"requests": 0, "cost": 0}
+                monthly_value["unattributed_external_requests"] = external["requests"]
+                monthly_value["unattributed_external_cost_units"] = external["cost"]
             if uses_provider_cycle and not cycle_end:
                 monthly_value.update(used=None, remaining=None)
             value = {
@@ -745,7 +772,10 @@ class PublicAdmission:
             monthly_key = (f"{pool_name}:cycle:{cycle_end}" if cycle_end
                            else f"{pool_name}:month:{month}")
             monthly = usage(monthly_key)
-            return state, result(daily, monthly, cycle_end=cycle_end)
+            unattributed = (self._serpapi_unattributed_usage(state, cycle_end)
+                            if pool_name == "serpapi" else None)
+            return state, result(daily, monthly, cycle_end=cycle_end,
+                                 unattributed=unattributed)
 
         return self.store.transact(self.state_key, read)
 
@@ -803,13 +833,13 @@ class PublicAdmission:
 
     def reconcile_serpapi_account_usage(self, cycle_ends_at: str, monthly_used: int,
                                         *, now: datetime) -> None:
-        """Align initial local allocations with provider usage; reject later drift.
+        """Reconcile provider counts without assigning unknown calls to a source.
 
         Before Bing is first enabled, all provider usage predates the Bing
         allocation and is conservatively assigned to Google. After that
-        one-time baseline, account usage may not exceed the shared local ledger:
-        an increase would mean a request outside this designated local host and
-        cannot be attributed safely to either source.
+        baseline, later provider usage beyond the local ledger is reserved in
+        the shared monthly pool as unattributed external use. It never increases
+        either source allocation. Account usage regression remains fail-closed.
         """
         now = _utc(now)
         if (not self.policy.source_allocations or not isinstance(cycle_ends_at, str)
@@ -843,14 +873,17 @@ class PublicAdmission:
             google = quota.get(google_key, {"requests": 0, "cost": 0})
             bing_key = f"{allocations[BING_SOURCE_ID]}:cycle:{cycle_ends_at}"
             bing = quota.get(bing_key, {"requests": 0, "cost": 0})
+            external = self._serpapi_unattributed_usage(state, cycle_ends_at)
             if any(not isinstance(value, dict)
                    or type(value.get("requests")) is not int
                    or type(value.get("cost")) is not int
                    or value["requests"] < 0 or value["cost"] < 0
                    for value in (shared, google, bing)):
                 raise AdmissionDenied("STATE_INVALID")
-            if (google["requests"] + bing["requests"] != shared["requests"]
-                    or google["cost"] + bing["cost"] != shared["cost"]):
+            if (google["requests"] + bing["requests"] + external["requests"]
+                    != shared["requests"]
+                    or google["cost"] + bing["cost"] + external["cost"]
+                    != shared["cost"]):
                 raise AdmissionDenied("QUOTA_ALLOCATION_STATE_MISMATCH")
 
             baseline_key = "serpapi_account_usage_baseline_cycle"
@@ -869,25 +902,56 @@ class PublicAdmission:
                 raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_STATE_INVALID")
             if baseline_cycle != cycle_ends_at:
                 delta = max(0, monthly_used - shared["requests"])
-                limit = self._pools[google_pool]
-                if (monthly_used > self._pools["serpapi"].monthly_requests
-                        or google["requests"] + delta > limit.monthly_requests
-                        or google["cost"] + delta > limit.monthly_cost_units):
+                if baseline_cycle is None:
+                    limit = self._pools[google_pool]
+                    if (google["requests"] + delta > limit.monthly_requests
+                            or google["cost"] + delta > limit.monthly_cost_units):
+                        raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
+                    google = dict(google)
+                    google["requests"] += delta
+                    google["cost"] += delta
+                    quota[google_key] = google
+                    external = {"requests": 0, "cost": 0}
+                else:
+                    external = {"requests": delta, "cost": delta}
+                limit = self._pools["serpapi"]
+                if (monthly_used > limit.monthly_requests
+                        or shared["requests"] + delta > limit.monthly_requests
+                        or shared["cost"] + delta > limit.monthly_cost_units):
                     raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
                 shared = dict(shared)
-                google = dict(google)
                 shared["requests"] += delta
                 shared["cost"] += delta
-                google["requests"] += delta
-                google["cost"] += delta
                 quota[shared_key] = shared
-                quota[google_key] = google
+                state["serpapi_account_usage_unattributed"] = {
+                    "cycle_ends_at": cycle_ends_at,
+                    "requests": external["requests"],
+                    "cost": external["cost"],
+                }
                 state[baseline_key] = cycle_ends_at
             else:
                 if (type(last_observed) is not int or last_observed < 0
-                        or monthly_used < last_observed
-                        or monthly_used > shared["requests"]):
+                        or monthly_used < last_observed):
                     raise AdmissionDenied("QUOTA_EXTERNAL_USAGE_UNRECONCILED")
+                delta = max(0, monthly_used - shared["requests"])
+                limit = self._pools["serpapi"]
+                if (shared["requests"] + delta > limit.monthly_requests
+                        or shared["cost"] + delta > limit.monthly_cost_units):
+                    raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
+                if delta:
+                    shared = dict(shared)
+                    shared["requests"] += delta
+                    shared["cost"] += delta
+                    quota[shared_key] = shared
+                    external = {
+                        "requests": external["requests"] + delta,
+                        "cost": external["cost"] + delta,
+                    }
+                state["serpapi_account_usage_unattributed"] = {
+                    "cycle_ends_at": cycle_ends_at,
+                    "requests": external["requests"],
+                    "cost": external["cost"],
+                }
 
             state[last_used_key] = monthly_used
             state["serpapi_account_usage_checked_at"] = now.isoformat()

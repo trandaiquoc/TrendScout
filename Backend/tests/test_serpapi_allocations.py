@@ -236,7 +236,7 @@ class SharedSerpApiAllocationTests(unittest.TestCase):
             admission.reconcile_serpapi_account_usage("2026-12-11", 6, now=NOW)
             self.assertEqual(admission.quota_snapshot("serpapi", now=NOW)["monthly"]["used"], 6)
 
-    def test_account_usage_above_local_ledger_fails_closed_after_baseline(self):
+    def test_account_usage_above_local_ledger_is_reserved_as_unattributed(self):
         with tempfile.TemporaryDirectory() as directory:
             store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
             admission = PublicAdmission(
@@ -244,9 +244,46 @@ class SharedSerpApiAllocationTests(unittest.TestCase):
             )
             admission.set_serpapi_billing_cycle("2026-12-11", now=NOW)
             admission.reconcile_serpapi_account_usage("2026-12-11", 6, now=NOW)
+
+            admission.reconcile_serpapi_account_usage("2026-12-11", 7, now=NOW)
+            shared = admission.quota_snapshot("serpapi", now=NOW)["monthly"]
+            google = admission.quota_snapshot("serpapi_google", now=NOW)["monthly"]
+            bing = admission.quota_snapshot("serpapi_bing", now=NOW)["monthly"]
+            self.assertEqual((shared["used"], shared["remaining"]), (7, 237))
+            self.assertEqual(shared["unattributed_external_requests"], 1)
+            self.assertEqual(shared["unattributed_external_cost_units"], 1)
+            self.assertEqual(google["used"], 6)
+            self.assertEqual(bing["used"], 0)
+
+            admission.reconcile_serpapi_account_usage("2026-12-11", 7, now=NOW)
+            self.assertEqual(
+                admission.quota_snapshot("serpapi", now=NOW)["monthly"]["used"], 7
+            )
+
+    def test_account_usage_regression_after_baseline_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
+            admission = PublicAdmission(
+                store, normal_google_live_policy(bing_enabled=True), state_key=GOOGLE_STATE_KEY
+            )
+            admission.set_serpapi_billing_cycle("2026-12-11", now=NOW)
+            admission.reconcile_serpapi_account_usage("2026-12-11", 6, now=NOW)
+
             with self.assertRaises(AdmissionDenied) as error:
-                admission.reconcile_serpapi_account_usage("2026-12-11", 7, now=NOW)
+                admission.reconcile_serpapi_account_usage("2026-12-11", 5, now=NOW)
             self.assertEqual(error.exception.code, "QUOTA_EXTERNAL_USAGE_UNRECONCILED")
+
+    def test_account_usage_above_shared_pool_limit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalSQLiteAtomicStateStore.for_local_live(Path(directory) / "quota.sqlite")
+            admission = PublicAdmission(
+                store, normal_google_live_policy(bing_enabled=True), state_key=GOOGLE_STATE_KEY
+            )
+            admission.set_serpapi_billing_cycle("2026-12-11", now=NOW)
+
+            with self.assertRaises(AdmissionDenied) as error:
+                admission.reconcile_serpapi_account_usage("2026-12-11", 245, now=NOW)
+            self.assertEqual(error.exception.code, "QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
 
     def test_provider_renewal_date_changes_monthly_window_without_calendar_reset(self):
         with tempfile.TemporaryDirectory() as directory:

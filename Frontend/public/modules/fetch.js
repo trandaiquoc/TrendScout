@@ -70,7 +70,6 @@ export function liveFetchMessageKey(kind, requestKind = 'latest', sourceIds = []
 function isUncertainSubmissionError(error) {
   if (!(error instanceof ApiError)) return false;
   const code = error.body?.detail?.code || error.body?.code;
-  if (['OPERATOR_AUTH_REQUIRED', 'OPERATOR_AUTH_UNAVAILABLE'].includes(code)) return false;
   return error.status === null
     || (error.status >= 200 && error.status < 300)
     || [408, 425, 500, 502, 503, 504].includes(error.status)
@@ -118,7 +117,6 @@ export class PublicFetchController {
     this.fetchId = null;
     this.requestBody = null;
     this.activeYoutubePolicyVersion = null;
-    this.operatorToken = null;
     this.includesYouTube = false;
     this.resumeNeeded = false;
     this.busy = false;
@@ -183,7 +181,6 @@ export class PublicFetchController {
       }
       const headers = { 'Idempotency-Key': this.key };
       if (isContinuation) headers['X-TrendScout-Fetch-Continuation'] = '1';
-      if (this.operatorToken) headers.Authorization = `Bearer ${this.operatorToken}`;
       if (this.activeYoutubePolicyVersion) {
         headers[YOUTUBE_POLICY_VERSION_HEADER] = this.activeYoutubePolicyVersion;
       }
@@ -223,16 +220,6 @@ export class PublicFetchController {
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       await this.poll();
     } catch (error) {
-      const submissionCode = error?.body?.detail?.code || error?.body?.code;
-      if (isContinuation && continuationFetchId
-          && ['OPERATOR_AUTH_REQUIRED', 'OPERATOR_AUTH_UNAVAILABLE'].includes(submissionCode)) {
-        this.fetchId = continuationFetchId;
-        this.resumeNeeded = true;
-        this.busy = false;
-        this.clearOperatorToken();
-        this.emit({ kind: 'operator-auth-failed', busy: false, error });
-        return;
-      }
       if (isContinuation && continuationFetchId && isUncertainSubmissionError(error)) {
         // A timed-out continuation may still be running on Vercel. Reattach to
         // the existing job and poll before considering another source slice.
@@ -245,7 +232,6 @@ export class PublicFetchController {
       }
       this.busy = false;
       this.emit({ kind: this.kindForError(error), busy: false, error });
-      this.clearOperatorToken();
     }
   }
 
@@ -336,7 +322,6 @@ export class PublicFetchController {
           this.requestBody = null;
           this.activeYoutubePolicyVersion = null;
           this.includesYouTube = false;
-          this.clearOperatorToken();
           this.resumeNeeded = false;
           this.automaticContinuations = 0;
           this.statusPolls = 0;
@@ -422,7 +407,6 @@ export class PublicFetchController {
     } catch (error) {
       this.busy = false;
       this.resumeNeeded = Boolean(this.fetchId);
-      this.clearOperatorToken();
       this.emit({ kind: this.kindForError(error), busy: false, error, fetch: status });
     }
   }
@@ -431,27 +415,8 @@ export class PublicFetchController {
     this.onState({ ...presentation, requestKind: this.requestKind });
   }
 
-  setOperatorToken(value) {
-    this.operatorToken = (typeof value === 'string' && value)
-      ? value : null;
-  }
-
-  clearOperatorToken() {
-    this.operatorToken = null;
-  }
-
   kindForError(error) {
     const code = error?.code || error?.body?.detail?.code || error?.body?.code;
-    if (code === 'OPERATOR_AUTH_REQUIRED' || code === 'OPERATOR_AUTH_UNAVAILABLE') {
-      this.fetchId = null;
-      this.key = null;
-      this.requestBody = null;
-      this.activeYoutubePolicyVersion = null;
-      this.includesYouTube = false;
-      this.resumeNeeded = false;
-      this.clearOperatorToken();
-      return 'operator-auth-failed';
-    }
     if (code === 'YOUTUBE_POLICY_NOT_APPROVED') {
       this.fetchId = null;
       this.key = null;
@@ -502,7 +467,6 @@ export class PublicFetchController {
 
   dispose() {
     this.stopped = true;
-    this.clearOperatorToken();
     if (this.retryTimer !== null) {
       window.clearTimeout(this.retryTimer);
     }

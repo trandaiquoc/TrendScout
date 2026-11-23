@@ -69,11 +69,13 @@ window.fetch=(path,options={{}})=>{{
     check = """<script>
 (async()=>{const errors=[];const check=(value,message)=>{if(!value)errors.push(message)};const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 await wait(200);const button=document.querySelector('#open-fetch');check(!button.disabled,'capability-enabled Fetch button');
-button.click();const policyDialog=document.querySelector('#youtube-policy-dialog');
-check(policyDialog.open,'YouTube policy consent opens before a Fetch that includes YouTube');
-check(document.querySelector('#youtube-policy-version').textContent==='d6-youtube-v2','current YouTube policy version is shown');
+button.click();const policySettings=document.querySelector('#youtube-policy-settings');
+check(!policySettings.hidden&&window.location.hash==='#settings','YouTube consent opens in Settings before Fetch');
+check(document.querySelector('#settings-youtube-policy-version').textContent==='d6-youtube-v2','current YouTube policy version is shown');
 check(!fetchRequests.some(request=>request.path==='/api/v1/fetches'&&request.method==='POST'),'no Fetch is submitted before consent');
-document.querySelector('#youtube-policy-consent').click();document.querySelector('#youtube-policy-accept').click();
+document.querySelector('#settings-youtube-policy-consent').click();
+check(localStorage.getItem('trendscout.youtube-policy.version')==='d6-youtube-v2','all three policies are accepted for the current version');
+window.location.hash='#overview';await wait(50);
 button.click();button.click();await wait(300);
 const posts=fetchRequests.filter(request=>request.path==='/api/v1/fetches'&&request.method==='POST');
 check(posts.length===1,'duplicate click submits one POST');check(posts[0]?.body==='{}','empty server-controlled request body');
