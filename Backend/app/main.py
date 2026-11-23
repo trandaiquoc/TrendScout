@@ -176,23 +176,46 @@ def _elapsed_milliseconds(started_at, finished_at):
     return max(0, int((finished_at - started_at) * 1000))
 
 
-def _vercel_timing_route(scope):
+def _vercel_timing_route(scope, application=None):
     route = getattr(scope.get("route"), "path", None)
     if isinstance(route, str) and route.startswith("/api/") and len(route) <= 128:
         return route
 
-    app = scope.get("app")
-    router = getattr(app, "router", None)
-    for candidate in getattr(router, "routes", ()):
-        route = getattr(candidate, "path", None)
-        if not isinstance(route, str) or not route.startswith("/api/") or len(route) > 128:
+    pending = [scope.get("app"), application]
+    seen = set()
+    while pending:
+        owner = pending.pop()
+        if owner is None or id(owner) in seen:
             continue
-        try:
-            match, _child_scope = candidate.matches(scope)
-        except Exception:
-            continue
-        if match is Match.FULL:
-            return route
+        seen.add(id(owner))
+        router = getattr(owner, "router", None)
+        for route_owner in (router, owner):
+            for candidate in getattr(route_owner, "routes", ()):
+                route = getattr(candidate, "path", None)
+                if (not isinstance(route, str) or not route.startswith("/api/")
+                        or len(route) > 128):
+                    continue
+                request_path = scope.get("path")
+                if "{" not in route and route == request_path:
+                    return route
+                try:
+                    match, _child_scope = candidate.matches(scope)
+                except Exception:
+                    match = None
+                if match is Match.FULL:
+                    return route
+                path_regex = getattr(candidate, "path_regex", None)
+                if path_regex is not None and isinstance(request_path, str):
+                    paths = [request_path]
+                    root_path = scope.get("root_path")
+                    if (isinstance(root_path, str) and root_path
+                            and request_path.startswith(root_path)):
+                        paths.append(request_path[len(root_path):] or "/")
+                    if any(path_regex.fullmatch(path) for path in paths):
+                        return route
+        child_app = getattr(owner, "app", None)
+        if child_app is not None:
+            pending.append(child_app)
     return "unmatched"
 
 
@@ -376,7 +399,7 @@ class VercelSharedLiveMiddleware:
         async def send_no_store(message):
             if message.get("type") == "http.response.start":
                 finished_at = perf_counter()
-                route = _vercel_timing_route(scope)
+                route = _vercel_timing_route(scope, self.app)
                 status_code = message.get("status")
                 if type(status_code) is not int:
                     status_code = 0
