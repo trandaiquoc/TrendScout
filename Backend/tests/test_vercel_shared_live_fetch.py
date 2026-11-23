@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
+from fastapi import FastAPI
 
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
@@ -17,6 +18,7 @@ from app.main import (
     _is_vercel_shared_live_request,
     _persists_vercel_collections,
     _vercel_collection_snapshot_required,
+    _vercel_timing_route,
     create_app,
 )
 from app.settings import Settings
@@ -89,12 +91,17 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
             client_factory=lambda _token: SimpleNamespace(close=lambda: None),
             context_factory=context_factory,
         )
+        api = FastAPI()
+        api.add_api_route("/api/v1/capabilities", lambda: {}, methods=["GET"])
+        api.add_api_route(
+            "/api/v1/fetches/{fetch_id}", lambda fetch_id: {"id": fetch_id}, methods=["GET"]
+        )
         scope = {
             "type": "http",
             "method": "GET",
             "path": "/api/v1/capabilities",
             "headers": [(b"x-vercel-oidc-token", b"sensitive-test-token")],
-            "route": SimpleNamespace(path="/api/v1/capabilities"),
+            "app": api,
         }
         messages = []
 
@@ -116,6 +123,11 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
             r"client_setup_ms=\d+ composition_ms=\d+ handler_ms=\d+ total_ms=\d+",
         )
         self.assertNotIn("sensitive-test-token", timing)
+        dynamic_scope = {**scope, "path": "/api/v1/fetches/" + "a" * 32}
+        self.assertEqual(
+            _vercel_timing_route(dynamic_scope),
+            "/api/v1/fetches/{fetch_id}",
+        )
 
 
 class _Client:

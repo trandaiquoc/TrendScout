@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Match
 
 from app.api.algorithms import router as algorithms_router
 from app.api.analytics import router as analytics_router
@@ -173,6 +174,26 @@ def _safe_exception_class(error):
 
 def _elapsed_milliseconds(started_at, finished_at):
     return max(0, int((finished_at - started_at) * 1000))
+
+
+def _vercel_timing_route(scope):
+    route = getattr(scope.get("route"), "path", None)
+    if isinstance(route, str) and route.startswith("/api/") and len(route) <= 128:
+        return route
+
+    app = scope.get("app")
+    router = getattr(app, "router", None)
+    for candidate in getattr(router, "routes", ()):
+        route = getattr(candidate, "path", None)
+        if not isinstance(route, str) or not route.startswith("/api/") or len(route) > 128:
+            continue
+        try:
+            match, _child_scope = candidate.matches(scope)
+        except Exception:
+            continue
+        if match is Match.FULL:
+            return route
+    return "unmatched"
 
 
 async def _save_vercel_collection_snapshot(distributed, *, failure_code):
@@ -355,9 +376,7 @@ class VercelSharedLiveMiddleware:
         async def send_no_store(message):
             if message.get("type") == "http.response.start":
                 finished_at = perf_counter()
-                route = getattr(scope.get("route"), "path", None)
-                if not isinstance(route, str) or not route.startswith("/api/") or len(route) > 128:
-                    route = "unmatched"
+                route = _vercel_timing_route(scope)
                 status_code = message.get("status")
                 if type(status_code) is not int:
                     status_code = 0
