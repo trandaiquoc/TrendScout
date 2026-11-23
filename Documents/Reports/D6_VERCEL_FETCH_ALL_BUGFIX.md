@@ -263,3 +263,22 @@ The implementation reduces the three schedule-state reads to one Firestore batch
 Post-deploy read-only verification called `/api/v1/capabilities` twice through the same authenticated Vercel URL-fetch connector. Both requests returned HTTP 200. The client-side call times were 14.3 seconds and 7.3 seconds, against earlier single samples of 8.6–9.8 seconds on the prior deployment. These samples include connector and request overhead; the slower first result and faster repeat do not establish a consistent latency improvement or regression. Vercel's available runtime logs expose dependency-install timing but not these handler stages, and the observability query returned HTTP 400, so application-side request duration could not be isolated. A larger matched sample or internal timing telemetry is needed before attributing any wall-clock change to this batch read.
 
 The checks used GET only and made no provider request, Fetch submission, quota reservation, or data mutation. Fresh four-source LIVE acceptance followed by a complete provider-free cached acceptance remains open and was not attempted.
+
+### Read-only Production dataset audit and request timing (2026-11-23, Asia/Bangkok)
+
+Authenticated `GET /api/v1/datasets/latest` and `GET /api/v1/runs/history?limit=5` returned HTTP 200. The latest dataset `a646be5f8602f4e9ac182dc90bcdc6b8` is `PARTIAL`, marked LIVE, with 1,637 received source records and 2,141 retained keywords. Its associated run record is timestamped `2026-11-23T09:56:32.581517Z`; the dataset row is timestamped `2026-11-23T10:31:05.641427Z`. The difference between these two persisted timestamps is unexplained, so they are reported separately.
+
+| Source | Latest result | Records | Provider requests | Cached observation time (UTC) |
+|---|---|---:|---:|---|
+| Bing | `SUCCESS / STALE_CACHE` | 1 | 0 | `08:53:06.456041Z` |
+| Google | `SUCCESS / STALE_CACHE` | 586 | 0 | `05:40:51.460928Z` |
+| Wikimedia | `SUCCESS / CACHED` | 1,000 | 0 | `04:44:29.617216Z` |
+| YouTube | `PARTIAL / CACHED` (`PAGE_CAP_REACHED`) | 50 | 0 | `04:45:31.255284Z` |
+
+The recorded freshness windows are one hour for Bing and Google, 24 hours for Wikimedia, and eight hours for YouTube. Those windows explain the cached labels at the run time; they do not make Bing or Google fresh. The result establishes a cache-only read across all four source IDs, with stale Bing and Google evidence and a partial YouTube sample. It does not establish a successful fresh four-source LIVE run or full-source cache acceptance.
+
+The immediately preceding history entry `047c819bec4028ecc94df66259a8316f` was also `PARTIAL`: Google returned 586 stale cached records with no provider calls, while Bing, Wikimedia, and YouTube failed with `FETCH_DEADLINE_EXCEEDED` after `JOB_DEADLINE_EXPIRED`. These records predate the latest continuation changes and cannot establish current Fetch behavior. The audit used GETs only and caused no provider calls or Fetch submissions.
+
+To distinguish application processing from the URL-fetch connector overhead in earlier latency samples, `Backend/app/main.py` now logs request-stage durations at ASGI response start for authenticated Shared LIVE requests: client setup, Shared LIVE composition, handler-to-response-start, and total-to-response-start. The log uses the static route template and excludes query strings, request bodies, and authentication headers. The focused middleware test, Ruff, Python compilation, and `git diff --check` pass. These timings exclude response transfer and do not imply improved latency; Production measurements will be recorded only after this instrumentation is deployed and observed.
+
+Fresh four-source LIVE followed by all-four cached acceptance without provider calls remains unverified by design. No Production Fetch POST or provider API request was made.

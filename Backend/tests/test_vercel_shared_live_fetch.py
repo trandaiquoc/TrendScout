@@ -13,6 +13,7 @@ from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.jobs.public_admission import AdmissionDenied
 from app.main import (
+    VercelSharedLiveMiddleware,
     _is_vercel_shared_live_request,
     _persists_vercel_collections,
     _vercel_collection_snapshot_required,
@@ -62,6 +63,59 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
         ):
             with self.subTest(method=method, path=path):
                 self.assertFalse(_vercel_collection_snapshot_required(method, path))
+
+
+class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_timing_log_uses_route_template_and_excludes_request_data(self):
+        settings = SimpleNamespace(
+            environment_profile="vercel",
+            vercel_shared_live_enabled=True,
+            wikimedia_user_agent="TrendScoutTest/0.1",
+        )
+
+        @asynccontextmanager
+        async def context_factory(_client, *, user_agent):
+            self.assertEqual(user_agent, settings.wikimedia_user_agent)
+            yield SimpleNamespace(available_sources=frozenset({WIKIMEDIA_SOURCE_ID}))
+
+        async def endpoint(scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware = VercelSharedLiveMiddleware(
+            endpoint,
+            settings=settings,
+            enabled=True,
+            client_factory=lambda _token: SimpleNamespace(close=lambda: None),
+            context_factory=context_factory,
+        )
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/capabilities",
+            "headers": [(b"x-vercel-oidc-token", b"sensitive-test-token")],
+            "route": SimpleNamespace(path="/api/v1/capabilities"),
+        }
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        with self.assertLogs("app.main", level="INFO") as captured:
+            await middleware(scope, receive, send)
+
+        self.assertEqual(messages[0]["status"], 200)
+        timing = next(message for message in captured.output
+                      if "Vercel Shared LIVE request timing" in message)
+        self.assertIn("route=/api/v1/capabilities status_code=200", timing)
+        self.assertRegex(
+            timing,
+            r"client_setup_ms=\d+ composition_ms=\d+ handler_ms=\d+ total_ms=\d+",
+        )
+        self.assertNotIn("sensitive-test-token", timing)
 
 
 class _Client:

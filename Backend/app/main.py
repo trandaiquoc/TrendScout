@@ -10,6 +10,7 @@ import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
@@ -170,6 +171,10 @@ def _safe_exception_class(error):
     return value if _SAFE_EXCEPTION_CLASS.fullmatch(value) else "UnknownError"
 
 
+def _elapsed_milliseconds(started_at, finished_at):
+    return max(0, int((finished_at - started_at) * 1000))
+
+
 async def _save_vercel_collection_snapshot(distributed, *, failure_code):
     snapshot = getattr(distributed, "collection_snapshot", None)
     if snapshot is None:
@@ -285,12 +290,17 @@ class VercelSharedLiveMiddleware:
             await response(scope, receive, send)
             return
 
+        request_started_at = perf_counter()
+        client_ready_at = None
+        composition_started_at = None
+        composition_ready_at = None
         try:
             if self.client_factory is None:
                 from app.storage.vercel_identity import firestore_client_for_request
                 client = firestore_client_for_request(oidc_token, settings=self.settings)
             else:
                 client = self.client_factory(oidc_token)
+            client_ready_at = perf_counter()
         except Exception:
             response = JSONResponse(
                 {"detail": {"code": "FIRESTORE_IDENTITY_REJECTED"}},
@@ -319,8 +329,10 @@ class VercelSharedLiveMiddleware:
             context_options = {"user_agent": self.settings.wikimedia_user_agent}
             if use_default_context:
                 context_options["defer_collection_snapshot"] = defer_collection_snapshot
+            composition_started_at = perf_counter()
             context_manager = context_factory(client, **context_options)
             distributed = await context_manager.__aenter__()
+            composition_ready_at = perf_counter()
             context_entered = True
         except Exception:
             _logger.error("Vercel shared LIVE composition failed")
@@ -342,6 +354,22 @@ class VercelSharedLiveMiddleware:
 
         async def send_no_store(message):
             if message.get("type") == "http.response.start":
+                finished_at = perf_counter()
+                route = getattr(scope.get("route"), "path", None)
+                if not isinstance(route, str) or not route.startswith("/api/") or len(route) > 128:
+                    route = "unmatched"
+                status_code = message.get("status")
+                if type(status_code) is not int:
+                    status_code = 0
+                _logger.info(
+                    "Vercel Shared LIVE request timing method=%s route=%s status_code=%d "
+                    "client_setup_ms=%d composition_ms=%d handler_ms=%d total_ms=%d",
+                    scope.get("method", "UNKNOWN"), route, status_code,
+                    _elapsed_milliseconds(request_started_at, client_ready_at),
+                    _elapsed_milliseconds(composition_started_at, composition_ready_at),
+                    _elapsed_milliseconds(composition_ready_at, finished_at),
+                    _elapsed_milliseconds(request_started_at, finished_at),
+                )
                 headers = [
                     (name, value) for name, value in message.get("headers", [])
                     if name.lower() != b"cache-control"
