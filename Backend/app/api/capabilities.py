@@ -27,6 +27,29 @@ _RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_
 
 async def _read_capability_metadata(distributed):
     """Read independent durable capability state in parallel without mutation."""
+    combined_reader = getattr(distributed, "capability_metadata_snapshot", None)
+    if callable(combined_reader):
+        try:
+            combined = await asyncio.to_thread(combined_reader)
+        except Exception:
+            combined = None
+        if combined is not None:
+            if not isinstance(combined, tuple) or len(combined) != 2:
+                raise RuntimeError("combined capability metadata is invalid")
+            runtime_metadata, refresh_schedule = combined
+            if isinstance(runtime_metadata, Exception):
+                runtime_metadata = {
+                    "admission_status": "UNAVAILABLE",
+                    "operational_enabled": False,
+                    "google": {"status": "UNAVAILABLE"},
+                    "youtube": {"status": "UNAVAILABLE"},
+                }
+            elif isinstance(runtime_metadata, BaseException):
+                raise runtime_metadata
+            if isinstance(refresh_schedule, BaseException):
+                raise refresh_schedule
+            return runtime_metadata, refresh_schedule
+
     runtime_reader = getattr(distributed, "capability_runtime_metadata", None)
     schedule_reader = getattr(distributed, "refresh_schedule_metadata", None)
     names, readers = [], []

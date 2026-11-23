@@ -94,6 +94,49 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
 
 
 class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_combined_capability_metadata_uses_one_read_result(self):
+        calls = []
+
+        def read_combined():
+            calls.append("combined")
+            return (
+                {"admission_status": "AVAILABLE"},
+                {"sources": {WIKIMEDIA_SOURCE_ID: {"status": "AVAILABLE"}}},
+            )
+
+        runtime, schedule = await _read_capability_metadata(SimpleNamespace(
+            capability_metadata_snapshot=read_combined,
+            capability_runtime_metadata=lambda: self.fail("separate runtime read"),
+            refresh_schedule_metadata=lambda: self.fail("separate schedule read"),
+        ))
+
+        self.assertEqual(calls, ["combined"])
+        self.assertEqual(runtime["admission_status"], "AVAILABLE")
+        self.assertEqual(schedule["sources"][WIKIMEDIA_SOURCE_ID]["status"], "AVAILABLE")
+
+    async def test_failed_combined_capability_read_falls_back_to_parallel_readers(self):
+        barrier = Barrier(2)
+
+        def read_combined():
+            raise RuntimeError("batch unavailable")
+
+        def read_runtime():
+            barrier.wait(timeout=1)
+            return {"admission_status": "AVAILABLE"}
+
+        def read_schedule():
+            barrier.wait(timeout=1)
+            return {"sources": {WIKIMEDIA_SOURCE_ID: {"status": "AVAILABLE"}}}
+
+        runtime, schedule = await _read_capability_metadata(SimpleNamespace(
+            capability_metadata_snapshot=read_combined,
+            capability_runtime_metadata=read_runtime,
+            refresh_schedule_metadata=read_schedule,
+        ))
+
+        self.assertEqual(runtime["admission_status"], "AVAILABLE")
+        self.assertEqual(schedule["sources"][WIKIMEDIA_SOURCE_ID]["status"], "AVAILABLE")
+
     async def test_capability_quota_and_schedule_reads_run_concurrently(self):
         barrier = Barrier(2)
 

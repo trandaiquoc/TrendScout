@@ -369,6 +369,7 @@ async def vercel_shared_live_composition(
     user_agent: str,
     utcnow=lambda: datetime.now(timezone.utc),
     defer_collection_snapshot: bool = False,
+    capability_metadata_request: bool = False,
 ):
     """Compose all owner-approved Vercel sources over the shared Firestore ledger.
 
@@ -378,7 +379,8 @@ async def vercel_shared_live_composition(
     """
     if (os.environ.get("VERCEL") != "1" or not isinstance(user_agent, str)
             or not user_agent.strip() or not callable(utcnow)
-            or type(defer_collection_snapshot) is not bool):
+            or type(defer_collection_snapshot) is not bool
+            or type(capability_metadata_request) is not bool):
         raise ValueError("Vercel Shared LIVE requires its deployed runtime")
     _client_project_id(client)
 
@@ -436,6 +438,7 @@ async def vercel_shared_live_composition(
             youtube_max_queries=1,
             shared_firestore_client=client,
             vercel_shared_live=True,
+            capability_metadata_request=capability_metadata_request,
             youtube_allow_initial_acceptance=True,
         ) as facade:
             facade.available_sources = frozenset(policy.enabled_sources)

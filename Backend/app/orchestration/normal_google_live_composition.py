@@ -299,6 +299,7 @@ async def normal_google_live_composition(*, user_agent,
                                          youtube_force_fresh_test_once: bool = False,
                                          shared_firestore_client=None,
                                          vercel_shared_live: bool = False,
+                                         capability_metadata_request: bool = False,
                                          youtube_allow_initial_acceptance: bool = False):
     """Compose the local or explicitly injected Vercel worker without startup fetches."""
     config = google_settings or GoogleLiveSettings.from_environment()
@@ -310,6 +311,8 @@ async def normal_google_live_composition(*, user_agent,
             or type(allow_initial_bing_acceptance) is not bool
             or type(preserve_expired_data) is not bool
             or type(vercel_shared_live) is not bool
+            or type(capability_metadata_request) is not bool
+            or (capability_metadata_request and not vercel_shared_live)
             or type(youtube_allow_initial_acceptance) is not bool
             or type(youtube_manual_live) is not bool
             or type(youtube_force_fresh_test_once) is not bool
@@ -374,7 +377,10 @@ async def normal_google_live_composition(*, user_agent,
         owner_manual_youtube_live=youtube_manual_live,
     )
     if uses_firestore:
-        existing_state = store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
+        existing_state = (
+            {} if capability_metadata_request
+            else store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
+        )
     else:
         existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
     # First launch has no quota state to migrate; any populated ledger must
@@ -1032,7 +1038,7 @@ async def normal_google_live_composition(*, user_agent,
             "live_verified": False,
         }
 
-        def refresh_schedule_metadata():
+        def refresh_schedule_metadata(state_snapshot=None):
             sources = {}
             schedules = []
             for source_id, state_key, initial_allowed in (
@@ -1055,7 +1061,9 @@ async def normal_google_live_composition(*, user_agent,
                     f"{source_id.upper()}_SCHEDULE_STATE_INVALID",
                     initial_allowed,
                 ))
-            sources.update(schedule_metadata_for_sources(store, schedules, utcnow()))
+            sources.update(schedule_metadata_for_sources(
+                store, schedules, utcnow(), state_snapshot=state_snapshot,
+            ))
             return {
                 "timezone": str(SCHEDULE_TIMEZONE),
                 "slots": [slot.strftime("%H:%M") for slot in SCHEDULE_SLOTS],
@@ -1090,7 +1098,7 @@ async def normal_google_live_composition(*, user_agent,
             "runtime_mode": OWNER_MANUAL_LIVE if youtube_manual_live else NORMAL_DEMO,
         }
 
-        def capability_runtime_metadata():
+        def capability_runtime_metadata(state_snapshot=None):
             """Read admission and provider quota data from one durable state snapshot."""
             pool_names = tuple(name for name in (
                 "serpapi", "google_rss", "serpapi_google", "serpapi_bing",
@@ -1101,6 +1109,9 @@ async def normal_google_live_composition(*, user_agent,
             try:
                 runtime = admission.quota_runtime_snapshot(
                     pool_names, source_ids=source_ids, now=utcnow(),
+                    **({"state_snapshot": state_snapshot[GOOGLE_STATE_KEY]}
+                       if isinstance(state_snapshot, dict)
+                       and GOOGLE_STATE_KEY in state_snapshot else {}),
                 )
                 pools = runtime["pools"]
                 google = {
@@ -1148,6 +1159,29 @@ async def normal_google_live_composition(*, user_agent,
         facade.capability_runtime_metadata = capability_runtime_metadata
         facade.google_quota_metadata = lambda: capability_runtime_metadata()["google"]
         facade.youtube_quota_metadata = lambda: capability_runtime_metadata()["youtube"]
+        read_many = getattr(store, "read_many", None)
+        if callable(read_many):
+            def capability_metadata_snapshot():
+                schedules = (
+                    (GOOGLE_REFRESH_STATE_KEY, BING_REFRESH_STATE_KEY)
+                    if youtube_manual_live else
+                    (GOOGLE_REFRESH_STATE_KEY, BING_REFRESH_STATE_KEY,
+                     YOUTUBE_REFRESH_STATE_KEY)
+                )
+                keys = (GOOGLE_STATE_KEY, *schedules)
+                state_snapshot = read_many(list(keys))
+                if (not isinstance(state_snapshot, dict)
+                        or set(state_snapshot) != set(keys)):
+                    raise ValueError("capability state batch is incomplete")
+                runtime = capability_runtime_metadata(state_snapshot)
+                try:
+                    schedule_states = {key: state_snapshot[key] for key in schedules}
+                    schedule = refresh_schedule_metadata(schedule_states)
+                except BaseException as error:
+                    schedule = error
+                return runtime, schedule
+
+            facade.capability_metadata_snapshot = capability_metadata_snapshot
         facade.youtube_retention_cleanup = (
             None if preserve_expired_data or uses_firestore else cleanup_youtube_data
         )

@@ -402,6 +402,11 @@ class VercelSharedLiveMiddleware:
             context_options = {"user_agent": self.settings.wikimedia_user_agent}
             if use_default_context:
                 context_options["defer_collection_snapshot"] = defer_collection_snapshot
+                if not use_collection_read_context:
+                    context_options["capability_metadata_request"] = (
+                        request_method.upper() == "GET"
+                        and request_path == "/api/v1/capabilities"
+                    )
             composition_started_at = perf_counter()
             context_manager = context_factory(client, **context_options)
             distributed = await context_manager.__aenter__()

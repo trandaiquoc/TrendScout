@@ -618,6 +618,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Provider quota status is unknown" in limitation
             for limitation in sources[YOUTUBE_SOURCE_ID]["known_limitations"]
         ))
+        self.assertEqual(client.batch_gets, 1)
         send_mock.assert_not_called()
 
     async def test_vercel_shared_live_composes_all_sources_without_provider_calls(self):

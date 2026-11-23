@@ -36,6 +36,7 @@ SOURCE_ALLOCATION_POOLS = {
 }
 YOUTUBE_OTHER_POOL = "youtube_other"
 YOUTUBE_PROVIDER_TIMEZONE = ZoneInfo("America/Los_Angeles")
+_NO_STATE_SNAPSHOT = object()
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -679,7 +680,8 @@ class PublicAdmission:
             return zero
         return {"requests": requests, "cost": cost}
 
-    def quota_runtime_snapshot(self, pool_names, *, source_ids=(), now: datetime) -> dict:
+    def quota_runtime_snapshot(self, pool_names, *, source_ids=(), now: datetime,
+                               state_snapshot=_NO_STATE_SNAPSHOT) -> dict:
         """Read quota usage and provider-attempt times from one durable state snapshot."""
         now = _utc(now)
         if (not isinstance(pool_names, (tuple, list)) or not pool_names
@@ -811,6 +813,11 @@ class PublicAdmission:
                     for source_id in source_ids
                 },
             }
+
+        if state_snapshot is not _NO_STATE_SNAPSHOT:
+            if not isinstance(state_snapshot, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            return read(state_snapshot)[1]
 
         read_many = getattr(self.store, "read_many", None)
         if callable(read_many):

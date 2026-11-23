@@ -328,7 +328,8 @@ def schedule_metadata(atomic_store, state_key: str, now: datetime, *, error_code
     )
 
 
-def schedule_metadata_for_sources(atomic_store, schedules, now: datetime) -> dict:
+def schedule_metadata_for_sources(atomic_store, schedules, now: datetime, *,
+                                  state_snapshot=None) -> dict:
     """Read independent source schedules together when the store supports batching."""
     schedules = tuple(schedules)
     if schedules:
@@ -336,7 +337,10 @@ def schedule_metadata_for_sources(atomic_store, schedules, now: datetime) -> dic
     keys = tuple(item[1] for item in schedules)
     read_many = getattr(atomic_store, "read_many", None)
     states = None
-    if schedules and callable(read_many):
+    if (state_snapshot is not None and isinstance(state_snapshot, dict)
+            and set(state_snapshot) == set(keys)):
+        states = state_snapshot
+    if schedules and states is None and callable(read_many):
         try:
             candidate = read_many(keys)
             if isinstance(candidate, dict) and set(candidate) == set(keys):
