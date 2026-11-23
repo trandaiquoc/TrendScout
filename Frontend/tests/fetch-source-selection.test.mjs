@@ -141,6 +141,93 @@ test('submits all four selected sources with current YouTube policy consent', as
   assert.equal(requests[1].headers['X-YouTube-Policy-Version'], 'd6-youtube-v2');
 });
 
+test('chains acknowledged Vercel LIVE source slices without stalled-queue delays', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
+  const requests = [];
+  const pollDelays = [];
+  const sourceIds = [
+    'wikimedia_pageviews_top_per_country',
+    'google_web_serp',
+    'bing_web_serp',
+    'youtube_video_search',
+  ];
+  let completedSlices = 0;
+  let statusReads = 0;
+  let terminalStatus = null;
+  globalThis.window = {
+    setTimeout(callback, milliseconds) {
+      pollDelays.push(milliseconds);
+      queueMicrotask(callback);
+      return pollDelays.length;
+    },
+    clearTimeout() {},
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    const url = String(path);
+    requests.push({ url, ...options });
+    if (url === '/api/v1/fetches') {
+      if (options.headers?.['X-TrendScout-Fetch-Continuation'] === '1') {
+        completedSlices += 1;
+      }
+      return new Response(JSON.stringify({
+        fetch_id: COMPLETED_ID, data_mode: 'LIVE', status: 'QUEUED',
+      }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url === '/api/v1/fetches/' + COMPLETED_ID) {
+      statusReads += 1;
+      const completed = completedSlices === sourceIds.length;
+      const sources = sourceIds.map((source_id) => ({
+        source_id, status: 'SUCCESS', delivery_state: 'CACHED',
+        provider_request_count: 0,
+      }));
+      terminalStatus = completed
+        ? { status: 'COMPLETED', terminal: true, sources } : null;
+      return new Response(JSON.stringify(completed
+        ? terminalStatus : { status: 'QUEUED', terminal: false }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw new Error('Unexpected Vercel Fetch request: ' + url);
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => sourceIds,
+      youtubePolicyVersion: () => 'd6-youtube-v2',
+      runtimeScope: () => 'VERCEL_SHARED_LIVE',
+    });
+    await controller.activate();
+
+    const submissions = requests.filter((request) => request.url === '/api/v1/fetches');
+    assert.equal(submissions.length, sourceIds.length + 1);
+    assert.equal(submissions[0].headers['X-TrendScout-Fetch-Continuation'], undefined);
+    assert.ok(submissions.slice(1).every((request) => (
+      request.headers['X-TrendScout-Fetch-Continuation'] === '1'
+    )));
+    assert.equal(new Set(submissions.map((request) => (
+      request.headers['Idempotency-Key']
+    )).filter(Boolean)).size, 1);
+    assert.ok(submissions.every((request) => (
+      JSON.parse(request.body).sources.join(',') === sourceIds.join(',')
+    )));
+    assert.ok(submissions.every((request) => (
+      request.headers['X-YouTube-Policy-Version'] === 'd6-youtube-v2'
+    )));
+    assert.equal(requests[1].url, '/api/v1/fetches');
+    assert.equal(requests[2].url, '/api/v1/fetches/' + COMPLETED_ID);
+    assert.equal(statusReads, sourceIds.length);
+    assert.deepEqual(pollDelays, []);
+    assert.deepEqual(terminalStatus.sources.map((source) => source.delivery_state),
+      sourceIds.map(() => 'CACHED'));
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test('omits source selection when the UI leaves the default all-sources choice', async () => {
   const requests = await activateWithSources(null);
 
@@ -319,7 +406,9 @@ test('uncertain continuation polls its existing job before another source slice'
     if (path === '/api/v1/fetches') {
       submissions += 1;
       if (submissions === 1) {
-        return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        return new Response(JSON.stringify({
+          fetch_id: COMPLETED_ID, data_mode: 'LIVE', status: 'QUEUED',
+        }), {
           status: 202, headers: { 'Content-Type': 'application/json' },
         });
       }
@@ -329,7 +418,7 @@ test('uncertain continuation polls its existing job before another source slice'
     }
     statusReads += 1;
     const body = statusReads === 1
-      ? { status: 'QUEUED', recovery_available: true, terminal: false }
+      ? { status: 'RUNNING', lease_until: new Date(Date.now() + 60_000).toISOString(), terminal: false }
       : { status: 'PARTIAL', terminal: true };
     return new Response(JSON.stringify(body), {
       status: 200, headers: { 'Content-Type': 'application/json' },
@@ -340,6 +429,7 @@ test('uncertain continuation polls its existing job before another source slice'
     const controller = new PublicFetchController({
       onState: (state) => states.push(state.kind), onTerminal: () => {},
       locale: () => 'en', sourceIds: () => ['google_web_serp'],
+      runtimeScope: () => 'VERCEL_SHARED_LIVE',
     });
     await controller.activate();
 

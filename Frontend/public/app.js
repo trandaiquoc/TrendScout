@@ -1494,6 +1494,8 @@ const fetchController = new PublicFetchController({
   },
   youtubeSelected: () => effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID),
   youtubePolicyVersion: acceptedYoutubePolicyVersion,
+  runtimeScope: () => isVercelSharedLive(state.capabilities)
+    ? 'VERCEL_SHARED_LIVE' : 'LOCAL',
 });
 const historyFetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale, historyDays: 2,

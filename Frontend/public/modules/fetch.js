@@ -101,7 +101,8 @@ const wait = (milliseconds) => new Promise((resolve) => {
 
 export class PublicFetchController {
   constructor({ onState, onTerminal, locale, historyDays = null, sourceIds = null,
-    youtubeSelected = () => false, youtubePolicyVersion = () => null }) {
+    youtubeSelected = () => false, youtubePolicyVersion = () => null,
+    runtimeScope = () => 'LOCAL' }) {
     if (historyDays !== null && (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2)) {
       throw new RangeError('Historical Fetch is limited to one or two days.');
     }
@@ -112,6 +113,7 @@ export class PublicFetchController {
     this.sourceIds = sourceIds;
     this.youtubeSelected = youtubeSelected;
     this.youtubePolicyVersion = youtubePolicyVersion;
+    this.runtimeScope = runtimeScope;
     this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
@@ -126,6 +128,13 @@ export class PublicFetchController {
     this.statusPolls = 0;
     this.statusErrorRetries = 0;
     this.lastAutomaticDispatchAt = 0;
+    this.continuationAcknowledged = false;
+  }
+
+  isVercelSharedLiveRuntime() {
+    return this.requestKind === 'latest'
+      && typeof this.runtimeScope === 'function'
+      && this.runtimeScope() === 'VERCEL_SHARED_LIVE';
   }
 
   async activate() {
@@ -138,7 +147,10 @@ export class PublicFetchController {
     }
     const isContinuation = this.resumeNeeded;
     const continuationFetchId = isContinuation ? this.fetchId : null;
-    if (isContinuation) this.fetchId = null;
+    if (isContinuation) {
+      this.fetchId = null;
+      this.continuationAcknowledged = false;
+    }
     this.busy = true;
     this.emit({ kind: 'submitting', busy: true });
     try {
@@ -160,6 +172,7 @@ export class PublicFetchController {
           this.statusPolls = 0;
           this.statusErrorRetries = 0;
           this.lastAutomaticDispatchAt = 0;
+          this.continuationAcknowledged = false;
         }
         this.activeYoutubePolicyVersion = this.includesYouTube ? policyVersion : null;
         this.requestBody = this.historyDays !== null
@@ -178,6 +191,7 @@ export class PublicFetchController {
         this.statusPolls = 0;
         this.statusErrorRetries = 0;
         this.lastAutomaticDispatchAt = 0;
+        this.continuationAcknowledged = false;
       }
       const headers = { 'Idempotency-Key': this.key };
       if (isContinuation) headers['X-TrendScout-Fetch-Continuation'] = '1';
@@ -218,6 +232,25 @@ export class PublicFetchController {
       this.fetchId = accepted.fetch_id;
       this.resumeNeeded = false;
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
+      if (isContinuation && this.isVercelSharedLiveRuntime()) {
+        // A successful Vercel continuation response is sent only after its
+        // bounded source slice has yielded or completed. The next status read
+        // can therefore dispatch the next queued slice without the generic
+        // stalled-queue delay. Uncertain responses still poll first.
+        this.continuationAcknowledged = true;
+      } else if (!isContinuation && this.isVercelSharedLiveRuntime()
+          && ['QUEUED', 'RUNNING'].includes(accepted.status)
+          && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+        // The first Vercel POST durably queues the job but deliberately does no
+        // provider work. Send its same-key continuation immediately after the
+        // job ID is acknowledged instead of waiting for the queue to look stale.
+        this.automaticContinuations += 1;
+        this.lastAutomaticDispatchAt = Date.now();
+        this.resumeNeeded = true;
+        this.busy = false;
+        await this.activate();
+        return;
+      }
       await this.poll();
     } catch (error) {
       if (isContinuation && continuationFetchId && isUncertainSubmissionError(error)) {
@@ -265,6 +298,7 @@ export class PublicFetchController {
     this.statusPolls = 0;
     this.statusErrorRetries = 0;
     this.lastAutomaticDispatchAt = 0;
+    this.continuationAcknowledged = false;
     await this.activate();
     return true;
   }
@@ -327,6 +361,7 @@ export class PublicFetchController {
           this.statusPolls = 0;
           this.statusErrorRetries = 0;
           this.lastAutomaticDispatchAt = 0;
+          this.continuationAcknowledged = false;
           this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
           this.onTerminal(status.run_id || null, status);
           return;
@@ -378,6 +413,21 @@ export class PublicFetchController {
         }
         if (status.status === 'QUEUED' && status.recovery_available !== true
             && typeof status.retry_at !== 'string') {
+          if (this.continuationAcknowledged && this.isVercelSharedLiveRuntime()) {
+            this.continuationAcknowledged = false;
+            if (this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+              this.resumeNeeded = true;
+              this.automaticContinuations += 1;
+              this.lastAutomaticDispatchAt = Date.now();
+              this.emit({ kind: 'auto-resuming', busy: true, fetch: status });
+              this.busy = false;
+              await this.activate();
+              return;
+            }
+            this.busy = false;
+            this.emit({ kind: 'recovery-available', busy: false, fetch: status });
+            return;
+          }
           const updatedAt = Date.parse(status.updated_at || status.created_at || '');
           const stalledSince = Math.max(
             Number.isFinite(updatedAt) ? updatedAt : 0,

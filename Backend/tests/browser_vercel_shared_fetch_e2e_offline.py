@@ -179,10 +179,16 @@ window.fetch = (path, options = {}) => {
   check(window.statusReads === 4, 'Fetch automatically resumes after transient status failures');
   const submissions = window.fetchRequests.filter((request) =>
     request.path === '/api/v1/fetches' && request.method === 'POST');
-  check(submissions.length === 2, 'same durable Fetch is safely reattached');
-  check(submissions.length === 2
-    && submissions[0].headers['Idempotency-Key'] === submissions[1].headers['Idempotency-Key'],
-  'automatic continuation reuses the idempotency key');
+  check(submissions.length === 3,
+    'one enqueue and two bounded Vercel continuations finish the durable Fetch');
+  check(submissions.length === 3 && submissions.every((request) =>
+    request.headers['Idempotency-Key'] === submissions[0].headers['Idempotency-Key']),
+  'all automatic continuations reuse the idempotency key');
+  check(submissions.length === 3
+    && submissions[0].headers['X-TrendScout-Fetch-Continuation'] === undefined
+    && submissions.slice(1).every((request) =>
+      request.headers['X-TrendScout-Fetch-Continuation'] === '1'),
+  'only Vercel continuation requests carry the continuation marker');
   check(window.collectionRecoveryPosts === 1, 'saved source checkpoints are persisted without provider calls');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
   check(window.collectionsReads >= 1, 'persisted Collections snapshot is readable');

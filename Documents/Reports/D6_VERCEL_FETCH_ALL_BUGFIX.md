@@ -2,8 +2,7 @@
 
 **Ngày:** 2026-11-19
 **Nhánh làm việc:** `main`
-**Trạng thái:** G1–G6 PASS.
-**Tiến độ:** 100% theo trọng số gate.
+**Trạng thái:** G1–G6 passed for the historical 2026-11-19 scope. The current Fetch All objective remains open; see the later follow-up sections.
 
 ## Phạm vi và giới hạn
 
@@ -187,3 +186,13 @@ The admission guard wrote a durable wall-clock high-water mark and rejected ever
 **Limit:** The five-second bound is a deliberately small recovery window, but the old telemetry does not establish whether every observed regression fit within it. Regressions beyond five seconds and quota-day boundary races remain rejected. The fix has only just deployed, so there is not yet post-deploy runtime evidence to assess its effect. A Production all-source Fetch and subsequent cached acceptance remain unverified by design.
 
 **Deployment verification:** Commit `116ce8ea99c2d649c12c8f229f9dd4b467a9796d` automatically produced Production deployment `dpl_Da4izmHzvKUKWZT8AhNGE94qopyy`, state `READY`, with alias `https://trend-scout-mu.vercel.app`. A read-only GET of `/dashboard/` returned HTTP 200. This confirms deployment and static dashboard delivery; it does not verify browser-side API calls, a fresh four-source run, or a cached second run. No Fetch POST or provider request was made.
+
+### Vercel continuation idle-time follow-up (2026-11-23, Asia/Bangkok)
+
+**Finding:** The first Vercel Fetch POST durably enqueues a job and returns its ID without running a source. The browser then waited for the queued job to appear stalled for six seconds and added a two-second retry delay before dispatching a bounded source slice. After a source slice yielded the job to the queue, the same delay could recur before the next slice. This code path could add about eight seconds of idle time at each normal queue boundary, apart from status-request time. This estimate is inferred from the client constants and queue timestamps, not a Production timing measurement.
+
+**Change:** The latest-source controller now sends the first same-key Vercel continuation immediately after the queued job ID is acknowledged. After a successful continuation response, it advances as soon as the status read confirms the job is queued without a scheduled retry. A timeout or other uncertain continuation still reattaches to the existing Fetch ID and polls before another continuation. Local and Wikimedia-history controller flows keep their existing behavior. The Frontend README now describes this flow and the CDN static-asset path accurately.
+
+**Focused verification:** The Frontend suite passed all 53 tests, including a mocked four-slice Vercel LIVE sequence with zero polling timers and an uncertain-continuation case that remains poll-first. The offline Chrome scenario `python Backend/tests/browser_vercel_shared_fetch_e2e_offline.py` passed; its API responses are mocked and network access is blocked. `node --check` passed for `fetch.js` and `app.js`; `git diff --check` passed. These checks do not call providers or prove the Production four-source LIVE/CACHED acceptance.
+
+**Limit:** The change removes avoidable browser idle time between slices; provider response time, Firestore latency, and the observed Production API latency remain. The browser session for this follow-up reached Vercel login, so browser-side Production API requests were not inspected. No access setting changed and no Production Fetch or provider request was made.

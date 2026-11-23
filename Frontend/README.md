@@ -21,7 +21,7 @@ Collection counts show keywords placed directly in a Collection; parent counts i
 - **public/app.js** composes shared views and capability state; **public/modules/source-library.js**, **research-workspace.js**, and **run-history.js** own their respective screen interactions and request state.
 - **public/modules/api.js** is the single HTTP boundary. It issues same-origin GET/POST requests with a bounded timeout and validates JSON/HTTP errors. Fetch submission and checkpoint-recovery POSTs use the Vercel function deadline; only the idempotent Fetch controller retries them with the same request key.
 - **public/modules/capabilities.js** loads server-owned source and Fetch readiness and stores the last-known public response for immediate, stale-labelled rendering after reload.
-- **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch, bounded status polling, automatic same-key recovery after transient errors or lease expiry, and explicit recovery of a durable job.
+- **public/modules/fetch.js** owns the anonymous, idempotent one-click Fetch, bounded status polling, automatic same-key recovery after transient errors or lease expiry, and explicit recovery of a durable job. Vercel Shared LIVE starts the first bounded source slice immediately after enqueue acknowledgement and advances after an acknowledged slice is confirmed queued; an uncertain continuation still polls the existing job before retrying.
 - **public/modules/format.js** formats dates and numbers for the selected locale.
 - **public/modules/theme.js** and **public/modules/i18n.js** manage display preferences.
 - **public/modules/i18n/vi.js** and **public/modules/i18n/en.js** are separate user-facing copy catalogs.
@@ -45,7 +45,7 @@ Capability data distinguishes adapter implementation from approval, configuratio
 
 ## Static assets and Vercel
 
-Local FastAPI serves the files under public/ at /dashboard/. The Vercel build runs Backend/scripts/prepare_vercel.py, which packages every non-hidden file under Frontend/public into the function's generated app/dashboard_assets.py. The same application route serves the public HTML, CSS, and nested JavaScript modules. Private run data stays behind its API boundary; assets are not moved to an unrelated CDN path.
+Local FastAPI serves the files under Frontend/public at /dashboard/. The Vercel build runs Backend/scripts/prepare_vercel.py and stages the same non-hidden files under Backend/public/dashboard. Vercel FastAPI static CDN is enabled and excludes those files from the Python Function bundle; Backend/vercel.json redirects / to /dashboard/. The FastAPI mount remains available for local runs and as the configured application path. Private run data stays behind its protected API boundary.
 
 ## Checks
 
