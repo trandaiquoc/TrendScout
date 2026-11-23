@@ -142,6 +142,31 @@ class PublicAdmissionTests(unittest.TestCase):
             snapshot["last_provider_request_at"][YOUTUBE_SOURCE_ID], NOW.isoformat()
         )
 
+    def test_runtime_quota_snapshot_uses_validated_read_many_when_available(self):
+        class BatchOnlyStore:
+            def __init__(self):
+                self.read_calls = 0
+                self.transaction_calls = 0
+
+            def read_many(self, keys):
+                self.read_calls += 1
+                if keys != ["public"]:
+                    raise AssertionError("unexpected state key")
+                return {"public": {}}
+
+            def transact(self, _key, _operation):
+                self.transaction_calls += 1
+                raise AssertionError("read-only quota metadata must not start a transaction")
+
+        store = BatchOnlyStore()
+        reader = PublicAdmission(store, policy(), state_key="public")
+        snapshot = reader.quota_runtime_snapshot(("serpapi", "youtube"), now=NOW)
+
+        self.assertEqual(store.read_calls, 1)
+        self.assertEqual(store.transaction_calls, 0)
+        self.assertTrue(snapshot["operational_enabled"])
+        self.assertEqual(snapshot["pools"]["serpapi"]["daily"]["used"], 0)
+
     def test_history_request_metadata_is_idempotent_and_survives_worker_claim(self):
         metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": 2}
         accepted = self.control.admit("explicit-history-request", now=NOW,

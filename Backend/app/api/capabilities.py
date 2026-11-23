@@ -25,6 +25,42 @@ router = APIRouter()
 _RESEARCH_CATALOG = Path(__file__).resolve().parents[1] / "sources" / "research_catalog.json"
 
 
+async def _read_capability_metadata(distributed):
+    """Read independent durable capability state in parallel without mutation."""
+    runtime_reader = getattr(distributed, "capability_runtime_metadata", None)
+    schedule_reader = getattr(distributed, "refresh_schedule_metadata", None)
+    names, readers = [], []
+    if callable(runtime_reader):
+        names.append("runtime")
+        readers.append(runtime_reader)
+    if callable(schedule_reader):
+        names.append("schedule")
+        readers.append(schedule_reader)
+    if not readers:
+        return None, None
+
+    results = await asyncio.gather(
+        *(asyncio.to_thread(reader) for reader in readers),
+        return_exceptions=True,
+    )
+    values = dict(zip(names, results))
+    runtime_metadata = values.get("runtime")
+    if isinstance(runtime_metadata, Exception):
+        runtime_metadata = {
+            "admission_status": "UNAVAILABLE",
+            "operational_enabled": False,
+            "google": {"status": "UNAVAILABLE"},
+            "youtube": {"status": "UNAVAILABLE"},
+        }
+    elif isinstance(runtime_metadata, BaseException):
+        raise runtime_metadata
+
+    refresh_schedule = values.get("schedule")
+    if isinstance(refresh_schedule, BaseException):
+        raise refresh_schedule
+    return runtime_metadata, refresh_schedule
+
+
 def _source_known_limitations(item, *, vercel_shared_live):
     if not vercel_shared_live:
         return list(item.known_limitations)
@@ -407,18 +443,7 @@ async def capabilities(request: Request, response: Response):
     shared_policy_reconciliation_required = False
     distributed = (getattr(request.state, "distributed_public_fetch", None)
                    or request.app.state.distributed_public_fetch)
-    runtime_metadata = None
-    runtime_metadata_reader = getattr(distributed, "capability_runtime_metadata", None)
-    if callable(runtime_metadata_reader):
-        try:
-            runtime_metadata = await asyncio.to_thread(runtime_metadata_reader)
-        except Exception:
-            runtime_metadata = {
-                "admission_status": "UNAVAILABLE",
-                "operational_enabled": False,
-                "google": {"status": "UNAVAILABLE"},
-                "youtube": {"status": "UNAVAILABLE"},
-            }
+    runtime_metadata, refresh_schedule = await _read_capability_metadata(distributed)
     if enabled:
         if distributed is not None:
             try:
@@ -537,10 +562,6 @@ async def capabilities(request: Request, response: Response):
         candidate_environment = os.environ.get("VERCEL_ENV")
         if candidate_environment in {"production", "preview", "development"}:
             deployment_environment = candidate_environment
-    refresh_schedule = None
-    refresh_schedule_reader = getattr(distributed, "refresh_schedule_metadata", None)
-    if callable(refresh_schedule_reader):
-        refresh_schedule = await asyncio.to_thread(refresh_schedule_reader)
     return {
         "contract_version": "1.0",
         "environment_mode": settings.environment_profile,

@@ -15,6 +15,18 @@ _ID = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _MAX_BYTES = 700_000
 
 
+def _validate_state_mapping(value):
+    if not isinstance(value, dict):
+        raise ValueError("coordination state must be a mapping")
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False,
+                             separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("coordination state must be finite JSON") from None
+    if len(encoded) > _MAX_BYTES:
+        raise ValueError("coordination state exceeds document budget")
+
+
 class CommitOutcomeUnknown(RuntimeError):
     """The transaction could have committed; do not perform an external action."""
 
@@ -46,15 +58,7 @@ class FirestoreAtomicStateStore:
             if not isinstance(current, dict):
                 raise ValueError("coordination state must be a mapping")
             updated, result = operation(deepcopy(current))
-            if not isinstance(updated, dict):
-                raise ValueError("coordination state must be a mapping")
-            try:
-                encoded = json.dumps(updated, ensure_ascii=False, allow_nan=False,
-                                     separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError, UnicodeError):
-                raise ValueError("coordination state must be finite JSON") from None
-            if len(encoded) > _MAX_BYTES:
-                raise ValueError("coordination state exceeds document budget")
+            _validate_state_mapping(updated)
             # Read-only operations (quota snapshots, status lookups, cache
             # misses) must not turn into Firestore writes. Besides reducing
             # quota use, this keeps startup probes from creating empty state.
@@ -87,8 +91,7 @@ class FirestoreAtomicStateStore:
             if key not in references or key in values:
                 raise ValueError("Firestore batch returned an unexpected document")
             value = snapshot.to_dict() if snapshot.exists else {}
-            if not isinstance(value, dict):
-                raise ValueError("coordination state must be a mapping")
+            _validate_state_mapping(value)
             values[key] = deepcopy(value)
         if set(values) != set(references):
             raise ValueError("Firestore batch omitted a requested document")

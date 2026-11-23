@@ -680,7 +680,7 @@ class PublicAdmission:
         return {"requests": requests, "cost": cost}
 
     def quota_runtime_snapshot(self, pool_names, *, source_ids=(), now: datetime) -> dict:
-        """Read quota usage and provider-attempt times in one atomic state read."""
+        """Read quota usage and provider-attempt times from one durable state snapshot."""
         now = _utc(now)
         if (not isinstance(pool_names, (tuple, list)) or not pool_names
                 or any(not isinstance(name, str) or name not in self._pools
@@ -812,6 +812,14 @@ class PublicAdmission:
                 },
             }
 
+        read_many = getattr(self.store, "read_many", None)
+        if callable(read_many):
+            try:
+                current = read_many([self.state_key])[self.state_key]
+            except Exception:
+                # A failed optional batch read keeps the previous durable path.
+                return self.store.transact(self.state_key, read)
+            return read(current)[1]
         return self.store.transact(self.state_key, read)
 
     def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:

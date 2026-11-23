@@ -112,6 +112,17 @@ class FirestoreAtomicStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.read_many(["expected"])
 
+    def test_read_many_enforces_transaction_json_and_size_budget(self):
+        client = FakeClient()
+        store = FirestoreAtomicStateStore(client)
+        client.data["oversized"] = {"value": "x" * 700_001}
+        with self.assertRaisesRegex(ValueError, "document budget"):
+            store.read_many(["oversized"])
+
+        client.data["non_finite"] = {"value": float("nan")}
+        with self.assertRaisesRegex(ValueError, "finite JSON"):
+            store.read_many(["non_finite"])
+
     def test_ambiguous_commit_is_never_reported_successful(self):
         client = FakeClient()
         store = FirestoreAtomicStateStore(client)

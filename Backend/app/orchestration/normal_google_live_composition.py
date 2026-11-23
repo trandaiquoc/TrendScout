@@ -1091,7 +1091,7 @@ async def normal_google_live_composition(*, user_agent,
         }
 
         def capability_runtime_metadata():
-            """Read admission and provider quota data with one durable transaction."""
+            """Read admission and provider quota data from one durable state snapshot."""
             pool_names = tuple(name for name in (
                 "serpapi", "google_rss", "serpapi_google", "serpapi_bing",
                 "youtube", "youtube_other",

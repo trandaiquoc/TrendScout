@@ -4,12 +4,14 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import httpx
 from fastapi import FastAPI
 
+from app.api.capabilities import _read_capability_metadata
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.jobs.public_admission import AdmissionDenied
@@ -92,6 +94,25 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
 
 
 class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_quota_and_schedule_reads_run_concurrently(self):
+        barrier = Barrier(2)
+
+        def read_runtime():
+            barrier.wait(timeout=1)
+            return {"admission_status": "AVAILABLE"}
+
+        def read_schedule():
+            barrier.wait(timeout=1)
+            return {"sources": {WIKIMEDIA_SOURCE_ID: {"status": "AVAILABLE"}}}
+
+        runtime, schedule = await _read_capability_metadata(SimpleNamespace(
+            capability_runtime_metadata=read_runtime,
+            refresh_schedule_metadata=read_schedule,
+        ))
+
+        self.assertEqual(runtime["admission_status"], "AVAILABLE")
+        self.assertEqual(schedule["sources"][WIKIMEDIA_SOURCE_ID]["status"], "AVAILABLE")
+
     async def test_request_timing_log_uses_route_template_and_excludes_request_data(self):
         settings = SimpleNamespace(
             environment_profile="vercel",
