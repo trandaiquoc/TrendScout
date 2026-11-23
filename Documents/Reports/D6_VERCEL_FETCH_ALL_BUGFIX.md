@@ -296,3 +296,28 @@ Fresh four-source LIVE followed by all-four cached acceptance without provider c
 The two dataset responses returned the same existing dataset, `a646be5f8602f4e9ac182dc90bcdc6b8`, with status `PARTIAL`; the preceding read-only audit recorded 1,637 source records and 2,141 retained keywords. On the prior `6dab4c9` deployment, two warm dataset-route totals were 5.163/5.206 seconds. The new samples are lower, but they are too few to establish a stable latency improvement or attribute the difference to this read-path change. Connector timing includes overhead outside the application measurement.
 
 These checks used GET only: no Fetch was submitted and no provider API was requested. The persisted dataset remains partial, and fresh four-source LIVE followed by a complete provider-free cached run remains unverified.
+
+### Read-only dashboard startup follow-ups (2026-11-24, Asia/Bangkok)
+
+**Findings and changes:**
+
+- `af711b0` routes Collection-backed GET/HEAD requests through a lightweight read context. These requests restore the persisted SQLite snapshot without constructing LIVE source workers, provider adapters, admission gates, or quota machinery.
+- `b234505` batches read-only quota state and reads independent capability metadata concurrently. Durable Fetch reservations and mutations remain on their existing transactional paths.
+- `69a4759` removes the duplicate admission-state read from `/api/v1/capabilities`. That endpoint reads its quota document and refresh-schedule documents in one read-only Firestore batch; if the batch fails, it falls back to the prior concurrent readers. The integration test confirms one batch for the capability request.
+- `6f6819b` keeps one verified snapshot blob and its validated expiry in a bounded process-local cache for at most 60 seconds. Each restore still reads the durable snapshot pointer and matches its content digest. Cache hits check expiry and re-hash the blob; misses revalidate the Firestore manifest and chunks. This avoids a repeated manifest read on warm processes without changing snapshot writes.
+
+**Production timing evidence:** The measurements below are Vercel application time from request start to response start. They exclude response transfer and connector overhead. The repeated samples are small and are not a latency distribution.
+
+| Read path and condition | Before | After | Observed change |
+|---|---:|---:|---:|
+| `/api/v1/capabilities`, SFO, two requests per deployment | 3.710 / 3.856 s (mean 3.783 s) | 2.205 / 2.224 s (mean 2.215 s) | about 41% lower |
+| `/api/v1/datasets/latest`, warm IAD read | 2.122 s | 1.912 s | about 10% lower |
+| `/api/v1/datasets/latest`, cold SFO snapshot miss | 5.400 / 5.408 s | 5.404 / 5.568 s | still about 5.4–5.6 s |
+
+The capability comparison is between deployment `dpl_Lso21AnU4Qrv2SuFPckhU9EppNJ1` and the capability-batching deployment `dpl_2A2t9xzf97VGVtfuruZynpzu25aY`; both pairs are SFO `GET /api/v1/capabilities` samples. The warm dataset comparison is between the IAD sample on `dpl_Lso21AnU4Qrv2SuFPckhU9EppNJ1` and the IAD sample on `dpl_7DSnVoQ4oKzTEU5nZz8f3LZ4H3c9`. Both report a 4,656,663-byte snapshot cache hit. Cold SFO misses still spend most of their time restoring that 4.66 MB blob, so this change has not improved the cold-start case.
+
+**Focused verification:** The capability, quota, schedule, and Vercel middleware suites passed (70 tests); Ruff, Python compilation, and `git diff --check` passed. The snapshot and Collections suites passed (33 tests); their tests confirm a warm read skips the manifest GET, expiry still fails closed, and the manifest is rechecked after the 60-second cache window. Ruff, Python compilation, and `git diff --check` passed for that change as well.
+
+**Deployment and read-only verification:** Commit `69a4759b25fa6f7cf9bec21e27950f0c4c14c90f` deployed as `dpl_2A2t9xzf97VGVtfuruZynpzu25aY`, state `READY`, with the Production alias assigned. The latest commit, `6f6819b7d2b3083bc5ad7d16d8a4c1b7da5e702d`, deployed as `dpl_7DSnVoQ4oKzTEU5nZz8f3LZ4H3c9`, state `READY`, aliasing `trend-scout-mu.vercel.app`. An authenticated read-only `GET /api/v1/datasets/latest` returned HTTP 200 and the existing dataset `a646be5f8602f4e9ac182dc90bcdc6b8`, still `PARTIAL`. The request made no Fetch submission or provider call and did not change provider quota or saved Production data.
+
+Cold SFO snapshot restore and the owner acceptance of one fresh four-source LIVE run followed by a complete all-four cached run remain open. No Production Fetch POST or provider API request was made.
