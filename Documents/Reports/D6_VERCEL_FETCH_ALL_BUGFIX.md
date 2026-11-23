@@ -133,3 +133,43 @@ That reload also exposed a dashboard metric bug. Production capabilities reporte
 Post-deployment browser verification on the existing `https://trend-scout-mu.vercel.app/dashboard/` alias confirmed the fix: the enabled-source metric stayed at four after the Analytics GET completed with HTTP 200, although Analytics `active_sources` reports only Wikimedia. The Vietnamese dashboard rendered its saved totals. Collections displayed saved keyword rows, and Run History displayed the latest runs at 03:35 and 03:16 as `PARTIAL`; `/api/v1/collections` and `/api/v1/runs/history` returned HTTP 200. The reload's observed app requests were GET only; no Fetch POST or provider request was sent for this verification. The deployment serves the existing alias; no project or access setting changed.
 
 The local-to-Firestore import remains dry-run only. No Production data or quota was reset, deleted or applied, and no new Vercel project or branch was created.
+
+### Vercel latency and snapshot follow-up (2026-11-23, Asia/Bangkok)
+
+**Status:** the dashboard and persisted-data GET paths improved in Production. A new all-source LIVE Fetch and its subsequent all-CACHED acceptance were not run; no production Fetch POST or provider request was sent in this follow-up.
+
+#### Confirmed causes
+
+- `Backend/pyproject.toml` explicitly disabled Vercel's FastAPI static CDN integration. Dashboard HTML, CSS, JavaScript and modules were read from a Python asset dictionary, so opening or reloading the site invoked the function for static files.
+- `FirestoreSnapshotBlobs.get()` issued one Firestore read per chunk in sequence. The 45.5 MB SQLite image was compressed to 3,733,635 bytes, about 33.6 KB above the 3,700,000-byte bound. Available Production error telemetry recorded 20 `COMPRESSED_SNAPSHOT_TOO_LARGE` errors, 20 function timeouts at 120 seconds, two `AdmissionDenied` errors and two database snapshot `OperationalError` errors for the deployment inspected before this fix. This is evidence of the currently reported failure modes, not attribution to either earlier user Fetch.
+- After restoring the image and checking its raw-byte SHA-256, every request recomputed a second SQL-content digest by iterating the full database. The request middleware also built the full Shared LIVE source/runtime composition for Collection-backed GETs, while dashboard startup initiated a hidden Collection workbench read and waited for the algorithm catalog before rendering analytics.
+
+#### Changes
+
+- `scripts/prepare_vercel.py` now stages 22 dashboard files under `Backend/public/dashboard`. FastAPI mounts that path through `StaticFiles`; Vercel is configured to promote and exclude the files from the Python bundle. A Vercel 307 redirect sends `/` to `/dashboard/` before the function.
+- Chunk reads now use Firestore `Client.get_all()` and validate each snapshot by document ID, so response order does not affect integrity checks. The blob budget is 5,700,000 JSON bytes and the compressed SQLite bound is 4,200,000 bytes; base64 expansion remains within the documented 10 MiB Firestore transaction request limit. The load path reuses a well-formed content digest from the versioned pointer, retaining a compatibility fallback for older pointers without it. It still verifies the full restored image against the raw-byte SHA-256.
+- Shared API middleware now restores the large Collections image only for paths that use it. Dashboard startup no longer fetches the hidden Collections workbench; its filter list loads when opened. Saved keyword rows start after the persisted dataset arrives without waiting for capabilities, and analytics no longer waits for the separate algorithm catalog request.
+- Vercel FastAPI static-file CDN, redirect and Firestore API details were checked against official documentation on 2026-11-23: [FastAPI static files on the CDN](https://vercel.com/changelog/fastapi-frontends-and-static-files-served-from-the-cdn), [Vercel project configuration](https://vercel.com/docs/project-configuration/vercel-json), [Firestore Python `Client.get_all`](https://docs.cloud.google.com/python/docs/reference/firestore/latest/google.cloud.firestore_v1.client.Client), [Firestore quotas](https://docs.cloud.google.com/firestore/quotas).
+
+#### Offline checks
+
+- Focused backend suite: 64 passed and 26 subtests passed (`test_firestore_collection_snapshot`, `test_d5_firestore_shared_cache`, `test_vercel_shared_live_fetch`, `test_frontend`, `test_vercel_readonly`).
+- Frontend suite: 52 passed. Ruff, Python compilation, JavaScript syntax and `git diff --check` passed. The build script staged all 22 dashboard files; no generated assets were committed.
+- These checks used local SQLite and fake Firestore/provider adapters. They did not call provider APIs or write Production data.
+
+#### Production read-only timing
+
+The measurements below use the same authenticated Vercel URL fetch tool before and after deploy, timing each request from the client around the tool call. They include connector and request overhead; they are not browser RUM measurements.
+
+| GET path | Before | After | Change |
+|---|---:|---:|---:|
+| `/` (same-origin redirect followed to dashboard) | 7.09 s | 3.01 s | 58% faster |
+| `/api/v1/datasets/latest` | 30.62 s | 9.62 s | 69% faster |
+| `/api/v1/analytics/overview` | 22.10 s | 9.29 s | 58% faster |
+| `/api/v1/collections` | 43.40 s | 9.06 s | 79% faster |
+
+After-deploy requests returned HTTP 200. The dashboard HTML returned `x-vercel-cache: HIT`; the served `app.js` also returned a CDN cache hit and contained the lazy Collection filter and startup changes. A repeated `/api/v1/datasets/latest` request took 9.79 seconds, so the API snapshot path remains materially slower than local and has not been claimed as fast-local. The shared middleware still creates the full request-scoped Shared LIVE composition for these Collection-backed GETs; its contribution to the remaining latency has not been isolated. The measurements are single requests per path (plus that repeated dataset read) and do not establish a latency distribution.
+
+The Git push of app commit `7b20f86814d0f7f9bce594c543f5ce63e575f8cb` automatically produced Production deployment `dpl_EAM1cMmSQhK4TtR8EmkxLqjuJZ8E`, state `READY`, aliased to `https://trend-scout-mu.vercel.app`. Build logs confirmed the 22-file staging command completed. Production validation used HTTP GETs only. Those reads can consume Firestore document-read operations; they made no provider calls and no provider quota reservations or ledger mutations.
+
+The core owner acceptance remains open: Production has not verified that one new user-authorized Fetch returns fresh results from all four approved sources and that a second valid Fetch returns all four as cached with no provider calls. This run expressly withheld Fetch POSTs, source-provider requests, migrations, data resets and quota changes. Existing saved Production data remains unchanged by any write from this follow-up.
