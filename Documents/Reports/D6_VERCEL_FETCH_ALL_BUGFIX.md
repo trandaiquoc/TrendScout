@@ -198,3 +198,24 @@ The admission guard wrote a durable wall-clock high-water mark and rejected ever
 **Limit:** The change removes avoidable browser idle time between slices; provider response time, Firestore latency, and the observed Production API latency remain. The browser session for this follow-up reached Vercel login, so browser-side Production API requests were not inspected. No access setting changed and no Production Fetch or provider request was made.
 
 **Code deployment verification:** Commit `ec3ede0a523d2e84a5e487c0753e2b3cbb2f1694` automatically produced Production deployment `dpl_AxnbKyA8w4QBAQzuG6GwT58KYEcj`, state `READY`, with aliases including `trend-scout-mu.vercel.app`. A read-only authenticated GET of `https://trend-scout-mu.vercel.app/dashboard/` returned HTTP 200 and the current dashboard HTML. This confirms that the continuation change is deployed on the Production alias and that the dashboard document is served. It does not verify browser-side API behavior, live results from all four sources, or a subsequent provider-free cached Fetch. No Fetch POST or provider request was made.
+
+### Latest read-only Production history observations (2026-11-23, Asia/Bangkok)
+
+A read-only `GET /api/v1/runs/history?limit=2` at 14:47 UTC returned two newer persisted runs than the earlier acceptance table. The details GETs did not submit Fetch work or contact providers:
+
+| Run ID | Run time (UTC) | Result |
+|---|---|---|
+| `a646be5f8602f4e9ac182dc90bcdc6b8` | 09:56:32 | `PARTIAL`; Google `STALE_CACHE` (586 records, 0 provider requests), Bing `STALE_CACHE` (1 record, 0 requests), Wikimedia `CACHED` (1,000 records, 0 requests), and YouTube `PARTIAL/CACHED` (50 records, 0 requests, `PAGE_CAP_REACHED`). |
+| `047c819bec4028ecc94df66259a8316f` | 10:02:34 | `PARTIAL`; Google `STALE_CACHE` (586 records, 0 requests; refresh blocked by `MANUAL_REFRESH_COOLDOWN`), while Bing, Wikimedia and YouTube were missing their completed checkpoints after `JOB_DEADLINE_EXPIRED` and were reported as `FETCH_DEADLINE_EXCEEDED`. |
+
+Both runs predate the `ec3ede0` Production deployment at 14:36 UTC and therefore do not verify the latest immediate-continuation change. The cache-only run shows saved results were returned for all four source IDs without new provider calls, but Google and Bing were stale and YouTube's retained result was partial. It does not satisfy the fresh-four-source then fresh-cache acceptance. Vercel's runtime-error aggregation API returned 403; the documented CLI fallback was unavailable because `vercel` is not installed in this workspace.
+
+### Avoid intermediate status reads between Vercel source slices (2026-11-23, Asia/Bangkok)
+
+**Finding:** After each successful bounded source continuation, the browser immediately read `GET /api/v1/fetches/{fetch_id}` to discover that the worker had returned the job to the queue. That status read added another request-scoped function invocation and Firestore job read at every normal source boundary. A four-source run could skip up to three of those intermediate reads; the terminal status read remains necessary to render final per-source results.
+
+**Change:** The continuation POST response now includes `continuation_ready: true` only when that invocation completed a slice for the same Fetch ID and the worker returned the job to `QUEUED`. The browser sends the next bounded same-key continuation directly in that case. A deferred job, lease race, terminal slice, or uncertain response still goes through the existing status/recovery path. No provider, quota, cache, or source-result behavior changed.
+
+**Focused verification:** The Vercel Fetch controller suite passed (30 tests), the Vercel Shared LIVE route suite passed (23 tests), the offline browser continuation/reload scenario passed, and `git diff --check` passed. The controller test confirms a mocked four-slice run now uses one terminal status read instead of four status reads. All network responses were mocked; no provider API or Production Fetch was called.
+
+**Limit:** The removed status reads should reduce Firestore traffic and avoid their request latency at normal source boundaries, but the change has not been measured against a Production Fetch because this objective prohibits another Production Fetch. Provider response time, the 45-second source deadline, Firestore latency, and any failure within a provider handler remain unchanged.

@@ -233,10 +233,19 @@ export class PublicFetchController {
       this.resumeNeeded = false;
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       if (isContinuation && this.isVercelSharedLiveRuntime()) {
-        // A successful Vercel continuation response is sent only after its
-        // bounded source slice has yielded or completed. The next status read
-        // can therefore dispatch the next queued slice without the generic
-        // stalled-queue delay. Uncertain responses still poll first.
+        if (accepted.continuation_ready === true
+            && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
+          // The server confirms this bounded slice returned the durable job to
+          // the queue. Continue directly instead of paying for a status GET
+          // between sources. Deferred, concurrent, terminal, and uncertain
+          // responses still use the status endpoint.
+          this.automaticContinuations += 1;
+          this.lastAutomaticDispatchAt = Date.now();
+          this.resumeNeeded = true;
+          this.busy = false;
+          await this.activate();
+          return;
+        }
         this.continuationAcknowledged = true;
       } else if (!isContinuation && this.isVercelSharedLiveRuntime()
           && ['QUEUED', 'RUNNING'].includes(accepted.status)

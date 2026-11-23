@@ -167,11 +167,18 @@ test('chains acknowledged Vercel LIVE source slices without stalled-queue delays
     const url = String(path);
     requests.push({ url, ...options });
     if (url === '/api/v1/fetches') {
-      if (options.headers?.['X-TrendScout-Fetch-Continuation'] === '1') {
+      const isContinuation = options.headers?.['X-TrendScout-Fetch-Continuation'] === '1';
+      if (isContinuation) {
         completedSlices += 1;
       }
-      return new Response(JSON.stringify({
+      const response = {
         fetch_id: COMPLETED_ID, data_mode: 'LIVE', status: 'QUEUED',
+      };
+      if (isContinuation) {
+        response.continuation_ready = completedSlices < sourceIds.length;
+      }
+      return new Response(JSON.stringify({
+        ...response,
       }), { status: 202, headers: { 'Content-Type': 'application/json' } });
     }
     if (url === '/api/v1/fetches/' + COMPLETED_ID) {
@@ -216,8 +223,8 @@ test('chains acknowledged Vercel LIVE source slices without stalled-queue delays
       request.headers['X-YouTube-Policy-Version'] === 'd6-youtube-v2'
     )));
     assert.equal(requests[1].url, '/api/v1/fetches');
-    assert.equal(requests[2].url, '/api/v1/fetches/' + COMPLETED_ID);
-    assert.equal(statusReads, sourceIds.length);
+    assert.equal(requests[2].url, '/api/v1/fetches');
+    assert.equal(statusReads, 1);
     assert.deepEqual(pollDelays, []);
     assert.deepEqual(terminalStatus.sources.map((source) => source.delivery_state),
       sourceIds.map(() => 'CACHED'));

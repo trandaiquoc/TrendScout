@@ -280,7 +280,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_key_submission_replay_waits_for_explicit_source_continuation(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         _client_factory.side_effect = lambda _token: _Client(events)
-        facade.slice_state = "PARTIAL"
+        facade.slice_state = "QUEUED"
         headers = {
             "Origin": "https://trend-scout.example",
             "x-vercel-oidc-token": "synthetic-test-token",
@@ -303,6 +303,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retry.status_code, 202, retry.text)
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(accepted.json()["fetch_id"], retry.json()["fetch_id"])
+        self.assertTrue(response.json()["continuation_ready"])
         self.assertEqual(retry.headers["idempotent-replay"], "true")
         self.assertEqual(facade.slice_calls, [(_JOB_ID, 1)])
         self.assertNotIn("collections_processed", events)

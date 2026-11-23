@@ -283,6 +283,7 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
                                      owner: str, *, run_worker: bool = True,
                                      process_collections: bool = True):
     """Run or resume a durable Fetch, then classify retained records."""
+    result = None
     shared_live = bool(getattr(distributed, "firestore_shared_live", False))
     vercel_shared_live = (
         shared_live
@@ -308,7 +309,7 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
         if (vercel_shared_live and not terminal_race
                 and not (result is not None and result.get("job_id") == fetch_id
                          and result.get("state") in {"COMPLETED", "PARTIAL"})):
-            return
+            return result
         elif (result and result.get("job_id") != fetch_id
               and result.get("state") in {"COMPLETED", "PARTIAL"}):
             await distributed.run_once(owner)
@@ -316,6 +317,7 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
         await _process_fetch_collections(
             request, distributed, fetch_id, cached_context_only=shared_live
         )
+    return result
 
 
 @router.post("/fetches", status_code=202)
@@ -397,6 +399,7 @@ async def create_fetch(
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
             raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
+        slice_result = None
         # Do not attach a worker to the first Vercel POST. FastAPI runs
         # BackgroundTasks before the ASGI app returns, and the Vercel shared
         # middleware buffers that response while it keeps Firestore alive.
@@ -406,7 +409,7 @@ async def create_fetch(
             if vercel_shared_live:
                 if (accepted.get("result") in {"REPLAY", "JOINED"}
                         and fetch_continuation):
-                    await _run_fetch_and_collections(
+                    slice_result = await _run_fetch_and_collections(
                         request, distributed, accepted["job_id"],
                         f"api-{secrets.token_hex(12)}",
                         process_collections=not vercel_shared_live,
@@ -443,6 +446,11 @@ async def create_fetch(
             "sources": request_sources,
             "created_at": accepted.get("created_at"),
             "status_url": f"/api/v1/fetches/{fetch_id}",
+            **({"continuation_ready": bool(
+                isinstance(slice_result, dict)
+                and slice_result.get("job_id") == fetch_id
+                and slice_result.get("state") == "QUEUED"
+            )} if vercel_shared_live and fetch_continuation else {}),
             **({"shared_state_policy_sync": shared_state_policy_sync}
                if shared_state_policy_sync is not None else {}),
         }
