@@ -145,6 +145,20 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(evidence["bing_verification_history"]), 1)
         self.assertIn(BING_SOURCE_ID, json.loads(snapshot["source_manifest"])[0]["source_id"])
 
+    async def test_bing_request_does_not_require_serpapi_account_api_preflight(self):
+        handler = BingSavedCandidateHandler(
+            gateway=self.gateway, collection_store=self.collections, atomic_store=self.atomic,
+            policy_fingerprint=POLICY, ensure_paid_budget=None, utcnow=lambda: NOW,
+        )
+
+        result = await handler(work_context())
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["provider_request_count"], 1)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertNotIn("account_quota", result["coverage"])
+        self.assertEqual(self.budget_calls, [])
+
     async def test_outside_slot_returns_no_data_without_budget_or_provider_call(self):
         later = NOW + timedelta(hours=3)
         later_handler = BingSavedCandidateHandler(

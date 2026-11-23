@@ -790,7 +790,10 @@ async def normal_google_live_composition(*, user_agent,
             collection_store=collection_store,
             atomic_store=store,
             policy_fingerprint=policy.plan_fingerprint,
-            ensure_paid_budget=budget.ensure_attempt_allowed,
+            # The Bing page request itself reserves the shared Firestore quota
+            # atomically through GuardedAttemptRunner. Do not let a transient
+            # SerpApi Account API read failure disable Bing before that gate.
+            ensure_paid_budget=None,
             utcnow=utcnow,
             allow_initial_acceptance=allow_initial_bing_acceptance,
             shared_cache=cache,

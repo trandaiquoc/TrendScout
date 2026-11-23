@@ -173,7 +173,7 @@ class BingSavedCandidateHandler:
     """At most one saved candidate, one page and one paid attempt per invocation."""
 
     def __init__(self, *, gateway, collection_store, atomic_store, policy_fingerprint,
-                 ensure_paid_budget, utcnow=lambda: datetime.now(timezone.utc),
+                 ensure_paid_budget=None, utcnow=lambda: datetime.now(timezone.utc),
                  allow_initial_acceptance: bool = False, candidate_loader=None,
                  checkpoint_candidate_loader=None,
                  shared_cache: SharedCache | None = None, resolve_cache_grant=None):
@@ -182,7 +182,8 @@ class BingSavedCandidateHandler:
                     and not callable(candidate_loader))
                 or not callable(getattr(atomic_store, "transact", None))
                 or not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
-                or not callable(ensure_paid_budget) or not callable(utcnow)
+                or (ensure_paid_budget is not None and not callable(ensure_paid_budget))
+                or not callable(utcnow)
                 or type(allow_initial_acceptance) is not bool
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
                 or ((shared_cache is None) != (resolve_cache_grant is None))
@@ -190,7 +191,7 @@ class BingSavedCandidateHandler:
                 or candidate_loader is not None and not callable(candidate_loader)
                 or (checkpoint_candidate_loader is not None
                     and not callable(checkpoint_candidate_loader))):
-            raise ValueError("approved Bing gateway, persisted stores and account preflight required")
+            raise ValueError("approved Bing gateway and durable stores required")
         self.gateway = gateway
         self.collection_store = collection_store
         self.candidate_loader = candidate_loader
@@ -433,17 +434,19 @@ class BingSavedCandidateHandler:
                 "coverage": coverage,
             }
 
-        try:
-            account_snapshot = await self.ensure_paid_budget()
-        except SerpApiError as error:
-            return {
-                "status": "FAILED", "data_mode": self.gateway.data_mode,
-                "records": [], "record_count": 0, "error_code": error.code,
-                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
-                             "provider_request_count": 0,
-                             "query": serp_context.canonical_query,
-                             "eligible_slot": slot},
-            }
+        account_snapshot = None
+        if self.ensure_paid_budget is not None:
+            try:
+                account_snapshot = await self.ensure_paid_budget()
+            except SerpApiError as error:
+                return {
+                    "status": "FAILED", "data_mode": self.gateway.data_mode,
+                    "records": [], "record_count": 0, "error_code": error.code,
+                    "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                                 "provider_request_count": 0,
+                                 "query": serp_context.canonical_query,
+                                 "eligible_slot": slot},
+                }
         try:
             slot = (
                 reserve_owner_acceptance_slot(
@@ -562,7 +565,8 @@ class BingSavedCandidateHandler:
                     "provider_created_at": verification["provider_created_at"],
                     "provider_cache_state": page.cache_state,
                     "eligible_slot": slot,
-                    "account_quota": account_snapshot,
+                    **({"account_quota": account_snapshot}
+                       if account_snapshot is not None else {}),
                 },
                 "provider_request_count": 1,
             }
