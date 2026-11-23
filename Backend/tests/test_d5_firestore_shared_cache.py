@@ -46,7 +46,7 @@ from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
 from app.storage.firestore_shared_cache import create_firestore_shared_cache
-from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
+from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs, _SnapshotReadCache
 from app.workers.d5_source_handlers import D5SourceHandlers
 from app.workers.guarded_attempt import GuardedAttemptRunner
 
@@ -216,6 +216,33 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual(self.client.batch_gets, 1)
         # The manifest is read once; chunk documents use one batch read.
         self.assertEqual(self.client.document_gets, 1)
+
+    def test_verified_warm_read_cache_skips_chunk_batch_and_still_checks_expiry(self):
+        records = [{"text": "x" * 500_000}]
+        reference = self.blobs.put(
+            records, now=NOW, retain_until=NOW + timedelta(seconds=30)
+        )
+        read_cache = _SnapshotReadCache()
+        first_reader = FirestoreSnapshotBlobs(self.client, read_cache=read_cache)
+        with self.assertLogs("app.storage.firestore_snapshot_blobs", level="INFO") as first:
+            self.assertEqual(first_reader.get(reference, now=NOW), records)
+        self.assertIn("cache=MISS", first.output[0])
+        self.assertEqual(self.client.batch_gets, 1)
+        self.assertEqual(self.client.document_gets, 1)
+
+        warm_reader = FirestoreSnapshotBlobs(self.client, read_cache=read_cache)
+        with self.assertLogs("app.storage.firestore_snapshot_blobs", level="INFO") as warm:
+            self.assertEqual(warm_reader.get(reference, now=NOW + timedelta(seconds=5)), records)
+        self.assertIn("cache=HIT", warm.output[0])
+        self.assertEqual(self.client.batch_gets, 1)
+        self.assertEqual(self.client.document_gets, 2)
+
+        with self.assertRaisesRegex(ValueError, "expired"):
+            warm_reader.get(reference, now=NOW + timedelta(seconds=30))
+        self.assertIsNone(read_cache.get(
+            reference["digest"], raw_bytes=reference["raw_bytes"],
+            item_count=reference["item_count"],
+        ))
 
     def test_snapshot_within_checkpoint_budget_round_trips_across_multiple_chunks(self):
         records = [{"text": "x" * 4_100_000, "record_count": 1}]

@@ -99,10 +99,15 @@ class FirestoreCollectionSnapshot:
         secure_private_directory(self.path.parent)
         self._utcnow = utcnow
         from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
-        from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
+        from app.storage.firestore_snapshot_blobs import (
+            _WARM_COLLECTION_SNAPSHOT_READ_CACHE,
+            FirestoreSnapshotBlobs,
+        )
 
         self._state = FirestoreAtomicStateStore(client)
-        self._blobs = FirestoreSnapshotBlobs(client)
+        self._blobs = FirestoreSnapshotBlobs(
+            client, read_cache=_WARM_COLLECTION_SNAPSHOT_READ_CACHE
+        )
         self.version = 0
         self._sha256 = None
         self._content_sha256 = None
