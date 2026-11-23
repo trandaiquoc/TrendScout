@@ -4,11 +4,13 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 
 from app.jobs.distributed_worker import DistributedFetchWorker
-from app.jobs.public_admission import PublicAdmission
+from app.jobs.public_admission import AdmissionDenied, PublicAdmission
+from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.normal_wikimedia_live_policy import normal_google_live_policy
 from app.orchestration.distributed_public_fetch import DistributedPublicFetch
@@ -80,6 +82,101 @@ class GoogleFetchSourceSelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TREND_SCOUT_DEMO_PORT", windows_script)
         self.assertNotIn("--synthetic", windows_script)
         self.assertNotIn("-Cloud", windows_script)
+
+    async def test_google_uses_validated_cache_after_quota_and_rss_failures(self):
+        class Handler:
+            def __init__(self, result):
+                self.result = result
+
+            async def __call__(self, _context):
+                return self.result
+
+        cached_result = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "STALE_CACHE",
+            "records": [{"keyword": "cached trend", "delivery_state": "STALE_CACHE"}],
+            "record_count": 1, "provider_request_count": 0,
+            "coverage": {"provider_request_count": 0, "cache_fetched_at": NOW.isoformat()},
+        }
+        workflow = GoogleDiscoveryFallbackHandler(
+            trending_now=Handler({
+                "status": "FAILED", "data_mode": "LIVE", "records": [],
+                "record_count": 0, "error_code": "QUOTA_EXHAUSTED",
+                "coverage": {"provider_request_count": 0},
+            }),
+            rss=Handler({
+                "status": "FAILED", "data_mode": "LIVE", "records": [],
+                "record_count": 0, "error_code": "DEADLINE_EXCEEDED",
+                "coverage": {"provider_request_count": 1},
+            }),
+            cached_fallback=lambda _context: cached_result,
+        )
+
+        result = await workflow(object())
+
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["delivery_state"], "STALE_CACHE")
+        self.assertEqual(result["records"][0]["keyword"], "cached trend")
+        self.assertEqual(result["provider_request_count"], 1)
+        self.assertEqual(result["coverage"]["provider_request_count"], 1)
+        self.assertEqual(result["coverage"]["refresh_provider_request_count"], 1)
+        self.assertEqual(result["coverage"]["refresh_error_codes"], [
+            "QUOTA_EXHAUSTED", "DEADLINE_EXCEEDED",
+        ])
+
+    async def test_rss_cache_delivery_does_not_count_or_repeat_provider_request(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalSQLiteAtomicStateStore(
+                Path(temporary) / "cache.sqlite", environment_profile="test",
+            )
+            cache = SharedCache(store)
+            grant = CacheGrant(
+                GOOGLE_SOURCE_ID, "RSS_CACHE_TEST_V1", NOW + timedelta(days=1),
+                3600, 2 * 24 * 3600, 3 * 24 * 3600, allowed=True,
+            )
+            current = [NOW]
+
+            class QuotaBlockedGateway:
+                data_mode = "LIVE"
+
+                async def fetch_page(self, **_kwargs):
+                    raise AdmissionDenied("QUOTA_EXHAUSTED")
+
+            handler = GoogleTrendsRSSHandler(
+                gateway=QuotaBlockedGateway(), policy_fingerprint="a" * 64,
+                utcnow=lambda: current[0], cache=cache,
+                resolve_cache_grant=lambda _source, _now: grant,
+            )
+            scope, _grant = handler._cache()
+            cache.put(
+                scope, grant=grant, origin="LIVE", fetched_at=NOW, now=NOW,
+                payload={
+                    "status": "SUCCESS", "data_mode": "LIVE",
+                    "delivery_state": "FRESH", "record_count": 1,
+                    "records": [{"keyword": "cached RSS", "delivery_state": "FRESH"}],
+                    "provider_request_count": 1,
+                    "coverage": {"provider_request_count": 1},
+                },
+            )
+
+            context = SimpleNamespace(
+                source_id=GOOGLE_SOURCE_ID, resume_snapshot=None,
+                job_id="rss-cache-test", owner="test-owner", fence=1,
+                checkpoint=lambda _value: 1,
+            )
+            result = await handler(context)
+            current[0] += timedelta(hours=2)
+            stale = await handler(context)
+
+        self.assertEqual(result["delivery_state"], "CACHED")
+        self.assertEqual(result["records"][0]["delivery_state"], "CACHED")
+        self.assertEqual(result["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["cached_provider_request_count"], 1)
+        self.assertEqual(stale["status"], "PARTIAL")
+        self.assertEqual(stale["delivery_state"], "STALE_CACHE")
+        self.assertEqual(stale["records"][0]["delivery_state"], "STALE_CACHE")
+        self.assertEqual(stale["provider_request_count"], 0)
+        self.assertEqual(stale["coverage"]["refresh_error_code"], "QUOTA_EXHAUSTED")
 
     async def _fetch(self, source_ids):
         with tempfile.TemporaryDirectory() as temporary:

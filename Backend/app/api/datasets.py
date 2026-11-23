@@ -11,8 +11,11 @@ router = APIRouter()
 
 @router.get('/datasets/latest')
 def latest_dataset(request: Request):
-    service = _service(request)
-    item = service.store.latest_dataset()
+    if getattr(request.state, 'latest_dataset_summary_available', False):
+        item = request.state.latest_dataset_summary
+    else:
+        service = _service(request)
+        item = service.store.latest_dataset()
     if item is None:
         return {'item': None}
     item['restoration_status'] = 'CACHED'

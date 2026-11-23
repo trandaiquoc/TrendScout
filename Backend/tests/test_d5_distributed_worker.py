@@ -1146,10 +1146,13 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             fetched_at=old_fetched_at, now=current[0],
         )
         batch_decisions = []
+        batch_blocked = [False]
 
         def resolve_batch(source_id, now, *, owner_fresh_acceptance=False,
                           acceptance_job_id=None):
             batch_decisions.append((source_id, owner_fresh_acceptance, acceptance_job_id))
+            if batch_blocked[0]:
+                return {"allowed": False, "error_code": "NOT_YET_ELIGIBLE"}
             return {"allowed": True, "quota_remaining": 5}
 
         registry = D5SourceHandlers(
@@ -1206,6 +1209,20 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["coverage"]["provider_request_count"], 0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(batch_decisions), 1)
+
+        batch_blocked[0] = True
+        current[0] += timedelta(minutes=1)
+        third = await registry._with_cache(YOUTUBE_SOURCE_ID, context("3" * 32, {
+            "sources": all_sources,
+            "owner_fresh_acceptance": OWNER_FRESH_ACCEPTANCE_MARKER,
+        }), collect)
+        self.assertEqual(third["delivery_state"], "CACHED")
+        self.assertEqual(third["records"][0]["provider_video_id"], "fresh-video")
+        self.assertEqual(third["provider_request_count"], 0)
+        self.assertEqual(third["coverage"]["refresh_eligible"], False)
+        self.assertEqual(third["coverage"]["refresh_error_code"], "NOT_YET_ELIGIBLE")
+        self.assertNotIn("owner_fresh_acceptance", third["coverage"])
+        self.assertEqual(len(calls), 1)
 
     def youtube_cache_only_handler(self, cache):
         capability = source_capability(YOUTUBE_SOURCE_ID)

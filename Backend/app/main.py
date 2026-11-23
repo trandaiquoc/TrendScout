@@ -402,7 +402,12 @@ class VercelSharedLiveMiddleware:
             context_options = {"user_agent": self.settings.wikimedia_user_agent}
             if use_default_context:
                 context_options["defer_collection_snapshot"] = defer_collection_snapshot
-                if not use_collection_read_context:
+                if use_collection_read_context:
+                    context_options["latest_dataset_summary_only"] = (
+                        request_method.upper() == "GET"
+                        and request_path == "/api/v1/datasets/latest"
+                    )
+                else:
                     context_options["capability_metadata_request"] = (
                         request_method.upper() == "GET"
                         and request_path == "/api/v1/capabilities"
@@ -428,6 +433,12 @@ class VercelSharedLiveMiddleware:
             None if use_collection_read_context else distributed
         )
         state["collection_service"] = getattr(distributed, "collection_service", None)
+        state["latest_dataset_summary_available"] = getattr(
+            distributed, "latest_dataset_summary_available", False
+        )
+        state["latest_dataset_summary"] = getattr(
+            distributed, "latest_dataset_summary", None
+        )
         state["public_fetch_source_ids"] = tuple(sorted(
             getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})
         ))

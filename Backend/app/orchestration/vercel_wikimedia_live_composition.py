@@ -425,6 +425,10 @@ async def vercel_shared_live_composition(
             collection_snapshot.load()
         collection_store = (None if defer_collection_snapshot else
                             CollectionStore(collection_path, data_mode_scope="LIVE"))
+        if collection_store is not None:
+            collection_snapshot.set_latest_dataset_summary_provider(
+                collection_store.latest_dataset,
+            )
         async with normal_google_live_composition(
             user_agent=user_agent,
             utcnow=utcnow,
@@ -494,6 +498,9 @@ async def vercel_shared_live_composition(
                 if collection_store is None:
                     collection_store = CollectionStore(
                         collection_path, data_mode_scope="LIVE"
+                    )
+                    collection_snapshot.set_latest_dataset_summary_provider(
+                        collection_store.latest_dataset,
                     )
                     facade.collection_service = build_collection_service(collection_store)
 

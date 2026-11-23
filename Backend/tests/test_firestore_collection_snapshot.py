@@ -51,6 +51,7 @@ class FakeSnapshotBlobs:
     def __init__(self):
         self.records = {}
         self.writes = 0
+        self.reads = 0
 
     def put(self, records, *, now, retain_until):
         self.writes += 1
@@ -59,6 +60,7 @@ class FakeSnapshotBlobs:
         return {"digest": digest, "item_count": len(records), "raw_bytes": 1}
 
     def get(self, reference, *, now):
+        self.reads += 1
         return copy.deepcopy(self.records[reference["digest"]])
 
 
@@ -133,6 +135,62 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
                 db.commit()
             self.assertEqual(restored.save(), 2)
             self.assertEqual(self.blobs.writes, 2)
+
+    def test_latest_dataset_summary_reads_without_restoring_sqlite_blob(self):
+        summary = {"dataset_id": "fetch-1", "status": "COMPLETED", "sources": ["google"]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.execute("INSERT INTO collections VALUES ('c1')")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.set_latest_dataset_summary_provider(lambda: summary)
+            self.assertEqual(writer.save(), 1)
+
+            reader = self._snapshot(Path(directory) / "not-restored.sqlite")
+            available, cached_summary = reader.read_latest_dataset_summary()
+
+        self.assertTrue(available)
+        self.assertEqual(cached_summary, summary)
+        self.assertEqual(self.blobs.reads, 0)
+        self.assertEqual(self.state.values["collections-live-snapshot-v1"][
+            "latest_dataset_summary_version"], 1)
+
+    def test_unchanged_snapshot_backfills_legacy_summary_without_reupload(self):
+        summary = {"dataset_id": "fetch-legacy", "status": "PARTIAL", "sources": []}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.sqlite"
+            with closing(sqlite3.connect(source)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.execute("INSERT INTO collections VALUES ('c1')")
+                db.commit()
+            writer = self._snapshot(source)
+            writer.load()
+            writer.save()
+            pointer = self.state.values["collections-live-snapshot-v1"]
+            pointer.pop("latest_dataset_summary_version", None)
+            pointer.pop("latest_dataset_summary", None)
+
+            restored = self._snapshot(Path(directory) / "restored.sqlite")
+            restored.load()
+            restored.set_latest_dataset_summary_provider(lambda: summary)
+            self.assertEqual(restored.save(), 1)
+
+        self.assertEqual(self.blobs.writes, 1)
+        available, cached_summary = self._snapshot(Path(directory) / "unused.sqlite").read_latest_dataset_summary()
+        self.assertTrue(available)
+        self.assertEqual(cached_summary, summary)
+
+    def test_missing_pointer_is_a_readable_empty_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reader = self._snapshot(Path(directory) / "empty.sqlite")
+            available, summary = reader.read_latest_dataset_summary()
+
+        self.assertTrue(available)
+        self.assertIsNone(summary)
+        self.assertEqual(self.blobs.reads, 0)
 
     def test_legacy_pointer_without_content_digest_is_still_restored(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+from app.jobs.public_admission import AdmissionDenied
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import GOOGLE_SOURCE_ID, source_capability
 from app.sources.google_trends.handler import _retry_after, _safe_error_code, _serialize_serp_page
@@ -109,18 +110,106 @@ class GoogleTrendsRSSHandler:
         )
         return scope, grant
 
+    @staticmethod
+    def _stale_cache_fallback(payload, *, fetched_at, error_code, provider_request_count):
+        records = payload["records"]
+        coverage = payload.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        cached_count = coverage.get("provider_request_count")
+        if type(cached_count) is not int or cached_count < 0:
+            cached_count = payload.get("provider_request_count")
+        if type(cached_count) is int and cached_count >= 0:
+            coverage["cached_provider_request_count"] = cached_count
+        quality_flags = payload.get("quality_flags")
+        quality_flags = {
+            flag for flag in quality_flags
+            if isinstance(flag, str)
+        } if isinstance(quality_flags, list) else set()
+        quality_flags.add("STALE_SHARED_CACHE_REUSED")
+        coverage.update(
+            cache_fetched_at=fetched_at,
+            cache_state="STALE",
+            refresh_attempt_status="FAILED",
+            refresh_error_code=error_code,
+        )
+        result = {
+            **payload,
+            "status": "PARTIAL",
+            "delivery_state": "STALE_CACHE",
+            "records": [
+                {**record, "delivery_state": "STALE_CACHE"}
+                for record in records
+            ],
+            "record_count": len(records),
+            "shared_cache_state": "STALE",
+            "shared_cache_fetched_at": fetched_at,
+            "error_code": error_code,
+            "quality_flags": sorted(quality_flags),
+        }
+        if type(provider_request_count) is int and provider_request_count >= 0:
+            coverage["provider_request_count"] = provider_request_count
+            coverage["refresh_provider_request_count"] = provider_request_count
+            result["provider_request_count"] = provider_request_count
+        else:
+            coverage.pop("provider_request_count", None)
+            result.pop("provider_request_count", None)
+        result["coverage"] = coverage
+        return result
+
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:
             raise ValueError("RSS handler received a different source")
         scope, grant = None, None
+        stale_cache_fallback = None
         if self.cache is not None:
             try:
                 scope, grant = self._cache()
                 if scope is not None:
                     cached = self.cache.get(scope, grant=grant, now=self.utcnow())
                     payload = cached.get("payload")
-                    if cached.get("status") == "CACHED" and isinstance(payload, dict):
-                        return {**payload, "delivery_state": "CACHED"}
+                    records = payload.get("records") if isinstance(payload, dict) else None
+                    if (cached.get("status") == "CACHED"
+                            and isinstance(payload, dict)
+                            and payload.get("data_mode") == self.gateway.data_mode
+                            and payload.get("status") in {"SUCCESS", "PARTIAL"}
+                            and isinstance(records, list)
+                            and type(payload.get("record_count")) is int
+                            and payload["record_count"] == len(records)
+                            and all(isinstance(record, dict) for record in records)):
+                        coverage = payload.get("coverage")
+                        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+                        cached_count = coverage.get("provider_request_count")
+                        if type(cached_count) is not int or cached_count < 0:
+                            cached_count = payload.get("provider_request_count")
+                        if type(cached_count) is int and cached_count >= 0:
+                            coverage["cached_provider_request_count"] = cached_count
+                        coverage.update(
+                            provider_request_count=0,
+                            attempted_calls=0,
+                            cache_fetched_at=cached.get("fetched_at"),
+                            cache_state="CACHED",
+                        )
+                        return {
+                            **payload,
+                            "delivery_state": "CACHED",
+                            "shared_cache_state": "CACHED",
+                            "shared_cache_fetched_at": cached.get("fetched_at"),
+                            "provider_request_count": 0,
+                            "coverage": coverage,
+                            "records": [
+                                {**record, "delivery_state": "CACHED"}
+                                for record in records
+                            ],
+                        }
+                    if (cached.get("status") == "STALE"
+                            and isinstance(payload, dict)
+                            and payload.get("data_mode") == self.gateway.data_mode
+                            and payload.get("status") in {"SUCCESS", "PARTIAL"}
+                            and isinstance(records, list)
+                            and type(payload.get("record_count")) is int
+                            and payload["record_count"] == len(records)
+                            and all(isinstance(record, dict) for record in records)):
+                        stale_cache_fallback = (payload, cached.get("fetched_at"))
             except Exception:
                 scope, grant = None, None
 
@@ -154,8 +243,10 @@ class GoogleTrendsRSSHandler:
                         "fetched_at": fetched_at.astimezone(timezone.utc).isoformat(),
                         "source_url": "https://trends.google.com/trending/rss?geo=US",
                         "coverage_limit": "Official RSS export sample; not a full historical window",
+                        "provider_request_count": 1,
                     },
                     "quality_flags": ["RSS_LIMITED_COVERAGE", "NO_COMPATIBLE_BASELINE"],
+                    "provider_request_count": 1,
                 }
                 receipt_box.append(value)
                 context.checkpoint({"google_trends_receipt": {"result": value}})
@@ -169,15 +260,38 @@ class GoogleTrendsRSSHandler:
                 if not receipt_box:
                     raise ValueError("RSS receipt was not checkpointed")
                 result = receipt_box[0]
-            except (GatewayError, SerpApiError) as error:
+            except (GatewayError, SerpApiError, AdmissionDenied) as error:
+                if isinstance(error, AdmissionDenied) and error.code == "LEASE_LOST":
+                    raise
                 retry = _retry_after(error)
-                return {
+                request_count = 0 if isinstance(error, AdmissionDenied) else None
+                if not isinstance(error, AdmissionDenied):
+                    missing = object()
+                    started_at = getattr(
+                        self.gateway, "last_provider_request_started_at", missing,
+                    )
+                    if started_at is not missing:
+                        request_count = int(started_at is not None)
+                coverage = {"discovery_mode": "RSS_LIMITED_DISCOVERY",
+                            "attempted_calls": 1, "records_omitted_storage_limit": 0}
+                if request_count is not None:
+                    coverage["provider_request_count"] = request_count
+                if stale_cache_fallback is not None:
+                    payload, fetched_at = stale_cache_fallback
+                    return self._stale_cache_fallback(
+                        payload, fetched_at=fetched_at,
+                        error_code=_safe_error_code(error),
+                        provider_request_count=request_count,
+                    )
+                failure = {
                     "status": "FAILED", "data_mode": self.gateway.data_mode,
                     "records": [], "record_count": 0, "error_code": _safe_error_code(error),
                     **({"retry_after_seconds": retry} if retry is not None else {}),
-                    "coverage": {"discovery_mode": "RSS_LIMITED_DISCOVERY",
-                                 "attempted_calls": 1, "records_omitted_storage_limit": 0},
+                    "coverage": coverage,
                 }
+                if request_count is not None:
+                    failure["provider_request_count"] = request_count
+                return failure
         if not isinstance(result, dict) or not isinstance(result.get("records"), list):
             raise ValueError("saved RSS result is invalid")
         records = [dict(item) for item in result["records"]]
@@ -235,7 +349,9 @@ class GoogleTrendsRSSHandler:
                         data_mode=page.data_mode,
                     )
                     verified += 1
-                except (GatewayError, SerpApiError) as error:
+                except (GatewayError, SerpApiError, AdmissionDenied) as error:
+                    if isinstance(error, AdmissionDenied) and error.code == "LEASE_LOST":
+                        raise
                     failed += 1
                     verification = {"status": "FAILED", "verification_mode": "GOOGLE_SERP",
                                     "plan_id": plan.plan_id, "plan_version": plan.version,
@@ -281,6 +397,15 @@ class GoogleTrendsRSSHandler:
             "records": accepted, "record_count": len(accepted),
             "coverage": coverage, "quality_flags": sorted(set(flags)),
         }
+        request_count = coverage.get("provider_request_count")
+        if attempted > 0:
+            # The base RSS request is known, but SERP verification can fail
+            # before its provider request starts. Keep the aggregate unknown.
+            request_count = None
+            coverage.pop("provider_request_count", None)
+            output["coverage"] = coverage
+        if type(request_count) is int and request_count >= 0:
+            output["provider_request_count"] = request_count
         if scope is not None and grant is not None and grant.allowed:
             try:
                 self.cache.put(scope, grant=grant, origin=output["data_mode"],

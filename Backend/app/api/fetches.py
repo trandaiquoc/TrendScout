@@ -213,7 +213,8 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
         history_manifest = {}
 
     for index, source in enumerate(recovered):
-        if source.get("error_code") != "RESULT_UNAVAILABLE":
+        if source.get("error_code") not in {
+                "RESULT_UNAVAILABLE", "FETCH_DEADLINE_EXCEEDED"}:
             continue
         source_id = source.get("source_id")
         if not isinstance(source_id, str):

@@ -11,13 +11,14 @@ from app.jobs.distributed_worker import SourceWorkContext
 from app.jobs.public_admission import (
     MANUAL_SOURCE_REFRESH_MARKER,
     OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
 )
 from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.sources.bing_search.handler import BingSavedCandidateHandler
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.sources.google_trends.trending_now import normalize_keyword
+from app.sources.live_gateway import GatewayError, GatewayPage
 from app.sources.refresh_eligibility import BING_REFRESH_STATE_KEY, reserve_manual_source_slot
-from app.sources.live_gateway import GatewayPage
 from app.sources.serpapi.models import ProviderPage
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
@@ -366,7 +367,7 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         def grant_for(source_id, now):
             return CacheGrant(
                 source_id, "D6_BING_ACCEPTANCE_CACHE_V1", now + timedelta(days=7),
-                24 * 3600, 2 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+                24 * 3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
             )
 
         handler = BingSavedCandidateHandler(
@@ -414,6 +415,62 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third["provider_request_count"], 1)
         self.assertEqual(len(self.gateway.calls), 2)
         self.assertEqual(len(self.budget_calls), 2)
+
+        class QuotaBlockedGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                raise AdmissionDenied("QUOTA_EXHAUSTED")
+
+        current[0] += timedelta(hours=25)
+        blocked_handler = BingSavedCandidateHandler(
+            gateway=QuotaBlockedGateway(), collection_store=None,
+            atomic_store=self.atomic, policy_fingerprint=POLICY,
+            ensure_paid_budget=None, utcnow=lambda: current[0],
+            candidate_loader=lambda _now: (shared_candidate,),
+            shared_cache=cache, resolve_cache_grant=grant_for,
+        )
+        blocked = await blocked_handler(work_context(
+            current[0], request_metadata={
+                "sources": sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }, job_id="4" * 32,
+        ))
+
+        self.assertEqual(blocked["status"], "PARTIAL")
+        self.assertEqual(blocked["delivery_state"], "STALE_CACHE")
+        self.assertEqual(blocked["provider_request_count"], 0)
+        self.assertEqual(blocked["coverage"]["refresh_error_code"], "QUOTA_EXHAUSTED")
+        self.assertEqual(blocked["records"][0]["bing_verification"]["delivery_state"],
+                         "STALE_CACHE")
+
+        class TimedOutGateway:
+            data_mode = "LIVE"
+            last_provider_request_started_at = current[0]
+
+            async def fetch_page(self, **_kwargs):
+                raise GatewayError("UPSTREAM_TIMEOUT")
+
+        current[0] += timedelta(hours=25)
+        timeout_handler = BingSavedCandidateHandler(
+            gateway=TimedOutGateway(), collection_store=None,
+            atomic_store=self.atomic, policy_fingerprint=POLICY,
+            ensure_paid_budget=None, utcnow=lambda: current[0],
+            candidate_loader=lambda _now: (shared_candidate,),
+            shared_cache=cache, resolve_cache_grant=grant_for,
+        )
+        timed_out = await timeout_handler(work_context(
+            current[0], request_metadata={
+                "sources": sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }, job_id="5" * 32,
+        ))
+
+        self.assertEqual(timed_out["status"], "PARTIAL")
+        self.assertEqual(timed_out["delivery_state"], "STALE_CACHE")
+        self.assertEqual(timed_out["provider_request_count"], 1)
+        self.assertEqual(timed_out["coverage"]["provider_request_count"], 1)
+        self.assertEqual(timed_out["coverage"]["refresh_error_code"], "UPSTREAM_TIMEOUT")
 
 
 if __name__ == "__main__":

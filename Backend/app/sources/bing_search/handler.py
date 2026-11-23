@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.jobs.public_admission import (
@@ -24,8 +25,8 @@ from app.sources.refresh_eligibility import (
     candidate_slot,
     manual_candidate_slot,
     manual_schedule_metadata,
-    reserve_owner_acceptance_slot,
     reserve_manual_source_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -280,6 +281,40 @@ class BingSavedCandidateHandler:
         return cached["status"], result
 
     @staticmethod
+    def _refresh_failed_fallback(cached_result, error_code, *, provider_request_count):
+        if not isinstance(cached_result, dict):
+            return None
+        result = dict(cached_result)
+        coverage = result.get("coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        safe_code = (error_code if isinstance(error_code, str)
+                     and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", error_code)
+                     else "SOURCE_REFRESH_FAILED")
+        coverage["refresh_attempt_status"] = "FAILED"
+        coverage["refresh_error_code"] = safe_code
+        if type(provider_request_count) is int and provider_request_count >= 0:
+            coverage["provider_request_count"] = provider_request_count
+            result["provider_request_count"] = provider_request_count
+        else:
+            coverage.pop("provider_request_count", None)
+            result.pop("provider_request_count", None)
+        result["coverage"] = coverage
+        if result.get("delivery_state") == "STALE_CACHE":
+            result["status"] = "PARTIAL"
+            result["error_code"] = safe_code
+        return result
+
+    @staticmethod
+    def _provider_request_count_for_error(gateway, error):
+        if isinstance(error, AdmissionDenied):
+            return 0
+        missing = object()
+        started_at = getattr(gateway, "last_provider_request_started_at", missing)
+        if started_at is missing:
+            return None
+        return int(started_at is not None)
+
+    @staticmethod
     def __call_mode__():
         return "LIVE"
 
@@ -385,14 +420,14 @@ class BingSavedCandidateHandler:
             }
 
         candidate, serp_context = plan.candidates[0], plan.contexts[0]
-        shared_stale_result = None
-        if not acceptance_fresh and self.shared_cache is not None:
+        shared_cache_fallback = None
+        if self.shared_cache is not None:
             cache_status, shared_result = self._shared_cached_result(candidate, now)
-            if cache_status == "CACHED":
+            if cache_status in {"CACHED", "STALE"}:
+                shared_cache_fallback = shared_result
+            if cache_status == "CACHED" and not acceptance_fresh:
                 context.checkpoint({"bing_receipt": {"result": shared_result}})
                 return shared_result
-            if cache_status == "STALE":
-                shared_stale_result = shared_result
         slot = (
             f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
             if acceptance_fresh else manual_candidate_slot(
@@ -406,12 +441,6 @@ class BingSavedCandidateHandler:
             )
         )
         if slot is None:
-            if cached_result is not None:
-                context.checkpoint({"bing_receipt": {"result": cached_result}})
-                return cached_result
-            if shared_stale_result is not None:
-                context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
-                return shared_stale_result
             error_code = "MANUAL_REFRESH_COOLDOWN" if manual_refresh else "NOT_YET_ELIGIBLE"
             coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
                         "provider_request_count": 0,
@@ -423,11 +452,26 @@ class BingSavedCandidateHandler:
                         error_code="BING_SCHEDULE_STATE_INVALID",
                     ).get("next_eligible_at")
                 except AdmissionDenied as error:
+                    fallback = self._refresh_failed_fallback(
+                        cached_result or shared_cache_fallback, error.code,
+                        provider_request_count=0,
+                    )
+                    if fallback is not None:
+                        context.checkpoint({"bing_receipt": {"result": fallback}})
+                        return fallback
                     return {
                         "status": "FAILED", "data_mode": self.gateway.data_mode,
                         "records": [], "record_count": 0,
                         "error_code": error.code, "coverage": coverage,
                     }
+            fallback = self._refresh_failed_fallback(
+                cached_result or shared_cache_fallback, error_code,
+                provider_request_count=0,
+            )
+            if fallback is not None:
+                fallback["coverage"].update(coverage)
+                context.checkpoint({"bing_receipt": {"result": fallback}})
+                return fallback
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0, "error_code": error_code,
@@ -439,6 +483,13 @@ class BingSavedCandidateHandler:
             try:
                 account_snapshot = await self.ensure_paid_budget()
             except SerpApiError as error:
+                fallback = self._refresh_failed_fallback(
+                    cached_result or shared_cache_fallback, error.code,
+                    provider_request_count=0,
+                )
+                if fallback is not None:
+                    context.checkpoint({"bing_receipt": {"result": fallback}})
+                    return fallback
                 return {
                     "status": "FAILED", "data_mode": self.gateway.data_mode,
                     "records": [], "record_count": 0, "error_code": error.code,
@@ -447,6 +498,7 @@ class BingSavedCandidateHandler:
                                  "query": serp_context.canonical_query,
                                  "eligible_slot": slot},
                 }
+        reservation_error_code = None
         try:
             slot = (
                 reserve_owner_acceptance_slot(
@@ -463,16 +515,15 @@ class BingSavedCandidateHandler:
                     allow_initial_acceptance=self.allow_initial_acceptance,
                 )
             )
-        except AdmissionDenied:
+        except AdmissionDenied as error:
+            if error.code == "LEASE_LOST":
+                raise
+            reservation_error_code = error.code
             slot = None
         if slot is None:
-            if cached_result is not None:
-                context.checkpoint({"bing_receipt": {"result": cached_result}})
-                return cached_result
-            if shared_stale_result is not None:
-                context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
-                return shared_stale_result
-            error_code = "MANUAL_REFRESH_COOLDOWN" if manual_refresh else "NOT_YET_ELIGIBLE"
+            error_code = (reservation_error_code or
+                          ("MANUAL_REFRESH_COOLDOWN" if manual_refresh
+                           else "NOT_YET_ELIGIBLE"))
             coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
                         "provider_request_count": 0,
                         "next_slots_timezone": "Asia/Ho_Chi_Minh"}
@@ -483,11 +534,26 @@ class BingSavedCandidateHandler:
                         error_code="BING_SCHEDULE_STATE_INVALID",
                     ).get("next_eligible_at")
                 except AdmissionDenied as error:
+                    fallback = self._refresh_failed_fallback(
+                        cached_result or shared_cache_fallback, error.code,
+                        provider_request_count=0,
+                    )
+                    if fallback is not None:
+                        context.checkpoint({"bing_receipt": {"result": fallback}})
+                        return fallback
                     return {
                         "status": "FAILED", "data_mode": self.gateway.data_mode,
                         "records": [], "record_count": 0,
                         "error_code": error.code, "coverage": coverage,
                     }
+            fallback = self._refresh_failed_fallback(
+                cached_result or shared_cache_fallback, error_code,
+                provider_request_count=0,
+            )
+            if fallback is not None:
+                fallback["coverage"].update(coverage)
+                context.checkpoint({"bing_receipt": {"result": fallback}})
+                return fallback
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0, "error_code": error_code,
@@ -594,16 +660,31 @@ class BingSavedCandidateHandler:
                 on_page_receipt=save_receipt,
             )
         except (GatewayError, SerpApiError, AdmissionDenied) as error:
+            if isinstance(error, AdmissionDenied) and error.code == "LEASE_LOST":
+                raise
             code = getattr(error, "code", "SOURCE_EXECUTION_FAILED")
-            return {
+            request_count = self._provider_request_count_for_error(self.gateway, error)
+            fallback = self._refresh_failed_fallback(
+                cached_result or shared_cache_fallback, code,
+                provider_request_count=request_count,
+            )
+            if fallback is not None:
+                context.checkpoint({"bing_receipt": {"result": fallback}})
+                return fallback
+            coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                        "query": serp_context.canonical_query,
+                        "eligible_slot": slot}
+            if request_count is not None:
+                coverage["provider_request_count"] = request_count
+            failure = {
                 "status": "FAILED", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0,
                 "error_code": code if isinstance(code, str) else "SOURCE_EXECUTION_FAILED",
-                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
-                             "provider_request_count": 1,
-                             "query": serp_context.canonical_query,
-                             "eligible_slot": slot},
+                "coverage": coverage,
             }
+            if request_count is not None:
+                failure["provider_request_count"] = request_count
+            return failure
         if not receipt_box:
             raise ValueError("Bing provider receipt was not persisted")
         return receipt_box[0]

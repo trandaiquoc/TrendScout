@@ -798,7 +798,9 @@ async def normal_google_live_composition(*, user_agent,
             previous_verification=previous_verification,
         ) if rss_gateway is not None else None)
         google_handler = (GoogleDiscoveryFallbackHandler(
-            trending_now=trends_handler, rss=rss_handler
+            trending_now=trends_handler, rss=rss_handler,
+            cached_fallback=(trends_handler.cached_result_for_fallback
+                             if trends_handler is not None else None),
         ) if trends_handler or rss_handler else None)
         bing_handler = (BingSavedCandidateHandler(
             gateway=bing_gateway,

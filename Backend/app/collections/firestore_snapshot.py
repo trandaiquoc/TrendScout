@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,9 @@ _SNAPSHOT_FAILURE_REASONS = frozenset({
     "SAVE_CONFIRMATION_FAILED",
     "SNAPSHOT_COMMIT_FAILED",
 })
+_LATEST_DATASET_SUMMARY_VERSION = 1
+_MAX_LATEST_DATASET_SUMMARY_BYTES = 48_000
+_logger = logging.getLogger(__name__)
 
 
 class CollectionSnapshotConflict(RuntimeError):
@@ -111,7 +115,72 @@ class FirestoreCollectionSnapshot:
         self.version = 0
         self._sha256 = None
         self._content_sha256 = None
+        self._latest_dataset_summary_provider = None
+        self._latest_dataset_summary_present = False
         self._loaded = False
+
+    def set_latest_dataset_summary_provider(self, provider) -> None:
+        """Attach the read-only query used to index the saved dashboard summary."""
+        if not callable(provider):
+            raise TypeError("latest dataset summary provider must be callable")
+        self._latest_dataset_summary_provider = provider
+
+    @staticmethod
+    def _valid_pointer(state) -> bool:
+        return (
+            isinstance(state, dict)
+            and type(state.get("schema")) is int
+            and state.get("schema") == 1
+            and type(state.get("version")) is int
+            and state["version"] >= 1
+            and isinstance(state.get("snapshot_ref"), dict)
+            and isinstance(state.get("sqlite_sha256"), str)
+            and _SHA256.fullmatch(state["sqlite_sha256"]) is not None
+        )
+
+    @staticmethod
+    def _summary_from_pointer(state):
+        if (not isinstance(state, dict)
+                or state.get("latest_dataset_summary_version")
+                != _LATEST_DATASET_SUMMARY_VERSION
+                or "latest_dataset_summary" not in state):
+            return False, None
+        summary = state["latest_dataset_summary"]
+        if summary is not None and not isinstance(summary, dict):
+            return False, None
+        try:
+            encoded = json.dumps(
+                summary, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError):
+            return False, None
+        if len(encoded) > _MAX_LATEST_DATASET_SUMMARY_BYTES:
+            return False, None
+        return True, json.loads(encoded)
+
+    def read_latest_dataset_summary(self):
+        """Read the atomic dashboard summary without downloading the SQLite image.
+
+        ``(False, None)`` means an older pointer needs the regular snapshot path.
+        An empty database is represented by ``(True, None)``.
+        """
+        read_many = getattr(self._state, "read_many", None)
+        state = (read_many([_STATE_KEY])[_STATE_KEY] if callable(read_many) else
+                 self._state.transact(_STATE_KEY, lambda current: (current, current)))
+        if not state:
+            self.version = 0
+            self._latest_dataset_summary_present = True
+            return True, None
+        if not self._valid_pointer(state):
+            raise CollectionSnapshotUnavailable(
+                "shared Collections pointer is invalid",
+                failure_reason="INVALID_SHARED_POINTER",
+            )
+        available, summary = self._summary_from_pointer(state)
+        self.version = state["version"]
+        self._sha256 = state["sqlite_sha256"]
+        self._latest_dataset_summary_present = available
+        return available, summary
 
     def load(self) -> int:
         """Restore the last committed image; leave a missing ledger as an empty DB."""
@@ -124,17 +193,15 @@ class FirestoreCollectionSnapshot:
             self.version = 0
             self._sha256 = None
             self._content_sha256 = None
+            self._latest_dataset_summary_present = False
             self._loaded = True
             return self.version
-        if (not isinstance(state, dict) or type(state.get("schema")) is not int
-                or state.get("schema") != 1 or type(state.get("version")) is not int
-                or state["version"] < 1 or not isinstance(state.get("snapshot_ref"), dict)
-                or not isinstance(state.get("sqlite_sha256"), str)
-                or not _SHA256.fullmatch(state["sqlite_sha256"])):
+        if not self._valid_pointer(state):
             raise CollectionSnapshotUnavailable(
                 "shared Collections pointer is invalid",
                 failure_reason="INVALID_SHARED_POINTER",
             )
+        self._latest_dataset_summary_present = self._summary_from_pointer(state)[0]
         try:
             records = self._blobs.get(state["snapshot_ref"], now=_utc(self._utcnow()))
             if (not isinstance(records, list) or len(records) != 1
@@ -283,7 +350,10 @@ class FirestoreCollectionSnapshot:
 
         now = _utc(self._utcnow())
         digest = hashlib.sha256(raw).hexdigest()
+        summary_pointer = self._latest_dataset_summary_metadata()
         if content_digest == self._content_sha256:
+            if summary_pointer and not self._latest_dataset_summary_present:
+                self._backfill_latest_dataset_summary(summary_pointer)
             return self.version
 
         try:
@@ -302,7 +372,7 @@ class FirestoreCollectionSnapshot:
         updated = {"schema": 1, "version": next_version,
                    "snapshot_ref": reference, "sqlite_sha256": digest,
                    "sqlite_content_sha256": content_digest,
-                   "updated_at": now.isoformat()}
+                   "updated_at": now.isoformat(), **summary_pointer}
 
         def operation(current):
             current_version = current.get("version", 0) if isinstance(current, dict) else -1
@@ -336,4 +406,57 @@ class FirestoreCollectionSnapshot:
         self.version = next_version
         self._sha256 = digest
         self._content_sha256 = content_digest
+        self._latest_dataset_summary_present = bool(summary_pointer)
         return self.version
+
+    def _backfill_latest_dataset_summary(self, summary_pointer: dict) -> None:
+        """Add optional metadata to the current pointer without replacing its blob."""
+        if (type(self.version) is not int or self.version < 1
+                or not isinstance(self._sha256, str)
+                or _SHA256.fullmatch(self._sha256) is None or not summary_pointer):
+            return
+
+        def operation(current):
+            if (not self._valid_pointer(current)
+                    or current["version"] != self.version
+                    or current["sqlite_sha256"] != self._sha256):
+                raise CollectionSnapshotConflict("Collections changed in another request")
+            available, _summary = self._summary_from_pointer(current)
+            updated = current if available else {**current, **summary_pointer}
+            return updated, updated
+
+        try:
+            current = self._state.transact(_STATE_KEY, operation)
+        except CollectionSnapshotConflict:
+            raise
+        except Exception as error:
+            _logger.warning(
+                "Firestore Collections latest dataset summary backfill skipped error_type=%s",
+                _exception_class(error),
+            )
+            return
+        self._latest_dataset_summary_present = self._summary_from_pointer(current)[0]
+
+    def _latest_dataset_summary_metadata(self) -> dict:
+        provider = self._latest_dataset_summary_provider
+        if provider is None:
+            return {}
+        try:
+            summary = provider()
+            if summary is not None and not isinstance(summary, dict):
+                raise ValueError("latest dataset summary must be a mapping or null")
+            encoded = json.dumps(
+                summary, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ).encode("utf-8")
+            if len(encoded) > _MAX_LATEST_DATASET_SUMMARY_BYTES:
+                raise ValueError("latest dataset summary exceeds its bounded size")
+        except Exception as error:
+            _logger.warning(
+                "Firestore Collections latest dataset summary omitted error_type=%s",
+                _exception_class(error),
+            )
+            return {}
+        return {
+            "latest_dataset_summary_version": _LATEST_DATASET_SUMMARY_VERSION,
+            "latest_dataset_summary": json.loads(encoded),
+        }

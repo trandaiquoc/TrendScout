@@ -17,6 +17,7 @@ async def vercel_collection_read_composition(
     user_agent: str,
     utcnow=lambda: datetime.now(timezone.utc),
     defer_collection_snapshot: bool = False,
+    latest_dataset_summary_only: bool = False,
 ):
     """Restore persisted Collection data without constructing LIVE source workers.
 
@@ -26,7 +27,8 @@ async def vercel_collection_read_composition(
     """
     if (os.environ.get("VERCEL") != "1" or not isinstance(user_agent, str)
             or not user_agent.strip() or not callable(utcnow)
-            or defer_collection_snapshot is not False):
+            or defer_collection_snapshot is not False
+            or type(latest_dataset_summary_only) is not bool):
         raise ValueError("Vercel Collection reads require the deployed runtime and snapshot")
 
     from app.collections.firestore_snapshot import FirestoreCollectionSnapshot
@@ -44,6 +46,22 @@ async def vercel_collection_read_composition(
     with TemporaryDirectory(prefix="trendscout-vercel-read-") as runtime_directory:
         collection_path = Path(runtime_directory) / "collections.sqlite"
         snapshot = FirestoreCollectionSnapshot(client, collection_path, utcnow=utcnow)
+        if latest_dataset_summary_only:
+            available, summary = snapshot.read_latest_dataset_summary()
+            if available:
+                yield SimpleNamespace(
+                    collection_service=None,
+                    collection_snapshot=snapshot,
+                    latest_dataset_summary_available=True,
+                    latest_dataset_summary=summary,
+                    available_sources=frozenset({
+                        BING_SOURCE_ID,
+                        GOOGLE_SOURCE_ID,
+                        WIKIMEDIA_SOURCE_ID,
+                        YOUTUBE_SOURCE_ID,
+                    }),
+                )
+                return
         snapshot.load()
         store = CollectionStore(collection_path, data_mode_scope="LIVE")
         service = CollectionService(store, fetch_model_inference_enabled=False)

@@ -32,8 +32,8 @@ from app.sources.refresh_eligibility import (
     candidate_slot,
     manual_candidate_slot,
     manual_schedule_metadata,
-    reserve_owner_acceptance_slot,
     reserve_manual_source_slot,
+    reserve_owner_acceptance_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -186,6 +186,64 @@ class GoogleTrendsDiscoveryHandler:
             return None, None
         return trending_now_cache_scope(self.policy_fingerprint, grant), grant
 
+    def cached_result_for_fallback(self, context):
+        """Return validated LIVE cache data for a quota/deadline fallback."""
+        if self.cache is None:
+            return None
+        try:
+            cache_scope, cache_grant = self._cache_scope(context)
+            return self._read_cached_result(cache_scope, cache_grant, self.utcnow())
+        except Exception:
+            return None
+
+    def _read_cached_result(self, cache_scope, cache_grant, now):
+        if self.cache is None or cache_scope is None:
+            return None
+        try:
+            cached = self.cache.get(cache_scope, grant=cache_grant, now=now)
+            if not isinstance(cached, dict) or cached.get("status") not in {"CACHED", "STALE"}:
+                return None
+            payload = cached.get("payload")
+            records = payload.get("records") if isinstance(payload, dict) else None
+            if (not isinstance(payload, dict) or payload.get("data_mode") != self.data_mode
+                    or payload.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or not isinstance(records, list)
+                    or type(payload.get("record_count")) is not int
+                    or payload["record_count"] != len(records)):
+                return None
+
+            delivery_state = "CACHED" if cached["status"] == "CACHED" else "STALE_CACHE"
+            coverage = payload.get("coverage")
+            coverage = dict(coverage) if isinstance(coverage, dict) else {}
+            coverage.pop("owner_fresh_acceptance", None)
+            originating_count = coverage.get("provider_request_count")
+            if type(originating_count) is not int or originating_count < 0:
+                originating_count = payload.get("provider_request_count")
+            if type(originating_count) is int and originating_count >= 0:
+                coverage["cached_provider_request_count"] = originating_count
+            coverage["provider_request_count"] = 0
+            coverage["attempted_calls"] = 0
+            coverage["cached_serp_verification_attempted"] = (
+                coverage.get("serp_verification_attempted", 0)
+            )
+            coverage["serp_verification_attempted"] = 0
+            coverage["cache_fetched_at"] = cached.get("fetched_at")
+            return {
+                **payload,
+                "delivery_state": delivery_state,
+                "shared_cache_state": cached["status"],
+                "shared_cache_fetched_at": cached.get("fetched_at"),
+                "provider_request_count": 0,
+                "coverage": coverage,
+                "records": [
+                    ({**record, "delivery_state": delivery_state}
+                     if isinstance(record, dict) else record)
+                    for record in records
+                ],
+            }
+        except Exception:
+            return None
+
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:
             raise ValueError("Google Trends handler received a different source")
@@ -209,53 +267,13 @@ class GoogleTrendsDiscoveryHandler:
         if self.cache is not None and not has_saved_result and not acceptance_fresh:
             try:
                 cache_scope, cache_grant = self._cache_scope(context)
-                if cache_scope is not None:
-                    cached = self.cache.get(cache_scope, grant=cache_grant, now=self.utcnow())
-                    cache_state = cached.get("status", "UNAVAILABLE")
-                    if cached.get("status") in {"CACHED", "STALE"}:
-                        payload = cached.get("payload")
-                        if (isinstance(payload, dict)
-                                and payload.get("data_mode") == self.data_mode):
-                            # A cached discovery batch can still supply validated
-                            # candidates to the separately approved SERP planner.
-                            # Preserve its original timestamps and never refresh
-                            # cache age merely because verification was requested.
-                            cached_delivery = (
-                                "CACHED" if cached.get("status") == "CACHED" else "STALE_CACHE"
-                            )
-                            cached_coverage = payload.get("coverage")
-                            cached_coverage = (dict(cached_coverage)
-                                               if isinstance(cached_coverage, dict) else {})
-                            cached_coverage.pop("owner_fresh_acceptance", None)
-                            originating_count = cached_coverage.get("provider_request_count")
-                            if type(originating_count) is not int or originating_count < 0:
-                                originating_count = payload.get("provider_request_count")
-                            if type(originating_count) is int and originating_count >= 0:
-                                cached_coverage["cached_provider_request_count"] = originating_count
-                            cached_coverage["provider_request_count"] = 0
-                            cached_coverage["attempted_calls"] = 0
-                            cached_coverage["cached_serp_verification_attempted"] = (
-                                cached_coverage.get("serp_verification_attempted", 0)
-                            )
-                            cached_coverage["serp_verification_attempted"] = 0
-                            cached_coverage["cache_fetched_at"] = cached.get("fetched_at")
-                            cached_result = {
-                                **payload,
-                                "delivery_state": cached_delivery,
-                                "shared_cache_state": cached.get("status"),
-                                "shared_cache_fetched_at": cached.get("fetched_at"),
-                                "provider_request_count": 0,
-                                "coverage": cached_coverage,
-                                "records": [
-                                    ({**record, "delivery_state": cached_delivery}
-                                     if isinstance(record, dict) else record)
-                                    for record in payload.get("records", [])
-                                ],
-                            }
+                cached_result = self._read_cached_result(
+                    cache_scope, cache_grant, self.utcnow(),
+                )
             except Exception:
-                # Cache failure does not authorize data substitution or a stale
-                # result. Proceed with the one explicitly admitted source request.
                 cache_scope, cache_grant, cached_result = None, None, None
+            if cached_result is not None:
+                cache_state = cached_result.get("shared_cache_state", "UNAVAILABLE")
         elif self.cache is not None:
             # Acceptance runs and resumed receipts skip cache reads, but still
             # need the approved scope/grant to persist the fresh receipt.
@@ -481,7 +499,9 @@ class GoogleTrendsDiscoveryHandler:
                             raise ValueError("Google Trends receipt was not checkpointed")
                         result = receipt_box[0]
                         provider_fetched = True
-                except (GatewayError, SerpApiError) as error:
+                except (GatewayError, SerpApiError, AdmissionDenied) as error:
+                    if isinstance(error, AdmissionDenied) and error.code == "LEASE_LOST":
+                        raise
                     coverage = {
                         "discovery_mode": "SERPAPI_TRENDING_NOW",
                         "attempted_calls": 1 if provider_attempted else 0,
@@ -490,6 +510,16 @@ class GoogleTrendsDiscoveryHandler:
                         **({"serpapi_account_quota": account_quota}
                            if account_quota is not None else {}),
                     }
+                    request_count = 0 if not provider_attempted else None
+                    if provider_attempted:
+                        missing = object()
+                        started_at = getattr(
+                            self.trends_gateway, "last_provider_request_started_at", missing,
+                        )
+                        if started_at is not missing:
+                            request_count = int(started_at is not None)
+                    if request_count is not None:
+                        coverage["provider_request_count"] = request_count
                     diagnostic = getattr(error, "diagnostic", None)
                     if diagnostic is not None:
                         if diagnostic.failure_phase == "RESULT_PERSISTENCE":
@@ -512,13 +542,16 @@ class GoogleTrendsDiscoveryHandler:
                                 "attempt_id": diagnostic.attempt_id,
                                 "error_code": diagnostic.error_code,
                             }
-                    return {
+                    failure = {
                         "status": "FAILED", "data_mode": self.data_mode,
                         "records": [], "record_count": 0, "error_code": _safe_error_code(error),
                         **({"retry_after_seconds": _retry_after(error)}
                            if _retry_after(error) is not None else {}),
                         "coverage": coverage,
                     }
+                    if request_count is not None:
+                        failure["provider_request_count"] = request_count
+                    return failure
         cache_reused = cached_result is not None and not provider_fetched and not has_saved_result
         records = [dict(item) for item in result["records"]]
         coverage = dict(result.get("coverage", {}))

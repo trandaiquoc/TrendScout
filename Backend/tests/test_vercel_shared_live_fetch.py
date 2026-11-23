@@ -10,8 +10,10 @@ from unittest.mock import Mock, patch
 
 import httpx
 from fastapi import FastAPI
+from starlette.requests import Request
 
 from app.api.capabilities import _read_capability_metadata
+from app.api.datasets import latest_dataset
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 from app.jobs.public_admission import AdmissionDenied
@@ -91,6 +93,126 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
         ):
             with self.subTest(method=method, path=path):
                 self.assertFalse(_vercel_collection_snapshot_required(method, path))
+
+    def test_latest_dataset_uses_available_summary_without_constructing_service(self):
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/datasets/latest",
+            "headers": [],
+            "state": {
+                "latest_dataset_summary_available": True,
+                "latest_dataset_summary": {
+                    "dataset_id": "cached-dataset",
+                    "status": "PARTIAL",
+                    "sources": [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+                                BING_SOURCE_ID, YOUTUBE_SOURCE_ID],
+                },
+            },
+        })
+
+        with patch("app.api.datasets._service",
+                   side_effect=AssertionError("summary path must not build a service")):
+            response = latest_dataset(request)
+
+        self.assertEqual(response["item"]["dataset_id"], "cached-dataset")
+        self.assertEqual(response["item"]["status"], "PARTIAL")
+        self.assertEqual(response["item"]["restoration_status"], "CACHED")
+        self.assertIsNone(response["item"]["age_seconds"])
+
+
+class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_valid_summary_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+        summary = {"dataset_id": "cached-dataset", "status": "PARTIAL"}
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                events.append("snapshot_created")
+
+            def read_latest_dataset_summary(self):
+                events.append("summary_read")
+                return True, summary
+
+            def load(self):
+                events.append("snapshot_loaded")
+                raise AssertionError("valid summary must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                latest_dataset_summary_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.latest_dataset_summary_available)
+                self.assertEqual(context.latest_dataset_summary, summary)
+                self.assertEqual(context.available_sources, frozenset({
+                    BING_SOURCE_ID, GOOGLE_SOURCE_ID,
+                    WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID,
+                }))
+
+        self.assertEqual(events, ["snapshot_created", "summary_read"])
+
+    async def test_missing_summary_falls_back_to_snapshot_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                events.append("snapshot_created")
+
+            def read_latest_dataset_summary(self):
+                events.append("summary_read")
+                return False, None
+
+            def load(self):
+                events.append("snapshot_loaded")
+                return 1
+
+        class Store:
+            def __init__(self, *_args, **_kwargs):
+                events.append("store_created")
+
+        class Service:
+            def __init__(self, store, *, fetch_model_inference_enabled):
+                self.store = store
+                self.fetch_model_inference_enabled = fetch_model_inference_enabled
+                events.append("service_created")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ), patch("app.collections.store.CollectionStore", Store), patch(
+            "app.collections.service.CollectionService", Service,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                latest_dataset_summary_only=True,
+            ) as context:
+                self.assertIsInstance(context.collection_service, Service)
+                self.assertEqual(context.collection_service.store.__class__, Store)
+                self.assertFalse(context.collection_service.fetch_model_inference_enabled)
+                self.assertFalse(getattr(context, "latest_dataset_summary_available", False))
+                self.assertIsNone(getattr(context, "latest_dataset_summary", None))
+
+        self.assertEqual(events, [
+            "snapshot_created", "summary_read", "snapshot_loaded",
+            "store_created", "service_created",
+        ])
 
 
 class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
@@ -233,9 +355,11 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         @asynccontextmanager
-        async def read_context(_client, *, user_agent, defer_collection_snapshot):
+        async def read_context(_client, *, user_agent, defer_collection_snapshot,
+                               latest_dataset_summary_only):
             self.assertEqual(user_agent, settings.wikimedia_user_agent)
             self.assertFalse(defer_collection_snapshot)
+            self.assertTrue(latest_dataset_summary_only)
             events.append("read_context")
             yield SimpleNamespace(collection_service=service, available_sources=sources)
 
@@ -903,7 +1027,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                 "data_mode": "LIVE",
                 "record_count": 0,
                 "records": [],
-                "error_code": "RESULT_UNAVAILABLE",
+                "error_code": ("FETCH_DEADLINE_EXCEEDED"
+                               if source_id == WIKIMEDIA_SOURCE_ID
+                               else "RESULT_UNAVAILABLE"),
                 "coverage": {"checkpoint_status": "RESULT_UNAVAILABLE"},
             } for source_id in source_ids],
         }
