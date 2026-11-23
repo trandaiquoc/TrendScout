@@ -158,6 +158,28 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         self.assertEqual(self.state.values["collections-live-snapshot-v1"][
             "latest_dataset_summary_version"], 1)
 
+    def test_legacy_summary_fallback_reuses_pointer_read_for_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.sqlite"
+            with closing(sqlite3.connect(source)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.execute("INSERT INTO collections VALUES ('c1')")
+                db.commit()
+
+            writer = self._snapshot(source)
+            writer.load()
+            writer.save()
+            self.state.read_many_calls = 0
+
+            restored = self._snapshot(Path(directory) / "restored.sqlite")
+            available, summary = restored.read_latest_dataset_summary()
+            self.assertFalse(available)
+            self.assertIsNone(summary)
+            self.assertEqual(restored.load(), 1)
+
+        self.assertEqual(self.state.read_many_calls, 1)
+        self.assertEqual(self.blobs.reads, 1)
+
     def test_unchanged_snapshot_backfills_legacy_summary_without_reupload(self):
         summary = {"dataset_id": "fetch-legacy", "status": "PARTIAL", "sources": []}
         with tempfile.TemporaryDirectory() as directory:

@@ -44,6 +44,7 @@ _SNAPSHOT_FAILURE_REASONS = frozenset({
 _LATEST_DATASET_SUMMARY_VERSION = 1
 _MAX_LATEST_DATASET_SUMMARY_BYTES = 48_000
 _logger = logging.getLogger(__name__)
+_NO_PRELOADED_POINTER = object()
 
 
 class CollectionSnapshotConflict(RuntimeError):
@@ -117,6 +118,7 @@ class FirestoreCollectionSnapshot:
         self._content_sha256 = None
         self._latest_dataset_summary_provider = None
         self._latest_dataset_summary_present = False
+        self._preloaded_pointer = _NO_PRELOADED_POINTER
         self._loaded = False
 
     def set_latest_dataset_summary_provider(self, provider) -> None:
@@ -167,6 +169,7 @@ class FirestoreCollectionSnapshot:
         read_many = getattr(self._state, "read_many", None)
         state = (read_many([_STATE_KEY])[_STATE_KEY] if callable(read_many) else
                  self._state.transact(_STATE_KEY, lambda current: (current, current)))
+        self._preloaded_pointer = state
         if not state:
             self.version = 0
             self._latest_dataset_summary_present = True
@@ -184,11 +187,15 @@ class FirestoreCollectionSnapshot:
 
     def load(self) -> int:
         """Restore the last committed image; leave a missing ledger as an empty DB."""
-        read_many = getattr(self._state, "read_many", None)
-        if callable(read_many):
-            state = read_many([_STATE_KEY])[_STATE_KEY]
+        if self._preloaded_pointer is not _NO_PRELOADED_POINTER:
+            state = self._preloaded_pointer
+            self._preloaded_pointer = _NO_PRELOADED_POINTER
         else:
-            state = self._state.transact(_STATE_KEY, lambda current: (current, current))
+            read_many = getattr(self._state, "read_many", None)
+            if callable(read_many):
+                state = read_many([_STATE_KEY])[_STATE_KEY]
+            else:
+                state = self._state.transact(_STATE_KEY, lambda current: (current, current))
         if not state:
             self.version = 0
             self._sha256 = None
