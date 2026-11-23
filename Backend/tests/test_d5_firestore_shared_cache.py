@@ -239,14 +239,30 @@ class FirestoreSharedCacheTests(unittest.TestCase):
             self.assertEqual(warm_reader.get(reference, now=NOW + timedelta(seconds=5)), records)
         self.assertIn("cache=HIT", warm.output[0])
         self.assertEqual(self.client.batch_gets, 1)
-        self.assertEqual(self.client.document_gets, 2)
+        self.assertEqual(self.client.document_gets, 1)
 
         with self.assertRaisesRegex(ValueError, "expired"):
             warm_reader.get(reference, now=NOW + timedelta(seconds=30))
+        self.assertEqual(self.client.document_gets, 2)
         self.assertIsNone(read_cache.get(
             reference["digest"], raw_bytes=reference["raw_bytes"],
-            item_count=reference["item_count"],
+            item_count=reference["item_count"], now=NOW + timedelta(seconds=30),
         ))
+
+    def test_verified_read_cache_rechecks_manifest_after_short_ttl(self):
+        records = [{"text": "cached"}]
+        reference = self.blobs.put(
+            records, now=NOW, retain_until=NOW + timedelta(minutes=5)
+        )
+        read_cache = _SnapshotReadCache()
+        reader = FirestoreSnapshotBlobs(self.client, read_cache=read_cache)
+
+        self.assertEqual(reader.get(reference, now=NOW), records)
+        self.assertEqual(reader.get(reference, now=NOW + timedelta(seconds=59)), records)
+        self.assertEqual(self.client.document_gets, 1)
+        self.assertEqual(reader.get(reference, now=NOW + timedelta(seconds=60)), records)
+        self.assertEqual(self.client.document_gets, 2)
+        self.assertEqual(self.client.batch_gets, 2)
 
     def test_snapshot_within_checkpoint_budget_round_trips_across_multiple_chunks(self):
         records = [{"text": "x" * 4_100_000, "record_count": 1}]

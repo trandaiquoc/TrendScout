@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 from google.cloud import firestore
@@ -22,6 +22,7 @@ _COLLECTION = "_ts_d5_cache_blobs"
 _MAX_BLOB_BYTES = 5_700_000
 _MAX_ITEMS = 5000
 _CHUNK_BYTES = 196_608
+_READ_CACHE_TTL = timedelta(seconds=60)
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _logger = logging.getLogger(__name__)
 
@@ -138,25 +139,36 @@ class FirestoreSnapshotBlobs:
             raise ValueError("invalid snapshot blob reference")
 
         digest = reference["digest"]
-        snapshot = self._manifest_ref(digest).get()
-        try:
-            manifest = _manifest(snapshot, digest)
-        except ValueError:
-            if self._read_cache is not None:
-                self._read_cache.discard(digest)
-            raise
-        if (manifest["raw_bytes"] != reference["raw_bytes"]
-                or manifest["item_count"] != reference["item_count"]):
-            raise ValueError("snapshot blob reference does not match stored metadata")
-        if manifest["expiry"] <= now:
-            if self._read_cache is not None:
-                self._read_cache.discard(digest)
-            raise ValueError("snapshot blob is expired")
-
-        raw = (self._read_cache.get(
-            digest, raw_bytes=manifest["raw_bytes"], item_count=manifest["item_count"]
+        cached = (self._read_cache.get(
+            digest, raw_bytes=reference["raw_bytes"],
+            item_count=reference["item_count"], now=now,
         ) if self._read_cache is not None else None)
-        cache_hit = raw is not None
+        cache_hit = cached is not None
+        if cached is not None:
+            raw = cached["raw"]
+            manifest = {
+                "raw_bytes": reference["raw_bytes"],
+                "item_count": reference["item_count"],
+                "chunk_count": cached["chunk_count"],
+                "expiry": cached["expiry"],
+                "retain_until": cached["expiry"].isoformat(),
+            }
+        else:
+            snapshot = self._manifest_ref(digest).get()
+            try:
+                manifest = _manifest(snapshot, digest)
+            except ValueError:
+                if self._read_cache is not None:
+                    self._read_cache.discard(digest)
+                raise
+            if (manifest["raw_bytes"] != reference["raw_bytes"]
+                    or manifest["item_count"] != reference["item_count"]):
+                raise ValueError("snapshot blob reference does not match stored metadata")
+            if manifest["expiry"] <= now:
+                if self._read_cache is not None:
+                    self._read_cache.discard(digest)
+                raise ValueError("snapshot blob is expired")
+            raw = None
         if raw is None:
             chunk_refs = [
                 self._chunk_ref(digest, index) for index in range(manifest["chunk_count"])
@@ -211,6 +223,8 @@ class FirestoreSnapshotBlobs:
                 self._read_cache.put(
                     digest, raw_bytes=manifest["raw_bytes"],
                     item_count=manifest["item_count"], raw=raw,
+                    chunk_count=manifest["chunk_count"], expiry=manifest["expiry"],
+                    now=now,
                 )
                 _logger.info("Firestore snapshot read cache=MISS raw_bytes=%d", len(raw))
         return records
@@ -249,7 +263,7 @@ class FirestoreSnapshotBlobs:
 
 
 class _SnapshotReadCache:
-    """One verified blob per warm process, bounded to the Firestore blob limit."""
+    """One verified blob per warm process with a short manifest-validation window."""
 
     def __init__(self, *, max_bytes=_MAX_BLOB_BYTES):
         if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_BLOB_BYTES:
@@ -258,19 +272,31 @@ class _SnapshotReadCache:
         self._lock = Lock()
         self._entry = None
 
-    def get(self, digest, *, raw_bytes, item_count):
+    def get(self, digest, *, raw_bytes, item_count, now):
+        now = _utc(now)
         with self._lock:
             entry = self._entry
             if (entry is None or entry[0] != digest or entry[1] != raw_bytes
                     or entry[2] != item_count):
                 return None
-            return entry[3]
+            if (entry[6] + _READ_CACHE_TTL <= now
+                    or entry[5] <= now):
+                self._entry = None
+                return None
+            return {
+                "raw": entry[3], "chunk_count": entry[4], "expiry": entry[5],
+            }
 
-    def put(self, digest, *, raw_bytes, item_count, raw):
+    def put(self, digest, *, raw_bytes, item_count, raw, chunk_count, expiry, now):
         if not isinstance(raw, bytes) or len(raw) > self._max_bytes:
             return
+        now, expiry = _utc(now), _utc(expiry)
+        if (type(chunk_count) is not int or chunk_count < 1
+                or chunk_count != max(1, (raw_bytes + _CHUNK_BYTES - 1) // _CHUNK_BYTES)
+                or expiry <= now):
+            return
         with self._lock:
-            self._entry = (digest, raw_bytes, item_count, raw)
+            self._entry = (digest, raw_bytes, item_count, raw, chunk_count, expiry, now)
 
     def discard(self, digest):
         with self._lock:
