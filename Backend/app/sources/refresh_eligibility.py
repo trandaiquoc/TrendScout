@@ -177,9 +177,9 @@ def manual_candidate_slot(atomic_store, state_key: str, now: datetime, *,
         raise AdmissionDenied(error_code)
     state = _schedule_state(atomic_store, state_key, error_code=error_code)
     slot = f"{MANUAL_SLOT_PREFIX}{job_id}"
-    last_attempt = state["last_attempt_at"]
     if state["last_slot"] == slot:
         return slot
+    last_attempt = state["last_attempt_at"]
     if last_attempt is not None and now.astimezone(timezone.utc) - last_attempt.astimezone(
             timezone.utc) < MIN_SOURCE_SPACING:
         return None

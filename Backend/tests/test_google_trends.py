@@ -606,6 +606,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["coverage"]["eligible_slot"], f"MANUAL:{context.job_id}")
         self.assertEqual(result["record_count"], 1)
         self.assertEqual(len(gateway.calls), 1)
+        self.assertTrue(gateway.calls[0][0].force_refresh)
         self.assertEqual(len(budget_checks), 1)
 
     async def test_google_failure_returns_safe_transport_diagnostic(self):

@@ -1138,12 +1138,18 @@ function renderYouTubeFetchEvidence(container, fetchStatus) {
   container.append(section);
 }
 
-function refreshCollectionJob(fetchId) {
+function refreshCollectionJob(fetchId, terminalFetch = null) {
   if ((!isLocalLiveDemo(state.capabilities) && !isVercelSharedLive(state.capabilities))
       || !fetchId) return;
   const poll = async (attempt = 0) => {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
+      if (job.status === 'NOT_PROCESSED' && isVercelSharedLive(state.capabilities)
+          && terminalFetch?.fetch_id === fetchId) {
+        await recoverLatestVercelCollectionSnapshot(terminalFetch);
+        if (attempt < 120) window.setTimeout(() => poll(attempt + 1), 250);
+        return;
+      }
       if (job.status === 'PROCESSING' && attempt < 120) {
         $('#workbench-status').textContent = t('collections.progress', {
         stage: t(`collections.stage-${job.stage || 'CLEANING'}`), eligible: number(job.eligible),
@@ -1433,7 +1439,7 @@ function handleFetchTerminal(runId, fetchStatus) {
       loadRun(runId);
     } else if (isVercelSharedLive(state.capabilities)) {
       const hasDiscovery = acceptsDiscovery(state.capabilities, fetchStatus?.discovery);
-      refreshCollectionJob(fetchStatus?.fetch_id);
+      refreshCollectionJob(fetchStatus?.fetch_id, fetchStatus);
       state.publicFetchDiscovery = hasDiscovery ? fetchStatus.discovery : null;
       state.publicFetchSources = Array.isArray(fetchStatus?.sources) ? fetchStatus.sources : [];
       state.publicFetchFinishedAt = typeof fetchStatus?.finished_at === 'string'
@@ -1450,7 +1456,7 @@ function handleFetchTerminal(runId, fetchStatus) {
         else void recoverLatestVercelCollectionSnapshot(fetchStatus);
       });
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
-      refreshCollectionJob(fetchStatus.fetch_id);
+      refreshCollectionJob(fetchStatus.fetch_id, fetchStatus);
       const localLive = isLocalLiveDemo(state.capabilities);
       state.publicFetchDiscovery = localLive ? null : fetchStatus.discovery;
       state.publicFetchSources = Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [];
@@ -1948,7 +1954,7 @@ async function loadLatestDataset() {
 async function recoverLatestVercelCollectionSnapshot(terminalFetch = null) {
   if (!isVercelSharedLive(state.capabilities)
       || state.capabilities.deployment_environment !== 'production'
-      || state.persistedDatasetAvailable) return;
+      || state.persistedDatasetAvailable && !terminalFetch?.fetch_id) return;
   try {
     const terminalStatuses = new Set(['COMPLETED', 'PARTIAL', 'FAILED', 'ABORTED', 'EXPIRED']);
     let latest = terminalFetch;

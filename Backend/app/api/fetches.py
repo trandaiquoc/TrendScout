@@ -253,7 +253,9 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
 
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
                                      cached_context_only: bool = False):
-    result = distributed.status(fetch_id, include_records=True)
+    result = await asyncio.to_thread(
+        distributed.status, fetch_id, include_records=True
+    )
     if result and result.get("terminal"):
         shared_live = getattr(distributed, "firestore_shared_live", False)
         if shared_live:
@@ -278,7 +280,8 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
 
 
 async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str,
-                                     owner: str, *, run_worker: bool = True):
+                                     owner: str, *, run_worker: bool = True,
+                                     process_collections: bool = True):
     """Run or resume a durable Fetch, then classify retained records."""
     shared_live = bool(getattr(distributed, "firestore_shared_live", False))
     vercel_shared_live = (
@@ -309,9 +312,10 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
         elif (result and result.get("job_id") != fetch_id
               and result.get("state") in {"COMPLETED", "PARTIAL"}):
             await distributed.run_once(owner)
-    await _process_fetch_collections(
-        request, distributed, fetch_id, cached_context_only=shared_live
-    )
+    if process_collections:
+        await _process_fetch_collections(
+            request, distributed, fetch_id, cached_context_only=shared_live
+        )
 
 
 @router.post("/fetches", status_code=202)
@@ -386,7 +390,9 @@ async def create_fetch(
             submit_options = {"source_ids": request_sources}
             if manual_source_refresh:
                 submit_options["manual_source_refresh"] = True
-            accepted = distributed.submit(idempotency_key, **submit_options)
+            accepted = await asyncio.to_thread(
+                distributed.submit, idempotency_key, **submit_options
+            )
         except AdmissionDenied as exc:
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
@@ -403,6 +409,7 @@ async def create_fetch(
                     await _run_fetch_and_collections(
                         request, distributed, accepted["job_id"],
                         f"api-{secrets.token_hex(12)}",
+                        process_collections=not vercel_shared_live,
                     )
             else:
                 background_tasks.add_task(
@@ -419,6 +426,7 @@ async def create_fetch(
                 await _run_fetch_and_collections(
                     request, distributed, accepted["job_id"],
                     f"api-{secrets.token_hex(12)}", run_worker=False,
+                    process_collections=not vercel_shared_live,
                 )
             else:
                 background_tasks.add_task(
@@ -517,7 +525,9 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
             or getattr(service.store, "data_mode_scope", None) != "LIVE"):
         raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
     try:
-        result = distributed.status(fetch_id, include_records=True)
+        result = await asyncio.to_thread(
+            distributed.status, fetch_id, include_records=True
+        )
     except AdmissionDenied as exc:
         _raise_distributed_admission_error(exc.code, distributed)
     if result is None:
@@ -563,7 +573,9 @@ async def create_history_fetch(
     if distributed is None or not getattr(distributed, "normal_wikimedia_live", False):
         raise HTTPException(409, {"code": "HISTORICAL_FETCH_UNAVAILABLE"})
     try:
-        accepted = distributed.submit(idempotency_key, history_days=days)
+        accepted = await asyncio.to_thread(
+            distributed.submit, idempotency_key, history_days=days
+        )
     except AdmissionDenied as exc:
         _raise_distributed_admission_error(exc.code, distributed)
     except ValueError:
@@ -596,7 +608,7 @@ async def get_fetch(fetch_id: str, request: Request, response: Response):
     if distributed is not None:
         validate_public_request_origin(request, request.app.state.settings.environment_profile)
         try:
-            result = distributed.status(fetch_id)
+            result = await asyncio.to_thread(distributed.status, fetch_id)
         except AdmissionDenied as exc:
             _raise_distributed_admission_error(exc.code, distributed)
         if result is None:

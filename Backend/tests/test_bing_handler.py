@@ -352,7 +352,7 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         def grant_for(source_id, now):
             return CacheGrant(
                 source_id, "D6_BING_ACCEPTANCE_CACHE_V1", now + timedelta(days=7),
-                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+                24 * 3600, 2 * 24 * 3600, 7 * 24 * 3600, allowed=True,
             )
 
         handler = BingSavedCandidateHandler(
@@ -383,8 +383,20 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["coverage"]["cached_provider_request_count"], 1)
         self.assertEqual(second["records"][0]["bing_verification"]["fetched_at"],
                          first["records"][0]["bing_verification"]["fetched_at"])
-        self.assertEqual(len(self.gateway.calls), 1)
-        self.assertEqual(len(self.budget_calls), 1)
+
+        current[0] = NOW + timedelta(hours=9)
+        third = await handler(work_context(
+            current[0], request_metadata={
+                "sources": sources,
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            }, job_id="3" * 32,
+        ))
+
+        self.assertEqual(third["status"], "SUCCESS")
+        self.assertEqual(third["delivery_state"], "FRESH")
+        self.assertEqual(third["provider_request_count"], 1)
+        self.assertEqual(len(self.gateway.calls), 2)
+        self.assertEqual(len(self.budget_calls), 2)
 
 
 if __name__ == "__main__":

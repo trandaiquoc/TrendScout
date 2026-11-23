@@ -361,7 +361,7 @@ class GoogleTrendsDiscoveryHandler:
                 request = GoogleTrendsRequest(
                     source_id=GOOGLE_SOURCE_ID,
                     policy_fingerprint=self.policy_fingerprint,
-                    force_refresh=self.force_refresh or acceptance_fresh,
+                    force_refresh=self.force_refresh or acceptance_fresh or manual_refresh,
                 )
                 attempt_id = hashlib.sha256(
                     f"{context.job_id}:trends:{request.plan_id}:{request.plan_version}".encode()
@@ -612,7 +612,8 @@ class GoogleTrendsDiscoveryHandler:
                         context=serp_context, cursor=initial_offset(serp_context),
                         job_id=context.job_id, owner=context.owner, fence=context.fence,
                         attempt_id=attempt_id, timeout_seconds=15,
-                        **({"force_refresh": True} if acceptance_fresh else {}),
+                        **({"force_refresh": True}
+                           if acceptance_fresh or manual_refresh else {}),
                     )
                     verification = _serialize_serp_page(
                         serp_context, gateway_page.page, fetched_at=self.utcnow(),

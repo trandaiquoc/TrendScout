@@ -97,6 +97,51 @@ class PublicAdmissionTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def test_runtime_quota_snapshot_reads_pools_and_request_times_atomically(self):
+        accepted = self.control.admit(
+            "quota-runtime-snapshot", now=NOW,
+            request_metadata={"sources": [YOUTUBE_SOURCE_ID]},
+        )
+        claim = self.control.claim(accepted["job_id"], "snapshot-worker", now=NOW)
+        attempt_id = "quota-snapshot-provider-attempt"
+        self.control.reserve_attempt(
+            accepted["job_id"], "snapshot-worker", claim["fence"],
+            source_id=YOUTUBE_SOURCE_ID, attempt_id=attempt_id, now=NOW,
+        )
+        self.control.record_provider_request_started(
+            accepted["job_id"], "snapshot-worker", claim["fence"],
+            source_id=YOUTUBE_SOURCE_ID, attempt_id=attempt_id, now=NOW,
+        )
+
+        class CountingStore:
+            def __init__(self, store):
+                self.store = store
+                self.calls = 0
+
+            def transact(self, key, operation):
+                self.calls += 1
+                return self.store.transact(key, operation)
+
+        counted_store = CountingStore(self.control.store)
+        reader = PublicAdmission(
+            counted_store, self.control.policy, state_key="public",
+        )
+        snapshot = reader.quota_runtime_snapshot(
+            ("serpapi", "youtube"),
+            source_ids=(YOUTUBE_SOURCE_ID,),
+            now=NOW,
+        )
+
+        self.assertEqual(counted_store.calls, 1)
+        self.assertTrue(snapshot["operational_enabled"])
+        self.assertEqual(snapshot["pools"]["youtube"]["daily"]["used"], 1)
+        self.assertEqual(
+            snapshot["last_attempt_reserved_at"][YOUTUBE_SOURCE_ID], NOW.isoformat()
+        )
+        self.assertEqual(
+            snapshot["last_provider_request_at"][YOUTUBE_SOURCE_ID], NOW.isoformat()
+        )
+
     def test_history_request_metadata_is_idempotent_and_survives_worker_claim(self):
         metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": 2}
         accepted = self.control.admit("explicit-history-request", now=NOW,

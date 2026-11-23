@@ -1,5 +1,6 @@
 """Public, non-secret view of runtime and source capabilities."""
 
+import asyncio
 import json
 import os
 import re
@@ -406,10 +407,29 @@ async def capabilities(request: Request, response: Response):
     shared_policy_reconciliation_required = False
     distributed = (getattr(request.state, "distributed_public_fetch", None)
                    or request.app.state.distributed_public_fetch)
+    runtime_metadata = None
+    runtime_metadata_reader = getattr(distributed, "capability_runtime_metadata", None)
+    if callable(runtime_metadata_reader):
+        try:
+            runtime_metadata = await asyncio.to_thread(runtime_metadata_reader)
+        except Exception:
+            runtime_metadata = {
+                "admission_status": "UNAVAILABLE",
+                "operational_enabled": False,
+                "google": {"status": "UNAVAILABLE"},
+                "youtube": {"status": "UNAVAILABLE"},
+            }
     if enabled:
         if distributed is not None:
             try:
-                enabled = distributed.admission.operationally_enabled()
+                if runtime_metadata is not None:
+                    if runtime_metadata.get("admission_status") != "AVAILABLE":
+                        raise RuntimeError("admission state is unavailable")
+                    enabled = runtime_metadata.get("operational_enabled") is True
+                else:
+                    enabled = await asyncio.to_thread(
+                        distributed.admission.operationally_enabled
+                    )
                 if not enabled:
                     block_reason = "FEATURE_DISABLED"
                     vercel_live_runtime = bool(
@@ -422,7 +442,7 @@ async def capabilities(request: Request, response: Response):
                             getattr(distributed, "vercel_wikimedia_policy_sync_status", None),
                         )
                         if callable(sync_status):
-                            sync_status = sync_status()
+                            sync_status = await asyncio.to_thread(sync_status)
                         if sync_status == "READY_TO_SYNC":
                             enabled = True
                             block_reason = None
@@ -448,7 +468,7 @@ async def capabilities(request: Request, response: Response):
                     enabled = False
                     block_reason = "ADMISSION_STATE_UNAVAILABLE"
     plan = get_query_plan(settings.query_plan_id, settings.query_plan_version)
-    saved_activity = _saved_source_activity(request)
+    saved_activity = await asyncio.to_thread(_saved_source_activity, request)
     source_ids = getattr(
         request.state, "public_fetch_source_ids", request.app.state.public_fetch_source_ids
     )
@@ -474,10 +494,13 @@ async def capabilities(request: Request, response: Response):
              or getattr(distributed, "normal_youtube_live", False))
         and distributed.data_mode == "LIVE"
     )
-    google_quota = (distributed.google_quota_metadata()
-                    if distributed is not None
-                    and callable(getattr(distributed, "google_quota_metadata", None))
-                    else None)
+    if runtime_metadata is not None:
+        google_quota = runtime_metadata.get("google")
+    elif (distributed is not None
+          and callable(getattr(distributed, "google_quota_metadata", None))):
+        google_quota = await asyncio.to_thread(distributed.google_quota_metadata)
+    else:
+        google_quota = None
     youtube_workflow = getattr(distributed, "youtube_capabilities", {
         "approval_status": "PENDING_LIVE_APPROVAL",
         "policy_status": "APPROVED" if YOUTUBE_POLICY_APPROVED else "DRAFT",
@@ -490,10 +513,13 @@ async def capabilities(request: Request, response: Response):
         "keyword_extraction": "DISABLED_PENDING_POLICY_APPROVAL",
         "derived_metrics": "DISABLED_PENDING_POLICY_APPROVAL",
     })
-    youtube_quota = (distributed.youtube_quota_metadata()
-                     if distributed is not None
-                     and callable(getattr(distributed, "youtube_quota_metadata", None))
-                     else None)
+    if runtime_metadata is not None:
+        youtube_quota = runtime_metadata.get("youtube")
+    elif (distributed is not None
+          and callable(getattr(distributed, "youtube_quota_metadata", None))):
+        youtube_quota = await asyncio.to_thread(distributed.youtube_quota_metadata)
+    else:
+        youtube_quota = None
     if (isinstance(google_quota, dict)
             and google_quota.get("provider_account") is None
             and google_quota.get("provider_account_status")
@@ -511,6 +537,10 @@ async def capabilities(request: Request, response: Response):
         candidate_environment = os.environ.get("VERCEL_ENV")
         if candidate_environment in {"production", "preview", "development"}:
             deployment_environment = candidate_environment
+    refresh_schedule = None
+    refresh_schedule_reader = getattr(distributed, "refresh_schedule_metadata", None)
+    if callable(refresh_schedule_reader):
+        refresh_schedule = await asyncio.to_thread(refresh_schedule_reader)
     return {
         "contract_version": "1.0",
         "environment_mode": settings.environment_profile,
@@ -530,10 +560,7 @@ async def capabilities(request: Request, response: Response):
         "google_quota": google_quota,
         "youtube_workflow": youtube_workflow,
         "youtube_quota": youtube_quota,
-        "refresh_schedule": (distributed.refresh_schedule_metadata()
-                             if distributed is not None
-                             and callable(getattr(distributed, "refresh_schedule_metadata", None))
-                             else None),
+        "refresh_schedule": refresh_schedule,
         "public_fetch_enabled": enabled,
         "fetch_enabled": enabled,
         "fetch_block_reason": block_reason,

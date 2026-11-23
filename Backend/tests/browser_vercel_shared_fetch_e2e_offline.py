@@ -9,7 +9,7 @@ from browser_support import find_chrome, require_linux_network_isolation
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
-FETCH_ID = "f" * 43
+FETCH_ID = "f" * 32
 SOURCE_ID = "wikimedia_pageviews_top_per_country"
 
 

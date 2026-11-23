@@ -1070,55 +1070,67 @@ async def normal_google_live_composition(*, user_agent,
             "runtime_mode": OWNER_MANUAL_LIVE if youtube_manual_live else NORMAL_DEMO,
         }
 
-        def youtube_quota_metadata():
+        def capability_runtime_metadata():
+            """Read admission and provider quota data with one durable transaction."""
+            pool_names = tuple(name for name in (
+                "serpapi", "google_rss", "serpapi_google", "serpapi_bing",
+                "youtube", "youtube_other",
+            ) if name in policy.pools)
+            source_ids = ((YOUTUBE_SOURCE_ID,)
+                          if YOUTUBE_SOURCE_ID in policy.enabled_sources else ())
             try:
-                return {
+                runtime = admission.quota_runtime_snapshot(
+                    pool_names, source_ids=source_ids, now=utcnow(),
+                )
+                pools = runtime["pools"]
+                google = {
+                    "provider_account": quota_state.get("snapshot"),
+                    "provider_account_status": quota_state.get("status", "NOT_CONFIGURED"),
+                }
+                for name in ("serpapi", "google_rss", "serpapi_google", "serpapi_bing"):
+                    if name in pools:
+                        google[name] = pools[name]
+                youtube = {
                     "provider_quota": {
                         "status": "UNKNOWN",
                         "search_calls_per_day": None,
                         "other_method_units_per_day": None,
                         "reason": "PROJECT_SPECIFIC_LIMITS_REQUIRE_GOOGLE_CLOUD_CONSOLE_EVIDENCE",
                     },
-                    "search": admission.quota_snapshot("youtube", now=utcnow()),
-                    "other_methods": admission.quota_snapshot("youtube_other", now=utcnow()),
-                    "last_attempt_reserved_at": admission.last_attempt_reserved_at(
-                        YOUTUBE_SOURCE_ID
-                    ),
-                    "last_provider_request_at": admission.last_provider_request_at(
-                        YOUTUBE_SOURCE_ID
-                    ),
                     "provider_timezone": "America/Los_Angeles",
                     "internal_monthly_timezone": "UTC",
                 }
+                if "youtube" in pools:
+                    youtube["search"] = pools["youtube"]
+                if "youtube_other" in pools:
+                    youtube["other_methods"] = pools["youtube_other"]
+                if YOUTUBE_SOURCE_ID in source_ids:
+                    youtube["last_attempt_reserved_at"] = runtime[
+                        "last_attempt_reserved_at"
+                    ][YOUTUBE_SOURCE_ID]
+                    youtube["last_provider_request_at"] = runtime[
+                        "last_provider_request_at"
+                    ][YOUTUBE_SOURCE_ID]
+                return {
+                    "admission_status": "AVAILABLE",
+                    "operational_enabled": runtime["operational_enabled"],
+                    "google": google,
+                    "youtube": youtube,
+                }
             except Exception:
-                return {"status": "UNAVAILABLE"}
+                return {
+                    "admission_status": "UNAVAILABLE",
+                    "operational_enabled": False,
+                    "google": {"status": "UNAVAILABLE"},
+                    "youtube": {"status": "UNAVAILABLE"},
+                }
 
-        facade.youtube_quota_metadata = youtube_quota_metadata
+        facade.capability_runtime_metadata = capability_runtime_metadata
+        facade.google_quota_metadata = lambda: capability_runtime_metadata()["google"]
+        facade.youtube_quota_metadata = lambda: capability_runtime_metadata()["youtube"]
         facade.youtube_retention_cleanup = (
             None if preserve_expired_data or uses_firestore else cleanup_youtube_data
         )
-
-        def google_quota_metadata():
-            try:
-                metadata = {
-                    "serpapi": admission.quota_snapshot("serpapi", now=utcnow()),
-                    "google_rss": admission.quota_snapshot("google_rss", now=utcnow()),
-                    "provider_account": quota_state.get("snapshot"),
-                    "provider_account_status": quota_state.get("status", "NOT_CONFIGURED"),
-                }
-                if "serpapi_google" in policy.pools:
-                    metadata["serpapi_google"] = admission.quota_snapshot(
-                        "serpapi_google", now=utcnow()
-                    )
-                if "serpapi_bing" in policy.pools:
-                    metadata["serpapi_bing"] = admission.quota_snapshot(
-                        "serpapi_bing", now=utcnow()
-                    )
-                return metadata
-            except Exception:
-                return {"status": "UNAVAILABLE"}
-
-        facade.google_quota_metadata = google_quota_metadata
         yield facade
     finally:
         for resource in reversed(resources):

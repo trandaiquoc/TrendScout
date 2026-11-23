@@ -245,7 +245,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_key_submission_replay_waits_for_explicit_source_continuation(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         _client_factory.side_effect = lambda _token: _Client(events)
-        facade.slice_state = "QUEUED"
+        facade.slice_state = "PARTIAL"
         headers = {
             "Origin": "https://trend-scout.example",
             "x-vercel-oidc-token": "synthetic-test-token",
@@ -545,7 +545,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(overview.json()["keyword_totals"]["unique"])
         self.assertEqual(overview.json()["shared_fetch_history"]["items"], 1)
 
-    async def test_existing_terminal_fetch_replays_collections_without_running_worker(self):
+    async def test_existing_terminal_fetch_defers_collections_to_recovery_endpoint(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         facade.submit_status = "PARTIAL"
         facade.force_replay = True
@@ -577,10 +577,10 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(response.json()["status"], "PARTIAL")
-        self.assertEqual(processed[0][0], _JOB_ID)
-        self.assertTrue(processed[0][2])
+        self.assertEqual(processed, [])
         self.assertNotIn("worker_finished", events)
-        self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
+        self.assertNotIn("collections_processed", events)
+        self.assertNotIn("snapshot_saved", events)
 
     async def test_checkpoint_recovery_endpoint_never_runs_source_worker(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)

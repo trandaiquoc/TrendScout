@@ -678,20 +678,56 @@ class PublicAdmission:
             return zero
         return {"requests": requests, "cost": cost}
 
-    def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:
-        """Return bounded local reservation counts for one configured pool."""
+    def quota_runtime_snapshot(self, pool_names, *, source_ids=(), now: datetime) -> dict:
+        """Read quota usage and provider-attempt times in one atomic state read."""
         now = _utc(now)
-        if not isinstance(pool_name, str) or pool_name not in self._pools:
-            raise ValueError("configured quota pool required")
-        limit = self._pools[pool_name]
-        day_date = self._quota_day(pool_name, now)
-        day, month = day_date.isoformat(), now.strftime("%Y-%m")
+        if (not isinstance(pool_names, (tuple, list)) or not pool_names
+                or any(not isinstance(name, str) or name not in self._pools
+                       for name in pool_names)
+                or len(pool_names) != len(set(pool_names))):
+            raise ValueError("unique configured quota pools required")
+        if (not isinstance(source_ids, (tuple, list))
+                or any(not isinstance(source_id, str)
+                       or source_id not in self.policy.enabled_sources
+                       for source_id in source_ids)
+                or len(source_ids) != len(set(source_ids))):
+            raise ValueError("unique configured sources required")
 
-        uses_provider_cycle = (bool(self.policy.source_allocations)
-                               and (pool_name == "serpapi"
-                                    or pool_name in self.policy.source_allocations.values()))
+        def snapshot(state, pool_name):
+            limit = self._pools[pool_name]
+            day_date = self._quota_day(pool_name, now)
+            day, month = day_date.isoformat(), now.strftime("%Y-%m")
+            uses_provider_cycle = (
+                bool(self.policy.source_allocations)
+                and (pool_name == "serpapi"
+                     or pool_name in self.policy.source_allocations.values())
+            )
 
-        def result(daily, monthly, *, cycle_end=None, unattributed=None):
+            def usage(key):
+                value = state.get("quota", {}).get(key, {"requests": 0, "cost": 0})
+                if (not isinstance(value, dict)
+                        or type(value.get("requests")) is not int
+                        or type(value.get("cost")) is not int
+                        or value["requests"] < 0 or value["cost"] < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                return value
+
+            daily = usage(f"{pool_name}:day:{day}")
+            cycle_end = state.get("serpapi_cycle_ends_at") if uses_provider_cycle else None
+            if cycle_end is not None:
+                try:
+                    parsed_cycle_end = date.fromisoformat(cycle_end)
+                except (TypeError, ValueError):
+                    raise AdmissionDenied("STATE_INVALID") from None
+                if parsed_cycle_end.isoformat() != cycle_end:
+                    raise AdmissionDenied("STATE_INVALID")
+                if parsed_cycle_end < now.date():
+                    cycle_end = None
+            monthly_key = (f"{pool_name}:cycle:{cycle_end}" if cycle_end
+                           else f"{pool_name}:month:{month}")
+            monthly = usage(monthly_key)
+            unattributed = (self._serpapi_unattributed_usage(state, cycle_end)
+                            if pool_name == "serpapi" else None)
             monthly_value = {
                 "limit": limit.monthly_requests,
                 "used": monthly["requests"],
@@ -734,50 +770,52 @@ class PublicAdmission:
             if uses_provider_cycle:
                 value["billing_cycle_ends_at"] = cycle_end
                 value["billing_cycle_status"] = "KNOWN" if cycle_end else "UNKNOWN"
-            source_ids = [source for source, allocation_pool in self.policy.source_allocations.items()
-                          if allocation_pool == pool_name]
-            if len(source_ids) == 1:
-                value["source_id"] = source_ids[0]
+            allocated_sources = [
+                source for source, allocation_pool in self.policy.source_allocations.items()
+                if allocation_pool == pool_name
+            ]
+            if len(allocated_sources) == 1:
+                value["source_id"] = allocated_sources[0]
             return value
 
-        def read(state):
-            if not state:
-                zero = {"requests": 0, "cost": 0}
-                return state, result(zero, zero)
-            if (state.get("schema") != 1
-                    or state.get("policy_digest") != self.policy_digest
-                    or not isinstance(state.get("quota"), dict)):
+        def timestamp(state, field_name, source_id):
+            values = state.get(field_name, {})
+            if not isinstance(values, dict):
                 raise AdmissionDenied("STATE_INVALID")
+            value = values.get(source_id)
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise AdmissionDenied("STATE_INVALID")
+            try:
+                return _parse(value).isoformat()
+            except (TypeError, ValueError):
+                raise AdmissionDenied("STATE_INVALID") from None
 
-            def usage(key):
-                value = state["quota"].get(key, {"requests": 0, "cost": 0})
-                if (not isinstance(value, dict)
-                        or type(value.get("requests")) is not int
-                        or type(value.get("cost")) is not int
-                        or value["requests"] < 0 or value["cost"] < 0):
-                    raise AdmissionDenied("STATE_INVALID")
-                return value
-
-            daily = usage(f"{pool_name}:day:{day}")
-            cycle_end = state.get("serpapi_cycle_ends_at") if uses_provider_cycle else None
-            if cycle_end is not None:
-                try:
-                    parsed_cycle_end = date.fromisoformat(cycle_end)
-                except (TypeError, ValueError):
-                    raise AdmissionDenied("STATE_INVALID") from None
-                if parsed_cycle_end.isoformat() != cycle_end:
-                    raise AdmissionDenied("STATE_INVALID")
-                if parsed_cycle_end < now.date():
-                    cycle_end = None
-            monthly_key = (f"{pool_name}:cycle:{cycle_end}" if cycle_end
-                           else f"{pool_name}:month:{month}")
-            monthly = usage(monthly_key)
-            unattributed = (self._serpapi_unattributed_usage(state, cycle_end)
-                            if pool_name == "serpapi" else None)
-            return state, result(daily, monthly, cycle_end=cycle_end,
-                                 unattributed=unattributed)
+        def read(state):
+            if state and (state.get("schema") != 1
+                          or state.get("policy_digest") != self.policy_digest
+                          or not isinstance(state.get("quota"), dict)):
+                raise AdmissionDenied("STATE_INVALID")
+            return state, {
+                "operational_enabled": (self.policy.enabled if not state else
+                                        state.get("operational_enabled") is True),
+                "pools": {name: snapshot(state, name) for name in pool_names},
+                "last_attempt_reserved_at": {
+                    source_id: timestamp(state, "last_attempt_reserved_at", source_id)
+                    for source_id in source_ids
+                },
+                "last_provider_request_at": {
+                    source_id: timestamp(state, "last_provider_request_at", source_id)
+                    for source_id in source_ids
+                },
+            }
 
         return self.store.transact(self.state_key, read)
+
+    def quota_snapshot(self, pool_name: str, *, now: datetime) -> dict:
+        """Return bounded local reservation counts for one configured pool."""
+        return self.quota_runtime_snapshot((pool_name,), now=now)["pools"][pool_name]
 
     def set_serpapi_billing_cycle(self, cycle_ends_at: str, *, now: datetime) -> None:
         """Pin combined Google/Bing reservations to the provider renewal boundary."""
