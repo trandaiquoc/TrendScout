@@ -41,6 +41,7 @@ _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
 OWNER_FRESH_ACCEPTANCE_MARKER = "D6_FOUR_SOURCE_FRESH_V1"
 MANUAL_SOURCE_REFRESH_MARKER = "VERCEL_OPERATOR_AUTHENTICATED_MANUAL_REFRESH_V1"
+_CLOCK_REGRESSION_TOLERANCE = timedelta(seconds=5)
 
 
 class AdmissionDenied(Exception):
@@ -831,7 +832,10 @@ class PublicAdmission:
             raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
+            if cycle_date < now.date():
+                raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
             previous_cycle = state.get("serpapi_cycle_ends_at")
             if previous_cycle == cycle_ends_at:
                 return
@@ -897,7 +901,10 @@ class PublicAdmission:
             raise AdmissionDenied("QUOTA_SOURCE_ALLOCATION_INVALID")
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
+            if cycle_date < now.date():
+                raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
             if state.get("serpapi_cycle_ends_at") != cycle_ends_at:
                 raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
             if monthly_used > self._pools["serpapi"].monthly_requests:
@@ -1002,7 +1009,8 @@ class PublicAdmission:
         if not callable(operation):
             raise ValueError("checkpoint operation required")
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             return operation(job)
@@ -1011,9 +1019,29 @@ class PublicAdmission:
     @staticmethod
     def _guard_clock(state, now):
         previous = state.get("last_observed_at")
-        if previous is not None and now < _parse(previous):
-            raise AdmissionDenied("CLOCK_REGRESSION")
+        if previous is not None:
+            previous = _parse(previous)
+            if now < previous:
+                regression = previous - now
+                crossed_quota_day = (
+                    now.date() != previous.date()
+                    or now.astimezone(YOUTUBE_PROVIDER_TIMEZONE).date()
+                    != previous.astimezone(YOUTUBE_PROVIDER_TIMEZONE).date()
+                )
+                if regression > _CLOCK_REGRESSION_TOLERANCE or crossed_quota_day:
+                    raise AdmissionDenied("CLOCK_REGRESSION")
+                # Firestore transactions can commit in a different order than
+                # their callers captured wall time. Keep mutations monotonic by
+                # evaluating bounded same-period skew at the durable high-water.
+                now = previous
         state["last_observed_at"] = now.isoformat()
+        return now
+
+    @staticmethod
+    def _effective_clock(state, now):
+        """Read the monotonic high-water without making a read-only write."""
+        previous = state.get("last_observed_at")
+        return max(now, _parse(previous)) if previous is not None else now
 
     def _selected_job_sources(self, job):
         metadata = job.get("request_metadata", {})
@@ -1224,7 +1252,8 @@ class PublicAdmission:
             if (state.get("schema") != 1
                     or state.get("policy_digest") != self.policy_digest):
                 raise AdmissionDenied("POLICY_MISMATCH")
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             return state, self._prune_expired_records(state, now)
 
         return self.store.transact(self.state_key, operation)
@@ -1328,7 +1357,8 @@ class PublicAdmission:
                     if key != "owner_fresh_acceptance"} == request_metadata
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             jobs, keys = state["jobs"], state["keys"]
             self._prune_expired_records(state, now)
             existing = keys.get(digest)
@@ -1420,7 +1450,8 @@ class PublicAdmission:
             if (not state or state.get("schema") != 1
                     or state.get("policy_digest") != self.policy_digest):
                 raise AdmissionDenied("POLICY_MISMATCH")
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             if not isinstance(job, dict):
                 return state, None
@@ -1447,13 +1478,15 @@ class PublicAdmission:
                     or state.get("policy_digest") != self.policy_digest
                     or not isinstance(state.get("jobs"), dict)):
                 raise AdmissionDenied("STATE_INVALID")
+            observed_now = now
+            effective_now = self._effective_clock(state, observed_now)
             jobs = []
             lifecycle_changed = False
             for job_id, job in state["jobs"].items():
                 if (not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id)
                         or not isinstance(job, dict) or job.get("job_id") != job_id):
                     raise AdmissionDenied("STATE_INVALID")
-                lifecycle_changed |= self._repair_job_lifecycle(job, now)
+                lifecycle_changed |= self._repair_job_lifecycle(job, effective_now)
                 try:
                     created = _parse(job["created_at"])
                     updated = _parse(job.get("updated_at") or job["created_at"])
@@ -1461,7 +1494,7 @@ class PublicAdmission:
                     raise AdmissionDenied("STATE_INVALID") from None
                 jobs.append((updated, created, deepcopy(job)))
             if lifecycle_changed:
-                self._guard_clock(state, now)
+                self._guard_clock(state, observed_now)
             jobs.sort(key=lambda item: (item[0], item[1], item[2]["job_id"]), reverse=True)
             return state, [item[2] for item in jobs[:limit]]
 
@@ -1473,7 +1506,8 @@ class PublicAdmission:
             raise ValueError("invalid worker identity")
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             return self._claim_job(job, owner, now)
         return self._transaction(op)
@@ -1485,7 +1519,8 @@ class PublicAdmission:
             raise ValueError("invalid worker identity")
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             if not job:
                 return {"denied": "JOB_EXPIRED"}
@@ -1555,7 +1590,8 @@ class PublicAdmission:
         if not isinstance(owner, str) or not _OWNER.fullmatch(owner):
             raise ValueError("invalid worker identity")
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             for job in sorted(state["jobs"].values(), key=lambda x: (x["created_at"], x["job_id"])):
                 if job["state"] not in {"QUEUED", "RUNNING"}:
                     continue
@@ -1584,7 +1620,8 @@ class PublicAdmission:
         """Release a lease with a bounded retry time; never truncate Retry-After."""
         now, not_before = _utc(now), _utc(not_before)
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             if (not job or job["state"] != "RUNNING" or job["owner"] != owner
                     or type(fence) is not int or job["fence"] != fence
@@ -1604,7 +1641,8 @@ class PublicAdmission:
         now = _utc(now)
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             job.update(state="QUEUED", owner=None, lease_until=None,
@@ -1617,7 +1655,8 @@ class PublicAdmission:
         """Extend only the currently fenced lease, never past the job deadline."""
         now = _utc(now)
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             job["lease_until"] = min(now + timedelta(seconds=self.policy.lease_seconds),
@@ -1647,7 +1686,8 @@ class PublicAdmission:
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
 
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             existing = job["receipts"].get(receipt_id)
@@ -1788,7 +1828,8 @@ class PublicAdmission:
             raise ValueError("invalid attempt identity")
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             if receipt_id not in job["receipts"]:
@@ -1811,7 +1852,8 @@ class PublicAdmission:
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
         pool = self._pool_name(source_id, pool_name)
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             receipt = job["receipts"].get(receipt_id)
@@ -1835,7 +1877,8 @@ class PublicAdmission:
         receipt_id = hashlib.sha256(attempt_id.encode("ascii")).hexdigest()
 
         def operation(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             receipt = job["receipts"].get(receipt_id)
@@ -1858,7 +1901,8 @@ class PublicAdmission:
         if type(partial) is not bool or type(require_source_results) is not bool:
             raise ValueError("finish flags must be boolean")
         def op(state):
-            self._guard_clock(state, now)
+            nonlocal now
+            now = self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
             if require_source_results:

@@ -515,10 +515,32 @@ class PublicAdmissionTests(unittest.TestCase):
 
     def test_clock_regression_and_disabled_policy_fail_closed(self):
         job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
+        claim = self.control.claim(
+            job, "worker", now=NOW - timedelta(seconds=1)
+        )
+        self.assertEqual(
+            claim["lease_until"], (NOW + timedelta(seconds=10)).isoformat()
+        )
         with self.assertRaisesRegex(AdmissionDenied, "CLOCK_REGRESSION"):
-            self.control.claim(job, "worker", now=NOW - timedelta(seconds=1))
+            self.control.heartbeat(
+                job, "worker", claim["fence"], now=NOW - timedelta(seconds=6)
+            )
         with self.assertRaisesRegex(AdmissionDenied, "FEATURE_DISABLED"):
             coordinator(self.path, policy(enabled=False)).admit("different-idempotency-key", now=NOW)
+
+    def test_small_clock_regression_cannot_cross_quota_day_boundaries(self):
+        boundaries = (
+            datetime(2026, 11, 13, 0, 0, tzinfo=timezone.utc),
+            # November is standard time in Los Angeles, so this is its midnight.
+            datetime(2026, 11, 13, 8, 0, tzinfo=timezone.utc),
+        )
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary.isoformat()):
+                state = {"last_observed_at": boundary.isoformat()}
+                with self.assertRaisesRegex(AdmissionDenied, "CLOCK_REGRESSION"):
+                    PublicAdmission._guard_clock(
+                        state, boundary - timedelta(seconds=1)
+                    )
 
     def test_durable_queue_defers_without_shortening_retry_after(self):
         job = self.control.admit("one-request-idempotency", now=NOW)["job_id"]
