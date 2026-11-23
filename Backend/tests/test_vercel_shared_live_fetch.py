@@ -128,6 +128,10 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
             _vercel_timing_route(dynamic_scope),
             "/api/v1/fetches/{fetch_id}",
         )
+        self.assertEqual(
+            _vercel_timing_route({"path": "/api/v1/capabilities"}),
+            "/api/v1/capabilities",
+        )
 
 
 class _Client:

@@ -54,6 +54,16 @@ from app.sources.catalog import (
 
 _logger = logging.getLogger(__name__)
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_VERCEL_STATIC_API_TIMING_ROUTES = frozenset({
+    "/api/v1/algorithms/results",
+    "/api/v1/capabilities",
+    "/api/v1/collections",
+    "/api/v1/datasets/latest",
+    "/api/v1/datasets/latest/keywords",
+    "/api/v1/research",
+    "/api/v1/runs/history",
+    "/api/v1/runtime",
+})
 _SAFE_SNAPSHOT_FAILURE_REASONS = frozenset({
     "INVALID_SHARED_POINTER",
     "RESTORE_FAILED",
@@ -216,6 +226,9 @@ def _vercel_timing_route(scope, application=None):
         child_app = getattr(owner, "app", None)
         if child_app is not None:
             pending.append(child_app)
+    request_path = scope.get("path")
+    if request_path in _VERCEL_STATIC_API_TIMING_ROUTES:
+        return request_path
     return "unmatched"
 
 
