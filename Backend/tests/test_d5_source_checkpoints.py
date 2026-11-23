@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
 
@@ -51,6 +52,43 @@ class SourceCheckpointTests(unittest.TestCase):
         loaded = self.load()
         self.assertEqual(loaded["revision"], 1)
         self.assertEqual(loaded["snapshot"], self.snapshot)
+
+    def test_large_collector_progress_records_use_existing_snapshot_blob_store(self):
+        class SnapshotBlobs:
+            def __init__(self):
+                self.records = None
+
+            def put(self, records, *, now, retain_until):
+                self.records = deepcopy(records)
+                return {"digest": "a" * 64, "raw_bytes": 200_000,
+                        "item_count": len(records)}
+
+            def get(self, _reference, *, now):
+                return deepcopy(self.records)
+
+        blobs = SnapshotBlobs()
+        journal = SourceCheckpointJournal(self.admission, snapshot_blobs=blobs)
+        collector_records = [{"video_id": "video-001", "description": "x" * 180_000}]
+        snapshot = {
+            "schema": 1, "source_id": GOOGLE_SOURCE_ID, "data_mode": "SYNTHETIC",
+            "plan_fingerprint": self.admission.policy.plan_fingerprint,
+            "phase": "RUNNING", "progress": {"collector": {"records": collector_records}},
+        }
+        self.assertEqual(journal.save(
+            self.job, self.owner, self.fence, source_id=GOOGLE_SOURCE_ID,
+            grant=grant(), now=NOW, expected_revision=0, snapshot=snapshot,
+        ), 1)
+        stored = self.admission.store.transact(
+            "public", lambda state: (state, state["jobs"][self.job]["source_checkpoints"][GOOGLE_SOURCE_ID]),
+        )
+        self.assertEqual(stored["snapshot_storage"], "EXTERNAL_RECORDS")
+        self.assertEqual(stored["snapshot_ref"]["path"], ["progress", "collector", "records"])
+        restored = journal.load(
+            self.job, self.owner, self.fence, source_id=GOOGLE_SOURCE_ID,
+            grant=grant(), now=NOW,
+        )
+        self.assertEqual(restored["snapshot"]["progress"]["collector"]["records"],
+                         collector_records)
 
     def test_unknown_checkpoint_commit_is_reconciled_without_losing_receipt(self):
         underlying = self.admission.store

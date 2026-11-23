@@ -9,6 +9,9 @@ from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
     YOUTUBE_REFRESH_STATE_KEY,
     eligible_slot,
+    manual_candidate_slot,
+    manual_schedule_metadata,
+    reserve_manual_source_slot,
     reserve_source_slot,
     schedule_metadata,
 )
@@ -120,6 +123,39 @@ class RefreshEligibilityTests(unittest.TestCase):
         self.assertTrue(metadata["user_triggered_only"])
         self.assertEqual(metadata["slots"], ["07:00", "15:00", "23:00"])
         self.assertEqual(metadata["minimum_spacing_hours"], 8)
+
+    def test_authenticated_manual_slot_ignores_clock_window_but_keeps_spacing_and_retry_identity(self):
+        job_id = "a" * 32
+        first = datetime(2026, 11, 16, 10, 11, tzinfo=LOCAL)
+        self.assertEqual(manual_candidate_slot(
+            self.store, BING_REFRESH_STATE_KEY, first,
+            job_id=job_id, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{job_id}")
+        self.assertEqual(reserve_manual_source_slot(
+            self.store, BING_REFRESH_STATE_KEY, first,
+            job_id=job_id, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{job_id}")
+        # A retry of the same durable job remains idempotent inside the spacing window.
+        self.assertEqual(reserve_manual_source_slot(
+            self.store, BING_REFRESH_STATE_KEY,
+            datetime(2026, 11, 16, 10, 12, tzinfo=LOCAL),
+            job_id=job_id, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{job_id}")
+        other_job = "b" * 32
+        retry_at = datetime(2026, 11, 16, 18, 10, 59, tzinfo=LOCAL)
+        self.assertIsNone(manual_candidate_slot(
+            self.store, BING_REFRESH_STATE_KEY, retry_at,
+            job_id=other_job, error_code="BING_SCHEDULE_STATE_INVALID",
+        ))
+        self.assertEqual(manual_schedule_metadata(
+            self.store, BING_REFRESH_STATE_KEY, retry_at,
+            error_code="BING_SCHEDULE_STATE_INVALID",
+        )["next_eligible_at"], "2026-11-16T11:11:00+00:00")
+        self.assertEqual(reserve_manual_source_slot(
+            self.store, BING_REFRESH_STATE_KEY,
+            datetime(2026, 11, 16, 18, 11, tzinfo=LOCAL),
+            job_id=other_job, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{other_job}")
 
 
 if __name__ == "__main__":

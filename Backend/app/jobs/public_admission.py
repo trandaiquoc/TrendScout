@@ -40,6 +40,7 @@ _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
 OWNER_FRESH_ACCEPTANCE_MARKER = "D6_FOUR_SOURCE_FRESH_V1"
+MANUAL_SOURCE_REFRESH_MARKER = "VERCEL_OPERATOR_AUTHENTICATED_MANUAL_REFRESH_V1"
 
 
 class AdmissionDenied(Exception):
@@ -952,10 +953,21 @@ class PublicAdmission:
         return fallback
 
     @staticmethod
-    def _finish_recovered_job(job, state, now):
+    def _finish_recovered_job(job, state, now, *, terminal_reason=None):
         job.update(state=state, owner=None, lease_until=None,
                    recovery_available=False, updated_at=now.isoformat(),
                    continuation_available=False, finished_at=now.isoformat())
+        if terminal_reason is None:
+            job.pop("terminal_reason", None)
+        else:
+            job["terminal_reason"] = terminal_reason
+
+    def _recover_terminal_job(self, job, fallback, reason, now):
+        state = self._terminal_state_for_job(job, fallback)
+        _, all_complete, _ = self._completed_job_sources(job)
+        self._finish_recovered_job(
+            job, state, now, terminal_reason=None if all_complete else reason
+        )
 
     def _repair_job_lifecycle(self, job, now):
         """Make expired durable jobs observable without starting a worker."""
@@ -972,9 +984,8 @@ class PublicAdmission:
             raise AdmissionDenied("JOB_STATE_INVALID") from None
 
         if expires_at <= now:
-            fallback = "EXPIRED"
-            self._finish_recovered_job(
-                job, self._terminal_state_for_job(job, fallback), now
+            self._recover_terminal_job(
+                job, "EXPIRED", "JOB_DEADLINE_EXPIRED", now
             )
             return True
 
@@ -986,9 +997,8 @@ class PublicAdmission:
             if lease_until > now:
                 return False
             if attempts >= self.policy.max_attempts:
-                fallback = "FAILED"
-                self._finish_recovered_job(
-                    job, self._terminal_state_for_job(job, fallback), now
+                self._recover_terminal_job(
+                    job, "FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED", now
                 )
             else:
                 job.update(state="QUEUED", owner=None, lease_until=None,
@@ -1002,9 +1012,8 @@ class PublicAdmission:
             raise AdmissionDenied("JOB_STATE_INVALID") from None
         if (available_at <= now and attempts >= self.policy.max_attempts
                 and not continuation_available):
-            fallback = "FAILED"
-            self._finish_recovered_job(
-                job, self._terminal_state_for_job(job, fallback), now
+            self._recover_terminal_job(
+                job, "FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED", now
             )
             return True
         return False
@@ -1126,8 +1135,10 @@ class PublicAdmission:
                 and type(value.get("history_days")) is int
                 and 1 <= value["history_days"] <= 2):
             return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
+        allowed = {"sources", "owner_fresh_acceptance", "manual_source_refresh"}
         if (not isinstance(value, dict)
-                or set(value) not in ({"sources"}, {"sources", "owner_fresh_acceptance"})
+                or "sources" not in value
+                or not set(value) <= allowed
                 or not isinstance(value.get("sources"), list)
                 or not 1 <= len(value["sources"]) <= len(SOURCE_POOLS)
                 or any(not isinstance(source, str) for source in value["sources"])
@@ -1140,6 +1151,10 @@ class PublicAdmission:
                     or set(metadata["sources"]) != set(SOURCE_POOLS)):
                 raise ValueError("invalid owner fresh acceptance metadata")
             metadata["owner_fresh_acceptance"] = OWNER_FRESH_ACCEPTANCE_MARKER
+        if "manual_source_refresh" in value:
+            if value.get("manual_source_refresh") != MANUAL_SOURCE_REFRESH_MARKER:
+                raise ValueError("invalid manual source refresh metadata")
+            metadata["manual_source_refresh"] = MANUAL_SOURCE_REFRESH_MARKER
         return metadata
 
     def lookup_idempotency(self, idempotency_key: str, *, now: datetime,
@@ -1376,8 +1391,8 @@ class PublicAdmission:
                 return {"denied": "JOB_TERMINAL"}
             expires_at = _parse(job["expires_at"])
             if expires_at <= now:
-                self._finish_recovered_job(
-                    job, self._terminal_state_for_job(job, "EXPIRED"), now,
+                self._recover_terminal_job(
+                    job, "EXPIRED", "JOB_DEADLINE_EXPIRED", now,
                 )
                 return {"denied": "JOB_EXPIRED"}
             if now < _parse(job["created_at"]):
@@ -1397,8 +1412,8 @@ class PublicAdmission:
                     or type(continuation_available) is not bool):
                 raise AdmissionDenied("JOB_STATE_INVALID")
             if attempts >= self.policy.max_attempts and not continuation_available:
-                self._finish_recovered_job(
-                    job, self._terminal_state_for_job(job, "FAILED"), now,
+                self._recover_terminal_job(
+                    job, "FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED", now,
                 )
                 return {"denied": "JOB_TERMINAL"}
             return {"claim": self._claim_job(job, owner, now)}
@@ -1443,8 +1458,8 @@ class PublicAdmission:
                 if job["state"] not in {"QUEUED", "RUNNING"}:
                     continue
                 if _parse(job["expires_at"]) <= now:
-                    self._finish_recovered_job(
-                        job, self._terminal_state_for_job(job, "EXPIRED"), now
+                    self._recover_terminal_job(
+                        job, "EXPIRED", "JOB_DEADLINE_EXPIRED", now
                     )
                     continue
                 due = (job["state"] == "QUEUED" and _parse(job["available_at"]) <= now
@@ -1454,8 +1469,8 @@ class PublicAdmission:
                     raise AdmissionDenied("JOB_STATE_INVALID")
                 if (due and job["attempts"] >= self.policy.max_attempts
                         and not continuation_available):
-                    self._finish_recovered_job(
-                        job, self._terminal_state_for_job(job, "FAILED"), now
+                    self._recover_terminal_job(
+                        job, "FAILED", "RECOVERY_ATTEMPTS_EXHAUSTED", now
                     )
                 elif due:
                     return self._claim_job(job, owner, now)
@@ -1716,14 +1731,18 @@ class PublicAdmission:
         self._transaction(operation)
 
     def finish(self, job_id: str, owner: str, fence: int, *, now: datetime,
-               partial: bool = False) -> None:
+               partial: bool = False, require_source_results: bool = False) -> None:
         now = _utc(now)
-        if type(partial) is not bool:
-            raise ValueError("partial must be boolean")
+        if type(partial) is not bool or type(require_source_results) is not bool:
+            raise ValueError("finish flags must be boolean")
         def op(state):
             self._guard_clock(state, now)
             job = state["jobs"].get(job_id)
             self._require_lease(job, owner, fence, now)
+            if require_source_results:
+                _, all_complete, _ = self._completed_job_sources(job)
+                if not all_complete:
+                    raise AdmissionDenied("SOURCE_RESULT_NOT_PERSISTED")
             job.update(state="PARTIAL" if partial else "COMPLETED", owner=None,
                        recovery_available=False,
                        continuation_available=False,

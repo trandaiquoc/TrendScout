@@ -254,7 +254,10 @@ class DistributedFetchWorker:
             return {"job_id": job_id, "state": "DEFERRED", "sources": outcomes}
 
         partial = any(value["status"] != "SUCCESS" for value in outcomes.values())
-        self.admission.finish(job_id, owner, fence, now=self.utcnow(), partial=partial)
+        self.admission.finish(
+            job_id, owner, fence, now=self.utcnow(), partial=partial,
+            require_source_results=True,
+        )
         return {"job_id": job_id, "state": "PARTIAL" if partial else "COMPLETED",
                 "sources": outcomes}
 

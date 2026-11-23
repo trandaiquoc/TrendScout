@@ -11,6 +11,8 @@ import { initializeRunHistory } from './modules/run-history.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const GOOGLE_SOURCE_ID = 'google_web_serp';
+const BING_SOURCE_ID = 'bing_web_serp';
 const YOUTUBE_SOURCE_ID = 'youtube_video_search';
 const YOUTUBE_POLICY_STORAGE_KEY = 'trendscout.youtube-policy.version';
 let pendingYoutubePolicyVersion = null;
@@ -836,6 +838,7 @@ const FETCH_STATE_MESSAGES = {
   'busy-error': 'fetch.busy',
   retryable: 'fetch.retryable',
   'submission-rejected': 'fetch.submission-rejected',
+  'operator-auth-failed': 'fetch.operator-auth-failed',
   'poll-limit': 'fetch.poll-limit',
   'poll-retrying': 'fetch.poll-retrying',
   'poll-error': 'fetch.poll-error',
@@ -957,7 +960,7 @@ function renderFetchPresentation() {
   const status = $('#fetch-status');
   const capabilityNote = $('#fetch-capabilities-note');
   const capabilityRetry = $('#fetch-capabilities-retry');
-  const canRetry = ['retryable', 'submission-rejected', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
+  const canRetry = ['retryable', 'submission-rejected', 'operator-auth-failed', 'poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const canResume = ['poll-limit', 'poll-error', 'recovery-available'].includes(presentation.kind);
   const busy = Boolean(presentation.busy);
   const youtubeSelected = effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID);
@@ -985,7 +988,7 @@ function renderFetchPresentation() {
     || youtubePolicyPending;
   const sourceSelect = $('#fetch-source-select');
   if (sourceSelect) sourceSelect.disabled = !state.fetchReady || busy;
-  const buttonKey = ['retryable', 'submission-rejected'].includes(presentation.kind)
+  const buttonKey = ['retryable', 'submission-rejected', 'operator-auth-failed'].includes(presentation.kind)
     ? 'fetch.retry'
     : canResume ? 'fetch.resume'
     : state.capabilities?.shared_policy_reconciliation_required === true
@@ -1211,10 +1214,17 @@ function acceptedYoutubePolicyVersion() {
   }
 }
 
+function controllerFetchSourceIds(controller, fallback = effectiveFetchSourceIds()) {
+  return Array.isArray(controller?.requestBody?.sources)
+    ? controller.requestBody.sources : fallback;
+}
+
 function activateFetchWithPolicyConsent(controller) {
   if (!state.fetchReady) return;
-  if (!effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID)) {
-    void controller.activate();
+  const sourceIds = controllerFetchSourceIds(controller);
+  if (!sourceIds.includes(YOUTUBE_SOURCE_ID)) {
+    activateWithOperatorAuthorization(controller, sourceIds,
+      () => { void controller.activate(); });
     return;
   }
 
@@ -1225,7 +1235,8 @@ function activateFetchWithPolicyConsent(controller) {
     return;
   }
   if (acceptedYoutubePolicyVersion()) {
-    void controller.activate();
+    activateWithOperatorAuthorization(controller, sourceIds,
+      () => { void controller.activate(); });
     return;
   }
 
@@ -1246,6 +1257,40 @@ function activateFetchWithPolicyConsent(controller) {
 }
 
 let pendingYoutubeFetchController = null;
+
+let pendingOperatorFetchController = null;
+let pendingOperatorFetchStart = null;
+
+function requiresVercelManualFetchAuthorization(sourceIds) {
+  return isVercelSharedLive(state.capabilities)
+    && Array.isArray(sourceIds)
+    && sourceIds.some((sourceId) => [GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]
+      .includes(sourceId));
+}
+
+function activateWithOperatorAuthorization(controller, sourceIds, start) {
+  if (!requiresVercelManualFetchAuthorization(sourceIds)) {
+    controller.setOperatorToken(null);
+    start();
+    return;
+  }
+  if (controller.operatorToken) {
+    start();
+    return;
+  }
+  const dialog = $('#operator-auth-dialog');
+  const input = $('#operator-auth-token');
+  if (!dialog || !input || typeof dialog.showModal !== 'function') {
+    $('#fetch-readiness').textContent = t('fetch.operator-auth-required');
+    return;
+  }
+  input.value = '';
+  $('#operator-auth-error').hidden = true;
+  pendingOperatorFetchController = controller;
+  pendingOperatorFetchStart = start;
+  dialog.showModal();
+  input.focus();
+}
 
 function scheduleCapabilityRefresh(delayMs) {
   clearTimeout(state.capabilityRetryTimer);
@@ -1444,10 +1489,13 @@ async function resumeRecoveredFetch(run) {
     ? historyFetchController : fetchController;
   showView('overview');
   window.location.hash = 'overview';
-  await controller.resumeAvailableJob({
-    sources: run.sources,
-    requestKind,
-    historyDays: run.history_days,
+  activateWithOperatorAuthorization(controller, run.sources, () => {
+    void controller.resumeAvailableJob({
+      sources: run.sources,
+      requestKind,
+      historyDays: run.history_days,
+      fetchId: requestKind === 'WIKIMEDIA_HISTORY' ? null : run.fetch_id,
+    });
   });
 }
 
@@ -2761,6 +2809,45 @@ function bindEvents() {
     else { showView('overview'); window.location.hash = 'overview'; }
   });
   $('#fetch-source-select').addEventListener('change', renderFetchPresentation);
+  const operatorAuthDialog = $('#operator-auth-dialog');
+  const closeOperatorAuthDialog = () => {
+    pendingOperatorFetchController = null;
+    pendingOperatorFetchStart = null;
+    $('#operator-auth-token').value = '';
+    operatorAuthDialog.close();
+  };
+  $('#operator-auth-cancel-top').addEventListener('click', closeOperatorAuthDialog);
+  $('#operator-auth-cancel').addEventListener('click', closeOperatorAuthDialog);
+  $('#operator-auth-confirm').addEventListener('click', () => {
+    const input = $('#operator-auth-token');
+    const error = $('#operator-auth-error');
+    const token = input.value;
+    if (!token.trim() || !pendingOperatorFetchController
+        || !pendingOperatorFetchStart) {
+      error.textContent = t('fetch.operator-auth-required');
+      error.hidden = false;
+      return;
+    }
+    const controller = pendingOperatorFetchController;
+    const start = pendingOperatorFetchStart;
+    pendingOperatorFetchController = null;
+    pendingOperatorFetchStart = null;
+    controller.setOperatorToken(token);
+    input.value = '';
+    operatorAuthDialog.close();
+    start();
+  });
+  $('#operator-auth-token').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      $('#operator-auth-confirm').click();
+    }
+  });
+  operatorAuthDialog.addEventListener('close', () => {
+    pendingOperatorFetchController = null;
+    pendingOperatorFetchStart = null;
+    $('#operator-auth-token').value = '';
+  });
   const youtubePolicyDialog = $('#youtube-policy-dialog');
   const closeYoutubePolicyDialog = () => {
     pendingYoutubeFetchController = null;
@@ -2795,7 +2882,8 @@ function bindEvents() {
     pendingYoutubePolicyVersion = null;
     youtubePolicyDialog.close();
     renderFetchPresentation();
-    void controller.activate();
+    activateWithOperatorAuthorization(controller, controllerFetchSourceIds(controller),
+      () => { void controller.activate(); });
   });
   youtubePolicyDialog.addEventListener('close', () => {
     pendingYoutubeFetchController = null;

@@ -5,9 +5,10 @@ from datetime import date, datetime, timezone
 from app.sources.query_plan import DEFAULT_QUERY_PLAN, QueryPlan
 from app.sources.refresh_eligibility import SCHEDULE_SLOTS, SCHEDULE_TIMEZONE, SLOT_GRACE
 
-YOUTUBE_QUERY_PLANNER_VERSION = "youtube-curated-dual-mode-rotation-v2"
+YOUTUBE_QUERY_PLANNER_VERSION = "youtube-curated-slot-and-manual-rotation-v3"
 NORMAL_DEMO = "NORMAL_DEMO"
 OWNER_MANUAL_LIVE = "OWNER_MANUAL_LIVE"
+AUTHENTICATED_MANUAL = "AUTHENTICATED_MANUAL"
 _ANCHOR_DATE = date(2026, 11, 16)
 _PRIORITY_SCOPES = (
     "fashion",
@@ -42,11 +43,12 @@ def select_youtube_query_scopes(
             or now.tzinfo is None or now.utcoffset() is None
             or type(max_queries) is not int or not 1 <= max_queries <= 2
             or not isinstance(mode, str)
-            or mode not in {NORMAL_DEMO, OWNER_MANUAL_LIVE}):
+            or mode not in {NORMAL_DEMO, OWNER_MANUAL_LIVE, AUTHENTICATED_MANUAL}):
         raise ValueError("registered plan, timezone-aware time, mode and a 1..2 query cap required")
-    if mode == OWNER_MANUAL_LIVE:
+    if mode in {OWNER_MANUAL_LIVE, AUTHENTICATED_MANUAL}:
         minute_ordinal = int(now.astimezone(timezone.utc).timestamp() // 60)
-        rotation_scopes = _MANUAL_PRODUCT_SCOPES
+        rotation_scopes = (_MANUAL_PRODUCT_SCOPES if mode == OWNER_MANUAL_LIVE
+                           else _PRIORITY_SCOPES)
         start = minute_ordinal % len(rotation_scopes)
     else:
         local = now.astimezone(SCHEDULE_TIMEZONE)

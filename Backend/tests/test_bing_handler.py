@@ -8,11 +8,15 @@ from pathlib import Path
 from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, keyword_record
 from app.jobs.distributed_worker import SourceWorkContext
-from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER
+from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+)
 from app.jobs.shared_cache import CacheGrant, SharedCache
 from app.sources.bing_search.handler import BingSavedCandidateHandler
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.sources.google_trends.trending_now import normalize_keyword
+from app.sources.refresh_eligibility import BING_REFRESH_STATE_KEY, reserve_manual_source_slot
 from app.sources.live_gateway import GatewayPage
 from app.sources.serpapi.models import ProviderPage
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
@@ -245,6 +249,90 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "SUCCESS")
         self.assertEqual(result["records"][0]["candidate_keyword_id"], self.candidate["id"])
         self.assertEqual(self.gateway.calls[0]["context"].canonical_query, "Pleated tote")
+
+    async def test_same_job_google_checkpoint_supplies_bing_before_collections_processing(self):
+        evidence = json.loads(self.candidate["evidence"])
+        same_job_candidate = {
+            "record_id": self.candidate["id"],
+            "canonical_keyword": self.candidate["keyword"],
+            "source_id": self.candidate["source"],
+            "project": self.candidate["project"],
+            "observed_at": self.candidate["observed_at"],
+            "fetched_at": evidence["fetched_at"],
+            "data_mode": "LIVE",
+            "evidence": evidence,
+        }
+        older_shared_candidate = {
+            **same_job_candidate,
+            "fetched_at": (NOW - timedelta(minutes=40)).isoformat(),
+        }
+        handler = BingSavedCandidateHandler(
+            gateway=self.gateway,
+            collection_store=None,
+            atomic_store=self.atomic,
+            policy_fingerprint=POLICY,
+            ensure_paid_budget=lambda: self._budget(),
+            utcnow=lambda: NOW,
+            shared_cache=SharedCache(self.atomic),
+            resolve_cache_grant=lambda source_id, now: CacheGrant(
+                source_id, "test-bing-cache", now + timedelta(days=1),
+                3600, 7200, 86400, allowed=True,
+            ),
+            candidate_loader=lambda now: (older_shared_candidate,),
+            checkpoint_candidate_loader=lambda context, now: (same_job_candidate,),
+        )
+
+        result = await handler(work_context(request_metadata={
+            "sources": [GOOGLE_SOURCE_ID, BING_SOURCE_ID],
+            "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+        }))
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["records"][0]["candidate_keyword_id"], self.candidate["id"])
+        self.assertEqual(result["coverage"]["candidate_fetched_at"],
+                         same_job_candidate["fetched_at"])
+        self.assertEqual(self.gateway.calls[0]["context"].canonical_query, "Pleated tote")
+
+    async def test_manual_bing_cooldown_reports_exact_next_eligible_time(self):
+        reserve_manual_source_slot(
+            self.atomic, BING_REFRESH_STATE_KEY, NOW,
+            job_id="a" * 32, error_code="BING_SCHEDULE_STATE_INVALID",
+        )
+        evidence = json.loads(self.candidate["evidence"])
+        shared_candidate = {
+            "record_id": self.candidate["id"],
+            "canonical_keyword": self.candidate["keyword"],
+            "source_id": self.candidate["source"],
+            "project": self.candidate["project"],
+            "observed_at": self.candidate["observed_at"],
+            "fetched_at": evidence["fetched_at"],
+            "data_mode": "LIVE",
+            "evidence": evidence,
+        }
+        later = NOW + timedelta(hours=3)
+        handler = BingSavedCandidateHandler(
+            gateway=self.gateway,
+            collection_store=None,
+            atomic_store=self.atomic,
+            policy_fingerprint=POLICY,
+            ensure_paid_budget=lambda: self._budget(),
+            utcnow=lambda: later,
+            candidate_loader=lambda now: (shared_candidate,),
+        )
+
+        result = await handler(work_context(
+            later, request_metadata={
+                "sources": [GOOGLE_SOURCE_ID, BING_SOURCE_ID],
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            },
+            job_id="c" * 32,
+        ))
+
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertEqual(result["error_code"], "MANUAL_REFRESH_COOLDOWN")
+        self.assertEqual(result["coverage"]["next_eligible_at"], "2026-11-16T08:05:00+00:00")
+        self.assertEqual(self.budget_calls, [])
+        self.assertEqual(self.gateway.calls, [])
 
     async def test_owner_acceptance_bing_receipt_is_cached_for_a_new_provider_free_fetch(self):
         evidence = json.loads(self.candidate["evidence"])

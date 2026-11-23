@@ -871,3 +871,39 @@ test('Run History recovery resubmits the stored source scope after reload', asyn
     globalThis.fetch = previousFetch;
   }
 });
+
+test('authenticated continuation keeps the job ID and does not send the operator token on GET status', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    if (path === '/api/v1/fetches') {
+      return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, data_mode: 'LIVE' }), {
+        status: 202, headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ status: 'COMPLETED', run_id: null }), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => [],
+    });
+    controller.setOperatorToken('synthetic-operator-token-for-fetch');
+    await controller.resumeAvailableJob({
+      sources: ['google_web_serp'], requestKind: 'LATEST', fetchId: COMPLETED_ID,
+    });
+
+    assert.equal(requests[0].path, '/api/v1/fetches');
+    assert.equal(requests[0].headers.Authorization,
+      'Bearer synthetic-operator-token-for-fetch');
+    assert.equal(requests[0].headers['X-TrendScout-Fetch-Continuation'], '1');
+    assert.equal(requests[1].path, '/api/v1/fetches/' + COMPLETED_ID);
+    assert.equal(requests[1].headers.Authorization, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});

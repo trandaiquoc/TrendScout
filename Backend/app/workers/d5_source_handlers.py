@@ -15,7 +15,11 @@ from enum import Enum
 from typing import Callable, Mapping
 
 from app.jobs.distributed_worker import SourceWorkContext
-from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER, AdmissionDenied
+from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -33,6 +37,7 @@ from app.sources.wikimedia.live_gateway import (
     WikimediaTopPageGateway,
 )
 from app.sources.youtube.query_planner import YOUTUBE_QUERY_PLANNER_VERSION
+from app.sources.youtube.storage_budget import MAX_YOUTUBE_BATCH_BYTES
 
 _QUERY_SOURCES = frozenset({GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID})
 _ALL_SOURCES = _QUERY_SOURCES | {WIKIMEDIA_SOURCE_ID}
@@ -94,7 +99,7 @@ class D5SourceHandlers:
                  resolve_cache_grant: Callable[[str, datetime], CacheGrant | None] | None = None,
                  source_limits: Mapping[str, CollectionLimits] | None = None,
                  resolve_provider_batch: Callable[[str, datetime], dict | None] | None = None,
-                 resolve_query_scopes: Callable[[str, datetime], tuple[str, ...] | None] | None = None,
+                 resolve_query_scopes: Callable[..., tuple[str, ...] | None] | None = None,
                  max_wikimedia_date_attempts: int = 1,
                  include_wikimedia_transport_metrics: bool = False,
                  unavailable_mode: str | None = None,
@@ -139,6 +144,9 @@ class D5SourceHandlers:
                 or force_youtube_refresh_once and youtube_query_mode != "OWNER_MANUAL_LIVE"
                 or not callable(utcnow)):
             raise ValueError("fixed four-source collectors, plan and limits required")
+        youtube_limits = (source_limits or {}).get(YOUTUBE_SOURCE_ID, limits)
+        if youtube_limits.result_byte_budget > MAX_YOUTUBE_BATCH_BYTES:
+            raise ValueError("YouTube batch exceeds its configured normalized storage budget")
         self.query_collectors = dict(query_collectors)
         self.wikimedia = wikimedia
         self.google_trends_handler = google_trends_handler
@@ -279,7 +287,10 @@ class D5SourceHandlers:
             saved_progress = (context.resume_snapshot or {}).get("progress", {})
             resume_snapshot = (saved_progress.get("collector")
                                if isinstance(saved_progress, dict) else None)
-            query_scopes = (self.resolve_query_scopes(source_id, self.utcnow())
+            query_scopes = (self.resolve_query_scopes(
+                                source_id, self.utcnow(),
+                                request_metadata=context.request_metadata,
+                            )
                             if source_id == YOUTUBE_SOURCE_ID
                             and self.resolve_query_scopes is not None else None)
             result = await collector.collect(
@@ -297,7 +308,12 @@ class D5SourceHandlers:
             should_defer = result.stop_reason == "DEFERRED" and bool(retry_times)
             if should_defer and result.attempted_calls == 0:
                 return {"status": "DEFERRED", "retry_at": max(retry_times)}
-            records, omitted = _bounded_records([_jsonable(record) for record in result.records])
+            records, omitted = _bounded_records(
+                [_jsonable(record) for record in result.records],
+                byte_budget=(limits.result_byte_budget
+                             if source_id == YOUTUBE_SOURCE_ID
+                             else _NORMALIZED_RESULT_BUDGET_BYTES),
+            )
             # SerpApi may return a cached provider response even on a network call.
             # Preserve that fact at the source level and keep per-query evidence.
             cached = any(
@@ -308,6 +324,12 @@ class D5SourceHandlers:
             query_results = []
             selected_scopes = query_scopes or tuple(seed.scope for seed in self.plan.seeds)
             seeds_by_scope = {seed.scope: seed for seed in self.plan.seeds}
+            authenticated_youtube_manual = (
+                source_id == YOUTUBE_SOURCE_ID
+                and isinstance(context.request_metadata, dict)
+                and context.request_metadata.get("manual_source_refresh")
+                == MANUAL_SOURCE_REFRESH_MARKER
+            )
             for index, row in enumerate(result.queries):
                 query_result = {
                     "query_fingerprint": row.query_fingerprint,
@@ -322,9 +344,13 @@ class D5SourceHandlers:
                     seed = seeds_by_scope.get(scope)
                     query_result.update({
                         "original_query": seed.query if seed else None,
-                        "query_source": ("CURATED_MANUAL_ROTATION"
-                                         if self.youtube_query_mode == "OWNER_MANUAL_LIVE"
-                                         else "CURATED_SLOT_ROTATION"),
+                        "query_source": (
+                            "CURATED_MANUAL_ROTATION"
+                            if self.youtube_query_mode == "OWNER_MANUAL_LIVE"
+                            else "CURATED_AUTHENTICATED_MANUAL_ROTATION"
+                            if authenticated_youtube_manual
+                            else "CURATED_SLOT_ROTATION"
+                        ),
                         "taxonomy_scope": scope,
                         "market_filter": self.plan.market,
                         "language_filter": self.plan.language,
@@ -403,6 +429,12 @@ class D5SourceHandlers:
             and context.request_metadata.get("owner_fresh_acceptance")
             == OWNER_FRESH_ACCEPTANCE_MARKER
         )
+        manual_source_refresh = (
+            source_id == YOUTUBE_SOURCE_ID
+            and isinstance(getattr(context, "request_metadata", None), dict)
+            and context.request_metadata.get("manual_source_refresh")
+            == MANUAL_SOURCE_REFRESH_MARKER
+        )
         owner_manual_fresh = (source_id == YOUTUBE_SOURCE_ID
                               and self._youtube_force_fresh_once)
         force_fresh = acceptance_fresh or owner_manual_fresh
@@ -421,6 +453,20 @@ class D5SourceHandlers:
         batch_decision = None
         stale_fallback = None
         cache_lookup = None
+
+        def provider_batch_decision():
+            if acceptance_fresh:
+                return self.resolve_provider_batch(
+                    source_id, now, owner_fresh_acceptance=True,
+                    acceptance_job_id=context.job_id,
+                )
+            if manual_source_refresh:
+                return self.resolve_provider_batch(
+                    source_id, now, manual_source_refresh=True,
+                    manual_job_id=context.job_id,
+                )
+            return self.resolve_provider_batch(source_id, now)
+
         try:
             grant = self.resolve_cache_grant(source_id, now)
         except Exception:
@@ -446,7 +492,7 @@ class D5SourceHandlers:
                         )
                     if source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None:
                         try:
-                            batch_decision = self.resolve_provider_batch(source_id, now)
+                            batch_decision = provider_batch_decision()
                         except Exception:
                             batch_decision = {"allowed": False,
                                               "error_code": "REFRESH_POLICY_UNAVAILABLE"}
@@ -465,14 +511,6 @@ class D5SourceHandlers:
                             cache_fetched_at=cached.get("fetched_at"),
                         )
                     stale_fallback = (payload, cached.get("fetched_at"))
-
-        def provider_batch_decision():
-            if acceptance_fresh:
-                return self.resolve_provider_batch(
-                    source_id, now, owner_fresh_acceptance=True,
-                    acceptance_job_id=context.job_id,
-                )
-            return self.resolve_provider_batch(source_id, now)
 
         if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
                 and batch_decision is None):

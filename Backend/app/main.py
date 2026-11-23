@@ -279,14 +279,21 @@ class VercelSharedLiveMiddleware:
         context_entered = False
         try:
             context_factory = self.context_factory
+            use_default_context = context_factory is None
             if context_factory is None:
                 from app.orchestration.vercel_wikimedia_live_composition import (
                     vercel_shared_live_composition,
                 )
                 context_factory = vercel_shared_live_composition
-            context_manager = context_factory(
-                client, user_agent=self.settings.wikimedia_user_agent
+            defer_collection_snapshot = (
+                _is_vercel_fetch_submission(scope.get("method", ""), scope.get("path", ""))
+                or scope.get("method", "").upper() == "GET"
+                and scope.get("path", "").startswith("/api/v1/fetches/")
             )
+            context_options = {"user_agent": self.settings.wikimedia_user_agent}
+            if use_default_context:
+                context_options["defer_collection_snapshot"] = defer_collection_snapshot
+            context_manager = context_factory(client, **context_options)
             distributed = await context_manager.__aenter__()
             context_entered = True
         except Exception:

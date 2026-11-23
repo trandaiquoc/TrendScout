@@ -51,6 +51,7 @@ from app.sources.youtube.normalizer import normalize_items as normalize_youtube
 from app.sources.youtube.pagination import build_execution_plan
 
 _CHECKPOINT_RECORD_BUDGET_BYTES = 100_000
+_MAX_RESULT_BYTE_BUDGET_BYTES = 4_000_000
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class CollectionLimits:
     max_retries_per_page: int = 0
     deadline_seconds: float = 60
     max_results: int = 50
+    result_byte_budget: int = _CHECKPOINT_RECORD_BUDGET_BYTES
 
     def validate(self, plan: QueryPlan):
         for value, lower, upper in ((self.max_queries, 1, len(plan.seeds)),
@@ -73,6 +75,9 @@ class CollectionLimits:
         if (type(self.deadline_seconds) not in (int, float) or not math.isfinite(self.deadline_seconds)
                 or not 0.1 <= self.deadline_seconds <= 300):
             raise ValueError("invalid collection deadline")
+        if (type(self.result_byte_budget) is not int
+                or not 1 <= self.result_byte_budget <= _MAX_RESULT_BYTE_BUDGET_BYTES):
+            raise ValueError("invalid normalized result byte budget")
 
 
 @dataclass(frozen=True)
@@ -113,13 +118,15 @@ def _checkpoint_json(value):
     return value
 
 
-def _bounded_checkpoint_records(records):
+def _bounded_checkpoint_records(records, *, byte_budget=_CHECKPOINT_RECORD_BUDGET_BYTES):
+    if type(byte_budget) is not int or not 1 <= byte_budget <= _MAX_RESULT_BYTE_BUDGET_BYTES:
+        raise ValueError("bounded checkpoint record budget required")
     selected, used, omitted = [], 2, 0
     for record in records:
         value = _checkpoint_json(record)
         encoded = json.dumps(value, ensure_ascii=False, allow_nan=False,
                              separators=(",", ":")).encode("utf-8")
-        if used + len(encoded) + (1 if selected else 0) > _CHECKPOINT_RECORD_BUDGET_BYTES:
+        if used + len(encoded) + (1 if selected else 0) > byte_budget:
             omitted += 1
             continue
         selected.append(value)
@@ -243,18 +250,23 @@ def _serialize_receipt(result):
 def _restore_checkpoint(source, data_mode, plan, limits, contexts, snapshot):
     if snapshot is None:
         return None
+    expected_limits = {
+        "max_queries": limits.max_queries,
+        "max_pages_per_query": limits.max_pages_per_query,
+        "max_requests": limits.max_requests,
+        "max_retries_per_page": limits.max_retries_per_page,
+        "deadline_seconds": limits.deadline_seconds,
+        "max_results": limits.max_results,
+        "result_byte_budget": limits.result_byte_budget,
+    }
+    legacy_limits = {key: value for key, value in expected_limits.items()
+                     if key != "result_byte_budget"}
+    stored_limits = snapshot.get("limits") if isinstance(snapshot, dict) else None
     if (not isinstance(snapshot, dict) or snapshot.get("schema") != 1
             or snapshot.get("source_id") != source
             or snapshot.get("data_mode") != data_mode
             or snapshot.get("plan_fingerprint") != plan.fingerprint
-            or snapshot.get("limits") != {
-                "max_queries": limits.max_queries,
-                "max_pages_per_query": limits.max_pages_per_query,
-                "max_requests": limits.max_requests,
-                "max_retries_per_page": limits.max_retries_per_page,
-                "deadline_seconds": limits.deadline_seconds,
-                "max_results": limits.max_results,
-            }
+            or stored_limits not in (expected_limits, legacy_limits)
             or not isinstance(snapshot.get("started_at"), str)
             or not isinstance(snapshot.get("queries"), list)
             or not isinstance(snapshot.get("records"), list)
@@ -406,7 +418,9 @@ class GuardedQueryCollector:
         def save_checkpoint(*, pending=None):
             if checkpoint is None:
                 return
-            checkpoint_records, newly_omitted = _bounded_checkpoint_records(records.values())
+            checkpoint_records, newly_omitted = _bounded_checkpoint_records(
+                records.values(), byte_budget=limits.result_byte_budget
+            )
             snapshot = {
                 "schema": 1,
                 "source_id": source,
@@ -419,6 +433,7 @@ class GuardedQueryCollector:
                     "max_retries_per_page": limits.max_retries_per_page,
                     "deadline_seconds": limits.deadline_seconds,
                     "max_results": limits.max_results,
+                    "result_byte_budget": limits.result_byte_budget,
                 },
                 "started_at": started,
                 "queries": [{**entry,

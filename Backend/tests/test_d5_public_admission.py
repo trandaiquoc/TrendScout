@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
     OWNER_FRESH_ACCEPTANCE_MARKER,
     YOUTUBE_OTHER_POOL,
     AdmissionDenied,
@@ -112,6 +113,45 @@ class PublicAdmissionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.control.admit("oversized-history-request", now=NOW,
                                request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 3})
+
+    def test_worker_cannot_finish_before_all_selected_source_results_are_durable(self):
+        accepted = self.control.admit(
+            "durable-source-results-required", now=NOW,
+            request_metadata={"sources": [GOOGLE_SOURCE_ID]},
+        )
+        claim = self.control.claim(accepted["job_id"], "result-worker", now=NOW)
+        with self.assertRaisesRegex(AdmissionDenied, "SOURCE_RESULT_NOT_PERSISTED"):
+            self.control.finish(
+                accepted["job_id"], "result-worker", claim["fence"], now=NOW,
+                require_source_results=True,
+            )
+        status = self.control.read_job(accepted["job_id"], now=NOW)
+        self.assertEqual(status["state"], "RUNNING")
+
+    def test_manual_source_refresh_marker_is_validated_and_survives_job_replay(self):
+        metadata = {
+            "sources": [GOOGLE_SOURCE_ID],
+            "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+        }
+        accepted = self.control.admit(
+            "authenticated-manual-refresh-marker", now=NOW, request_metadata=metadata,
+        )
+        replay = self.control.admit(
+            "authenticated-manual-refresh-marker", now=NOW, request_metadata=metadata,
+        )
+        claim = self.control.claim_next("manual-refresh-worker", now=NOW)
+
+        self.assertEqual(replay["result"], "REPLAY")
+        self.assertEqual(claim["job_id"], accepted["job_id"])
+        self.assertEqual(claim["request_metadata"], metadata)
+        with self.assertRaises(ValueError):
+            self.control.admit(
+                "invalid-manual-refresh-marker", now=NOW,
+                request_metadata={
+                    "sources": [GOOGLE_SOURCE_ID],
+                    "manual_source_refresh": "browser-controlled",
+                },
+            )
 
     def test_owner_fresh_acceptance_is_atomically_bound_once_to_a_new_all_source_job(self):
         base = policy()

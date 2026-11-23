@@ -1,4 +1,4 @@
-"""Guarded Trends discovery and optional two-query SERP verification workflow."""
+"""Guarded Trends discovery and optional single-candidate SERP verification."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timezone
 
 from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
     OWNER_FRESH_ACCEPTANCE_MARKER,
     AdmissionDenied,
 )
@@ -29,7 +30,10 @@ from app.sources.refresh_eligibility import (
     GOOGLE_REFRESH_STATE_KEY,
     OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
+    manual_candidate_slot,
+    manual_schedule_metadata,
     reserve_owner_acceptance_slot,
+    reserve_manual_source_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -190,6 +194,11 @@ class GoogleTrendsDiscoveryHandler:
             and context.request_metadata.get("owner_fresh_acceptance")
             == OWNER_FRESH_ACCEPTANCE_MARKER
         )
+        manual_refresh = (
+            isinstance(context.request_metadata, dict)
+            and context.request_metadata.get("manual_source_refresh")
+            == MANUAL_SOURCE_REFRESH_MARKER
+        )
         progress = ((context.resume_snapshot or {}).get("progress")
                     if isinstance(context.resume_snapshot, dict) else None)
         saved = progress.get("google_trends_receipt") if isinstance(progress, dict) else None
@@ -300,7 +309,11 @@ class GoogleTrendsDiscoveryHandler:
             try:
                 eligible_slot = (
                     f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
-                    if acceptance_fresh else candidate_slot(
+                    if acceptance_fresh else manual_candidate_slot(
+                        self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                        job_id=context.job_id,
+                        error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                    ) if manual_refresh else candidate_slot(
                         self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                         error_code="GOOGLE_SCHEDULE_STATE_INVALID",
                         allow_initial_acceptance=self.allow_initial_acceptance,
@@ -314,22 +327,35 @@ class GoogleTrendsDiscoveryHandler:
                                  "attempted_calls": 0},
                 }
             if eligible_slot is None:
+                error_code = ("MANUAL_REFRESH_COOLDOWN" if manual_refresh
+                              else "NOT_YET_ELIGIBLE")
+                coverage = {"discovery_mode": "SERPAPI_TRENDING_NOW",
+                            "attempted_calls": 0,
+                            "next_slots_timezone": "Asia/Ho_Chi_Minh"}
+                if manual_refresh:
+                    try:
+                        coverage["next_eligible_at"] = manual_schedule_metadata(
+                            self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                            error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                        ).get("next_eligible_at")
+                    except AdmissionDenied as error:
+                        return {
+                            "status": "FAILED", "data_mode": self.data_mode,
+                            "records": [], "record_count": 0,
+                            "error_code": error.code, "coverage": coverage,
+                        }
                 if cached_result is not None:
                     cached_result["coverage"] = {
                         **cached_result.get("coverage", {}),
-                        "refresh_state": "NOT_YET_ELIGIBLE",
-                        "attempted_calls": 0,
-                        "next_slots_timezone": "Asia/Ho_Chi_Minh",
+                        "refresh_state": error_code,
+                        **coverage,
                     }
                     result = cached_result
                 else:
                     return {
                         "status": "UNAVAILABLE", "data_mode": self.data_mode,
                         "records": [], "record_count": 0,
-                        "error_code": "NOT_YET_ELIGIBLE",
-                        "coverage": {"discovery_mode": "SERPAPI_TRENDING_NOW",
-                                     "attempted_calls": 0,
-                                     "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+                        "error_code": error_code, "coverage": coverage,
                     }
             else:
                 request = GoogleTrendsRequest(
@@ -395,7 +421,11 @@ class GoogleTrendsDiscoveryHandler:
                                 self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                                 job_id=context.job_id,
                                 error_code="GOOGLE_SCHEDULE_STATE_INVALID",
-                            ) if acceptance_fresh else reserve_source_slot(
+                            ) if acceptance_fresh else reserve_manual_source_slot(
+                                self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
+                                job_id=context.job_id,
+                                error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                            ) if manual_refresh else reserve_source_slot(
                                 self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                                 error_code="GOOGLE_SCHEDULE_STATE_INVALID",
                                 allow_initial_acceptance=self.allow_initial_acceptance,
@@ -409,22 +439,36 @@ class GoogleTrendsDiscoveryHandler:
                                          "attempted_calls": 0},
                         }
                     if eligible_slot is None:
+                        error_code = ("MANUAL_REFRESH_COOLDOWN" if manual_refresh
+                                      else "NOT_YET_ELIGIBLE")
+                        coverage = {"discovery_mode": "SERPAPI_TRENDING_NOW",
+                                    "attempted_calls": 0,
+                                    "next_slots_timezone": "Asia/Ho_Chi_Minh"}
+                        if manual_refresh:
+                            try:
+                                coverage["next_eligible_at"] = manual_schedule_metadata(
+                                    self.atomic_store, GOOGLE_REFRESH_STATE_KEY,
+                                    self.utcnow(),
+                                    error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+                                ).get("next_eligible_at")
+                            except AdmissionDenied as error:
+                                return {
+                                    "status": "FAILED", "data_mode": self.data_mode,
+                                    "records": [], "record_count": 0,
+                                    "error_code": error.code, "coverage": coverage,
+                                }
                         if cached_result is not None:
                             cached_result["coverage"] = {
                                 **cached_result.get("coverage", {}),
-                                "refresh_state": "NOT_YET_ELIGIBLE",
-                                "attempted_calls": 0,
-                                "next_slots_timezone": "Asia/Ho_Chi_Minh",
+                                "refresh_state": error_code,
+                                **coverage,
                             }
                             result = cached_result
                         else:
                             return {
                                 "status": "UNAVAILABLE", "data_mode": self.data_mode,
                                 "records": [], "record_count": 0,
-                                "error_code": "NOT_YET_ELIGIBLE",
-                                "coverage": {"discovery_mode": "SERPAPI_TRENDING_NOW",
-                                             "attempted_calls": 0,
-                                             "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+                                "error_code": error_code, "coverage": coverage,
                             }
                     else:
                         provider_attempted = True

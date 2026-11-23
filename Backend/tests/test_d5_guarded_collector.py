@@ -122,6 +122,17 @@ class GuardedCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resumed.records), 1)
         self.assertEqual(len(resumed.records[0].evidence), 2)
 
+    async def test_approved_youtube_result_budget_keeps_all_fifty_small_records(self):
+        records = [{"video_id": f"video-{index:02d}", "title": f"Trend {index}"}
+                   for index in range(50)]
+        kept, omitted = _bounded_checkpoint_records(
+            records, byte_budget=3_500_000,
+        )
+        self.assertEqual((len(kept), omitted), (50, 0))
+        limits = CollectionLimits(max_queries=1, max_requests=1,
+                                  result_byte_budget=3_500_000)
+        limits.validate(DEFAULT_QUERY_PLAN)
+
     async def test_receipt_is_durable_before_settlement_and_resume_skips_duplicate_request(self):
         class SimulatedProcessCrash(BaseException):
             pass

@@ -27,6 +27,7 @@ _AUDIENCE = (
 )
 _PROJECT = "trendscout-192e4"
 _JOB_ID = "a" * 32
+_OPERATOR_TOKEN = "synthetic-vercel-operator-token-0001"
 
 
 class _Client:
@@ -59,6 +60,7 @@ class _FetchFacade:
             operationally_enabled=lambda: True,
         )
         self.submitted_sources = None
+        self.submitted_manual_source_refresh = None
         self.submitted_keys = []
         self.status_calls = 0
         self.collection_service = None
@@ -96,9 +98,10 @@ class _FetchFacade:
             "progress": {"completed_sources": 1, "total_sources": 1},
         }
 
-    def submit(self, idempotency_key, *, source_ids):
+    def submit(self, idempotency_key, *, source_ids, manual_source_refresh=False):
         self.submitted_keys.append(idempotency_key)
         self.submitted_sources = source_ids
+        self.submitted_manual_source_refresh = manual_source_refresh
         return {
             "job_id": _JOB_ID,
             "status": self.submit_status,
@@ -154,6 +157,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             "GOOGLE_WIF_AUDIENCE": _AUDIENCE,
             "TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED": "true" if enabled else "false",
             "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+            "TREND_SCOUT_OPERATOR_TOKEN": _OPERATOR_TOKEN,
         }
         return Settings.from_environment(values)
 
@@ -228,6 +232,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                     headers={
                         "Origin": "https://trend-scout.example",
                         "x-vercel-oidc-token": "synthetic-test-token",
+                        "Authorization": f"Bearer {_OPERATOR_TOKEN}",
                         "Idempotency-Key": "vercel-four-sources-test-0001",
                     },
                     json={"sources": sources},
@@ -236,6 +241,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(set(response.json()["sources"]), set(sources))
         self.assertEqual(facade.submitted_sources, sorted(sources))
+        self.assertTrue(facade.submitted_manual_source_refresh)
         self.assertNotIn("worker_finished", events)
         self.assertEqual(facade.slice_calls, [])
 
@@ -283,6 +289,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         headers = {
             "Origin": "https://trend-scout.example",
             "x-vercel-oidc-token": "synthetic-test-token",
+            "Authorization": f"Bearer {_OPERATOR_TOKEN}",
             "Idempotency-Key": "vercel-recovery-test-0001",
             "X-YouTube-Policy-Version": "test-policy-v1",
         }
@@ -468,6 +475,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                     headers={
                         "Origin": "https://trend-scout.example",
                         "x-vercel-oidc-token": "synthetic-test-token",
+                        "Authorization": f"Bearer {_OPERATOR_TOKEN}",
                         "Idempotency-Key": "vercel-bing-auto-google-0001",
                     },
                     json={"sources": [BING_SOURCE_ID]},
@@ -480,6 +488,32 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(facade.submitted_sources,
                          sorted([GOOGLE_SOURCE_ID, BING_SOURCE_ID]))
+        self.assertTrue(facade.submitted_manual_source_refresh)
+
+    async def test_search_fetch_requires_existing_operator_token_before_admission(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.available_sources = frozenset({
+            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+        })
+        facade.admission.policy.enabled_sources = facade.available_sources
+        headers = {
+            "Origin": "https://trend-scout.example",
+            "x-vercel-oidc-token": "synthetic-test-token",
+            "Idempotency-Key": "vercel-operator-required-0001",
+        }
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    "/api/v1/fetches", headers=headers,
+                    json={"sources": [GOOGLE_SOURCE_ID]},
+                )
+
+        self.assertEqual(response.status_code, 401, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "OPERATOR_AUTH_REQUIRED")
+        self.assertEqual(facade.submitted_keys, [])
 
     async def test_shared_dashboard_history_and_detail_are_available_without_fabricated_totals(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)
@@ -689,9 +723,12 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         original_submit = facade.submit
 
-        def submit_after_sync(idempotency_key, *, source_ids):
+        def submit_after_sync(idempotency_key, *, source_ids, manual_source_refresh=False):
             events.append("fetch_submitted")
-            return original_submit(idempotency_key, source_ids=source_ids)
+            return original_submit(
+                idempotency_key, source_ids=source_ids,
+                manual_source_refresh=manual_source_refresh,
+            )
 
         def prepare_for_fetch():
             events.append("policy_reconciled")

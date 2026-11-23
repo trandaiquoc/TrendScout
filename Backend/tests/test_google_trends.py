@@ -15,6 +15,7 @@ from app.collections.store import CollectionStore, keyword_record, saved_source_
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import SourceWorkContext
 from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
     OWNER_FRESH_ACCEPTANCE_MARKER,
     AdmissionDenied,
     PublicAdmission,
@@ -540,6 +541,72 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["last_slot"], "2026-11-17T07:00:00+07:00")
         finally:
             directory.cleanup()
+
+    async def test_authenticated_manual_google_fetch_bypasses_clock_window_and_keeps_live_receipt(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        atomic = LocalSQLiteAtomicStateStore.for_local_live(root / "state.sqlite")
+        cache = SharedCache(atomic)
+        current = datetime(2026, 11, 17, 12, 41, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+
+        class TrendsGateway:
+            data_mode = "LIVE"
+
+            def __init__(self):
+                self.calls = []
+
+            async def fetch_page(self, *, context, on_page_receipt, **kwargs):
+                self.calls.append((context, kwargs))
+                page = parse_trending_now_response(
+                    _trending_response([_trend_row()]),
+                    request=context,
+                    sensitive_key=FAKE_KEY,
+                )
+                gateway_page = GatewayPage(GOOGLE_SOURCE_ID, "LIVE", page)
+                on_page_receipt(gateway_page)
+                return gateway_page
+
+        gateway = TrendsGateway()
+        budget_checks = []
+
+        async def ensure_budget():
+            budget_checks.append(current)
+            return {"budget_status": "AVAILABLE", "total_remaining": 5}
+
+        handler = GoogleTrendsDiscoveryHandler(
+            trends_gateway=gateway,
+            data_mode="LIVE",
+            policy_fingerprint=DEFAULT_QUERY_PLAN.fingerprint,
+            utcnow=lambda: current,
+            cache=cache,
+            resolve_cache_grant=lambda _source, now: CacheGrant(
+                GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", now + timedelta(days=7),
+                3600, 7 * 24 * 3600, 7 * 24 * 3600, allowed=True,
+            ),
+            atomic_store=atomic,
+            ensure_paid_budget=ensure_budget,
+        )
+        context = SourceWorkContext(
+            "d" * 32, "test-worker", 1, GOOGLE_SOURCE_ID,
+            DEFAULT_QUERY_PLAN.fingerprint, current + timedelta(minutes=5),
+            None, lambda _value: 1, lambda: "ACTIVE",
+            request_metadata={
+                "sources": [GOOGLE_SOURCE_ID],
+                "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+            },
+        )
+
+        try:
+            result = await handler(context)
+        finally:
+            directory.cleanup()
+
+        self.assertEqual(result["data_mode"], "LIVE")
+        self.assertEqual(result["delivery_state"], "FRESH")
+        self.assertEqual(result["coverage"]["eligible_slot"], f"MANUAL:{context.job_id}")
+        self.assertEqual(result["record_count"], 1)
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertEqual(len(budget_checks), 1)
 
     async def test_google_failure_returns_safe_transport_diagnostic(self):
         directory = tempfile.TemporaryDirectory()

@@ -264,6 +264,12 @@
     <p id="youtube-policy-error" class="youtube-policy-error" role="status" aria-live="polite" hidden></p>
     <div class="youtube-policy-actions"><button id="youtube-policy-cancel" class="button button-secondary" type="button" data-i18n="youtube-policy.cancel"></button><button id="youtube-policy-accept" class="button button-primary" type="button" disabled data-i18n="youtube-policy.accept"></button></div>
   </dialog>
+  <dialog id="operator-auth-dialog" class="operator-auth-dialog" aria-labelledby="operator-auth-title" aria-describedby="operator-auth-description">
+    <div class="dialog-head"><div><p class="section-kicker" data-i18n="fetch.operator-auth-kicker"></p><h2 id="operator-auth-title" data-i18n="fetch.operator-auth-title"></h2><p id="operator-auth-description" data-i18n="fetch.operator-auth-description"></p></div><button id="operator-auth-cancel-top" class="icon-button dialog-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button></div>
+    <label class="operator-auth-field"><span data-i18n="fetch.operator-auth-label"></span><input id="operator-auth-token" type="password" autocomplete="off" spellcheck="false" required></label>
+    <p id="operator-auth-error" class="youtube-policy-error" role="status" aria-live="polite" hidden></p>
+    <div class="youtube-policy-actions"><button id="operator-auth-cancel" class="button button-secondary" type="button" data-i18n="fetch.operator-auth-cancel"></button><button id="operator-auth-confirm" class="button button-primary" type="button" data-i18n="fetch.operator-auth-confirm"></button></div>
+  </dialog>
   <dialog id="detail-dialog" aria-labelledby="detail-title">
     <div class="dialog-head"><div><p class="section-kicker" data-i18n="detail.kicker"></p><h2 id="detail-title" data-i18n="detail.loading"></h2><p id="detail-subtitle"></p></div><button class="icon-button dialog-close" type="button" data-close="detail-dialog" data-i18n-aria="common.close" aria-label="Close">×</button></div>
     <div id="detail-content" class="detail-content"></div>

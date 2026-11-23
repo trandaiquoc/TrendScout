@@ -14,6 +14,7 @@ GOOGLE_REFRESH_STATE_KEY = "normal-google-trends-refresh-v1"
 BING_REFRESH_STATE_KEY = "normal-bing-search-schedule-v1"
 YOUTUBE_REFRESH_STATE_KEY = "normal-youtube-search-schedule-v1"
 OWNER_ACCEPTANCE_SLOT_PREFIX = "D6_OWNER_ACCEPTANCE:"
+MANUAL_SLOT_PREFIX = "MANUAL:"
 
 
 def eligible_slot(now: datetime, *, last_attempt_at: datetime | None = None) -> str | None:
@@ -166,6 +167,92 @@ def reserve_owner_acceptance_slot(atomic_store, state_key: str, now: datetime, *
         raise
     except Exception:
         raise AdmissionDenied(error_code) from None
+
+
+def manual_candidate_slot(atomic_store, state_key: str, now: datetime, *,
+                          job_id: str, error_code: str) -> str | None:
+    """Check a user-authenticated manual slot while preserving source spacing."""
+    if (not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
+            or not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id)):
+        raise AdmissionDenied(error_code)
+    state = _schedule_state(atomic_store, state_key, error_code=error_code)
+    slot = f"{MANUAL_SLOT_PREFIX}{job_id}"
+    last_attempt = state["last_attempt_at"]
+    if state["last_slot"] == slot:
+        return slot
+    if last_attempt is not None and now.astimezone(timezone.utc) - last_attempt.astimezone(
+            timezone.utc) < MIN_SOURCE_SPACING:
+        return None
+    return slot
+
+
+def reserve_manual_source_slot(atomic_store, state_key: str, now: datetime, *,
+                               job_id: str, error_code: str) -> str | None:
+    """Atomically reserve an authenticated manual refresh; retries are idempotent."""
+    if (not callable(getattr(atomic_store, "transact", None))
+            or not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
+            or not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id)):
+        raise AdmissionDenied(error_code)
+    slot = f"{MANUAL_SLOT_PREFIX}{job_id}"
+
+    def operation(raw_state):
+        if not raw_state:
+            state = {"schema": 1, "last_attempt_at": None, "last_slot": None}
+        elif isinstance(raw_state, dict) and raw_state.get("schema") == 1:
+            raw_attempt, last_slot = raw_state.get("last_attempt_at"), raw_state.get("last_slot")
+            if raw_attempt is None and last_slot is None:
+                state = {"schema": 1, "last_attempt_at": None, "last_slot": None}
+            elif isinstance(raw_attempt, str) and isinstance(last_slot, str) and last_slot:
+                try:
+                    parsed = datetime.fromisoformat(raw_attempt.replace("Z", "+00:00"))
+                except ValueError:
+                    raise AdmissionDenied(error_code) from None
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise AdmissionDenied(error_code)
+                state = {"schema": 1, "last_attempt_at": parsed, "last_slot": last_slot}
+            else:
+                raise AdmissionDenied(error_code)
+        else:
+            raise AdmissionDenied(error_code)
+
+        if state["last_slot"] == slot:
+            return raw_state, slot
+        last_attempt = state["last_attempt_at"]
+        if (last_attempt is not None
+                and now.astimezone(timezone.utc) - last_attempt.astimezone(timezone.utc)
+                < MIN_SOURCE_SPACING):
+            return raw_state, None
+        return {
+            "schema": 1,
+            "last_attempt_at": now.astimezone(timezone.utc).isoformat(),
+            "last_slot": slot,
+        }, slot
+
+    try:
+        return atomic_store.transact(state_key, operation)
+    except AdmissionDenied:
+        raise
+    except Exception:
+        raise AdmissionDenied(error_code) from None
+
+
+def manual_schedule_metadata(atomic_store, state_key: str, now: datetime, *,
+                             error_code: str) -> dict:
+    """Return the exact next time the shared eight-hour source spacing permits."""
+    if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        raise AdmissionDenied(error_code)
+    state = _schedule_state(atomic_store, state_key, error_code=error_code)
+    last_attempt = state["last_attempt_at"]
+    next_at = now.astimezone(timezone.utc)
+    if last_attempt is not None:
+        next_at = max(next_at, last_attempt.astimezone(timezone.utc) + MIN_SOURCE_SPACING)
+    return {
+        "minimum_spacing_hours": int(MIN_SOURCE_SPACING.total_seconds() // 3600),
+        "last_attempt_at": last_attempt.astimezone(timezone.utc).isoformat()
+            if last_attempt else None,
+        "next_eligible_at": next_at.isoformat(),
+        "last_slot": state["last_slot"],
+    }
 
 
 def schedule_metadata(atomic_store, state_key: str, now: datetime, *, error_code: str,

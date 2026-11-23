@@ -365,6 +365,7 @@ async def vercel_shared_live_composition(
     *,
     user_agent: str,
     utcnow=lambda: datetime.now(timezone.utc),
+    defer_collection_snapshot: bool = False,
 ):
     """Compose all owner-approved Vercel sources over the shared Firestore ledger.
 
@@ -373,7 +374,8 @@ async def vercel_shared_live_composition(
     after an authenticated same-origin Fetch is admitted.
     """
     if (os.environ.get("VERCEL") != "1" or not isinstance(user_agent, str)
-            or not user_agent.strip() or not callable(utcnow)):
+            or not user_agent.strip() or not callable(utcnow)
+            or type(defer_collection_snapshot) is not bool):
         raise ValueError("Vercel Shared LIVE requires its deployed runtime")
     _client_project_id(client)
 
@@ -413,8 +415,11 @@ async def vercel_shared_live_composition(
 
         collection_path = Path(runtime_directory) / "collections.sqlite"
         collection_snapshot = FirestoreCollectionSnapshot(client, collection_path, utcnow=utcnow)
-        collection_snapshot.load()
-        collection_store = CollectionStore(collection_path, data_mode_scope="LIVE")
+        collection_snapshot_loaded = not defer_collection_snapshot
+        if collection_snapshot_loaded:
+            collection_snapshot.load()
+        collection_store = (None if defer_collection_snapshot else
+                            CollectionStore(collection_path, data_mode_scope="LIVE"))
         async with normal_google_live_composition(
             user_agent=user_agent,
             utcnow=utcnow,
@@ -460,13 +465,32 @@ async def vercel_shared_live_composition(
             from app.collections.entity_context import WikimediaEntityContextResolver
             from app.collections.service import CollectionService
 
-            facade.collection_service = CollectionService(
-                collection_store,
-                entity_context_resolver=WikimediaEntityContextResolver(
-                    collection_store,
-                    before_request=facade.entity_lookup_before_request,
-                ),
-                fetch_model_inference_enabled=False,
-            )
+            def build_collection_service(store):
+                return CollectionService(
+                    store,
+                    entity_context_resolver=WikimediaEntityContextResolver(
+                        store,
+                        before_request=facade.entity_lookup_before_request,
+                    ),
+                    fetch_model_inference_enabled=False,
+                )
+
+            if collection_store is not None:
+                facade.collection_service = build_collection_service(collection_store)
+            else:
+                facade.collection_service = None
+
+            def load_collection_snapshot():
+                nonlocal collection_snapshot_loaded, collection_store
+                if not collection_snapshot_loaded:
+                    collection_snapshot.load()
+                    collection_snapshot_loaded = True
+                if collection_store is None:
+                    collection_store = CollectionStore(
+                        collection_path, data_mode_scope="LIVE"
+                    )
+                    facade.collection_service = build_collection_service(collection_store)
+
             facade.collection_snapshot = collection_snapshot
+            facade.load_collection_snapshot = load_collection_snapshot
             yield facade

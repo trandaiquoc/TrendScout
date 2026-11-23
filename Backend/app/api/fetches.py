@@ -1,6 +1,7 @@
 """Manual Fetch API; the active backend composition owns its data mode."""
 
 import asyncio
+import hmac
 import ipaddress
 import json
 import secrets
@@ -50,6 +51,20 @@ def _require_youtube_policy_consent(request: Request, distributed) -> None:
     if (not isinstance(version, str) or not version
             or request.headers.get(YOUTUBE_POLICY_VERSION_HEADER.lower()) != version):
         raise HTTPException(428, {"code": "YOUTUBE_POLICY_CONSENT_REQUIRED"})
+
+
+def _require_manual_live_operator(request: Request) -> None:
+    """Authenticate manual provider refresh with the existing server operator token."""
+    token = getattr(request.app.state, "operator_token", None)
+    if not isinstance(token, str) or len(token) < 24:
+        raise HTTPException(503, {"code": "OPERATOR_AUTH_UNAVAILABLE"})
+    authorization = request.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, {"code": "OPERATOR_AUTH_REQUIRED"})
+    supplied = authorization[7:]
+    if (len(supplied) != len(token)
+            or not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))):
+        raise HTTPException(401, {"code": "OPERATOR_AUTH_REQUIRED"})
 
 
 def _origin_tuple(value: str):
@@ -253,14 +268,18 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
 
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
                                      cached_context_only: bool = False):
-    service = (getattr(getattr(request, "state", None), "collection_service", None)
-               or getattr(request.app.state, "collection_service", None))
-    if service is None:
-        return
     result = distributed.status(fetch_id, include_records=True)
     if result and result.get("terminal"):
-        if getattr(distributed, "firestore_shared_live", False):
-            request.state.vercel_fetch_snapshot_required = True
+        shared_live = getattr(distributed, "firestore_shared_live", False)
+        if shared_live:
+            load_snapshot = getattr(distributed, "load_collection_snapshot", None)
+            if callable(load_snapshot):
+                await asyncio.to_thread(load_snapshot)
+        service = (getattr(getattr(request, "state", None), "collection_service", None)
+                   or getattr(distributed, "collection_service", None)
+                   or getattr(request.app.state, "collection_service", None))
+        if service is None:
+            return
         if cached_context_only:
             processed = await service.process_fetch(
                 fetch_id, result.get("sources", []), cached_context_only=True
@@ -269,6 +288,8 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
             processed = await service.process_fetch(fetch_id, result.get("sources", []))
         if processed.get("status") == "FAILED":
             raise RuntimeError("Fetch Collections processing failed")
+        if shared_live:
+            request.state.vercel_fetch_snapshot_required = True
 
 
 async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str,
@@ -296,12 +317,10 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
                 raise
             terminal_race = True
             result = None
-        if vercel_shared_live:
-            if (result is not None and result.get("job_id") == fetch_id
-                    and result.get("state") in {"COMPLETED", "PARTIAL"}):
-                request.state.vercel_fetch_snapshot_required = True
-            elif not terminal_race:
-                return
+        if (vercel_shared_live and not terminal_race
+                and not (result is not None and result.get("job_id") == fetch_id
+                         and result.get("state") in {"COMPLETED", "PARTIAL"})):
+            return
         elif (result and result.get("job_id") != fetch_id
               and result.get("state") in {"COMPLETED", "PARTIAL"}):
             await distributed.run_once(owner)
@@ -356,6 +375,16 @@ async def create_fetch(
                 and getattr(distributed, "normal_bing_live", False)):
             effective_sources.add(GOOGLE_SOURCE_ID)
         request_sources = sorted(effective_sources)
+        vercel_shared_live = (
+            getattr(distributed, "firestore_shared_live", False)
+            and request.app.state.settings.environment_profile == "vercel"
+            and getattr(distributed, "data_mode", None) == "LIVE"
+        )
+        manual_source_refresh = vercel_shared_live and bool(
+            effective_sources & {GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
+        )
+        if manual_source_refresh:
+            _require_manual_live_operator(request)
         if YOUTUBE_SOURCE_ID in effective_sources:
             _require_youtube_policy_consent(request, distributed)
         shared_state_policy_sync = None
@@ -369,7 +398,10 @@ async def create_fetch(
             except ValueError:
                 raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         try:
-            accepted = distributed.submit(idempotency_key, source_ids=request_sources)
+            submit_options = {"source_ids": request_sources}
+            if manual_source_refresh:
+                submit_options["manual_source_refresh"] = True
+            accepted = distributed.submit(idempotency_key, **submit_options)
         except AdmissionDenied as exc:
             _raise_distributed_admission_error(exc.code, distributed)
         except ValueError:
@@ -379,13 +411,9 @@ async def create_fetch(
         # middleware buffers that response while it keeps Firestore alive.
         # The browser must receive the durable job ID first; its same-key
         # continuation POST then runs exactly one bounded source slice.
-        vercel_shared_live = (
-            getattr(distributed, "firestore_shared_live", False)
-            and request.app.state.settings.environment_profile == "vercel"
-        )
         if accepted["status"] in {"QUEUED", "RUNNING"}:
             if vercel_shared_live:
-                if (accepted.get("result") == "REPLAY"
+                if (accepted.get("result") in {"REPLAY", "JOINED"}
                         and fetch_continuation):
                     await _run_fetch_and_collections(
                         request, distributed, accepted["job_id"],

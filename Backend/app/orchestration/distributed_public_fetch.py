@@ -12,17 +12,28 @@ from urllib.parse import urlsplit
 
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
-from app.jobs.public_admission import AdmissionDenied, PublicAdmission
+from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
+    AdmissionDenied,
+    PublicAdmission,
+)
 from app.jobs.source_checkpoints import CheckpointGrant
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 
-def _terminal_missing_source_result(job_state, source_id, data_mode):
+def _terminal_missing_source_result(job_state, source_id, data_mode,
+                                   terminal_reason=None):
     failure = {
         "FAILED": ("RECOVERY_ATTEMPTS_EXHAUSTED", "RECOVERY_ATTEMPTS_EXHAUSTED"),
         "EXPIRED": ("JOB_DEADLINE_EXPIRED", "FETCH_DEADLINE_EXCEEDED"),
         "ABORTED": ("JOB_ABORTED", "FETCH_ABORTED"),
     }.get(job_state, ("TERMINAL_RESULT_MISSING", "SOURCE_RESULT_MISSING"))
+    failure = {
+        "JOB_DEADLINE_EXPIRED": ("JOB_DEADLINE_EXPIRED", "FETCH_DEADLINE_EXCEEDED"),
+        "RECOVERY_ATTEMPTS_EXHAUSTED": (
+            "RECOVERY_ATTEMPTS_EXHAUSTED", "RECOVERY_ATTEMPTS_EXHAUSTED"
+        ),
+    }.get(terminal_reason, failure)
     reason, error_code = failure
     diagnostic = {
         "source_id": source_id,
@@ -217,7 +228,12 @@ class DistributedPublicFetch:
         self.owner_fresh_acceptance_once = owner_fresh_acceptance_once
 
     def submit(self, idempotency_key: str, *, history_days: int | None = None,
-               source_ids: list[str] | None = None) -> dict:
+               source_ids: list[str] | None = None,
+               manual_source_refresh: bool = False) -> dict:
+        if type(manual_source_refresh) is not bool:
+            raise ValueError("manual source refresh flag must be boolean")
+        if manual_source_refresh and (history_days is not None or source_ids is None):
+            raise AdmissionDenied("MANUAL_REFRESH_NOT_ALLOWED")
         if history_days is not None:
             if (source_ids is not None or not self.normal_wikimedia_live
                     or type(history_days) is not int or not 1 <= history_days <= 2):
@@ -225,6 +241,10 @@ class DistributedPublicFetch:
             request_metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": history_days}
         elif source_ids is not None:
             request_metadata = {"sources": source_ids}
+            if manual_source_refresh:
+                if not self.firestore_shared_live or self.data_mode != "LIVE":
+                    raise AdmissionDenied("MANUAL_REFRESH_NOT_ALLOWED")
+                request_metadata["manual_source_refresh"] = MANUAL_SOURCE_REFRESH_MARKER
         else:
             request_metadata = None
         if self.provider_retry_after_seconds is not None:
@@ -282,7 +302,8 @@ class DistributedPublicFetch:
                 )
                 if not checkpoint_complete:
                     missing = _terminal_missing_source_result(
-                        job["state"], source_id, self.data_mode
+                        job["state"], source_id, self.data_mode,
+                        job.get("terminal_reason"),
                     )
                     source_results.append(missing)
                     modes.add(self.data_mode)
@@ -434,6 +455,8 @@ class DistributedPublicFetch:
             "created_at": job["created_at"],
             "updated_at": job.get("updated_at") or job.get("available_at"),
             "finished_at": job.get("finished_at"),
+            **({"terminal_reason": job["terminal_reason"]}
+               if isinstance(job.get("terminal_reason"), str) else {}),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
             "recovery_available": job.get("recovery_available") is True,
             **({"retry_at": retry_at} if retry_at is not None else {}),
@@ -470,7 +493,8 @@ class DistributedPublicFetch:
                     "COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED",
                 }:
                     missing = _terminal_missing_source_result(
-                        job["state"], source_id, self.data_mode
+                        job["state"], source_id, self.data_mode,
+                        job.get("terminal_reason"),
                     )
                     status = missing["status"]
                     error_code = missing["error_code"]

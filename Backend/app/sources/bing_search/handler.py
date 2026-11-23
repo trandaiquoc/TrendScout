@@ -6,7 +6,11 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-from app.jobs.public_admission import OWNER_FRESH_ACCEPTANCE_MARKER, AdmissionDenied
+from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
+    OWNER_FRESH_ACCEPTANCE_MARKER,
+    AdmissionDenied,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
 from app.sources.bing_search.verification_plan import (
     build_verification_plan,
@@ -18,7 +22,10 @@ from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
     OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
+    manual_candidate_slot,
+    manual_schedule_metadata,
     reserve_owner_acceptance_slot,
+    reserve_manual_source_slot,
     reserve_source_slot,
 )
 from app.sources.serpapi.errors import SerpApiError
@@ -168,6 +175,7 @@ class BingSavedCandidateHandler:
     def __init__(self, *, gateway, collection_store, atomic_store, policy_fingerprint,
                  ensure_paid_budget, utcnow=lambda: datetime.now(timezone.utc),
                  allow_initial_acceptance: bool = False, candidate_loader=None,
+                 checkpoint_candidate_loader=None,
                  shared_cache: SharedCache | None = None, resolve_cache_grant=None):
         if (not callable(getattr(gateway, "fetch_page", None))
                 or (not callable(getattr(collection_store, "connect", None))
@@ -179,11 +187,14 @@ class BingSavedCandidateHandler:
                 or (shared_cache is not None and not isinstance(shared_cache, SharedCache))
                 or ((shared_cache is None) != (resolve_cache_grant is None))
                 or (resolve_cache_grant is not None and not callable(resolve_cache_grant))
-                or candidate_loader is not None and not callable(candidate_loader)):
+                or candidate_loader is not None and not callable(candidate_loader)
+                or (checkpoint_candidate_loader is not None
+                    and not callable(checkpoint_candidate_loader))):
             raise ValueError("approved Bing gateway, persisted stores and account preflight required")
         self.gateway = gateway
         self.collection_store = collection_store
         self.candidate_loader = candidate_loader
+        self.checkpoint_candidate_loader = checkpoint_candidate_loader
         self.atomic_store = atomic_store
         self.policy_fingerprint = policy_fingerprint
         self.ensure_paid_budget = ensure_paid_budget
@@ -279,6 +290,11 @@ class BingSavedCandidateHandler:
             and context.request_metadata.get("owner_fresh_acceptance")
             == OWNER_FRESH_ACCEPTANCE_MARKER
         )
+        manual_refresh = (
+            isinstance(context.request_metadata, dict)
+            and context.request_metadata.get("manual_source_refresh")
+            == MANUAL_SOURCE_REFRESH_MARKER
+        )
         progress = ((context.resume_snapshot or {}).get("progress")
                     if isinstance(context.resume_snapshot, dict) else None)
         saved = progress.get("bing_receipt") if isinstance(progress, dict) else None
@@ -292,7 +308,8 @@ class BingSavedCandidateHandler:
         if raw_now.tzinfo is None or raw_now.utcoffset() is None:
             raise ValueError("timezone-aware Bing handler clock required")
         now = raw_now.astimezone(timezone.utc)
-        if not acceptance_fresh and self.collection_store is not None:
+        if (not acceptance_fresh and not manual_refresh
+                and self.collection_store is not None):
             rows, recently_verified, cached = _read_saved_candidates(
                 self.collection_store, now=now
             )
@@ -319,6 +336,28 @@ class BingSavedCandidateHandler:
                                 and row["record_id"] not in by_id):
                             by_id[row["record_id"]] = row
                     rows = tuple(by_id.values())
+        handoff_error = None
+        if self.checkpoint_candidate_loader is not None:
+            try:
+                loaded = self.checkpoint_candidate_loader(context, now)
+            except AdmissionDenied as error:
+                loaded = ()
+                handoff_error = error.code
+            except Exception:
+                loaded = ()
+                handoff_error = "GOOGLE_CANDIDATE_HANDOFF_UNAVAILABLE"
+            if isinstance(loaded, (tuple, list)):
+                by_id = {
+                    row.get("record_id"): row for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("record_id"), str)
+                }
+                for row in loaded:
+                    if (isinstance(row, dict)
+                            and isinstance(row.get("record_id"), str)):
+                        # The current durable Google checkpoint is newer evidence
+                        # than a same-ID shared cache or older collection row.
+                        by_id[row["record_id"]] = row
+                rows = tuple(by_id.values())
         cached_result = _current_cached(cached, now) if not acceptance_fresh else None
         plan = build_verification_plan(
             rows, policy_fingerprint=self.policy_fingerprint, started_at=now,
@@ -328,6 +367,15 @@ class BingSavedCandidateHandler:
             if cached_result is not None:
                 context.checkpoint({"bing_receipt": {"result": cached_result}})
                 return cached_result
+            if handoff_error and not rows:
+                return {
+                    "status": "FAILED", "data_mode": self.gateway.data_mode,
+                    "records": [], "record_count": 0,
+                    "error_code": handoff_error,
+                    "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                                 "failure_phase": "GOOGLE_CANDIDATE_HANDOFF",
+                                 "provider_request_count": 0},
+                }
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
                 "records": [], "record_count": 0, "error_code": "NO_SAVED_CANDIDATE",
@@ -346,7 +394,11 @@ class BingSavedCandidateHandler:
                 shared_stale_result = shared_result
         slot = (
             f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
-            if acceptance_fresh else candidate_slot(
+            if acceptance_fresh else manual_candidate_slot(
+                self.atomic_store, BING_REFRESH_STATE_KEY, now,
+                job_id=context.job_id,
+                error_code="BING_SCHEDULE_STATE_INVALID",
+            ) if manual_refresh else candidate_slot(
                 self.atomic_store, BING_REFRESH_STATE_KEY, now,
                 error_code="BING_SCHEDULE_STATE_INVALID",
                 allow_initial_acceptance=self.allow_initial_acceptance,
@@ -359,12 +411,26 @@ class BingSavedCandidateHandler:
             if shared_stale_result is not None:
                 context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
                 return shared_stale_result
+            error_code = "MANUAL_REFRESH_COOLDOWN" if manual_refresh else "NOT_YET_ELIGIBLE"
+            coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                        "provider_request_count": 0,
+                        "next_slots_timezone": "Asia/Ho_Chi_Minh"}
+            if manual_refresh:
+                try:
+                    coverage["next_eligible_at"] = manual_schedule_metadata(
+                        self.atomic_store, BING_REFRESH_STATE_KEY, now,
+                        error_code="BING_SCHEDULE_STATE_INVALID",
+                    ).get("next_eligible_at")
+                except AdmissionDenied as error:
+                    return {
+                        "status": "FAILED", "data_mode": self.gateway.data_mode,
+                        "records": [], "record_count": 0,
+                        "error_code": error.code, "coverage": coverage,
+                    }
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
-                "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
-                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
-                             "provider_request_count": 0,
-                             "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+                "records": [], "record_count": 0, "error_code": error_code,
+                "coverage": coverage,
             }
 
         try:
@@ -384,7 +450,11 @@ class BingSavedCandidateHandler:
                     self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
                     job_id=context.job_id,
                     error_code="BING_SCHEDULE_STATE_INVALID",
-                ) if acceptance_fresh else reserve_source_slot(
+                ) if acceptance_fresh else reserve_manual_source_slot(
+                    self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
+                    job_id=context.job_id,
+                    error_code="BING_SCHEDULE_STATE_INVALID",
+                ) if manual_refresh else reserve_source_slot(
                     self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
                     error_code="BING_SCHEDULE_STATE_INVALID",
                     allow_initial_acceptance=self.allow_initial_acceptance,
@@ -399,12 +469,26 @@ class BingSavedCandidateHandler:
             if shared_stale_result is not None:
                 context.checkpoint({"bing_receipt": {"result": shared_stale_result}})
                 return shared_stale_result
+            error_code = "MANUAL_REFRESH_COOLDOWN" if manual_refresh else "NOT_YET_ELIGIBLE"
+            coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                        "provider_request_count": 0,
+                        "next_slots_timezone": "Asia/Ho_Chi_Minh"}
+            if manual_refresh:
+                try:
+                    coverage["next_eligible_at"] = manual_schedule_metadata(
+                        self.atomic_store, BING_REFRESH_STATE_KEY, self.utcnow(),
+                        error_code="BING_SCHEDULE_STATE_INVALID",
+                    ).get("next_eligible_at")
+                except AdmissionDenied as error:
+                    return {
+                        "status": "FAILED", "data_mode": self.gateway.data_mode,
+                        "records": [], "record_count": 0,
+                        "error_code": error.code, "coverage": coverage,
+                    }
             return {
                 "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
-                "records": [], "record_count": 0, "error_code": "NOT_YET_ELIGIBLE",
-                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
-                             "provider_request_count": 0,
-                             "next_slots_timezone": "Asia/Ho_Chi_Minh"},
+                "records": [], "record_count": 0, "error_code": error_code,
+                "coverage": coverage,
             }
         attempt_id = hashlib.sha256(
             f"{context.job_id}:bing:{serp_context.query_fingerprint}".encode("utf-8")

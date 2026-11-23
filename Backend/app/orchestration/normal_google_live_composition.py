@@ -14,9 +14,13 @@ from pathlib import Path
 from app.discovery.contracts import ProcessingGrant
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.distributed_worker import DistributedFetchWorker
-from app.jobs.public_admission import AdmissionDenied, PublicAdmission
+from app.jobs.public_admission import (
+    MANUAL_SOURCE_REFRESH_MARKER,
+    AdmissionDenied,
+    PublicAdmission,
+)
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
-from app.jobs.source_checkpoints import CheckpointGrant
+from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.normal_wikimedia_live_policy import (
     GOOGLE_POLICY_VERSION,
     GOOGLE_STATE_KEY,
@@ -51,7 +55,10 @@ from app.sources.refresh_eligibility import (
     SLOT_GRACE,
     YOUTUBE_REFRESH_STATE_KEY,
     candidate_slot,
+    manual_candidate_slot,
+    manual_schedule_metadata,
     reserve_owner_acceptance_slot,
+    reserve_manual_source_slot,
     reserve_source_slot,
     schedule_metadata,
 )
@@ -60,10 +67,12 @@ from app.sources.serpapi.errors import SerpApiError
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
 from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION
 from app.sources.youtube.query_planner import (
+    AUTHENTICATED_MANUAL,
     NORMAL_DEMO,
     OWNER_MANUAL_LIVE,
     select_youtube_query_scopes,
 )
+from app.sources.youtube.storage_budget import MAX_YOUTUBE_BATCH_BYTES
 from app.sources.youtube.retention import (
     purge_expired_youtube_cache,
     purge_expired_youtube_checkpoints,
@@ -109,6 +118,13 @@ def _shared_google_candidate_rows(cache, resolve_cache_grant, *, now):
     records = payload.get("records") if isinstance(payload, dict) else None
     if (not isinstance(payload, dict) or payload.get("data_mode") != "LIVE"
             or not isinstance(records, list) or len(records) > _MAX_CANDIDATE_HISTORY):
+        return ()
+    return _google_candidate_rows(records)
+
+
+def _google_candidate_rows(records):
+    """Project bounded, normalized LIVE Google records into Bing provenance rows."""
+    if not isinstance(records, list) or len(records) > _MAX_CANDIDATE_HISTORY:
         return ()
     from app.sources.google_trends.trending_now import normalize_keyword
 
@@ -310,7 +326,7 @@ async def normal_google_live_composition(*, user_agent,
     if credential_provider is None:
         from app.local_credentials import LocalCredentialProvider
         credential_provider = LocalCredentialProvider()
-    if collection_store is None:
+    if collection_store is None and not vercel_shared_live:
         from app.collections.store import CollectionStore
         collection_store = CollectionStore.local()
 
@@ -553,6 +569,33 @@ async def normal_google_live_composition(*, user_agent,
                 now + timedelta(seconds=policy.receipt_seconds), policy.receipt_seconds, True,
             )
 
+        checkpoint_journal = SourceCheckpointJournal(
+            admission, snapshot_blobs=snapshot_blobs
+        )
+
+        def checkpoint_google_candidates(context, now):
+            grant = resolve_checkpoint(GOOGLE_SOURCE_ID, now)
+            saved = checkpoint_journal.load(
+                context.job_id, context.owner, context.fence,
+                source_id=GOOGLE_SOURCE_ID, grant=grant, now=now,
+            )
+            if not isinstance(saved, dict):
+                raise AdmissionDenied("GOOGLE_SOURCE_CHECKPOINT_MISSING")
+            snapshot = saved.get("snapshot")
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if (not isinstance(snapshot, dict) or snapshot.get("phase") != "COMPLETE"
+                    or not isinstance(result, dict)
+                    or result.get("data_mode") != "LIVE"):
+                raise AdmissionDenied("GOOGLE_SOURCE_CHECKPOINT_INVALID")
+            records = result.get("records")
+            if (not isinstance(records, list) or len(records) > _MAX_CANDIDATE_HISTORY
+                    or type(result.get("record_count")) is not int
+                    or result["record_count"] != len(records)):
+                raise AdmissionDenied("GOOGLE_SOURCE_CHECKPOINT_INVALID")
+            if result.get("status") not in {"SUCCESS", "PARTIAL"}:
+                return ()
+            return _google_candidate_rows(records)
+
         def resolve_processing(now):
             processed_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID}
             if BING_SOURCE_ID in policy.enabled_sources:
@@ -695,13 +738,16 @@ async def normal_google_live_composition(*, user_agent,
             resources.append(rss_gateway)
 
         def previously_observed():
-            return _candidate_history(collection_store, now=utcnow())[0]
+            return (frozenset() if vercel_shared_live
+                    else _candidate_history(collection_store, now=utcnow())[0])
 
         def recently_verified():
-            return _candidate_history(collection_store, now=utcnow())[1]
+            return (frozenset() if vercel_shared_live
+                    else _candidate_history(collection_store, now=utcnow())[1])
 
         def previous_verification():
-            return _candidate_history(collection_store, now=utcnow())[2]
+            return ({} if vercel_shared_live
+                    else _candidate_history(collection_store, now=utcnow())[2])
 
         def remaining_paid_attempts():
             snapshot = admission.quota_snapshot("serpapi", now=utcnow())
@@ -752,11 +798,14 @@ async def normal_google_live_composition(*, user_agent,
             candidate_loader=lambda now: _shared_google_candidate_rows(
                 cache, resolve_cache_grant, now=now
             ),
+            checkpoint_candidate_loader=checkpoint_google_candidates,
         ) if bing_gateway is not None and budget is not None else None)
 
         def resolve_youtube_provider_batch(source_id, now, *,
                                            owner_fresh_acceptance=False,
-                                           acceptance_job_id=None):
+                                           acceptance_job_id=None,
+                                           manual_source_refresh=False,
+                                           manual_job_id=None):
             if source_id != YOUTUBE_SOURCE_ID:
                 return None
             if not config.youtube_approval_configured:
@@ -783,6 +832,41 @@ async def normal_google_live_composition(*, user_agent,
                         job_id=acceptance_job_id,
                         error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
                     )
+                except AdmissionDenied as error:
+                    return {"allowed": False, "error_code": error.code}
+                return {"allowed": True, "slot": reserved}
+            if manual_source_refresh:
+                try:
+                    slot = manual_candidate_slot(
+                        store, YOUTUBE_REFRESH_STATE_KEY, now,
+                        job_id=manual_job_id,
+                        error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    )
+                    if slot is None:
+                        schedule = manual_schedule_metadata(
+                            store, YOUTUBE_REFRESH_STATE_KEY, now,
+                            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                        )
+                        return {
+                            "allowed": False,
+                            "error_code": "MANUAL_REFRESH_COOLDOWN",
+                            "next_eligible_at": schedule.get("next_eligible_at"),
+                        }
+                    reserved = reserve_manual_source_slot(
+                        store, YOUTUBE_REFRESH_STATE_KEY, now,
+                        job_id=manual_job_id,
+                        error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                    )
+                    if reserved is None:
+                        schedule = manual_schedule_metadata(
+                            store, YOUTUBE_REFRESH_STATE_KEY, now,
+                            error_code="YOUTUBE_SCHEDULE_STATE_INVALID",
+                        )
+                        return {
+                            "allowed": False,
+                            "error_code": "MANUAL_REFRESH_COOLDOWN",
+                            "next_eligible_at": schedule.get("next_eligible_at"),
+                        }
                 except AdmissionDenied as error:
                     return {"allowed": False, "error_code": error.code}
                 return {"allowed": True, "slot": reserved}
@@ -815,13 +899,20 @@ async def normal_google_live_composition(*, user_agent,
                 return {"allowed": False, "error_code": error.code}
             return {"allowed": True, "slot": reserved}
 
-        def resolve_youtube_query_scopes(source_id, now):
+        def resolve_youtube_query_scopes(source_id, now, *, request_metadata=None):
             if source_id != YOUTUBE_SOURCE_ID:
                 return None
             if youtube_manual_live:
                 return select_youtube_query_scopes(
                     now=now, plan=DEFAULT_QUERY_PLAN,
                     max_queries=youtube_max_queries, mode=OWNER_MANUAL_LIVE,
+                )
+            if (isinstance(request_metadata, dict)
+                    and request_metadata.get("manual_source_refresh")
+                    == MANUAL_SOURCE_REFRESH_MARKER):
+                return select_youtube_query_scopes(
+                    now=now, plan=DEFAULT_QUERY_PLAN,
+                    max_queries=youtube_max_queries, mode=AUTHENTICATED_MANUAL,
                 )
             schedule = schedule_metadata(
                 store, YOUTUBE_REFRESH_STATE_KEY, now,
@@ -861,6 +952,7 @@ async def normal_google_live_composition(*, user_agent,
                 max_requests=youtube_max_queries,
                 max_retries_per_page=0, deadline_seconds=source_deadline_seconds,
                 max_results=50,
+                result_byte_budget=MAX_YOUTUBE_BATCH_BYTES,
             )},
             resolve_provider_batch=resolve_youtube_provider_batch,
             resolve_query_scopes=resolve_youtube_query_scopes,

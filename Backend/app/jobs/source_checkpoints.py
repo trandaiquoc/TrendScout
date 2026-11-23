@@ -17,6 +17,7 @@ _RECORD_PATHS = (
     ("progress", "wikimedia_receipt", "result", "records"),
     ("progress", "wikimedia_history_records"),
     ("progress", "google_trends_receipt", "result", "records"),
+    ("progress", "collector", "records"),
     ("result", "records"),
 )
 
