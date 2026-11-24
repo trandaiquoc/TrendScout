@@ -263,7 +263,16 @@ class CollectionService:
                 eligible=COALESCE((SELECT CASE decision WHEN 'EXCLUDED' THEN 0 ELSE 1 END
                     FROM keyword_decisions WHERE keyword_id=excluded.id),1),
                 rejection_reason=CASE WHEN (SELECT decision FROM keyword_decisions
-                    WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END""",
+                    WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END
+                WHERE keywords.keyword IS NOT excluded.keyword
+                   OR keywords.observed_at IS NOT excluded.observed_at
+                   OR keywords.evidence IS NOT excluded.evidence
+                   OR keywords.eligible IS NOT COALESCE((SELECT CASE decision
+                        WHEN 'EXCLUDED' THEN 0 ELSE 1 END FROM keyword_decisions
+                        WHERE keyword_id=excluded.id),1)
+                   OR keywords.rejection_reason IS NOT CASE WHEN (SELECT decision
+                        FROM keyword_decisions WHERE keyword_id=excluded.id)='EXCLUDED'
+                        THEN 'USER_EXCLUDED' ELSE NULL END""",
                 [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
                     "observed_at", "data_mode", "evidence", "context")) for record in records])
             for update in bing_updates:
@@ -815,7 +824,12 @@ class CollectionService:
                     country,access,project,metric,unit,status,value,rank,snapshot_status,input_digest)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id,source,observation_date,metric,unit)
                     DO UPDATE SET value=excluded.value,rank=excluded.rank,status=excluded.status,
-                    snapshot_status=excluded.snapshot_status,input_digest=excluded.input_digest""",
+                    snapshot_status=excluded.snapshot_status,input_digest=excluded.input_digest
+                    WHERE algorithm_observations.value IS NOT excluded.value
+                       OR algorithm_observations.rank IS NOT excluded.rank
+                       OR algorithm_observations.status IS NOT excluded.status
+                       OR algorithm_observations.snapshot_status IS NOT excluded.snapshot_status
+                       OR algorithm_observations.input_digest IS NOT excluded.input_digest""",
                     (record["id"], record["source"], observed.isoformat(), evidence.get("country_scope") or "US",
                      evidence.get("access") or "all-access", record["project"], metric, unit,
                      "OBSERVED", value, rank, snapshot_status, digest))

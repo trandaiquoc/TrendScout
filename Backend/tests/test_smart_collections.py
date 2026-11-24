@@ -739,6 +739,47 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
             self.assertEqual(sum(calls), previous_calls)
 
+    def test_repeated_observation_avoids_writes_but_changed_evidence_is_saved(self):
+        live_store = CollectionStore(Path(self.temp.name) / "unchanged.sqlite", data_mode_scope="LIVE")
+        service = CollectionService(live_store, fetch_model_inference_enabled=False)
+        rows = [{"article_display": "Mars Rover", "article_original": "Mars_Rover",
+                 "project": "en.wikipedia", "observation_date": "2026-11-10",
+                 "fetched_at": "2026-11-12T00:00:00Z", "views_ceil": 1000,
+                 "provider_rank": 1}]
+        source = live_source(rows)
+        self.assertEqual(service._process_fetch("unchanged-first", source)["status"],
+                         "MODEL_UNAVAILABLE")
+        with live_store.connect() as db:
+            db.executescript("""
+                CREATE TABLE update_audit(kind TEXT NOT NULL);
+                CREATE TRIGGER audit_keyword_update AFTER UPDATE ON keywords BEGIN
+                    INSERT INTO update_audit VALUES('keyword'); END;
+                CREATE TRIGGER audit_observation_update AFTER UPDATE ON algorithm_observations BEGIN
+                    INSERT INTO update_audit VALUES('observation'); END;
+            """)
+        service._process_fetch("unchanged-second", source)
+        with live_store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM update_audit").fetchone()[0], 0)
+        rows[0]["views_ceil"] = 1100
+        service._process_fetch("changed-third", source)
+        with live_store.connect() as db:
+            self.assertEqual(dict(db.execute("SELECT kind,count(*) FROM update_audit GROUP BY kind")),
+                             {"keyword": 1, "observation": 1})
+            self.assertEqual(db.execute("SELECT value FROM algorithm_observations").fetchone()[0], 1100)
+            identifier = db.execute("SELECT id FROM keywords").fetchone()[0]
+            db.execute("INSERT INTO keyword_decisions VALUES(?,'EXCLUDED','test','2026-11-13')",
+                       (identifier,))
+        service._process_fetch("excluded-fourth", source)
+        with live_store.connect() as db:
+            self.assertEqual(tuple(db.execute("SELECT eligible,rejection_reason FROM keywords").fetchone()),
+                             (0, "USER_EXCLUDED"))
+            db.execute("UPDATE keyword_decisions SET decision='RESTORED' WHERE keyword_id=?",
+                       (identifier,))
+        service._process_fetch("restored-fifth", source)
+        with live_store.connect() as db:
+            self.assertEqual(tuple(db.execute("SELECT eligible,rejection_reason FROM keywords").fetchone()),
+                             (1, None))
+
     def test_cohort_digest_encoding_matches_original_for_each_excluded_keyword(self):
         from types import SimpleNamespace
         from app.collections.service import (
