@@ -734,10 +734,48 @@ class SmartCollectionsTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
                 self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
             previous_calls = sum(calls)
-            replay = self.service._process_fetch("full-set-again", source)
+            with patch("app.collections.service._algorithm_digest_input",
+                       side_effect=AssertionError("unchanged ledger should reuse analysis")):
+                replay = self.service._process_fetch("full-set-again", source)
             self.assertEqual(replay["algorithms"]["executed_keywords"], 0)
             self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
             self.assertEqual(sum(calls), previous_calls)
+
+    def test_analysis_cache_invalidates_for_observation_result_and_registry_changes(self):
+        from dataclasses import replace
+        from app.collections.service import _analysis_state_digest
+        from app.composition import algorithm_engine
+
+        service = CollectionService(self.store, fetch_model_inference_enabled=False)
+        rows = [{"article_display": "Mars Rover", "article_original": "Mars_Rover",
+                 "project": "en.wikipedia", "observation_date": "2026-11-10",
+                 "fetched_at": "2026-11-12T00:00:00Z"}]
+        service._process_fetch("cache-first", live_source(rows))
+        with self.store.connect() as db:
+            record = dict(db.execute("SELECT * FROM keywords").fetchone())
+        with patch("app.collections.service._algorithm_digest_input",
+                   side_effect=AssertionError("expected cache hit")):
+            cached = service._analyze_persisted_keywords([record])
+        self.assertEqual((cached["unchanged_keywords"], cached["executed_keywords"]), (1, 0))
+        with self.store.connect() as db:
+            db.execute("UPDATE algorithm_observations SET value=value+1")
+        with patch("app.collections.service._algorithm_digest_input", wraps=__import__(
+                "app.collections.service", fromlist=["_algorithm_digest_input"])._algorithm_digest_input) as encode:
+            service._analyze_persisted_keywords([])
+        self.assertGreater(encode.call_count, 0)
+        with self.store.connect() as db:
+            db.execute("DELETE FROM algorithm_results WHERE algorithm_id=(SELECT algorithm_id FROM algorithm_results LIMIT 1)")
+        result = service._analyze_persisted_keywords([])
+        self.assertGreater(result["recomputed_algorithms"], 0)
+        registry = algorithm_engine().registry
+        metadata = {key: registry.get(key).metadata for key in registry.keys()}
+        first_key = next(iter(metadata))
+        changed = dict(metadata)
+        changed[first_key] = replace(metadata[first_key], version="future-test-version")
+        with self.store.connect() as db:
+            records = [dict(row) for row in db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id")]
+            self.assertNotEqual(_analysis_state_digest(db, records, None, metadata),
+                                _analysis_state_digest(db, records, None, changed))
 
     def test_repeated_observation_avoids_writes_but_changed_evidence_is_saved(self):
         live_store = CollectionStore(Path(self.temp.name) / "unchanged.sqlite", data_mode_scope="LIVE")

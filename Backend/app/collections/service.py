@@ -99,6 +99,41 @@ def _algorithm_digest_input(input_data, *, popularity, cohort_bytes):
     return encoded
 
 
+def _analysis_state_digest(db, records, mode, metadata_by_key):
+    """Fingerprint every persisted input the algorithm digest pass can observe."""
+    digest = hashlib.sha256(b"trendscout-algorithm-state-v1\n")
+
+    def add(value):
+        encoded = json.dumps(value, ensure_ascii=True, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False).encode("ascii")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+
+    try:
+        add({key: asdict(value) for key, value in metadata_by_key.items()})
+        for record in records:
+            add(record)
+        scope = " AND k.data_mode=?" if mode else ""
+        parameters = (mode,) if mode else ()
+        for row in db.execute(
+            "SELECT o.* FROM algorithm_observations o JOIN keywords k ON k.id=o.keyword_id "
+            "WHERE k.eligible=1" + scope +
+            " ORDER BY o.keyword_id,o.source,o.observation_date,o.metric,o.unit", parameters
+        ):
+            add(tuple(row))
+        for row in db.execute(
+            "SELECT r.keyword_id,r.algorithm_id,r.input_digest FROM algorithm_results r "
+            "JOIN keywords k ON k.id=r.keyword_id WHERE k.eligible=1" + scope +
+            " ORDER BY r.keyword_id,r.algorithm_id", parameters
+        ):
+            add(tuple(row))
+        return digest.hexdigest()
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        # The ordinary per-record path remains authoritative for malformed or
+        # unusual SQLite values that cannot be represented in this cache key.
+        return None
+
+
 def cosine(left, right):
     dot = sum(a * b for a, b in zip(left, right))
     norm_left = math.sqrt(sum(value * value for value in left))
@@ -839,6 +874,14 @@ class CollectionService:
             engine = algorithm_engine()
             keys = engine.registry.keys()
             metadata_by_key = {key: engine.registry.get(key).metadata for key in keys}
+            cache_key = "algorithm_analysis_state_v1:" + (self.store.data_mode_scope or "ALL")
+            state_digest = _analysis_state_digest(db, records, self.store.data_mode_scope,
+                                                  metadata_by_key)
+            previous_state = db.execute("SELECT value FROM settings WHERE key=?", (cache_key,)).fetchone()
+            if state_digest is not None and previous_state and previous_state["value"] == state_digest:
+                return {"eligible_keywords": len(records), "executed_keywords": 0,
+                        "unchanged_keywords": len(records), "recomputed_algorithms": 0,
+                        "registered_algorithms": len(keys)}
             metadata_prefix_by_key = {
                 key: _algorithm_digest_prefix(asdict(value))
                 for key, value in metadata_by_key.items()
@@ -871,6 +914,7 @@ class CollectionService:
                     # mixed values that cannot be globally ordered.
                     pass
             executed = unchanged = recomputed_algorithms = 0
+            cacheable = True
             for record in records:
                 try:
                     evidence = json.loads(record["evidence"])
@@ -931,9 +975,12 @@ class CollectionService:
                     item = AlgorithmInput(record["id"], scope, analysis_date, current, history,
                         window_days=7, minimum_samples=3, evidence_url=evidence.get("source_url"),
                         current_snapshot_status=evidence.get("snapshot_status", "SUCCESS"), cohort=cohort)
+                    produced_keys = []
                     for result in engine.run(item, missing_keys):
                         payload = json.dumps(asdict(result), ensure_ascii=False, sort_keys=True)
-                        result_digest = digest_by_key[f"{result.algorithm_id}@{result.algorithm_version}"]
+                        result_key = f"{result.algorithm_id}@{result.algorithm_version}"
+                        result_digest = digest_by_key[result_key]
+                        produced_keys.append(result_key)
                         db.execute("""INSERT INTO algorithm_results(keyword_id,algorithm_id,version,status,
                             reason_code,value,metric,unit,result_json,input_digest,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                             ON CONFLICT(keyword_id,algorithm_id) DO UPDATE SET version=excluded.version,
@@ -945,8 +992,21 @@ class CollectionService:
                              payload, result_digest, now()))
                     executed += 1
                     recomputed_algorithms += len(missing_keys)
+                    if len(produced_keys) != len(missing_keys) or set(produced_keys) != set(missing_keys):
+                        cacheable = False
                 except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                    cacheable = False
                     continue
+            if cacheable:
+                # Results may have been inserted above, so calculate the key
+                # from the final state in the same SQLite transaction.
+                final_digest = _analysis_state_digest(db, records, self.store.data_mode_scope,
+                                                      metadata_by_key)
+                if final_digest is not None:
+                    db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                               (cache_key, final_digest))
+            elif previous_state:
+                db.execute("DELETE FROM settings WHERE key=?", (cache_key,))
         return {"eligible_keywords": len(records), "executed_keywords": executed,
                 "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
                 "registered_algorithms": len(keys)}
