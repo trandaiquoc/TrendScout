@@ -17,6 +17,7 @@ import logging
 import re
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
@@ -242,8 +243,15 @@ class FirestoreCollectionSnapshot:
         try:
             references = state.get("snapshot_refs", [state.get("snapshot_ref")])
             payloads = []
-            for reference in references:
-                records = self._blobs.get(reference, now=_utc(self._utcnow()))
+            def read_segment(reference):
+                return self._blobs.get(reference, now=_utc(self._utcnow()))
+
+            if len(references) > 1:
+                with ThreadPoolExecutor(max_workers=min(4, len(references))) as executor:
+                    results = list(executor.map(read_segment, references))
+            else:
+                results = [read_segment(references[0])]
+            for records in results:
                 if (not isinstance(records, list) or len(records) != 1
                         or not isinstance(records[0], dict)
                         or records[0].get("encoding") != "sqlite-gzip-base64-v1"

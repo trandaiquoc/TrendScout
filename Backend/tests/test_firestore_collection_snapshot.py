@@ -9,6 +9,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from app.collections import firestore_snapshot
@@ -204,6 +205,34 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             self.assertEqual(recovered.load(), 1)
             with closing(sqlite3.connect(recovered.path)) as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM records").fetchone()[0], 1)
+
+    def test_multiple_snapshot_segments_are_read_concurrently(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+        ):
+            path = Path(directory) / "source.sqlite"
+            payload = random.Random(34).randbytes(90_000)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records (value BLOB)")
+                db.execute("INSERT INTO records VALUES (?)", (payload,))
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.save()
+            pointer = self.state.values["collections-live-snapshot-v1"]
+            self.assertEqual(len(pointer["snapshot_refs"]), 2)
+            barrier = Barrier(2, timeout=10)
+            original = self.blobs.get
+
+            def concurrent_get(*args, **kwargs):
+                barrier.wait()
+                return original(*args, **kwargs)
+
+            reader = self._snapshot(Path(directory) / "restored.sqlite")
+            with patch.object(self.blobs, "get", side_effect=concurrent_get):
+                self.assertEqual(reader.load(), 1)
+            with closing(sqlite3.connect(reader.path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
 
     def test_latest_dataset_summary_reads_without_restoring_sqlite_blob(self):
         summary = {"dataset_id": "fetch-1", "status": "COMPLETED", "sources": ["google"]}

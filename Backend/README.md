@@ -12,8 +12,8 @@ multi-blob write must use a release with multi-blob reader support. This change
 does not reset quota or replace the shared database. Unreferenced blobs from an
 interrupted upload follow the existing blob retention and cleanup policy.
 
-Terminal Fetch status reads independent Firestore checkpoints concurrently,
-while preserving source order and per-source retention checks. Google documents
+Terminal Fetch status and multi-blob Collections restores read independent
+Firestore blobs concurrently, while preserving order and retention checks. Google documents
 that the Firestore Python gRPC client can be shared across threads
 ([documentation](https://docs.cloud.google.com/python/docs/reference/firestore/latest/multiprocessing),
 accessed 2026-11-24); actual latency depends on the deployment and database.
