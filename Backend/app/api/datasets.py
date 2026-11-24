@@ -39,7 +39,8 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
                     collection_ids: list[str] = Query(default=[]), source: str = Query(default='', max_length=100),
                     sort: str = Query(default='recent', pattern='^(recent|keyword|views|rank)$'),
                     date_from: date | None = None, date_to: date | None = None,
-                    limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=1000000)):
+                    limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=1000000),
+                    include_algorithm_results: bool = True):
     service = _service(request)
     if len(collection_ids) > 20 or any(not value or len(value) > 64 for value in collection_ids):
         raise HTTPException(422, {'code': 'INVALID_COLLECTION_FILTER'})
@@ -49,6 +50,7 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
         result = service.store.search_keywords(query=q, state=state, collection_ids=collection_ids,
                                                source=source, sort=sort, limit=limit, offset=offset,
                                                classification=classification, evidence=evidence,
+                                               include_algorithm_results=include_algorithm_results,
                                                date_from=date_from.isoformat() if date_from else '',
                                                date_to=date_to.isoformat() if date_to else '')
     except ValueError:

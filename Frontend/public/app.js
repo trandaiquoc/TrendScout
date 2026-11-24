@@ -1909,7 +1909,8 @@ function renderRows(items) {
 
 function currentDatasetQuery() {
   const params = new URLSearchParams({ q: state.query, state: $('#keyword-state-filter')?.value || 'all',
-    sort: state.sort === 'score' ? 'recent' : state.sort, limit: String(state.limit), offset: String(state.offset) });
+    sort: state.sort === 'score' ? 'recent' : state.sort, limit: String(state.limit), offset: String(state.offset),
+    include_algorithm_results: 'false' });
   for (const id of state.collectionFilters) params.append('collection_ids', id);
   return params;
 }

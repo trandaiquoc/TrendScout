@@ -1,5 +1,11 @@
 # TrendScout backend — Bước 3
 
+`GET /api/v1/datasets/latest/keywords` includes detailed algorithm results by
+default. List consumers that do not display those results may pass
+`include_algorithm_results=false`; the `algorithm_results` field is then
+omitted, while filtering and pagination remain unchanged. Full algorithm
+evidence remains available from `GET /api/v1/collections/keywords/{keyword_id}`.
+
 ## Vercel shared Collections snapshot format
 
 The shared SQLite image is stored as a gzip stream in one or more bounded,

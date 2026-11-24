@@ -456,7 +456,7 @@ function build() {
 
 function debounce(fn, wait) { let timer; return (...args) => { clearTimeout(timer); timer=setTimeout(()=>fn(...args),wait); }; }
 function queryParams() {
-  const params=new URLSearchParams({q:state.query,state:state.filterState,classification:state.classification,evidence:state.evidence,sort:state.sort,limit:String(state.limit),offset:String(state.offset)});
+  const params=new URLSearchParams({q:state.query,state:state.filterState,classification:state.classification,evidence:state.evidence,sort:state.sort,limit:String(state.limit),offset:String(state.offset),include_algorithm_results:'false'});
   if(state.source) params.set('source',state.source); if(state.dateFrom) params.set('date_from',state.dateFrom); if(state.dateTo) params.set('date_to',state.dateTo);
   if(state.collectionId) params.append('collection_ids',state.collectionId); return params;
 }

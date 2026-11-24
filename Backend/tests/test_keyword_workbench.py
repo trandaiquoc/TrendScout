@@ -83,6 +83,22 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(tree[self.root]["subtree_unique_keyword_count"], 2)
         self.assertEqual(tree[self.child]["subtree_unique_keyword_count"], 2)
 
+    def test_compact_keyword_list_keeps_filters_and_full_detail(self):
+        full = self._request("GET", "/api/v1/datasets/latest/keywords?evidence=algorithm")
+        compact = self._request("GET", "/api/v1/datasets/latest/keywords?evidence=algorithm&include_algorithm_results=false")
+        self.assertEqual((full.status_code, compact.status_code), (200, 200))
+        expected, actual = full.json(), compact.json()
+        self.assertEqual(expected["total"], actual["total"])
+        self.assertEqual([item["id"] for item in expected["items"]],
+                         [item["id"] for item in actual["items"]])
+        self.assertTrue(expected["items"][0]["algorithm_results"])
+        self.assertNotIn("algorithm_results", actual["items"][0])
+        self.assertEqual({k: v for k, v in expected["items"][0].items() if k != "algorithm_results"},
+                         actual["items"][0])
+        detail = self._request("GET", "/api/v1/collections/keywords/k-classified")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["algorithm_results"][0]["result"], {"rank": 1})
+
     def test_system_ineligible_is_distinct_from_user_exclusion_and_unknown_context(self):
         with self.store.connect() as db:
             db.execute("UPDATE classification_results SET classification_status='INELIGIBLE' WHERE keyword_id='k-unknown'")

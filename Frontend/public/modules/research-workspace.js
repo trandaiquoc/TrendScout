@@ -23,7 +23,7 @@ async function loadResearchWorkspace() {
 async function loadResearchKeywords(query='') {
   const select=$('#research-keyword'); if(!select)return;
   const sequence=++keywordSequence;
-  const prior=select.value; const params=new URLSearchParams({limit:'100',sort:'recent'}); if(query)params.set('q',query);
+  const prior=select.value; const params=new URLSearchParams({limit:'100',sort:'recent',include_algorithm_results:'false'}); if(query)params.set('q',query);
   try {
     const data=await getJson('/api/v1/datasets/latest/keywords?'+params.toString(),{locale:getLocale()});
     if(sequence!==keywordSequence)return;

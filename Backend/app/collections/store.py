@@ -310,7 +310,7 @@ class CollectionStore:
     def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
                         sort="recent", limit=50, offset=0, ids_only=False,
                         classification="all", evidence="all", date_from="", date_to="",
-                        keyword_id=None):
+                        keyword_id=None, include_algorithm_results=True):
         normalized = " ".join(query.casefold().split())
         clauses, parameters = [], []
         if self.data_mode_scope:
@@ -442,9 +442,10 @@ class CollectionStore:
                         item["rejection_reason"] = "CLASSIFICATION_INELIGIBLE"
                 else:
                     item["topic_eligible"] = bool(item.get("eligible"))
-                item["algorithm_results"] = [dict(result) for result in db.execute(
-                    "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
-                    (item["id"],))]
+                if include_algorithm_results:
+                    item["algorithm_results"] = [dict(result) for result in db.execute(
+                        "SELECT algorithm_id,version,status,reason_code,value,metric,unit,result_json FROM algorithm_results WHERE keyword_id=? ORDER BY algorithm_id",
+                        (item["id"],))]
                 items.append(item)
         return {"items": items, "total": total, "limit": limit, "offset": offset,
                 "next_offset": offset + limit if limit is not None and offset + limit < total else None}
