@@ -36,6 +36,12 @@ that the Firestore Python gRPC client can be shared across threads
 ([documentation](https://docs.cloud.google.com/python/docs/reference/firestore/latest/multiprocessing),
 accessed 2026-11-24); actual latency depends on the deployment and database.
 
+Worker logs include per-source checkpoint-load, handler/validation, and
+checkpoint-save durations, delivery state, and provider-request count. They do
+not include the fetch ID, query, credentials, or source records. These timings
+only appear when a source result is checkpointed; they do not themselves prove
+that a provider call was made or that a cached Fetch met a latency target.
+
 ## Native Windows (môi trường chính)
 
 Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `.\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.

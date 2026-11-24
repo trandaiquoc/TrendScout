@@ -268,12 +268,20 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
                     "provider_request_count": 0}
 
         worker = self.worker({source: handler for source in SOURCES})
-        outcome = await worker.run_once("cached-slice", job_id=job_id,
-                                        max_sources=1, continue_cached=True)
+        with self.assertLogs("app.jobs.distributed_worker", level="INFO") as captured:
+            outcome = await worker.run_once("cached-slice", job_id=job_id,
+                                            max_sources=1, continue_cached=True)
         self.assertEqual(outcome["state"], "COMPLETED")
         self.assertEqual(set(seen), set(SOURCES))
         self.assertTrue(all(value["provider_request_count"] == 0
                             for value in outcome["sources"].values()))
+        self.assertEqual(len(captured.output), len(SOURCES))
+        for line in captured.output:
+            self.assertIn("delivery=CACHED provider_requests=0", line)
+            self.assertIn("checkpoint_load_ms=", line)
+            self.assertIn("handler_ms=", line)
+            self.assertIn("checkpoint_save_ms=", line)
+            self.assertNotIn(job_id, line)
 
     async def test_source_admission_failure_is_saved_and_later_sources_finish(self):
         job_id = self.admit()

@@ -7,9 +7,11 @@ separate opt-in decisions; offline tests use local or injected Firestore stores.
 
 import inspect
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Awaitable, Callable, Mapping
 
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
@@ -19,6 +21,8 @@ from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_SAFE_SOURCE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_logger = logging.getLogger(__name__)
 _MAX_SOURCE_RESULT_BYTES = 4_900_000
 _TERMINAL_STATUSES = frozenset({"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"})
 _SOURCE_FAILURE_PHASES = frozenset({
@@ -153,8 +157,10 @@ class DistributedFetchWorker:
             declared_mode = self.source_modes[source_id]
             if declared_mode is not None and declared_mode != grant.data_mode:
                 raise AdmissionDenied("SOURCE_MODE_POLICY_MISMATCH")
+            checkpoint_started = perf_counter()
             saved = self.journal.load(job_id, owner, fence, source_id=source_id,
                                       grant=grant, now=now)
+            checkpoint_finished = perf_counter()
             if saved and saved["snapshot"].get("phase") == "COMPLETE":
                 outcomes[source_id] = saved["snapshot"]["result"]
                 continue
@@ -188,6 +194,7 @@ class DistributedFetchWorker:
                                         checkpoint, heartbeat,
                                         request_metadata=claim.get("request_metadata", {}))
             try:
+                handler_started = perf_counter()
                 result = self.handlers[source_id](context)
                 if inspect.isawaitable(result):
                     result = await result
@@ -245,9 +252,27 @@ class DistributedFetchWorker:
                 "phase": "COMPLETE",
                 "result": result,
             }
+            handler_finished = perf_counter()
             self.journal.save(job_id, owner, fence, source_id=source_id, grant=grant,
                               now=self.utcnow(), expected_revision=revision_box[0],
                               snapshot=snapshot)
+            checkpoint_saved = perf_counter()
+            delivery = result.get("delivery_state")
+            if delivery not in ("FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE"):
+                delivery = "UNKNOWN"
+            count = result.get("provider_request_count")
+            if type(count) is not int or count < 0:
+                count = "UNKNOWN"
+            _logger.info(
+                "Fetch source timing source=%s status=%s delivery=%s provider_requests=%s "
+                "checkpoint_load_ms=%d handler_ms=%d checkpoint_save_ms=%d",
+                source_id if isinstance(source_id, str) and _SAFE_SOURCE.fullmatch(source_id)
+                else "unknown",
+                result["status"], delivery, count,
+                int((checkpoint_finished - checkpoint_started) * 1000),
+                int((handler_finished - handler_started) * 1000),
+                int((checkpoint_saved - handler_finished) * 1000),
+            )
             outcomes[source_id] = result
             # A confirmed cache hit performs no provider request. Continue to
             # the next source in this invocation while retaining the live-source
