@@ -202,6 +202,17 @@ test('keeps YouTube provider count, storage omission, observation and cache deli
   });
 });
 
+test('explains a capped YouTube sample and preserves zero rejections', () => {
+  const result = extractRunSourceCoverage({ source_manifest: [{
+    source_id: 'youtube_video_search', status: 'PARTIAL', record_count: 50,
+    coverage: { stop_reason: 'PAGE_CAP_REACHED', records_omitted_storage_limit: 0,
+      queries: [{ accepted: 50, rejected: 0 }] },
+  }] });
+  assert.equal(result.sources[0].youtubePageCapReached, true);
+  assert.equal(result.sources[0].rejectedRecords, 0);
+  assert.equal(result.sources[0].omittedRecords, 0);
+});
+
 test('does not label a failed source as fresh or cached delivery', () => {
   const result = extractRunSourceCoverage({source_manifest: [{
     source_id: 'google_web_serp',

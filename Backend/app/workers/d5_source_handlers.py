@@ -358,7 +358,9 @@ class D5SourceHandlers:
                             _jsonable(value) for value in row.request_timestamps
                         ],
                         "next_page_available": row.reason == "PAGE_CAP_REACHED",
-                        "next_page_token_saved": row.reason == "PAGE_CAP_REACHED",
+                        # The running checkpoint can hold a cursor, but the
+                        # terminal receipt does not retain it for continuation.
+                        "next_page_token_saved": False,
                     })
                 query_results.append(query_result)
             youtube_fetch_times = [record.fetched_at for record in result.records

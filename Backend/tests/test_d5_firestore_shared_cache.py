@@ -264,6 +264,22 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual(self.client.document_gets, 2)
         self.assertEqual(self.client.batch_gets, 2)
 
+    def test_verified_read_cache_keeps_multiple_segments_with_bounded_eviction(self):
+        records = [[{"text": character * 100}] for character in "abc"]
+        references = [self.blobs.put(item, now=NOW, retain_until=NOW + timedelta(minutes=5))
+                      for item in records]
+        size = references[0]["raw_bytes"]
+        reader = FirestoreSnapshotBlobs(self.client, read_cache=_SnapshotReadCache(max_bytes=2 * size))
+        self.assertEqual(reader.get(references[0], now=NOW), records[0])
+        self.assertEqual(reader.get(references[1], now=NOW), records[1])
+        self.assertEqual(reader.get(references[0], now=NOW), records[0])
+        self.assertEqual(self.client.batch_gets, 2)
+        self.assertEqual(reader.get(references[2], now=NOW), records[2])
+        self.assertEqual(reader.get(references[0], now=NOW), records[0])
+        self.assertEqual(self.client.batch_gets, 3)
+        self.assertEqual(reader.get(references[1], now=NOW), records[1])
+        self.assertEqual(self.client.batch_gets, 4)
+
     def test_snapshot_within_checkpoint_budget_round_trips_across_multiple_chunks(self):
         records = [{"text": "x" * 4_100_000, "record_count": 1}]
         ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))

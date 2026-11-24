@@ -106,8 +106,11 @@ class DistributedFetchWorker:
         self.journal = SourceCheckpointJournal(admission, snapshot_blobs=snapshot_blobs)
 
     async def run_once(self, owner: str, *, job_id: str | None = None,
-                       max_sources: int | None = None) -> dict | None:
+                       max_sources: int | None = None,
+                       continue_cached: bool = False) -> dict | None:
         if (job_id is not None and (not isinstance(job_id, str) or not job_id)
+                or type(continue_cached) is not bool
+                or continue_cached and max_sources is None
                 or max_sources is not None and (
                     type(max_sources) is not int or not 1 <= max_sources <= len(self.handlers)
                 )
@@ -246,7 +249,13 @@ class DistributedFetchWorker:
                               now=self.utcnow(), expected_revision=revision_box[0],
                               snapshot=snapshot)
             outcomes[source_id] = result
-            processed_sources += 1
+            # A confirmed cache hit performs no provider request. Continue to
+            # the next source in this invocation while retaining the live-source
+            # slice bound and all normal checkpoints and quota checks.
+            if not (continue_cached and result.get("delivery_state") == "CACHED"
+                    and type(result.get("provider_request_count")) is int
+                    and result["provider_request_count"] == 0):
+                processed_sources += 1
 
         if deferred_until is not None:
             self.admission.defer(job_id, owner, fence, now=self.utcnow(),

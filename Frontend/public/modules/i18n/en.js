@@ -627,7 +627,7 @@ export const en = {
   'fetch.youtube-evidence-delivery': 'Delivery: {state}',
   'fetch.youtube-query-coverage': 'Query “{query}”: {accepted} accepted, {rejected} rejected.',
   'fetch.youtube-evidence-storage-limit': '{count} additional video records were omitted to fit the saved-result limit.',
-  'fetch.youtube-evidence-page-cap': 'Only the first page was fetched. A continuation token was saved; more pages were not requested.',
+  'fetch.youtube-evidence-page-cap': 'The page limit was reached; more results are available, but another page was not requested.',
   'fetch.google-summary': 'US Google Trends: {candidates} candidates, {verified} SERP verified, {keywords} distinct keywords; {mode}; source data {source_time}; fetched {fetched_at}; {delivery}',
   'fetch.google-counts': '{candidates} candidates, {verified} SERP verified',
   'runs.google-summary': 'Google discovery coverage',

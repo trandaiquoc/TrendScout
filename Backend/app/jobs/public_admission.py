@@ -1513,6 +1513,14 @@ class PublicAdmission:
             jobs.sort(key=lambda item: (item[0], item[1], item[2]["job_id"]), reverse=True)
             return state, [item[2] for item in jobs[:limit]]
 
+        read_many = getattr(self.store, "read_many", None)
+        if callable(read_many):
+            current = read_many([self.state_key])[self.state_key]
+            updated, jobs = operation(deepcopy(current))
+            if updated == current:
+                return jobs
+            # Lifecycle repairs must be repeated against the current state in
+            # a transaction; the read-only snapshot may already be stale.
         return self.store.transact(self.state_key, operation)
 
     def claim(self, job_id: str, owner: str, *, now: datetime) -> dict:

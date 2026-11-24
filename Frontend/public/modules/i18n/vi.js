@@ -627,7 +627,7 @@ export const vi = {
   'fetch.youtube-evidence-delivery': 'Phân phối: {state}',
   'fetch.youtube-query-coverage': 'Truy vấn “{query}”: nhận {accepted}, từ chối {rejected}.',
   'fetch.youtube-evidence-storage-limit': '{count} video bổ sung đã được lược bỏ để vừa giới hạn lưu kết quả.',
-  'fetch.youtube-evidence-page-cap': 'Chỉ lấy trang đầu tiên. Token trang tiếp theo đã lưu; hệ thống chưa gọi thêm trang.',
+  'fetch.youtube-evidence-page-cap': 'Đã đạt giới hạn số trang; còn kết quả ở trang tiếp theo nhưng hệ thống chưa yêu cầu thêm trang.',
   'fetch.google-summary': 'Google Trends, phạm vi mục tiêu Hoa Kỳ: {candidates} từ khóa xu hướng, {verified} đã đối chiếu SERP, {keywords} từ khóa riêng biệt; {mode}; dữ liệu nguồn {source_time}; tải lúc {fetched_at}; {delivery}',
   'fetch.google-counts': '{candidates} từ khóa xu hướng, {verified} đã đối chiếu SERP',
   'runs.google-summary': 'Độ phủ khám phá Google',

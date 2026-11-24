@@ -47,6 +47,8 @@ export function extractRunSourceCoverage(item) {
     const acceptedQueries = sourceId === 'youtube_video_search' && Array.isArray(coverage.queries)
       ? coverage.queries.map(query => count(query?.accepted)).filter(value => value !== null)
       : [];
+    const rejectedQueries = sourceId === 'youtube_video_search' && Array.isArray(coverage.queries)
+      ? coverage.queries.map(query => count(query?.rejected)) : [];
     const sourceCoverage = {
       sourceId,
       status: typeof source?.status === 'string' ? source.status : 'UNKNOWN',
@@ -62,6 +64,8 @@ export function extractRunSourceCoverage(item) {
       rejectedRecords: firstCount(
         coverage.rejected_records,
         coverage.rejected,
+        ...(rejectedQueries.length && rejectedQueries.every(value => value !== null)
+          ? [rejectedQueries.reduce((sum, value) => sum + value, 0)] : []),
       ),
       omittedRecords: firstCount(
         coverage.explicitly_omitted_records,
@@ -99,6 +103,9 @@ export function extractRunSourceCoverage(item) {
       marketFilter: typeof coverage.market_filter === 'string' ? coverage.market_filter : null,
       languageFilter: typeof coverage.language_filter === 'string' ? coverage.language_filter : null,
     };
+    if (sourceId === 'youtube_video_search' && coverage.stop_reason === 'PAGE_CAP_REACHED') {
+      sourceCoverage.youtubePageCapReached = true;
+    }
     const diagnostic = failureDiagnostic(sourceId, coverage);
     if (diagnostic) sourceCoverage.failureDiagnostic = diagnostic;
     if (typeof source?.error_code === 'string') sourceCoverage.errorCode = source.error_code;

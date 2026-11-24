@@ -552,4 +552,5 @@ class DistributedPublicFetch:
         """Continue one requested shared Fetch through a bounded source slice."""
         return await self.worker.run_once(
             owner, job_id=fetch_id, max_sources=max_sources,
+            continue_cached=self.firestore_shared_live,
         )

@@ -1,5 +1,17 @@
 # TrendScout backend — Bước 3
 
+## Vercel shared Collections snapshot format
+
+The shared SQLite image is stored as a gzip stream in one or more bounded,
+content-addressed Firestore blobs. Each blob is committed independently; the
+versioned pointer is changed only after all blobs are stored. Readers verify the
+complete SQLite SHA-256 before opening the working copy. Existing single-blob
+`snapshot_ref` pointers remain readable. Multi-blob pointers use `snapshot_refs`;
+releases predating this format cannot read them, so a rollback after the first
+multi-blob write must use a release with multi-blob reader support. This change
+does not reset quota or replace the shared database. Unreferenced blobs from an
+interrupted upload follow the existing blob retention and cleanup policy.
+
 ## Native Windows (môi trường chính)
 
 Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `.\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.

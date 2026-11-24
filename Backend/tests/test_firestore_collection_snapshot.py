@@ -104,6 +104,31 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         self.assertEqual(self.state.read_many_calls, 1)
         self.assertEqual(self.state.transact_calls, 0)
 
+    def test_warm_image_reuses_decompression_but_still_checks_blob_access(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            firestore_snapshot, "_restored_image_cache", None
+        ):
+            path = Path(directory) / "source.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records (value TEXT)")
+                db.execute("INSERT INTO records VALUES ('kept')")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.save()
+            first = self._snapshot(Path(directory) / "first.sqlite")
+            first.load()
+            with patch.object(FirestoreCollectionSnapshot, "_decompress_bounded",
+                              side_effect=AssertionError("unexpected decompression")):
+                second = self._snapshot(Path(directory) / "second.sqlite")
+                second.load()
+            with closing(sqlite3.connect(second.path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], "kept")
+            with patch.object(self.blobs, "get", side_effect=ValueError("expired")):
+                third = self._snapshot(Path(directory) / "third.sqlite")
+                with self.assertRaises(CollectionSnapshotUnavailable):
+                    third.load()
+
     def test_round_trip_and_unchanged_image_does_not_write_again(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.sqlite"
@@ -135,6 +160,50 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
                 db.commit()
             self.assertEqual(restored.save(), 2)
             self.assertEqual(self.blobs.writes, 2)
+
+    def test_large_snapshot_segments_round_trip_and_failed_upload_keeps_pointer(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+        ):
+            path = Path(directory) / "collections.sqlite"
+            payload = random.Random(120).randbytes(180_000)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, value BLOB)")
+                db.execute("INSERT INTO records VALUES (1, ?)", (payload,))
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            self.assertEqual(writer.save(), 1)
+            pointer = copy.deepcopy(self.state.values["collections-live-snapshot-v1"])
+            self.assertGreater(len(pointer["snapshot_refs"]), 1)
+            restored_path = Path(directory) / "restored.sqlite"
+            reader = self._snapshot(restored_path)
+            self.assertEqual(reader.load(), 1)
+            with closing(sqlite3.connect(restored_path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
+                db.execute("INSERT INTO records VALUES (2, ?)", (b"changed",))
+                db.commit()
+            original_put = self.blobs.put
+            calls = 0
+
+            def fail_second_segment(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("upload failed")
+                return original_put(*args, **kwargs)
+
+            with patch.object(self.blobs, "put", side_effect=fail_second_segment):
+                with self.assertRaises(CollectionSnapshotUnavailable):
+                    reader.save()
+            self.assertEqual(calls, 2)
+            self.assertEqual(self.state.values["collections-live-snapshot-v1"], pointer)
+
+            # The old pointer remains readable even though a new blob exists.
+            recovered = self._snapshot(Path(directory) / "recovered.sqlite")
+            self.assertEqual(recovered.load(), 1)
+            with closing(sqlite3.connect(recovered.path)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM records").fetchone()[0], 1)
 
     def test_latest_dataset_summary_reads_without_restoring_sqlite_blob(self):
         summary = {"dataset_id": "fetch-1", "status": "COMPLETED", "sources": ["google"]}
@@ -383,7 +452,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
                                  ("Demo",))
                 self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 0)
 
-    def test_compressed_size_fallback_drops_only_recomputable_embedding_cache(self):
+    def test_large_compressed_snapshot_preserves_embedding_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "collections.sqlite"
             with closing(sqlite3.connect(path)) as db:
@@ -408,7 +477,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             with closing(sqlite3.connect(restored_path)) as db:
                 self.assertEqual(db.execute("SELECT name FROM collections WHERE id='c1'").fetchone(),
                                  ("Demo",))
-                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT count(*) FROM cache").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

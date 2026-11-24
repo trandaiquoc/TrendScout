@@ -42,6 +42,22 @@ COLLECTION_SEMANTIC_ANCHORS = {
 }
 INITIAL_TOPIC_ROOTS = ("fashion", "home_living", "technology", "entertainment", "sports", "gaming")
 
+_COHORT_MARKER = {"__trendscout_cohort_payload__": True}
+_COHORT_MARKER_JSON = b'{"__trendscout_cohort_payload__":true}'
+
+
+def _serialized_cohort(cohort):
+    """Pre-sort the exact JSON rows used by existing algorithm input digests."""
+    rows = [(keyword_id, (point.scope.project, point.scope.article, point.value, point.rank))
+            for keyword_id, point in cohort]
+    rows.sort(key=lambda row: row[1])
+    return [(keyword_id, json.dumps(values, separators=(",", ":")).encode())
+            for keyword_id, values in rows]
+
+
+def _cohort_json_without(rows, keyword_id):
+    return b"[" + b",".join(value for identity, value in rows if identity != keyword_id) + b"]"
+
 
 def cosine(left, right):
     dot = sum(a * b for a, b in zip(left, right))
@@ -768,6 +784,8 @@ class CollectionService:
                 mode_parameters)]
             engine = algorithm_engine()
             keys = engine.registry.keys()
+            metadata_by_key = {key: engine.registry.get(key).metadata for key in keys}
+            metadata_json_by_key = {key: asdict(value) for key, value in metadata_by_key.items()}
             snapshot_cohorts = defaultdict(list)
             for peer in records:
                 try:
@@ -785,6 +803,14 @@ class CollectionService:
                         peer_evidence.get("snapshot_status", "SUCCESS"), peer_evidence.get("provider_rank"))))
                 except (TypeError, ValueError):
                     continue
+            serialized_cohorts = {}
+            for cohort_key, cohort in snapshot_cohorts.items():
+                try:
+                    serialized_cohorts[cohort_key] = _serialized_cohort(cohort)
+                except TypeError:
+                    # Preserve the old per-record sort behavior for unusual
+                    # mixed values that cannot be globally ordered.
+                    pass
             executed = unchanged = recomputed_algorithms = 0
             for record in records:
                 try:
@@ -802,35 +828,49 @@ class CollectionService:
                     current = evidence.get("views_ceil")
                     cohort_key = (record["source"], scope.country, scope.access,
                         analysis_date.isoformat(), metric, unit, record["project"])
-                    cohort = tuple(point for keyword_id, point in snapshot_cohorts.get(cohort_key, ())
-                                   if keyword_id != record["id"])
-                    item = AlgorithmInput(record["id"], scope, analysis_date, current, history,
-                        window_days=7, minimum_samples=3, evidence_url=evidence.get("source_url"),
-                        current_snapshot_status=evidence.get("snapshot_status", "SUCCESS"), cohort=cohort)
+                    peers = snapshot_cohorts.get(cohort_key, ())
+                    serialized = serialized_cohorts.get(cohort_key)
+                    if serialized is None:
+                        cohort = tuple(point for keyword_id, point in peers if keyword_id != record["id"])
+                        cohort_input = sorted((point.scope.project, point.scope.article, point.value, point.rank)
+                                              for point in cohort)
+                        cohort_bytes = None
+                    else:
+                        cohort = None
+                        cohort_input = _COHORT_MARKER
+                        cohort_bytes = _cohort_json_without(serialized, record["id"])
                     input_data = {"scope": asdict(scope),
                         "date": analysis_date.isoformat(), "current": current,
                         "current_snapshot_status": evidence.get("snapshot_status", "SUCCESS"),
                         "history": [(str(point.date), point.status, point.value, point.snapshot_status) for point in history],
-                        "cohort": sorted((point.scope.project, point.scope.article, point.value, point.rank)
-                                         for point in cohort)}
+                        "cohort": cohort_input}
                     existing = {row["algorithm_id"]: row["input_digest"] for row in db.execute(
                         "SELECT algorithm_id,input_digest FROM algorithm_results WHERE keyword_id=?",
                         (record["id"],))}
                     digest_by_key = {}
                     missing_keys = []
                     for key in keys:
-                        metadata = engine.registry.get(key).metadata
-                        digest_input = {"input": dict(input_data), "algorithm": asdict(metadata)}
+                        metadata = metadata_by_key[key]
+                        digest_input = {"input": dict(input_data), "algorithm": metadata_json_by_key[key]}
                         if metadata.family != "popularity":
                             digest_input["input"].pop("cohort")
-                        digest = hashlib.sha256(json.dumps(digest_input, sort_keys=True,
-                            separators=(",", ":")).encode()).hexdigest()
+                        encoded = json.dumps(digest_input, sort_keys=True,
+                            separators=(",", ":")).encode()
+                        if metadata.family == "popularity" and cohort_bytes is not None:
+                            encoded = encoded.replace(b'"cohort":' + _COHORT_MARKER_JSON,
+                                                      b'"cohort":' + cohort_bytes, 1)
+                        digest = hashlib.sha256(encoded).hexdigest()
                         digest_by_key[key] = digest
                         if existing.get(metadata.algorithm_id) != digest:
                             missing_keys.append(key)
                     if not missing_keys:
                         unchanged += 1
                         continue
+                    if cohort is None:
+                        cohort = tuple(point for keyword_id, point in peers if keyword_id != record["id"])
+                    item = AlgorithmInput(record["id"], scope, analysis_date, current, history,
+                        window_days=7, minimum_samples=3, evidence_url=evidence.get("source_url"),
+                        current_snapshot_status=evidence.get("snapshot_status", "SUCCESS"), cohort=cohort)
                     for result in engine.run(item, missing_keys):
                         payload = json.dumps(asdict(result), ensure_ascii=False, sort_keys=True)
                         result_digest = digest_by_key[f"{result.algorithm_id}@{result.algorithm_version}"]

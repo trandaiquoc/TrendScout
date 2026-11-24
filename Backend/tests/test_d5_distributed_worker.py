@@ -206,6 +206,50 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(states, ["QUEUED", "QUEUED", "QUEUED", "COMPLETED"])
         self.assertEqual(status["attempts"], 1)
 
+    async def test_slice_continues_only_confirmed_zero_request_cached_sources(self):
+        job_id = self.admit()
+        order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                 WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID)
+        seen = []
+
+        def handler(context):
+            seen.append(context.source_id)
+            cached = context.source_id != WIKIMEDIA_SOURCE_ID
+            return {**self.source_result(1),
+                    "delivery_state": "CACHED" if cached else "FRESH",
+                    "provider_request_count": 0 if cached else 1}
+
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={source: handler for source in SOURCES},
+            resolve_grant=self.grant, utcnow=self.clock, source_order=order,
+        )
+        first = await worker.run_once("cache-slice-1", job_id=job_id,
+                                      max_sources=1, continue_cached=True)
+        self.assertEqual(first["state"], "QUEUED")
+        self.assertEqual(seen, list(order[:3]))
+        second = await worker.run_once("cache-slice-2", job_id=job_id,
+                                       max_sources=1, continue_cached=True)
+        self.assertEqual(second["state"], "COMPLETED")
+        self.assertEqual(seen, list(order))
+
+    async def test_slice_completes_all_cached_sources_in_one_invocation(self):
+        job_id = self.admit()
+        seen = []
+
+        def handler(context):
+            seen.append(context.source_id)
+            return {**self.source_result(1), "delivery_state": "CACHED",
+                    "provider_request_count": 0}
+
+        worker = self.worker({source: handler for source in SOURCES})
+        outcome = await worker.run_once("cached-slice", job_id=job_id,
+                                        max_sources=1, continue_cached=True)
+        self.assertEqual(outcome["state"], "COMPLETED")
+        self.assertEqual(set(seen), set(SOURCES))
+        self.assertTrue(all(value["provider_request_count"] == 0
+                            for value in outcome["sources"].values()))
+
     async def test_source_admission_failure_is_saved_and_later_sources_finish(self):
         job_id = self.admit()
         order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
@@ -943,8 +987,9 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("raw_record", repr(result))
         first_request_counts = dict(request_counts)
 
-        admission.admit("four-source-worker-cached-key", now=self.clock())
-        cached = await worker.run_once("cached-fixture-worker")
+        cached_id = admission.admit("four-source-worker-cached-key", now=self.clock())["job_id"]
+        cached = await worker.run_once("cached-fixture-worker", job_id=cached_id,
+                                       max_sources=1, continue_cached=True)
         self.assertEqual(cached["state"], "PARTIAL", repr(cached["sources"]))
         self.assertEqual(request_counts, first_request_counts)
         self.assertTrue(all(item.get("delivery_state") == "CACHED"

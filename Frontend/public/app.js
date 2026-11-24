@@ -1144,8 +1144,9 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
       if (job.status === 'NOT_PROCESSED' && isVercelSharedLive(state.capabilities)
           && terminalFetch?.fetch_id === fetchId) {
-        await recoverLatestVercelCollectionSnapshot(terminalFetch);
-        if (attempt < 120) window.setTimeout(() => poll(attempt + 1), 250);
+        const recovered = await recoverLatestVercelCollectionSnapshot(terminalFetch);
+        if (recovered && attempt < 120) window.setTimeout(() => poll(attempt + 1), 250);
+        else if (!recovered) $('#workbench-status').textContent = t('runs.outcome.collection-failed');
         return;
       }
       if (job.status === 'PROCESSING' && attempt < 120) {
@@ -2009,11 +2010,14 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null) {
             );
             recovered = true;
           } catch (error) {
+            const code = error?.body?.detail?.code || error?.body?.code;
             const transient = error instanceof ApiError
               && (error.status === null || [408, 425, 500, 502, 503, 504].includes(error.status)
                 || error.status === 409
-                  && (error.body?.detail?.code || error.body?.code)
-                    === 'COLLECTIONS_CONCURRENT_UPDATE');
+                  && code === 'COLLECTIONS_CONCURRENT_UPDATE');
+            // A failed snapshot commit is not made more likely to succeed by
+            // replaying the same expensive processing immediately.
+            if (code === 'COLLECTIONS_PERSISTENCE_FAILED') throw error;
             if (!transient || attempt === 2) throw error;
             await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1000));
           }

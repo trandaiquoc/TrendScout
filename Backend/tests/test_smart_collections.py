@@ -739,6 +739,34 @@ class SmartCollectionsTests(unittest.TestCase):
             self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
             self.assertEqual(sum(calls), previous_calls)
 
+    def test_cohort_digest_encoding_matches_original_for_each_excluded_keyword(self):
+        from types import SimpleNamespace
+        from app.collections.service import (
+            _COHORT_MARKER, _COHORT_MARKER_JSON, _serialized_cohort, _cohort_json_without,
+        )
+        peers = [
+            (identifier, SimpleNamespace(scope=SimpleNamespace(project=project, article=title),
+                                         value=value, rank=rank))
+            for identifier, project, title, value, rank in [
+                ("a", "en.wikipedia", "Café", 10, 1),
+                ("b", "en.wikipedia", "Mars", 20, 2),
+                ("c", "en.wikipedia", "Mars", 20, 2),
+            ]
+        ]
+        encoded_peers = _serialized_cohort(peers)
+        for excluded in ("a", "b", "c", "absent"):
+            original = sorted((point.scope.project, point.scope.article, point.value, point.rank)
+                              for identifier, point in peers if identifier != excluded)
+            template = {"algorithm": {"family": "popularity"},
+                        "input": {"scope": {"article": "Café"}, "cohort": _COHORT_MARKER}}
+            actual = json.dumps(template, sort_keys=True, separators=(",", ":")).encode().replace(
+                b'"cohort":' + _COHORT_MARKER_JSON,
+                b'"cohort":' + _cohort_json_without(encoded_peers, excluded), 1)
+            expected = json.dumps({"algorithm": template["algorithm"],
+                                   "input": {"scope": {"article": "Café"}, "cohort": original}},
+                                  sort_keys=True, separators=(",", ":")).encode()
+            self.assertEqual(actual, expected)
+
     def test_localized_wikimedia_special_and_main_pages_are_filtered(self):
         for project, title in (
             ("el.wikisource", "Ειδικό:Αναζήτηση"),

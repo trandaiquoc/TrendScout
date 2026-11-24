@@ -16,8 +16,10 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 
 from app.storage.local_file_security import secure_private_directory
 
@@ -27,6 +29,9 @@ _RETENTION = timedelta(days=3650)
 # budget. The encoded chunks remain below Firestore's 10 MiB transaction limit.
 _MAX_COMPRESSED_BYTES = 4_200_000
 _MAX_DATABASE_BYTES = 80_000_000
+# Each segment is independently bounded by the existing blob transaction limit.
+# The pointer is committed only after all segments are durable.
+_MAX_SNAPSHOT_SEGMENTS = 20
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SNAPSHOT_FAILURE_REASONS = frozenset({
@@ -45,6 +50,27 @@ _LATEST_DATASET_SUMMARY_VERSION = 1
 _MAX_LATEST_DATASET_SUMMARY_BYTES = 48_000
 _logger = logging.getLogger(__name__)
 _NO_PRELOADED_POINTER = object()
+_RESTORED_IMAGE_CACHE_SECONDS = 60
+_restored_image_cache_lock = Lock()
+_restored_image_cache = None
+
+
+def _cached_restored_image(key):
+    global _restored_image_cache
+    with _restored_image_cache_lock:
+        entry = _restored_image_cache
+        if entry is not None:
+            if time.monotonic() >= entry[1]:
+                _restored_image_cache = None
+            elif entry[0] == key:
+                return entry[2]
+    return None
+
+
+def _remember_restored_image(key, raw):
+    global _restored_image_cache
+    with _restored_image_cache_lock:
+        _restored_image_cache = (key, time.monotonic() + _RESTORED_IMAGE_CACHE_SECONDS, raw)
 
 
 class CollectionSnapshotConflict(RuntimeError):
@@ -135,7 +161,11 @@ class FirestoreCollectionSnapshot:
             and state.get("schema") == 1
             and type(state.get("version")) is int
             and state["version"] >= 1
-            and isinstance(state.get("snapshot_ref"), dict)
+            and (isinstance(state.get("snapshot_ref"), dict)
+                 if "snapshot_refs" not in state else
+                 isinstance(state["snapshot_refs"], list)
+                 and 1 <= len(state["snapshot_refs"]) <= _MAX_SNAPSHOT_SEGMENTS
+                 and all(isinstance(ref, dict) for ref in state["snapshot_refs"]))
             and isinstance(state.get("sqlite_sha256"), str)
             and _SHA256.fullmatch(state["sqlite_sha256"]) is not None
         )
@@ -210,18 +240,32 @@ class FirestoreCollectionSnapshot:
             )
         self._latest_dataset_summary_present = self._summary_from_pointer(state)[0]
         try:
-            records = self._blobs.get(state["snapshot_ref"], now=_utc(self._utcnow()))
-            if (not isinstance(records, list) or len(records) != 1
-                    or not isinstance(records[0], dict)
-                    or records[0].get("encoding") != "sqlite-gzip-base64-v1"
-                    or not isinstance(records[0].get("payload"), str)):
-                raise ValueError("invalid Collections snapshot payload")
-            compressed = base64.b64decode(records[0]["payload"], validate=True)
-            if len(compressed) > _MAX_COMPRESSED_BYTES:
-                raise ValueError("Collections snapshot exceeds its compressed size limit")
-            raw = self._decompress_bounded(compressed)
-            if hashlib.sha256(raw).hexdigest() != state["sqlite_sha256"]:
-                raise ValueError("Collections snapshot checksum mismatch")
+            references = state.get("snapshot_refs", [state.get("snapshot_ref")])
+            payloads = []
+            for reference in references:
+                records = self._blobs.get(reference, now=_utc(self._utcnow()))
+                if (not isinstance(records, list) or len(records) != 1
+                        or not isinstance(records[0], dict)
+                        or records[0].get("encoding") != "sqlite-gzip-base64-v1"
+                        or not isinstance(records[0].get("payload"), str)):
+                    raise ValueError("invalid Collections snapshot payload")
+                payloads.append(records[0]["payload"])
+            key = (state["sqlite_sha256"], tuple(
+                (reference.get("digest"), reference.get("raw_bytes"), reference.get("item_count"))
+                for reference in references
+            ))
+            raw = _cached_restored_image(key)
+            if raw is None:
+                pieces = []
+                for payload in payloads:
+                    piece = base64.b64decode(payload, validate=True)
+                    if len(piece) > _MAX_COMPRESSED_BYTES:
+                        raise ValueError("Collections snapshot segment exceeds its size limit")
+                    pieces.append(piece)
+                raw = self._decompress_bounded(b"".join(pieces))
+                if hashlib.sha256(raw).hexdigest() != state["sqlite_sha256"]:
+                    raise ValueError("Collections snapshot checksum mismatch")
+                _remember_restored_image(key, raw)
             if self.path.exists() or self.path.is_symlink():
                 raise ValueError("Collections working path already exists")
             with self.path.open("xb") as target:
@@ -325,18 +369,12 @@ class FirestoreCollectionSnapshot:
                     database_size_bytes=len(raw),
                 )
             content_digest = self._content_digest(backup_path)
+            if content_digest == self._content_sha256:
+                summary_pointer = self._latest_dataset_summary_metadata()
+                if summary_pointer and not self._latest_dataset_summary_present:
+                    self._backfill_latest_dataset_summary(summary_pointer)
+                return self.version
             compressed = gzip.compress(raw, mtime=0)
-            if len(compressed) > _MAX_COMPRESSED_BYTES:
-                self._compact_backup(backup_path, discard_embedding_cache=True)
-                raw = backup_path.read_bytes()
-                if len(raw) > _MAX_DATABASE_BYTES:
-                    raise CollectionSnapshotUnavailable(
-                        "Collections database exceeds its storage limit",
-                        failure_reason="DATABASE_TOO_LARGE",
-                        database_size_bytes=len(raw),
-                    )
-                content_digest = self._content_digest(backup_path)
-                compressed = gzip.compress(raw, mtime=0)
         except (OSError, sqlite3.Error) as error:
             raise CollectionSnapshotUnavailable(
                 "Collections database could not be snapshotted",
@@ -347,7 +385,7 @@ class FirestoreCollectionSnapshot:
                 backup_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        if len(compressed) > _MAX_COMPRESSED_BYTES:
+        if len(compressed) > _MAX_COMPRESSED_BYTES * _MAX_SNAPSHOT_SEGMENTS:
             raise CollectionSnapshotUnavailable(
                 "Collections snapshot exceeds its storage limit",
                 failure_reason="COMPRESSED_SNAPSHOT_TOO_LARGE",
@@ -358,26 +396,26 @@ class FirestoreCollectionSnapshot:
         now = _utc(self._utcnow())
         digest = hashlib.sha256(raw).hexdigest()
         summary_pointer = self._latest_dataset_summary_metadata()
-        if content_digest == self._content_sha256:
-            if summary_pointer and not self._latest_dataset_summary_present:
-                self._backfill_latest_dataset_summary(summary_pointer)
-            return self.version
-
         try:
-            reference = self._blobs.put(
-                [{"encoding": "sqlite-gzip-base64-v1",
-                  "payload": base64.b64encode(compressed).decode("ascii")}],
-                now=now,
-                retain_until=now + _RETENTION,
-            )
+            references = []
+            for offset in range(0, len(compressed), _MAX_COMPRESSED_BYTES):
+                segment = compressed[offset:offset + _MAX_COMPRESSED_BYTES]
+                references.append(self._blobs.put(
+                    [{"encoding": "sqlite-gzip-base64-v1",
+                      "payload": base64.b64encode(segment).decode("ascii")}],
+                    now=now,
+                    retain_until=now + _RETENTION,
+                ))
         except Exception as error:
             raise CollectionSnapshotUnavailable(
                 "Collections snapshot could not be uploaded",
                 failure_reason="BLOB_UPLOAD_FAILED", cause_class=_exception_class(error),
             ) from None
         next_version = self.version + 1
+        snapshot_pointer = ({"snapshot_ref": references[0]} if len(references) == 1
+                            else {"snapshot_refs": references})
         updated = {"schema": 1, "version": next_version,
-                   "snapshot_ref": reference, "sqlite_sha256": digest,
+                   **snapshot_pointer, "sqlite_sha256": digest,
                    "sqlite_content_sha256": content_digest,
                    "updated_at": now.isoformat(), **summary_pointer}
 

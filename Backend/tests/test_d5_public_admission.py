@@ -97,6 +97,32 @@ class PublicAdmissionTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def test_history_reads_without_transaction_but_repairs_expired_lease_atomically(self):
+        job_id = self.control.admit("history-read-optimization", now=NOW)["job_id"]
+        self.control.claim(job_id, "history-worker", now=NOW)
+
+        class ReadCountingStore:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.reads = self.transactions = 0
+
+            def read_many(self, keys):
+                self.reads += 1
+                return {key: self.wrapped.transact(key, lambda state: (state, state)) for key in keys}
+
+            def transact(self, key, operation):
+                self.transactions += 1
+                return self.wrapped.transact(key, operation)
+
+        counted = ReadCountingStore(self.control.store)
+        self.control.store = counted
+        self.assertEqual(self.control.list_jobs(limit=20, now=NOW)[0]["state"], "RUNNING")
+        self.assertEqual((counted.reads, counted.transactions), (1, 0))
+        repaired = self.control.list_jobs(limit=20, now=NOW + timedelta(seconds=11))
+        self.assertEqual(repaired[0]["state"], "QUEUED")
+        self.assertTrue(repaired[0]["recovery_available"])
+        self.assertEqual((counted.reads, counted.transactions), (2, 1))
+
     def test_runtime_quota_snapshot_reads_pools_and_request_times_atomically(self):
         accepted = self.control.admit(
             "quota-runtime-snapshot", now=NOW,

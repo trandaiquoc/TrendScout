@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
@@ -263,26 +264,28 @@ class FirestoreSnapshotBlobs:
 
 
 class _SnapshotReadCache:
-    """One verified blob per warm process with a short manifest-validation window."""
+    """Bounded verified blobs with a short manifest-validation window."""
 
-    def __init__(self, *, max_bytes=_MAX_BLOB_BYTES):
-        if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_BLOB_BYTES:
+    def __init__(self, *, max_bytes=2 * _MAX_BLOB_BYTES):
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 2 * _MAX_BLOB_BYTES:
             raise ValueError("snapshot read cache must stay within the blob size limit")
         self._max_bytes = max_bytes
         self._lock = Lock()
-        self._entry = None
+        self._entries = OrderedDict()
+        self._size = 0
 
     def get(self, digest, *, raw_bytes, item_count, now):
         now = _utc(now)
         with self._lock:
-            entry = self._entry
-            if (entry is None or entry[0] != digest or entry[1] != raw_bytes
-                    or entry[2] != item_count):
+            entry = self._entries.get(digest)
+            if entry is None or entry[1] != raw_bytes or entry[2] != item_count:
                 return None
             if (entry[6] + _READ_CACHE_TTL <= now
                     or entry[5] <= now):
-                self._entry = None
+                self._size -= len(entry[3])
+                del self._entries[digest]
                 return None
+            self._entries.move_to_end(digest)
             return {
                 "raw": entry[3], "chunk_count": entry[4], "expiry": entry[5],
             }
@@ -296,16 +299,25 @@ class _SnapshotReadCache:
                 or expiry <= now):
             return
         with self._lock:
-            self._entry = (digest, raw_bytes, item_count, raw, chunk_count, expiry, now)
+            old = self._entries.pop(digest, None)
+            if old is not None:
+                self._size -= len(old[3])
+            while self._entries and self._size + len(raw) > self._max_bytes:
+                _, evicted = self._entries.popitem(last=False)
+                self._size -= len(evicted[3])
+            self._entries[digest] = (digest, raw_bytes, item_count, raw, chunk_count, expiry, now)
+            self._size += len(raw)
 
     def discard(self, digest):
         with self._lock:
-            if self._entry is not None and self._entry[0] == digest:
-                self._entry = None
+            entry = self._entries.pop(digest, None)
+            if entry is not None:
+                self._size -= len(entry[3])
 
     def clear(self):
         with self._lock:
-            self._entry = None
+            self._entries.clear()
+            self._size = 0
 
 
 _WARM_COLLECTION_SNAPSHOT_READ_CACHE = _SnapshotReadCache()

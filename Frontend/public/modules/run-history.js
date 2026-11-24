@@ -147,6 +147,7 @@ function renderRunHistoryDetail(item, errorMessage = null) {
         source.failureDiagnostic.exceptionClass,
       ].filter(Boolean).join(' · ')}` : null,
       source.providerMethod ? `${t('runs.provider-method')}: ${source.providerMethod}` : null,
+      source.youtubePageCapReached ? t('fetch.youtube-evidence-page-cap') : null,
       source.query ? `${t('runs.source-query')}: ${source.query}` : null,
       source.queryScopes.length ? `${t('runs.source-scope')}: ${source.queryScopes.join(', ')}` : null,
       source.marketFilter ? `${t('runs.source-market')}: ${source.marketFilter}` : null,
