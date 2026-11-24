@@ -231,6 +231,20 @@ class FirestoreSharedCacheTests(unittest.TestCase):
             self.blobs.get(ref, now=NOW + timedelta(seconds=30))
         self.assertEqual(self.blobs.purge_expired(now=NOW + timedelta(seconds=30)), 1)
 
+    def test_binary_chunk_survives_firestore_protobuf_serialization(self):
+        from google.cloud.firestore_v1._helpers import decode_dict, encode_dict
+        from google.cloud.firestore_v1.types import Document
+
+        ref = self.blobs.put([{"payload": "fixture" * 1000}], now=NOW,
+                             retain_until=NOW + timedelta(seconds=30), binary_chunks=True)
+        path = f"_ts_d5_cache_blobs/{ref['digest']}/chunks/00000000"
+        chunk = self.client.data[path]
+        document = Document(fields=encode_dict(chunk))
+        decoded = Document.deserialize(Document.serialize(document))
+        restored = decode_dict(decoded.fields, client=None)
+        self.assertEqual(restored, chunk)
+        self.assertIs(type(restored["data_bytes"]), bytes)
+
     def test_existing_legacy_blob_keeps_its_encoding_on_binary_put(self):
         records = [{"payload": "legacy"}]
         ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))
