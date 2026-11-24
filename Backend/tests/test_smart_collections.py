@@ -743,6 +743,7 @@ class SmartCollectionsTests(unittest.TestCase):
         from types import SimpleNamespace
         from app.collections.service import (
             _COHORT_MARKER, _COHORT_MARKER_JSON, _serialized_cohort, _cohort_json_without,
+            _cohort_json_index,
         )
         peers = [
             (identifier, SimpleNamespace(scope=SimpleNamespace(project=project, article=title),
@@ -766,6 +767,14 @@ class SmartCollectionsTests(unittest.TestCase):
                                    "input": {"scope": {"article": "Café"}, "cohort": original}},
                                   sort_keys=True, separators=(",", ":")).encode()
             self.assertEqual(actual, expected)
+            self.assertEqual(_cohort_json_without(encoded_peers, excluded,
+                                                   _cohort_json_index(encoded_peers)),
+                             _cohort_json_without(encoded_peers, excluded))
+        duplicated = encoded_peers + [encoded_peers[0]]
+        self.assertIsNone(_cohort_json_index(duplicated))
+        self.assertEqual(_cohort_json_without(duplicated, "a", _cohort_json_index(duplicated)),
+                         _cohort_json_without(duplicated, "a"))
+        self.assertEqual(_cohort_json_without([], "absent", _cohort_json_index([])), b"[]")
 
     def test_localized_wikimedia_special_and_main_pages_are_filtered(self):
         for project, title in (

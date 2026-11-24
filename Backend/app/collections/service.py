@@ -55,8 +55,32 @@ def _serialized_cohort(cohort):
             for keyword_id, values in rows]
 
 
-def _cohort_json_without(rows, keyword_id):
-    return b"[" + b",".join(value for identity, value in rows if identity != keyword_id) + b"]"
+def _cohort_json_index(rows):
+    """Index the already sorted JSON so single-row exclusions need no Python scan."""
+    positions = {}
+    offset = 0
+    for identity, value in rows:
+        if identity in positions:
+            # An identity appearing more than once requires removing every row.
+            return None
+        positions[identity] = (offset, offset + len(value))
+        offset += len(value) + 1
+    return b",".join(value for _, value in rows), positions
+
+
+def _cohort_json_without(rows, keyword_id, index=None):
+    if index is None:
+        return b"[" + b",".join(value for identity, value in rows if identity != keyword_id) + b"]"
+    joined, positions = index
+    position = positions.get(keyword_id)
+    if position is None:
+        return b"[" + joined + b"]"
+    start, end = position
+    if end < len(joined):
+        end += 1
+    elif start:
+        start -= 1
+    return b"[" + joined[:start] + joined[end:] + b"]"
 
 
 def cosine(left, right):
@@ -804,9 +828,11 @@ class CollectionService:
                 except (TypeError, ValueError):
                     continue
             serialized_cohorts = {}
+            cohort_indexes = {}
             for cohort_key, cohort in snapshot_cohorts.items():
                 try:
                     serialized_cohorts[cohort_key] = _serialized_cohort(cohort)
+                    cohort_indexes[cohort_key] = _cohort_json_index(serialized_cohorts[cohort_key])
                 except TypeError:
                     # Preserve the old per-record sort behavior for unusual
                     # mixed values that cannot be globally ordered.
@@ -838,7 +864,9 @@ class CollectionService:
                     else:
                         cohort = None
                         cohort_input = _COHORT_MARKER
-                        cohort_bytes = _cohort_json_without(serialized, record["id"])
+                        cohort_bytes = _cohort_json_without(
+                            serialized, record["id"], cohort_indexes[cohort_key]
+                        )
                     input_data = {"scope": asdict(scope),
                         "date": analysis_date.isoformat(), "current": current,
                         "current_snapshot_status": evidence.get("snapshot_status", "SUCCESS"),
