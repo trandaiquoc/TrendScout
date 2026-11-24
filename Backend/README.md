@@ -3,7 +3,8 @@
 ## Vercel shared Collections snapshot format
 
 The shared SQLite image is stored as a gzip stream in one or more bounded,
-content-addressed Firestore blobs. Each blob is committed independently; the
+content-addressed Firestore blobs. Independent blobs can be uploaded concurrently;
+each blob is committed independently, and the
 versioned pointer is changed only after all blobs are stored. Readers verify the
 complete SQLite SHA-256 before opening the working copy. Existing single-blob
 `snapshot_ref` pointers remain readable. Multi-blob pointers use `snapshot_refs`;

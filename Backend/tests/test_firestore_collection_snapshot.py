@@ -9,7 +9,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Lock
 from unittest.mock import patch
 
 from app.collections import firestore_snapshot
@@ -53,11 +53,13 @@ class FakeSnapshotBlobs:
         self.records = {}
         self.writes = 0
         self.reads = 0
+        self.lock = Lock()
 
     def put(self, records, *, now, retain_until):
-        self.writes += 1
-        digest = str(self.writes)
-        self.records[digest] = copy.deepcopy(records)
+        with self.lock:
+            self.writes += 1
+            digest = str(self.writes)
+            self.records[digest] = copy.deepcopy(records)
         return {"digest": digest, "item_count": len(records), "raw_bytes": 1}
 
     def get(self, reference, *, now):
@@ -197,7 +199,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             with patch.object(self.blobs, "put", side_effect=fail_second_segment):
                 with self.assertRaises(CollectionSnapshotUnavailable):
                     reader.save()
-            self.assertEqual(calls, 2)
+            self.assertGreaterEqual(calls, 2)
             self.assertEqual(self.state.values["collections-live-snapshot-v1"], pointer)
 
             # The old pointer remains readable even though a new blob exists.
@@ -231,6 +233,32 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             reader = self._snapshot(Path(directory) / "restored.sqlite")
             with patch.object(self.blobs, "get", side_effect=concurrent_get):
                 self.assertEqual(reader.load(), 1)
+            with closing(sqlite3.connect(reader.path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
+
+    def test_multiple_snapshot_segments_are_uploaded_concurrently_and_in_order(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+        ):
+            path = Path(directory) / "source.sqlite"
+            payload = random.Random(43).randbytes(90_000)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records (value BLOB)")
+                db.execute("INSERT INTO records VALUES (?)", (payload,))
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            barrier = Barrier(2, timeout=10)
+            original = self.blobs.put
+
+            def concurrent_put(*args, **kwargs):
+                barrier.wait()
+                return original(*args, **kwargs)
+
+            with patch.object(self.blobs, "put", side_effect=concurrent_put):
+                self.assertEqual(writer.save(), 1)
+            reader = self._snapshot(Path(directory) / "restored.sqlite")
+            self.assertEqual(reader.load(), 1)
             with closing(sqlite3.connect(reader.path)) as db:
                 self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
 

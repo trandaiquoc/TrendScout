@@ -415,15 +415,24 @@ class FirestoreCollectionSnapshot:
         summary_pointer = self._latest_dataset_summary_metadata()
         upload_started = time.perf_counter()
         try:
-            references = []
-            for offset in range(0, len(compressed), _MAX_COMPRESSED_BYTES):
+            offsets = range(0, len(compressed), _MAX_COMPRESSED_BYTES)
+
+            def upload_segment(offset):
                 segment = compressed[offset:offset + _MAX_COMPRESSED_BYTES]
-                references.append(self._blobs.put(
+                return self._blobs.put(
                     [{"encoding": "sqlite-gzip-base64-v1",
                       "payload": base64.b64encode(segment).decode("ascii")}],
                     now=now,
                     retain_until=now + _RETENTION,
-                ))
+                )
+
+            if len(offsets) > 1:
+                # Blobs are immutable and independently committed. The pointer
+                # below remains the sole atomic publication boundary.
+                with ThreadPoolExecutor(max_workers=min(4, len(offsets))) as executor:
+                    references = list(executor.map(upload_segment, offsets))
+            else:
+                references = [upload_segment(0)]
             upload_done = time.perf_counter()
         except Exception as error:
             raise CollectionSnapshotUnavailable(
