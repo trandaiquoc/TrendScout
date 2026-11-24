@@ -170,6 +170,8 @@ window.fetch = (path, options = {}) => {
     return;
   }
   await wait(200);
+  check(!window.fetchRequests.some((request) => request.path === '/api/v1/collections'),
+    'opening Overview does not eagerly load the hidden Collections workbench');
   const button = document.querySelector('#open-fetch');
   check(Boolean(button && !button.disabled), 'Vercel Shared LIVE Fetch is enabled');
   button?.click();
@@ -191,7 +193,11 @@ window.fetch = (path, options = {}) => {
   'only Vercel continuation requests carry the continuation marker');
   check(window.collectionRecoveryPosts === 1, 'saved source checkpoints are persisted without provider calls');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
+  document.querySelector('[data-nav="collections"]').click();
+  await wait(250);
   check(window.collectionsReads >= 1, 'persisted Collections snapshot is readable');
+  document.querySelector('[data-nav="overview"]').click();
+  await wait(50);
   check(document.querySelector('#keyword-count').textContent.trim() === '1',
     'recovered cached result remains visible in the dashboard');
   check(document.querySelector('#demo-discovery-list').textContent.includes('Shared cache result'),

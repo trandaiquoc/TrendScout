@@ -333,6 +333,7 @@ class FirestoreCollectionSnapshot:
 
     def save(self) -> int:
         """Publish a compressed SQLite image only if its base version is current."""
+        started = time.perf_counter()
         if not self._loaded or self.path.is_symlink() or not self.path.is_file():
             raise CollectionSnapshotUnavailable(
                 "Collections working database is unavailable",
@@ -368,13 +369,21 @@ class FirestoreCollectionSnapshot:
                     failure_reason="DATABASE_TOO_LARGE",
                     database_size_bytes=len(raw),
                 )
+            backup_done = time.perf_counter()
             content_digest = self._content_digest(backup_path)
+            digest_done = time.perf_counter()
             if content_digest == self._content_sha256:
                 summary_pointer = self._latest_dataset_summary_metadata()
                 if summary_pointer and not self._latest_dataset_summary_present:
                     self._backfill_latest_dataset_summary(summary_pointer)
+                _logger.info(
+                    "Collections snapshot timing unchanged=true database_bytes=%d backup_ms=%d digest_ms=%d total_ms=%d",
+                    len(raw), int((backup_done-started)*1000),
+                    int((digest_done-backup_done)*1000), int((time.perf_counter()-started)*1000),
+                )
                 return self.version
             compressed = gzip.compress(raw, mtime=0)
+            compression_done = time.perf_counter()
         except (OSError, sqlite3.Error) as error:
             raise CollectionSnapshotUnavailable(
                 "Collections database could not be snapshotted",
@@ -396,6 +405,7 @@ class FirestoreCollectionSnapshot:
         now = _utc(self._utcnow())
         digest = hashlib.sha256(raw).hexdigest()
         summary_pointer = self._latest_dataset_summary_metadata()
+        upload_started = time.perf_counter()
         try:
             references = []
             for offset in range(0, len(compressed), _MAX_COMPRESSED_BYTES):
@@ -406,6 +416,7 @@ class FirestoreCollectionSnapshot:
                     now=now,
                     retain_until=now + _RETENTION,
                 ))
+            upload_done = time.perf_counter()
         except Exception as error:
             raise CollectionSnapshotUnavailable(
                 "Collections snapshot could not be uploaded",
@@ -452,6 +463,15 @@ class FirestoreCollectionSnapshot:
         self._sha256 = digest
         self._content_sha256 = content_digest
         self._latest_dataset_summary_present = bool(summary_pointer)
+        finished = time.perf_counter()
+        _logger.info(
+            "Collections snapshot timing unchanged=false database_bytes=%d compressed_bytes=%d segments=%d "
+            "backup_ms=%d digest_ms=%d compression_ms=%d preparation_ms=%d upload_ms=%d commit_ms=%d total_ms=%d",
+            len(raw), len(compressed), len(references), int((backup_done-started)*1000),
+            int((digest_done-backup_done)*1000), int((compression_done-digest_done)*1000),
+            int((upload_started-compression_done)*1000), int((upload_done-upload_started)*1000),
+            int((finished-upload_done)*1000), int((finished-started)*1000),
+        )
         return self.version
 
     def _backfill_latest_dataset_summary(self, summary_pointer: dict) -> None:
