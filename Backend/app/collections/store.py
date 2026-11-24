@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS memberships (
  pinned INTEGER NOT NULL DEFAULT 0, score REAL, reason TEXT NOT NULL DEFAULT '',
  created_at TEXT NOT NULL, PRIMARY KEY(collection_id, keyword_id)
 );
+-- Keyword-centric filters and unassigned counts cannot efficiently use the
+-- collection-first primary key. Also creates the index for existing snapshots.
+CREATE INDEX IF NOT EXISTS memberships_keyword_id ON memberships(keyword_id);
 CREATE TABLE IF NOT EXISTS feedback (
  collection_id TEXT NOT NULL, keyword_id TEXT NOT NULL, action TEXT NOT NULL,
  created_at TEXT NOT NULL, PRIMARY KEY(collection_id, keyword_id)
