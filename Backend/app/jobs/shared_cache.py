@@ -187,7 +187,18 @@ class SharedCache:
                 if previous > fetched_at:
                     raise ValueError("cache entry is older than stored data")
                 if previous == fetched_at:
-                    if old.get("origin") != origin or old.get("payload") != record["payload"]:
+                    same_payload = (
+                        old.get("schema") == record["schema"] == 1
+                        and old.get("payload") == record.get("payload")
+                        or old.get("schema") == record["schema"] == 2
+                        and self._valid_payload_reference(old.get("payload_ref"))
+                        and old.get("payload_ref") == record.get("payload_ref")
+                    )
+                    # A storage-mode change cannot be proved equal from the
+                    # transaction's metadata alone; reject it rather than
+                    # overwrite a same-time observation or read blobs inside
+                    # the Firestore transaction.
+                    if old.get("origin") != origin or not same_payload:
                         raise ValueError("conflicting cache entry for same observation")
                     for field in ("fresh_until", "stale_until", "retain_until"):
                         old[field] = min(_utc(datetime.fromisoformat(old[field])),

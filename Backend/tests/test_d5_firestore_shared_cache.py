@@ -440,6 +440,26 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         self.assertEqual((result["status"], result["reason"]),
                          ("UNAVAILABLE", "CACHE_BLOB_UNAVAILABLE"))
 
+    def test_external_cache_same_observation_is_idempotent_and_conflicts_fail_closed(self):
+        cache = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=32)
+        payload = {"value": "x" * 500}
+        cache.put(SCOPE, grant=GRANT, origin="SYNTHETIC", payload=payload,
+                  fetched_at=NOW, now=NOW)
+        cache.put(SCOPE, grant=GRANT, origin="SYNTHETIC", payload=payload,
+                  fetched_at=NOW, now=NOW + timedelta(seconds=1))
+        result = cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=2))
+        self.assertEqual(result["payload"], payload)
+        self.assertEqual(result["fetched_at"], NOW.isoformat())
+        with self.assertRaisesRegex(ValueError, "conflicting cache entry"):
+            cache.put(SCOPE, grant=GRANT, origin="SYNTHETIC", payload={"value": "y" * 500},
+                      fetched_at=NOW, now=NOW + timedelta(seconds=3))
+        self.assertEqual(cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=4))["payload"], payload)
+        inline_writer = SharedCache(self.atomic, payload_blobs=self.blobs, max_inline_bytes=1024)
+        with self.assertRaisesRegex(ValueError, "conflicting cache entry"):
+            inline_writer.put(SCOPE, grant=GRANT, origin="SYNTHETIC", payload=payload,
+                              fetched_at=NOW, now=NOW + timedelta(seconds=5))
+        self.assertEqual(cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=6))["payload"], payload)
+
     def test_four_source_handler_returns_youtube_cache_before_provider_call(self):
         source = YOUTUBE_SOURCE_ID
         capability = source_capability(source)
