@@ -173,6 +173,8 @@ window.fetch = (path, options = {}) => {
   check(!window.fetchRequests.some((request) => request.path === '/api/v1/collections'),
     'opening Overview does not eagerly load the hidden Collections workbench');
   const button = document.querySelector('#open-fetch');
+  const readyDeadline = Date.now() + 4000;
+  while (button?.disabled && Date.now() < readyDeadline) await wait(50);
   check(Boolean(button && !button.disabled), 'Vercel Shared LIVE Fetch is enabled');
   button?.click();
   const deadline = Date.now() + 12000;
@@ -192,6 +194,11 @@ window.fetch = (path, options = {}) => {
       request.headers['X-TrendScout-Fetch-Continuation'] === '1'),
   'only Vercel continuation requests carry the continuation marker');
   check(window.collectionRecoveryPosts === 1, 'saved source checkpoints are persisted without provider calls');
+  const recoveryIndex = window.fetchRequests.findIndex((request) =>
+    request.path === '/api/v1/fetches/' + fetchId + '/collections' && request.method === 'POST');
+  check(recoveryIndex >= 0 && !window.fetchRequests.slice(0, recoveryIndex).some((request) =>
+    request.path === '/api/v1/collections/jobs/' + fetchId),
+  'terminal Fetch starts idempotent recovery without a preceding Collections job read');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
   document.querySelector('[data-nav="collections"]').click();
   await wait(250);

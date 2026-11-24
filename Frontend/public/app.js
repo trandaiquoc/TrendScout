@@ -1179,7 +1179,21 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
       if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
   };
-  poll();
+  if (isVercelSharedLive(state.capabilities)
+      && terminalFetch?.fetch_id === fetchId
+      && terminalFetch?.data_mode === 'LIVE'
+      && ['COMPLETED', 'PARTIAL'].includes(terminalFetch.status)) {
+    // The Vercel worker persists source checkpoints first; Collections is
+    // recovered by this idempotent endpoint. Avoid restoring the same SQLite
+    // snapshot merely to discover that the new job has not been processed.
+    void recoverLatestVercelCollectionSnapshot(terminalFetch, { replayTerminal: true })
+      .then((recovered) => {
+        if (recovered) void poll();
+        else $('#workbench-status').textContent = t('runs.outcome.collection-failed');
+      });
+  } else {
+    void poll();
+  }
 }
 
 function liveFetchMessage(kind, requestKind = 'latest') {
@@ -1972,7 +1986,7 @@ async function loadLatestDataset() {
   }
 }
 
-async function recoverLatestVercelCollectionSnapshot(terminalFetch = null) {
+async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { replayTerminal = false } = {}) {
   if (!isVercelSharedLive(state.capabilities)
       || state.capabilities.deployment_environment !== 'production'
       || state.persistedDatasetAvailable && !terminalFetch?.fetch_id) return;
@@ -1994,11 +2008,13 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null) {
     if (inFlight) return await inFlight;
 
     const recovery = (async () => {
-      const job = await getJson(
+      const shouldReplay = replayTerminal && terminalFetch?.fetch_id === fetchId
+        && ['COMPLETED', 'PARTIAL'].includes(terminalFetch.status);
+      const job = shouldReplay ? null : await getJson(
         `/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`,
         { locale: getLocale() },
       );
-      if (job.status === 'NOT_PROCESSED') {
+      if (shouldReplay || job.status === 'NOT_PROCESSED') {
         // This endpoint only replays the already retained LIVE source checkpoints.
         // It does not admit a Fetch, reserve quota, or contact a provider.
         let recovered = false;
