@@ -8,6 +8,7 @@ import unittest
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Barrier
 
 import httpx
 from test_d5_live_gateway import Approvals, Credentials
@@ -149,6 +150,30 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({source for source, _ in seen}, set(SOURCES))
         self.assertEqual(len({fence for _, fence in seen}), 1)
         self.assertIsNone(await worker.run_once("worker-two"))
+
+    async def test_shared_terminal_status_reads_independent_sources_concurrently(self):
+        job_id = self.admit()
+        def handler(context):
+            return self.source_result(1)
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = self.worker({source: handler for source in SOURCES})
+        await worker.run_once("status-worker")
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        # Exercise the shared read scheduling with synthetic source receipts.
+        service.firestore_shared_live = True
+        barrier = Barrier(len(SOURCES), timeout=5)
+        original = service.journal.completed_result
+
+        def concurrent_read(*args, **kwargs):
+            barrier.wait()
+            return original(*args, **kwargs)
+
+        service.journal.completed_result = concurrent_read
+        result = service.status(job_id, include_records=True)
+        self.assertEqual([source["source_id"] for source in result["sources"]], sorted(SOURCES))
+        self.assertTrue(all(source["record_count"] == 1 for source in result["sources"]))
 
     async def test_configured_source_order_is_used_for_fetch_all(self):
         self.admit()

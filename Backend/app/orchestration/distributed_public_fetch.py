@@ -6,6 +6,7 @@ are usable only when explicitly injected by backend composition.
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -292,6 +293,35 @@ class DistributedPublicFetch:
             selected_sources = ([WIKIMEDIA_SOURCE_ID]
                 if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
                 else request_metadata.get("sources", sorted(self.admission.policy.enabled_sources)))
+            grants = {}
+            for source_id in sorted(selected_sources):
+                checkpoint = job.get("source_checkpoints", {}).get(source_id)
+                snapshot = checkpoint.get("snapshot") if isinstance(checkpoint, dict) else None
+                if not isinstance(snapshot, dict) or snapshot.get("phase") != "COMPLETE":
+                    continue
+                try:
+                    grant = self.resolve_grant(source_id, now)
+                except Exception:
+                    grant = None
+                if isinstance(grant, CheckpointGrant) and grant.source_id == source_id:
+                    grants[source_id] = grant
+
+            def read_completed(source_id):
+                try:
+                    return self.journal.completed_result(
+                        job, source_id=source_id, grant=grants[source_id], now=now
+                    )
+                except AdmissionDenied:
+                    return None
+
+            source_ids = list(grants)
+            if self.firestore_shared_live and len(source_ids) > 1:
+                # Independent immutable checkpoint reads share no transaction.
+                # Keep source ordering deterministic while overlapping I/O.
+                with ThreadPoolExecutor(max_workers=min(4, len(source_ids))) as executor:
+                    resolved = dict(zip(source_ids, executor.map(read_completed, source_ids), strict=True))
+            else:
+                resolved = {source_id: read_completed(source_id) for source_id in source_ids}
             for source_id in sorted(selected_sources):
                 checkpoint = job.get("source_checkpoints", {}).get(source_id)
                 checkpoint_snapshot = (checkpoint.get("snapshot")
@@ -308,20 +338,11 @@ class DistributedPublicFetch:
                     source_results.append(missing)
                     modes.add(self.data_mode)
                     continue
-                try:
-                    grant = self.resolve_grant(source_id, now)
-                except Exception:
-                    grant = None
-                if not isinstance(grant, CheckpointGrant) or grant.source_id != source_id:
+                if source_id not in grants:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
                                           "error_code": "RETENTION_POLICY_UNAVAILABLE"})
                     continue
-                try:
-                    result = self.journal.completed_result(
-                        job, source_id=source_id, grant=grant, now=now
-                    )
-                except AdmissionDenied:
-                    result = None
+                result = resolved[source_id]
                 if result is None:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
                                           "data_mode": self.data_mode,

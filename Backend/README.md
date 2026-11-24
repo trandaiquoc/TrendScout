@@ -12,6 +12,12 @@ multi-blob write must use a release with multi-blob reader support. This change
 does not reset quota or replace the shared database. Unreferenced blobs from an
 interrupted upload follow the existing blob retention and cleanup policy.
 
+Terminal Fetch status reads independent Firestore checkpoints concurrently,
+while preserving source order and per-source retention checks. Google documents
+that the Firestore Python gRPC client can be shared across threads
+([documentation](https://docs.cloud.google.com/python/docs/reference/firestore/latest/multiprocessing),
+accessed 2026-11-24); actual latency depends on the deployment and database.
+
 ## Native Windows (môi trường chính)
 
 Yêu cầu Python 3.12 native, Git, Node.js và Chrome. Từ repository root chạy `.\setup.ps1`; dependency cài vào `Backend\.venv`, không cài global. Python Launcher phải có bản 3.12; nếu chưa có, cài chính thức bằng `winget install --id Python.Python.3.12 --exact`.
