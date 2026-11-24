@@ -210,6 +210,77 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expired"):
             reopened.get(ref, now=NOW + timedelta(seconds=40))
 
+    def test_binary_chunks_round_trip_expire_and_detect_corruption(self):
+        records = [{"encoding": "sqlite-gzip-base64-v1", "payload": "a" * 500_000}]
+        ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30),
+                             binary_chunks=True)
+        manifest_path = f"_ts_d5_cache_blobs/{ref['digest']}"
+        self.assertEqual(self.client.data[manifest_path]["chunk_encoding"], "bytes")
+        chunks = [value for path, value in self.client.data.items()
+                  if path.startswith(manifest_path + "/chunks/")]
+        self.assertTrue(all(type(item["data_bytes"]) is bytes and "data_b64" not in item
+                            for item in chunks))
+        self.assertEqual(self.blobs.get(ref, now=NOW), records)
+        path = manifest_path + "/chunks/00000000"
+        self.client.data[path]["data_bytes"] = b"corrupted"
+        with self.assertRaisesRegex(ValueError, "integrity"):
+            self.blobs.get(ref, now=NOW)
+        self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30),
+                       binary_chunks=True)
+        with self.assertRaisesRegex(ValueError, "expired"):
+            self.blobs.get(ref, now=NOW + timedelta(seconds=30))
+        self.assertEqual(self.blobs.purge_expired(now=NOW + timedelta(seconds=30)), 1)
+
+    def test_existing_legacy_blob_keeps_its_encoding_on_binary_put(self):
+        records = [{"payload": "legacy"}]
+        ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))
+        same = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=40),
+                              binary_chunks=True)
+        self.assertEqual(ref, same)
+        path = f"_ts_d5_cache_blobs/{ref['digest']}/chunks/00000000"
+        self.assertIn("data_b64", self.client.data[path])
+        self.assertNotIn("data_bytes", self.client.data[path])
+        self.assertEqual(self.blobs.get(ref, now=NOW + timedelta(seconds=35)), records)
+
+    def test_collection_snapshot_binary_write_restores_and_failure_keeps_pointer(self):
+        import random
+        import sqlite3
+        from contextlib import closing
+        from app.collections.firestore_snapshot import (
+            CollectionSnapshotUnavailable, FirestoreCollectionSnapshot,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.sqlite"
+            writer = FirestoreCollectionSnapshot(self.client, path, utcnow=lambda: NOW)
+            original_put = writer._blobs.put
+            writer._blobs.put = lambda records, **kwargs: original_put(
+                records, **{**kwargs, "binary_chunks": True})
+            self.assertEqual(writer.load(), 0)
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records(value BLOB)")
+                payload = random.Random(9).randbytes(300_000)
+                db.execute("INSERT INTO records VALUES(?)", (payload,))
+                db.commit()
+            self.assertEqual(writer.save(), 1)
+            pointer = deepcopy(self.client.data)
+            self.assertTrue(any(value.get("chunk_encoding") == "bytes"
+                                for value in self.client.data.values()))
+            restored_path = Path(directory) / "restored.sqlite"
+            reader = FirestoreCollectionSnapshot(self.client, restored_path, utcnow=lambda: NOW)
+            original_reader_put = reader._blobs.put
+            reader._blobs.put = lambda records, **kwargs: original_reader_put(
+                records, **{**kwargs, "binary_chunks": True})
+            self.assertEqual(reader.load(), 1)
+            with closing(sqlite3.connect(restored_path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
+                db.execute("INSERT INTO records VALUES(?)", (b"new data",))
+                db.commit()
+            self.client.fail_write_at = 1
+            with self.assertRaises(CollectionSnapshotUnavailable):
+                reader.save()
+            self.assertEqual(self.client.data, pointer)
+
     def test_chunk_reads_use_one_order_independent_batch_get(self):
         records = [{"text": "x" * 500_000}]
         reference = self.blobs.put(

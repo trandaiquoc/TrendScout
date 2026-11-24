@@ -45,6 +45,7 @@ def _manifest(snapshot, digest: str) -> dict:
             or not 0 <= value["item_count"] <= _MAX_ITEMS
             or type(value.get("chunk_count")) is not int
             or value["chunk_count"] != max(1, (value["raw_bytes"] + _CHUNK_BYTES - 1) // _CHUNK_BYTES)
+            or value.get("chunk_encoding", "base64") not in ("base64", "bytes")
             or not isinstance(value.get("retain_until"), str)):
         raise ValueError("stored Firestore snapshot manifest is invalid")
     try:
@@ -75,9 +76,10 @@ class FirestoreSnapshotBlobs:
     def _chunk_ref(self, digest: str, index: int):
         return self._manifest_ref(digest).collection("chunks").document(f"{index:08d}")
 
-    def put(self, records, *, now: datetime, retain_until: datetime) -> dict:
+    def put(self, records, *, now: datetime, retain_until: datetime,
+            binary_chunks: bool = False) -> dict:
         now, retain_until = _utc(now), _utc(retain_until)
-        if (not isinstance(records, list) or len(records) > _MAX_ITEMS
+        if (type(binary_chunks) is not bool or not isinstance(records, list) or len(records) > _MAX_ITEMS
                 or retain_until <= now):
             raise ValueError("bounded records and a future retention deadline are required")
         try:
@@ -98,6 +100,7 @@ class FirestoreSnapshotBlobs:
         def write_snapshot(tx):
             snapshot = next(iter(tx.get(manifest_ref)))
             effective_expiry = retain_until
+            encoding = "bytes" if binary_chunks else "base64"
             if snapshot.exists:
                 previous = _manifest(snapshot, digest)
                 if (previous["raw_bytes"] != len(raw)
@@ -107,13 +110,17 @@ class FirestoreSnapshotBlobs:
                 # A shared digest can be referenced by several cache scopes;
                 # storage must outlive every live reference to those bytes.
                 effective_expiry = max(previous["expiry"], retain_until)
+                # Do not change the representation of a blob already referenced
+                # by an older snapshot or checkpoint.
+                encoding = previous.get("chunk_encoding", "base64")
             retention_text = effective_expiry.isoformat()
             for index, (reference, content) in enumerate(zip(chunk_refs, chunks, strict=True)):
                 tx.set(reference, {
                     "schema": 1,
                     "digest": digest,
                     "index": index,
-                    "data_b64": base64.b64encode(content).decode("ascii"),
+                    **({"data_bytes": content} if encoding == "bytes" else
+                       {"data_b64": base64.b64encode(content).decode("ascii")}),
                     "retain_until": retention_text,
                 })
             tx.set(manifest_ref, {
@@ -123,6 +130,7 @@ class FirestoreSnapshotBlobs:
                 "item_count": len(records),
                 "chunk_count": len(chunks),
                 "retain_until": retention_text,
+                **({"chunk_encoding": "bytes"} if encoding == "bytes" else {}),
             })
 
         firestore.transactional(write_snapshot)(transaction)
@@ -189,13 +197,19 @@ class FirestoreSnapshotBlobs:
                 if (not isinstance(value, dict) or type(value.get("schema")) is not int
                         or value.get("schema") != 1 or value.get("digest") != digest
                         or type(value.get("index")) is not int or value.get("index") != index
-                        or value.get("retain_until") != manifest["retain_until"]
-                        or not isinstance(value.get("data_b64"), str)):
+                        or value.get("retain_until") != manifest["retain_until"]):
                     raise ValueError("snapshot blob chunk is missing or invalid")
-                try:
-                    piece = base64.b64decode(value["data_b64"], validate=True)
-                except (binascii.Error, ValueError):
-                    raise ValueError("snapshot blob chunk encoding is invalid") from None
+                if manifest.get("chunk_encoding", "base64") == "bytes":
+                    if type(value.get("data_bytes")) is not bytes or "data_b64" in value:
+                        raise ValueError("snapshot blob chunk encoding is invalid")
+                    piece = value["data_bytes"]
+                else:
+                    if not isinstance(value.get("data_b64"), str) or "data_bytes" in value:
+                        raise ValueError("snapshot blob chunk encoding is invalid")
+                    try:
+                        piece = base64.b64decode(value["data_b64"], validate=True)
+                    except (binascii.Error, ValueError):
+                        raise ValueError("snapshot blob chunk encoding is invalid") from None
                 if len(piece) > _CHUNK_BYTES or byte_count + len(piece) > _MAX_BLOB_BYTES:
                     raise ValueError("snapshot blob chunk exceeds its bounded size")
                 pieces.append(piece)

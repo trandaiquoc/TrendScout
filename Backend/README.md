@@ -19,6 +19,17 @@ multi-blob write must use a release with multi-blob reader support. This change
 does not reset quota or replace the shared database. Unreferenced blobs from an
 interrupted upload follow the existing blob retention and cleanup policy.
 
+New Collections blobs store their JSON chunks as Firestore byte values instead
+of wrapping each chunk in another base64 string. Existing blobs retain their
+original representation and remain readable; the content digest, expiry checks,
+and atomic pointer publication are unchanged. Once a byte-chunk blob is
+published, a rollback must use a release that supports byte chunks (commit
+containing this paragraph or later); earlier releases cannot read the new blob.
+Firestore documents support byte values up to 1 MiB minus 89 bytes; each chunk
+here is at most 196,608 bytes. See [Firestore value types](https://docs.cloud.google.com/python/docs/reference/firestore/latest/google.cloud.firestore_v1.types.Value),
+accessed 2026-11-24. This verification does not establish project connectivity
+or measure deployed write latency.
+
 Terminal Fetch status and multi-blob Collections restores read independent
 Firestore blobs concurrently, while preserving order and retention checks. Google documents
 that the Firestore Python gRPC client can be shared across threads

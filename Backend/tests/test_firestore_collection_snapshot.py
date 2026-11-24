@@ -55,7 +55,7 @@ class FakeSnapshotBlobs:
         self.reads = 0
         self.lock = Lock()
 
-    def put(self, records, *, now, retain_until):
+    def put(self, records, *, now, retain_until, binary_chunks=False):
         with self.lock:
             self.writes += 1
             digest = str(self.writes)
