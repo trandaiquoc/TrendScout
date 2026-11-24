@@ -1139,13 +1139,13 @@ function renderYouTubeFetchEvidence(container, fetchStatus) {
 function refreshCollectionJob(fetchId, terminalFetch = null) {
   if ((!isLocalLiveDemo(state.capabilities) && !isVercelSharedLive(state.capabilities))
       || !fetchId) return;
-  const poll = async (attempt = 0) => {
+  const poll = async (attempt = 0, viewsAlreadyRefreshed = false) => {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
       if (job.status === 'NOT_PROCESSED' && isVercelSharedLive(state.capabilities)
           && terminalFetch?.fetch_id === fetchId) {
         const recovered = await recoverLatestVercelCollectionSnapshot(terminalFetch);
-        if (recovered && attempt < 120) window.setTimeout(() => poll(attempt + 1), 250);
+        if (recovered && attempt < 120) window.setTimeout(() => poll(attempt + 1, true), 250);
         else if (!recovered) $('#workbench-status').textContent = t('runs.outcome.collection-failed');
         return;
       }
@@ -1157,7 +1157,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
         created: number(job.created_collections), unassigned: number(job.unassigned),
         rejected: number(job.skipped),
         });
-        window.setTimeout(() => poll(attempt + 1), 1000);
+        window.setTimeout(() => poll(attempt + 1, viewsAlreadyRefreshed), 1000);
         return;
       }
       state.collectionJobStatus = job;
@@ -1173,9 +1173,11 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
           unassigned: number(job.unassigned), rejected: number(job.skipped),
         })));
       }
-      await loadLatestDataset();
-      await loadAnalytics();
-      if (state.persistedDatasetAvailable) loadKeywords();
+      if (!viewsAlreadyRefreshed) {
+        await loadLatestDataset();
+        await loadAnalytics();
+        if (state.persistedDatasetAvailable) loadKeywords();
+      }
       if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
   };
@@ -1188,7 +1190,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
     // snapshot merely to discover that the new job has not been processed.
     void recoverLatestVercelCollectionSnapshot(terminalFetch, { replayTerminal: true })
       .then((recovered) => {
-        if (recovered) void poll();
+        if (recovered) void poll(0, true);
         else $('#workbench-status').textContent = t('runs.outcome.collection-failed');
       });
   } else {
@@ -1464,10 +1466,12 @@ function handleFetchTerminal(runId, fetchStatus) {
       showView('overview');
       window.location.hash = 'overview';
       renderPublicFetchDiscovery();
-      void loadLatestDataset().then((item) => {
-        if (item) loadKeywords();
-        else void recoverLatestVercelCollectionSnapshot(fetchStatus);
-      });
+      if (state.capabilities.deployment_environment !== 'production') {
+        void loadLatestDataset().then((item) => {
+          if (item) loadKeywords();
+          else void recoverLatestVercelCollectionSnapshot(fetchStatus);
+        });
+      }
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
       refreshCollectionJob(fetchStatus.fetch_id, fetchStatus);
       const localLive = isLocalLiveDemo(state.capabilities);
@@ -1497,7 +1501,8 @@ function handleFetchTerminal(runId, fetchStatus) {
         loadKeywords();
       }
     }
-    void loadAnalytics();
+    if (!isVercelSharedLive(state.capabilities)
+        || state.capabilities.deployment_environment !== 'production') void loadAnalytics();
     scheduleCapabilityRefresh(100);
 }
 
@@ -2003,7 +2008,14 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
     const fetchId = latest?.fetch_id;
     const status = latest?.outcome_status || latest?.status;
     if (!fetchId || latest.data_mode !== 'LIVE' || !terminalStatuses.has(status)) return false;
-    if (collectionRecoverySucceeded.has(fetchId)) return true;
+    if (collectionRecoverySucceeded.has(fetchId)) {
+      // Another fetch or an edit may have changed the current dataset since
+      // this recovery completed, even though this fetch needs no replay.
+      await loadLatestDataset();
+      await loadAnalytics();
+      if (state.persistedDatasetAvailable) loadKeywords();
+      return true;
+    }
     const inFlight = collectionRecoveryInFlight.get(fetchId);
     if (inFlight) return await inFlight;
 

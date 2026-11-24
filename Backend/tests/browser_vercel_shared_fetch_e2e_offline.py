@@ -199,6 +199,11 @@ window.fetch = (path, options = {}) => {
   check(recoveryIndex >= 0 && !window.fetchRequests.slice(0, recoveryIndex).some((request) =>
     request.path === '/api/v1/collections/jobs/' + fetchId),
   'terminal Fetch starts idempotent recovery without a preceding Collections job read');
+  const recoveryRequests = window.fetchRequests.slice(recoveryIndex + 1);
+  check(recoveryRequests.filter((request) => request.path === '/api/v1/datasets/latest').length === 1,
+    'recovery refreshes the dataset once');
+  check(recoveryRequests.filter((request) => request.path === '/api/v1/analytics/overview').length === 1,
+    'recovery refreshes analytics once');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
   document.querySelector('[data-nav="collections"]').click();
   await wait(250);
