@@ -776,6 +776,37 @@ class SmartCollectionsTests(unittest.TestCase):
                          _cohort_json_without(duplicated, "a"))
         self.assertEqual(_cohort_json_without([], "absent", _cohort_json_index([])), b"[]")
 
+    def test_algorithm_digest_encoding_matches_original_registry_inputs(self):
+        from dataclasses import asdict
+        from app.collections.service import (
+            _COHORT_MARKER, _COHORT_MARKER_JSON,
+            _algorithm_digest_input, _algorithm_digest_prefix,
+        )
+        from app.composition import algorithm_engine
+
+        registry = algorithm_engine().registry
+        for cohort, encoded_cohort in [(_COHORT_MARKER, b'[["Caf\\u00e9",2]]'),
+                                       ([('Café', 2)], None)]:
+            input_data = {"scope": {"article": "Café"}, "date": "2026-11-20",
+                          "current": 3, "history": [("2026-11-19", "OBSERVED", 2)],
+                          "current_snapshot_status": "PARTIAL", "cohort": cohort}
+            for key in registry.keys():
+                metadata = registry.get(key).metadata
+                metadata_dict = asdict(metadata)
+                original_input = dict(input_data)
+                popularity = metadata.family == "popularity"
+                if not popularity:
+                    original_input.pop("cohort")
+                original = json.dumps({"input": original_input, "algorithm": metadata_dict},
+                                      sort_keys=True, separators=(",", ":")).encode()
+                if popularity and encoded_cohort is not None:
+                    original = original.replace(b'"cohort":' + _COHORT_MARKER_JSON,
+                                                b'"cohort":' + encoded_cohort, 1)
+                optimized = (_algorithm_digest_prefix(metadata_dict)
+                             + _algorithm_digest_input(input_data, popularity=popularity,
+                                                       cohort_bytes=encoded_cohort) + b"}")
+                self.assertEqual(optimized, original, key)
+
     def test_localized_wikimedia_special_and_main_pages_are_filtered(self):
         for project, title in (
             ("el.wikisource", "Ειδικό:Αναζήτηση"),

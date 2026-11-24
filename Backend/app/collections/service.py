@@ -83,6 +83,22 @@ def _cohort_json_without(rows, keyword_id, index=None):
     return b"[" + joined[:start] + joined[end:] + b"]"
 
 
+def _algorithm_digest_prefix(metadata):
+    return (b'{"algorithm":' + json.dumps(metadata, sort_keys=True,
+            separators=(",", ":")).encode() + b',"input":')
+
+
+def _algorithm_digest_input(input_data, *, popularity, cohort_bytes):
+    value = dict(input_data)
+    if not popularity:
+        value.pop("cohort")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    if popularity and cohort_bytes is not None:
+        encoded = encoded.replace(b'"cohort":' + _COHORT_MARKER_JSON,
+                                  b'"cohort":' + cohort_bytes, 1)
+    return encoded
+
+
 def cosine(left, right):
     dot = sum(a * b for a, b in zip(left, right))
     norm_left = math.sqrt(sum(value * value for value in left))
@@ -809,7 +825,10 @@ class CollectionService:
             engine = algorithm_engine()
             keys = engine.registry.keys()
             metadata_by_key = {key: engine.registry.get(key).metadata for key in keys}
-            metadata_json_by_key = {key: asdict(value) for key, value in metadata_by_key.items()}
+            metadata_prefix_by_key = {
+                key: _algorithm_digest_prefix(asdict(value))
+                for key, value in metadata_by_key.items()
+            }
             snapshot_cohorts = defaultdict(list)
             for peer in records:
                 try:
@@ -877,16 +896,15 @@ class CollectionService:
                         (record["id"],))}
                     digest_by_key = {}
                     missing_keys = []
+                    encoded_inputs = {}
                     for key in keys:
                         metadata = metadata_by_key[key]
-                        digest_input = {"input": dict(input_data), "algorithm": metadata_json_by_key[key]}
-                        if metadata.family != "popularity":
-                            digest_input["input"].pop("cohort")
-                        encoded = json.dumps(digest_input, sort_keys=True,
-                            separators=(",", ":")).encode()
-                        if metadata.family == "popularity" and cohort_bytes is not None:
-                            encoded = encoded.replace(b'"cohort":' + _COHORT_MARKER_JSON,
-                                                      b'"cohort":' + cohort_bytes, 1)
+                        popularity = metadata.family == "popularity"
+                        if popularity not in encoded_inputs:
+                            encoded_inputs[popularity] = _algorithm_digest_input(
+                                input_data, popularity=popularity, cohort_bytes=cohort_bytes
+                            )
+                        encoded = metadata_prefix_by_key[key] + encoded_inputs[popularity] + b"}"
                         digest = hashlib.sha256(encoded).hexdigest()
                         digest_by_key[key] = digest
                         if existing.get(metadata.algorithm_id) != digest:
