@@ -533,6 +533,42 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
             or service is None
             or getattr(service.store, "data_mode_scope", None) != "LIVE"):
         raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
+
+    # A completed, persisted Collections job is already the outcome that
+    # process_fetch would return for these retained receipts. Avoid downloading
+    # and rediscovering the same source records merely to replay that result.
+    connect = getattr(service.store, "connect", None)
+    read_job = getattr(getattr(distributed, "admission", None), "read_job", None)
+    clock = getattr(distributed, "utcnow", None)
+    if callable(connect) and callable(read_job) and callable(clock):
+        def persisted_result():
+            with connect() as db:
+                return db.execute(
+                    "SELECT j.status,j.error_code FROM fetch_jobs j "
+                    "JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id "
+                    "WHERE j.fetch_id=? AND d.data_mode='LIVE' "
+                    "AND j.status IN ('COMPLETED','MODEL_UNAVAILABLE') "
+                    "AND d.processing_status IN ('COMPLETED','MODEL_UNAVAILABLE')",
+                    (fetch_id,),
+                ).fetchone()
+
+        prior = await asyncio.to_thread(persisted_result)
+        if prior is not None:
+            try:
+                job = await asyncio.to_thread(read_job, fetch_id, now=clock())
+            except AdmissionDenied as exc:
+                _raise_distributed_admission_error(exc.code, distributed)
+            checkpoints = job.get("source_checkpoints") if isinstance(job, dict) else None
+            if (isinstance(job, dict)
+                    and job.get("state") in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
+                    and isinstance(checkpoints, dict)
+                    and all(isinstance(entry, dict)
+                            and isinstance(entry.get("snapshot"), dict)
+                            and entry["snapshot"].get("data_mode") == "LIVE"
+                            for entry in checkpoints.values())):
+                request.state.vercel_fetch_snapshot_unchanged = True
+                return {"fetch_id": fetch_id, "status": prior["status"],
+                        "error_code": prior["error_code"]}
     try:
         result = await asyncio.to_thread(
             distributed.status, fetch_id, include_records=True

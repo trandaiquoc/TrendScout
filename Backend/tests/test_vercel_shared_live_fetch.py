@@ -998,6 +998,40 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("worker_finished", events)
         self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
 
+    async def test_persisted_checkpoint_recovery_skips_records_and_snapshot_write(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        with TemporaryDirectory() as directory:
+            store = CollectionStore(Path(directory) / "collections.sqlite", data_mode_scope="LIVE")
+            with store.connect() as db:
+                db.execute("INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at) VALUES(?,?,?,?)",
+                           (_JOB_ID, "MODEL_UNAVAILABLE", "MODEL_INFERENCE_DEFERRED", "2026-11-24T00:00:00Z"))
+                db.execute("""INSERT INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
+                    provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
+                    quality_flags,processing_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (_JOB_ID, "PARTIAL", "LIVE", "[]", 1, 1, 1, 0, "[]",
+                     "MODEL_UNAVAILABLE", "2026-11-24T00:00:00Z"))
+            facade.collection_service = CollectionService(store, fetch_model_inference_enabled=False)
+            facade.utcnow = lambda: "unused-clock"
+            facade.admission.read_job = lambda fetch_id, now: {
+                "state": "PARTIAL", "source_checkpoints": {
+                    WIKIMEDIA_SOURCE_ID: {"snapshot": {"data_mode": "LIVE"}}
+                },
+            }
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="https://trend-scout.example",
+                ) as browser:
+                    response = await browser.post(
+                        f"/api/v1/fetches/{_JOB_ID}/collections",
+                        headers={"Origin": "https://trend-scout.example",
+                                 "x-vercel-oidc-token": "synthetic-test-token"},
+                    )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["status"], "MODEL_UNAVAILABLE")
+            self.assertEqual(facade.status_calls, 0)
+            self.assertNotIn("snapshot_saved", events)
+
     async def test_expired_checkpoints_replay_only_retained_live_caches(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         source_ids = [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]

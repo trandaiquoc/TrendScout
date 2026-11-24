@@ -508,6 +508,9 @@ class VercelSharedLiveMiddleware:
                     )
                     and getattr(distributed, "firestore_shared_live", False)
                     and not getattr(request.state, "vercel_fetch_snapshot_required", False)
+                ) and not (
+                    _is_vercel_fetch_collections_recovery(scope.get("path", ""))
+                    and getattr(request.state, "vercel_fetch_snapshot_unchanged", False)
                 )
                 if needs_snapshot:
                     persistence_error = await _save_vercel_collection_snapshot(
