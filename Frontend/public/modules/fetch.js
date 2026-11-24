@@ -233,6 +233,12 @@ export class PublicFetchController {
       this.resumeNeeded = false;
       this.emit({ kind: 'queued', busy: true, dataMode: accepted.data_mode });
       if (isContinuation && this.isVercelSharedLiveRuntime()) {
+        const terminal = accepted.terminal_fetch;
+        if (terminal && terminal.fetch_id === this.fetchId && terminal.terminal === true
+            && TERMINAL.has(terminal.status)) {
+          this.finish(terminal);
+          return;
+        }
         if (accepted.continuation_ready === true
             && this.automaticContinuations < MAX_AUTOMATIC_CONTINUATIONS) {
           // The server confirms this bounded slice returned the durable job to
@@ -312,6 +318,23 @@ export class PublicFetchController {
     return true;
   }
 
+  finish(status) {
+    this.busy = false;
+    this.key = null;
+    this.fetchId = null;
+    this.requestBody = null;
+    this.activeYoutubePolicyVersion = null;
+    this.includesYouTube = false;
+    this.resumeNeeded = false;
+    this.automaticContinuations = 0;
+    this.statusPolls = 0;
+    this.statusErrorRetries = 0;
+    this.lastAutomaticDispatchAt = 0;
+    this.continuationAcknowledged = false;
+    this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
+    this.onTerminal(status.run_id || null, status);
+  }
+
   async poll() {
     this.busy = true;
     let status = null;
@@ -359,20 +382,7 @@ export class PublicFetchController {
         }
         this.emit({ kind: 'running', busy: true, fetch: status });
         if (TERMINAL.has(status.status)) {
-          this.busy = false;
-          this.key = null;
-          this.fetchId = null;
-          this.requestBody = null;
-          this.activeYoutubePolicyVersion = null;
-          this.includesYouTube = false;
-          this.resumeNeeded = false;
-          this.automaticContinuations = 0;
-          this.statusPolls = 0;
-          this.statusErrorRetries = 0;
-          this.lastAutomaticDispatchAt = 0;
-          this.continuationAcknowledged = false;
-          this.emit({ kind: status.status.toLowerCase(), busy: false, fetch: status });
-          this.onTerminal(status.run_id || null, status);
+          this.finish(status);
           return;
         }
         const leaseUntil = Date.parse(status.lease_until || '');

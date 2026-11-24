@@ -241,6 +241,36 @@ test('omits source selection when the UI leaves the default all-sources choice',
   assert.deepEqual(JSON.parse(requests[0].body), {});
 });
 
+test('uses validated cached terminal status in continuation without a status GET', async () => {
+  const previousFetch = globalThis.fetch;
+  const requests = [];
+  const terminal = { fetch_id: COMPLETED_ID, status: 'PARTIAL', terminal: true,
+    data_mode: 'LIVE', sources: [{ source_id: 'wikimedia_pageviews_top_per_country',
+      delivery_state: 'CACHED', provider_request_count: 0 }] };
+  let received = null;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push(String(path));
+    assert.equal(String(path), '/api/v1/fetches');
+    const continuation = options.headers?.['X-TrendScout-Fetch-Continuation'] === '1';
+    return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, status: 'QUEUED',
+      data_mode: 'LIVE', ...(continuation ? { terminal_fetch: terminal } : {}) }),
+    { status: 202, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: (_run, status) => { received = status; },
+      locale: () => 'en', sourceIds: () => ['wikimedia_pageviews_top_per_country'],
+      runtimeScope: () => 'VERCEL_SHARED_LIVE',
+    });
+    await controller.activate();
+    assert.equal(requests.length, 2);
+    assert.deepEqual(received, terminal);
+    assert.equal(controller.busy, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('uses source-neutral LIVE messages for Google and mixed-source fetches', () => {
   assert.equal(liveFetchMessageKey('failed', 'latest', ['google_web_serp']),
     'fetch.failed-local-live');

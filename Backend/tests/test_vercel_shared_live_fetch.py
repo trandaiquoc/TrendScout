@@ -658,6 +658,39 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                                 if event == "context_exited")
         self.assertLess(events.index("worker_finished"), last_context_exit)
 
+    async def test_cached_terminal_slice_returns_validated_status_without_extra_poll(self):
+        for delivery, request_count, status_failure in (
+                ("CACHED", 0, False), ("FRESH", 1, False), ("CACHED", 0, True)):
+            with self.subTest(delivery=delivery, status_failure=status_failure):
+                app, _events, _client, facade, factory = self.app(enabled=True)
+                factory.side_effect = lambda _token: _Client(_events)
+                facade.force_replay = True
+
+                async def run_slice(_owner, fetch_id, *, max_sources):
+                    return {"job_id": fetch_id, "state": "COMPLETED", "sources": {
+                        WIKIMEDIA_SOURCE_ID: {"delivery_state": delivery,
+                                              "provider_request_count": request_count}}}
+
+                facade.run_slice = run_slice
+                if status_failure:
+                    facade.status = Mock(side_effect=RuntimeError("status unavailable"))
+                headers = {"Origin": "https://trend-scout.example",
+                           "x-vercel-oidc-token": "synthetic-test-token",
+                           "Idempotency-Key": "vercel-cached-terminal-0001",
+                           "X-TrendScout-Fetch-Continuation": "1"}
+                async with app.router.lifespan_context(app):
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                                 base_url="https://trend-scout.example") as browser:
+                        response = await browser.post("/api/v1/fetches", headers=headers, json={})
+                self.assertEqual(response.status_code, 202)
+                if delivery == "CACHED" and not status_failure:
+                    self.assertEqual(response.json()["terminal_fetch"]["fetch_id"], _JOB_ID)
+                    self.assertEqual(facade.status_calls, 1)
+                else:
+                    self.assertNotIn("terminal_fetch", response.json())
+                    if not status_failure:
+                        self.assertEqual(facade.status_calls, 0)
+
     async def test_idempotent_recovery_post_dispatches_a_new_vercel_worker(self):
         app, events, _client, facade, client_factory = self.app(enabled=True)
         client_factory.side_effect = lambda _token: _Client(events)

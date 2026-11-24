@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import secrets
 from urllib.parse import urlsplit
 
@@ -32,6 +33,7 @@ from app.sources.youtube.policy import YOUTUBE_POLICY_VERSION_HEADER
 router = APIRouter()
 MAX_BODY_BYTES = 1024
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
+_logger = logging.getLogger(__name__)
 
 
 def _distributed_for_request(request):
@@ -438,6 +440,28 @@ async def create_fetch(
                     f"api-{secrets.token_hex(12)}", run_worker=False,
                 )
         fetch_id = accepted["job_id"]
+        terminal_fetch = None
+        if (vercel_shared_live and fetch_continuation
+                and isinstance(slice_result, dict)
+                and slice_result.get("job_id") == fetch_id
+                and slice_result.get("state") in {"COMPLETED", "PARTIAL"}):
+            results = slice_result.get("sources")
+            if (isinstance(results, dict) and set(results) == set(request_sources)
+                    and all(isinstance(item, dict)
+                            and item.get("delivery_state") == "CACHED"
+                            and type(item.get("provider_request_count")) is int
+                            and item["provider_request_count"] == 0
+                            for item in results.values())):
+                try:
+                    status = await asyncio.to_thread(distributed.status, fetch_id)
+                    if (isinstance(status, dict) and status.get("fetch_id") == fetch_id
+                            and status.get("terminal") is True
+                            and status.get("status") in {"COMPLETED", "PARTIAL"}):
+                        terminal_fetch = status
+                except Exception as exc:
+                    # The worker has already committed. The normal status GET
+                    # remains the recovery path if this optional read fails.
+                    _logger.warning("Terminal Fetch status prefetch failed: %s", type(exc).__name__)
         response.headers["Idempotent-Replay"] = "true" if accepted["result"] == "REPLAY" else "false"
         return {
             "fetch_id": fetch_id,
@@ -452,6 +476,7 @@ async def create_fetch(
                 and slice_result.get("job_id") == fetch_id
                 and slice_result.get("state") == "QUEUED"
             )} if vercel_shared_live and fetch_continuation else {}),
+            **({"terminal_fetch": terminal_fetch} if terminal_fetch is not None else {}),
             **({"shared_state_policy_sync": shared_state_policy_sync}
                if shared_state_policy_sync is not None else {}),
         }
