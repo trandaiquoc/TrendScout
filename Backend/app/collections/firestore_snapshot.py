@@ -424,6 +424,7 @@ class FirestoreCollectionSnapshot:
                       "payload": base64.b64encode(segment).decode("ascii")}],
                     now=now,
                     retain_until=now + _RETENTION,
+                    binary_chunks=True,
                 )
 
             if len(offsets) > 1:

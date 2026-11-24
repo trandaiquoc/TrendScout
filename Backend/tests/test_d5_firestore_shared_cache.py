@@ -253,9 +253,6 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.sqlite"
             writer = FirestoreCollectionSnapshot(self.client, path, utcnow=lambda: NOW)
-            original_put = writer._blobs.put
-            writer._blobs.put = lambda records, **kwargs: original_put(
-                records, **{**kwargs, "binary_chunks": True})
             self.assertEqual(writer.load(), 0)
             with closing(sqlite3.connect(path)) as db:
                 db.execute("CREATE TABLE records(value BLOB)")
@@ -268,9 +265,6 @@ class FirestoreSharedCacheTests(unittest.TestCase):
                                 for value in self.client.data.values()))
             restored_path = Path(directory) / "restored.sqlite"
             reader = FirestoreCollectionSnapshot(self.client, restored_path, utcnow=lambda: NOW)
-            original_reader_put = reader._blobs.put
-            reader._blobs.put = lambda records, **kwargs: original_reader_put(
-                records, **{**kwargs, "binary_chunks": True})
             self.assertEqual(reader.load(), 1)
             with closing(sqlite3.connect(restored_path)) as db:
                 self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
