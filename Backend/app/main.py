@@ -22,6 +22,7 @@ from app.api.algorithms import router as algorithms_router
 from app.api.analytics import router as analytics_router
 from app.api.capabilities import router as capabilities_router
 from app.api.collections import router as collections_router
+from app.api.dashboard import router as dashboard_router
 from app.api.datasets import router as datasets_router
 from app.api.fetches import router as fetches_router
 from app.api.health import router as health_router
@@ -58,6 +59,7 @@ _VERCEL_STATIC_API_TIMING_ROUTES = frozenset({
     "/api/v1/algorithms/results",
     "/api/v1/capabilities",
     "/api/v1/collections",
+    "/api/v1/dashboard/bootstrap",
     "/api/v1/datasets/latest",
     "/api/v1/datasets/latest/keywords",
     "/api/v1/research",
@@ -121,6 +123,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             # legacy dataset routes. They must share its request-scoped
             # Firestore-backed CollectionService instead of the empty Vercel
             # app state.
+            or path == "/api/v1/dashboard/bootstrap"
             or path in {
                 "/api/v1/datasets/latest",
                 "/api/v1/datasets/latest/keywords",
@@ -152,6 +155,7 @@ def _vercel_collection_snapshot_required(method, path):
             or path.startswith("/api/v1/collections/")
             or path == "/api/v1/datasets/latest"
             or path.startswith("/api/v1/datasets/latest/")
+            or path == "/api/v1/dashboard/bootstrap"
         )
     if method in {"POST", "PATCH", "PUT", "DELETE"}:
         return (
@@ -957,6 +961,7 @@ def create_app(
     application.include_router(scheduler_router, prefix="/api/v1")
     application.include_router(fetches_router, prefix="/api/v1")
     application.include_router(collections_router, prefix="/api/v1")
+    application.include_router(dashboard_router, prefix="/api/v1")
     application.include_router(datasets_router, prefix="/api/v1")
     if settings.environment_profile == "vercel":
         # Add last so this pure ASGI middleware wraps FastAPI's request middleware

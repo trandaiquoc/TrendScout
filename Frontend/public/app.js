@@ -171,10 +171,10 @@ function renderDataTable(root, headers, rows, note = '') {
   table.append(body); const wrap=element('div',null,'table-wrap'); wrap.append(table); root.append(wrap);
 }
 
-async function loadAnalytics() {
+async function loadAnalytics(preloadedData = null) {
   const sequence = ++analyticsSequence;
   try {
-    const data = await getJson('/api/v1/analytics/overview', { locale: getLocale() });
+    const data = preloadedData ?? await getJson('/api/v1/analytics/overview', { locale: getLocale() });
     if (sequence !== analyticsSequence) return;
     state.analytics = data;
     const totals = data.keyword_totals || {};
@@ -249,6 +249,21 @@ async function loadAnalytics() {
     if (scope) scope.textContent = t('common.unavailable');
     const empty = $('#pageviews-empty');
     if (empty) { empty.hidden = false; empty.textContent = getErrorMessage(error, 'analysis.error'); }
+  }
+}
+
+async function loadDashboardBootstrap() {
+  const query = currentDatasetQuery().toString();
+  try {
+    const data = await getJson('/api/v1/dashboard/bootstrap?' + query, { locale: getLocale() });
+    if (!data?.analytics || !data?.keywords) return;
+    state.persistedDataset = data.item || null;
+    state.persistedDatasetAvailable = Boolean(data.item);
+    if (data.item) renderPersistedDataset(data.item);
+    await loadAnalytics(data.analytics);
+    if (query === currentDatasetQuery().toString()) await loadKeywords(data.keywords);
+  } catch (error) {
+    setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'), 'error');
   }
 }
 
@@ -2188,7 +2203,7 @@ function showEmpty(title, detail) {
   $('p', box).textContent = detail;
 }
 
-async function loadKeywords() {
+async function loadKeywords(preloadedResult = null) {
   if (state.publicFetchDiscovery) {
     const category = state.category === 'home_goods' ? 'home_living' : state.category;
     const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -2262,7 +2277,7 @@ async function loadKeywords() {
   if (state.persistedDatasetAvailable && !state.dataRunId) {
     const sequence = ++state.keywordSequence;
     try {
-      const result = await getJson('/api/v1/datasets/latest/keywords?' + currentDatasetQuery(), { locale: getLocale() });
+      const result = preloadedResult ?? await getJson('/api/v1/datasets/latest/keywords?' + currentDatasetQuery(), { locale: getLocale() });
       if (sequence !== state.keywordSequence) return;
       const rows = result.items.map((item) => {
         const evidence = item.evidence && typeof item.evidence === 'object' ? item.evidence : {};
@@ -3099,8 +3114,7 @@ document.documentElement.classList.remove('js-pending');
 checkBackend();
 const startupCapabilities = loadPublicCapabilities();
 const startupDataset = loadLatestDataset();
-void loadAnalytics();
 void startupDataset.then((item) => {
-  if (item) void loadKeywords();
+  if (item) void loadDashboardBootstrap();
   else void startupCapabilities.then(() => recoverLatestVercelCollectionSnapshot());
 });

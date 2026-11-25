@@ -38,6 +38,7 @@ test('slow Firestore-backed dashboard reads allow Vercel cold starts', async () 
   for (const path of [
     '/api/v1/collections',
     '/api/v1/collections/collection-1',
+    '/api/v1/dashboard/bootstrap',
     '/api/v1/datasets/latest',
     '/api/v1/datasets/latest/keywords?limit=50',
     '/api/v1/analytics/overview',
@@ -130,6 +131,26 @@ test('page read cache expires quickly and mutations invalidate it', async () => 
   } finally {
     globalThis.fetch = previousFetch;
     Date.now = previousNow;
+  }
+});
+
+test('dashboard bootstrap response is cached briefly and invalidated by writes', async () => {
+  const previousFetch = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = async () => new Response(JSON.stringify({ revision: ++reads }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  try {
+    const path = '/api/v1/dashboard/bootstrap';
+    assert.deepEqual(await getJson(path), { revision: 1 });
+    assert.deepEqual(await getJson(path), { revision: 1 });
+    assert.equal(reads, 1);
+    await requestJson('/api/v1/collections', { method: 'POST', body: { name: 'test' } });
+    assert.deepEqual(await getJson(path), { revision: 3 });
+    assert.equal(reads, 3);
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });
 

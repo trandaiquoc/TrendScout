@@ -1,6 +1,6 @@
 # Vercel Performance and Scaling Report
 
-**Status:** Implementation and consolidated offline verification complete; application commit `27f861ed8e8c3bec190d0827c648b455bd3b9672` is deployed to Production and `READY`. Production verification used read-only GET requests; no Fetch or provider endpoint was called.
+**Status:** Dashboard read coalescing is implemented and consolidated offline verification passed; the follow-up Production release is pending. No Production Fetch or provider endpoint was called.
 **Updated:** 25 November 2026
 
 ## Baseline and Production evidence
@@ -31,6 +31,8 @@ Provider requests were reported as **0**. These run details and timings below we
 
 The snapshot segment is part of or overlaps Collections processing and is not added again to the reported 127 seconds.
 
+Read-only Vercel runtime evidence from deployment `dpl_HbKCifTWYBbNmFFyn4K5nUEWFeLZ` adds a separate page-read cost: two `GET /api/v1/analytics/overview` requests took 5.788 s and 5.978 s, with 5.522 s and 5.582 s in request composition. Each request logged Firestore snapshot cache misses for 5,600,051 and 3,423,315 raw bytes. Nearby `GET /api/v1/datasets/latest` took 1.553 s and `GET /api/v1/capabilities` took 2.349 s. These were GET-only dashboard checks, not a Fetch; no provider endpoint was called. The measurements show that a cold SQL-backed analytics read can exceed five seconds, but do not establish the cache-only Fetch duration.
+
 ## Findings verified in the repository
 
 - Google and Bing cache entries use a **one-hour freshness window** (`max_fresh_seconds=60*60`), while refresh eligibility uses `MIN_SOURCE_SPACING=8 hours`. A stale delivery is therefore expected when the cached evidence remains usable but another provider refresh is not yet eligible. Cache TTL was not extended.
@@ -49,6 +51,7 @@ The snapshot segment is part of or overlaps Collections processing and is not ad
 7. **Page read efficiency.** Identical in-flight GETs share a same-origin request. Safe dashboard reads have a three-second in-memory cache that is invalidated by mutations and terminal Fetch status. Duplicate hash/history events no longer reload the already active view.
 8. **Public contract.** Internal digest values stay out of public dataset and analytics manifests. Existing provider cache freshness, refresh spacing, provider budgets, LIVE mode, and stored data were not changed or reset.
 9. **One application release.** Vercel's repository `ignoreCommand` builds when `Backend` or `Frontend` changes and skips documentation-only commits, so recording the post-deploy report does not start a second application build. Exit-code behavior follows [Vercel's `ignoreCommand` configuration](https://vercel.com/docs/project-configuration/vercel-json#ignorecommand), checked 25 November 2026.
+10. **Dashboard read coalescing.** The initial dashboard now requests analytics and its first keyword page through one provider-free bootstrap GET, which runs those reads and the latest-dataset read through one request-scoped SQLite restoration. The browser renders the same response fields and retains the existing filtered/paginated keyword route. This reduces duplicated full-image restores when opening the dashboard; it does not eliminate the restore or claim that the endpoint finishes under five seconds.
 
 ## Storage scalability assessment
 
@@ -71,7 +74,8 @@ The release therefore keeps the existing backward-compatible store and eliminate
 | `CACHED` and `STALE_CACHE` remain distinct and reusable when inputs match | **Passed offline** | Stale-state, warning, provenance, quality/scope, and legacy-manifest regression checks |
 | Cache-only checkpoint and Fetch overhead is reduced | **Passed offline** | Batch checkpoint, read-path, admission, and refresh-eligibility regression checks; Production timing remains pending |
 | Changed-data storage scales without whole-image snapshot cost | **Open**; exact no-change runs skip snapshot work | A backward-compatible incremental/partitioned store or approved database migration with integrity and rollback evidence |
-| Page reload and view transitions avoid duplicate reads | **Passed offline** | Frontend request-coalescing, expiry, invalidation, navigation, and browser recovery checks |
+| Page reload and view transitions avoid duplicate reads | **Passed offline** | Frontend cache/navigation and initial dashboard bootstrap regressions; Production runtime confirmation pending |
+| Initial dashboard shares one SQLite restore for latest summary, analytics, and first keyword page | **Passed offline** | Bootstrap handler calls all three reads through one provider-free Collection composition; Production runtime evidence pending |
 | Fetch with no provider work completes under 5 seconds | **Unproven** | A Production cache-only Fetch with eligibility proven to forbid provider work, or equivalent Vercel runtime evidence. No Production Fetch has been run for this change. |
 | Application release commit is on `origin/main`; Production is `READY` on that exact code SHA | **Passed** | Commit `27f861ed8e8c3bec190d0827c648b455bd3b9672` is deployed as `dpl_HbKCifTWYBbNmFFyn4K5nUEWFeLZ`; the Production alias points to that deployment. A later report-only commit is excluded from Vercel builds by `ignoreCommand`. |
 
@@ -86,12 +90,19 @@ The final verification pass ran after implementation was complete:
 
 The tests use fixtures and mocked transports. No Production Fetch, provider endpoint, or LIVE provider was called. A cache-only Production Fetch is not a safe performance probe until refresh eligibility for that request is proven to forbid provider work. The under-five-second gate therefore remains open; this report does not claim the target has been met.
 
+### Follow-up dashboard bootstrap verification
+
+- **41 backend tests passed:** 39 Vercel shared LIVE route/composition regressions and 2 dashboard bootstrap regressions.
+- **60 frontend Node tests passed**, including the initial request coalescing, cache expiry, and mutation invalidation checks.
+- Ruff passed for the changed Python files; Python compilation, JavaScript syntax checks, and `git diff --check` passed.
+- These checks use local fakes and do not call LIVE providers or Production Fetch. Production deployment and runtime confirmation of a single dashboard snapshot restoration are pending.
+
 ## Remaining limits
 
 - The no-op path avoids Collections analysis and full-image snapshot work when source business inputs match. A Fetch still needs to read/validate the source cache evidence and persist its Run History receipt.
 - When business input really changes, Collections continues to use the existing bounded, chunked SQLite snapshot. This work does not replace that storage model or claim that changed-data snapshot uploads are faster.
 - Firestore row-level, partitioned/delta, and managed relational alternatives require data-model, migration, consistency, cost, and rollback decisions that cannot be inferred safely from the current repository. The report records these as future decisions rather than selecting an unapproved production service.
-- SQL-backed analytics still require the SQLite working snapshot on a cold function instance. The page changes coalesce duplicate reads but do not eliminate that first restore.
+- SQL-backed analytics still require the SQLite working snapshot on a cold function instance. The dashboard bootstrap coalesces its initial reads into one restore but does not eliminate that full-image restore.
 - Cold-start, Firestore, and end-to-end Production latency must be measured after release. Offline tests cannot establish the Vercel under-five-second performance gate.
 
 ## Release record

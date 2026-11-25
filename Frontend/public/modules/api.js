@@ -16,6 +16,7 @@ function pageReadCacheable(path) {
     || pathname.startsWith('/api/v1/collections/')
     || pathname === '/api/v1/datasets/latest'
     || pathname.startsWith('/api/v1/datasets/latest/keywords')
+    || pathname === '/api/v1/dashboard/bootstrap'
     || pathname === '/api/v1/analytics/overview'
     || pathname === '/api/v1/algorithms'
     || pathname === '/api/v1/algorithms/results'
@@ -42,6 +43,7 @@ function invalidatePageReadCache() {
 
 function requestTimeoutMs(path, requestedTimeoutMs) {
   if (Number.isFinite(requestedTimeoutMs)) return requestedTimeoutMs;
+  const pathname = typeof path === 'string' ? path.split('?', 1)[0] : path;
   if (path === '/api/v1/fetches') {
     return FETCH_TIMEOUT_MS;
   }
@@ -54,6 +56,7 @@ function requestTimeoutMs(path, requestedTimeoutMs) {
   if (path === '/api/v1/collections' || path.startsWith('/api/v1/collections/')
       || path === '/api/v1/datasets/latest'
       || path.startsWith('/api/v1/datasets/latest/')
+      || pathname === '/api/v1/dashboard/bootstrap'
       || path === '/api/v1/analytics/overview'
       || path.startsWith('/api/v1/runs/history')
       || path === '/api/health'
