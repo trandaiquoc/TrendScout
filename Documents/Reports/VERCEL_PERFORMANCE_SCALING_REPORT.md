@@ -1,6 +1,6 @@
 # Vercel Shared LIVE Performance and Scaling Report
 
-**Status:** Implementation and consolidated offline verification complete; release acceptance pending.
+**Status:** Implementation, consolidated offline verification, and read-only production acceptance complete. No Production Fetch was submitted.
 **Updated:** 25 November 2026
 **Baseline revision:** `4c02c718b6177bc04aa4ab1b5069886236b620c5`
 **Baseline production deployment:** `dpl_HKevZoBtmXC4xJxevvUQpvWSQ33k`
@@ -77,14 +77,14 @@ The production workflow, source selection, provider adapters, request budgets, r
 ## Correctness and acceptance checklist
 
 - [x] Consolidated offline verification passes for the touched backend, storage, API, and browser paths.
-- [ ] Exact matching LIVE/CACHED evidence can reuse only a completed LIVE dataset and reports the saved dataset ID.
-- [ ] Any changed source scope or record content, non-zero/conflicting provider request count, stale result, malformed digest, incomplete source set, or unavailable processing result falls back or fails closed.
-- [ ] Existing source observation times and provider request counts remain unchanged by cache delivery; the established four-source/FRESH-to-CACHED acceptance contract remains intact.
-- [ ] Internal source digests are absent from public Fetch history, analytics, run detail, and latest dataset manifests.
-- [ ] Changes are committed and pushed to `origin/main`; Vercel Production is READY on the pushed revision and the production alias serves the deployment.
-- [ ] Production read-only checks complete for capabilities, latest dataset, run history, analytics overview, and runtime/deployment status, with status codes and request timings recorded below.
-- [ ] No Production LIVE Fetch or provider-call acceptance is performed.
-- [ ] If cache-only Production acceptance is attempted, it is preceded by a verified zero-provider-call condition; otherwise it remains explicitly not run.
+- [x] Exact matching LIVE/CACHED evidence can reuse only a completed LIVE dataset and reports the saved dataset ID; regression coverage passed offline.
+- [x] Changed source scope or content, non-zero/conflicting provider counts, stale delivery, malformed digest, incomplete sources, and non-completed processing fail closed or use normal processing; regression coverage passed offline.
+- [x] The most recent saved production run still reports the four source outcomes, zero provider requests for each cached result, and original source timestamps/observation date (details below). No source adapter or timestamp logic changed in this release.
+- [x] Internal source digests are absent from public history, analytics, and latest dataset responses.
+- [x] Code commit `d2cfafb2d5ed6f1ed9730f6231197071a9646580` is pushed to `origin/main`; its Vercel Production deployment reached `READY` and the production alias mapped to it.
+- [x] Production read-only checks returned HTTP 200 for capabilities, latest dataset, run history, analytics overview, and runtime; connector wall times are recorded below.
+- [x] No Production LIVE Fetch or provider-call acceptance was performed.
+- [x] No cache-only Production Fetch was submitted; no Production provider-call condition was needed.
 
 ## Verification and release record
 
@@ -103,7 +103,28 @@ These are offline/fake-provider checks. They do not establish live Firestore lat
 
 ### Deployment and read-only production acceptance
 
-**Pending.** Record the pushed commit, production deployment ID/status, alias check, and GET-only acceptance endpoints/timings here. No live provider acceptance is authorized by this plan.
+**Code deployment:** `dpl_9RaBjs8tSihQ6LB7QaFhWBrLec4b`, Production `READY`, source commit `d2cfafb2d5ed6f1ed9730f6231197071a9646580`, branch `main`, function region `iad1`. Vercel reported the alias `trend-scout-mu.vercel.app`; a separate alias lookup mapped it to the same deployment without a redirect. No project, domain, protection, billing, or region settings were changed.
+
+The five checks below were GET requests through the protected Vercel connector on 25 November 2026. The measured time is connector round-trip wall time and includes its access/share-link handling; it is not an isolated Vercel function duration and must not be compared directly with the baseline request timings.
+
+| Read-only route | HTTP | Connector round-trip | Result |
+| --- | ---: | ---: | --- |
+| `/api/v1/capabilities` | 200 | 5.409 s | Production, LIVE, Shared LIVE; all four sources enabled |
+| `/api/v1/datasets/latest` | 200 | 4.531 s | Latest dataset `be19f94dd725cc80810ffe9d78e48843`, LIVE/PARTIAL, 1,580 received records, 3,447 retained keywords |
+| `/api/v1/runs/history?limit=1&cursor=` | 200 | 5.544 s | Latest run is the same dataset; four CACHED source outcomes, zero requests each |
+| `/api/v1/analytics/overview` | 200 | 3.671 s | Overview loaded; latest dataset matches; no digest field exposed |
+| `/api/v1/runtime` | 200 | 3.294 s | System and SQLite available, integrity `OK`, 3,447 keyword rows, database 72,589,312 bytes |
+
+Public dataset and history responses did not expose `source_input_digest`; the overview response did not expose it either. The latest saved run, created before this code deployment, remains evidence of previously delivered cached inputs and their provenance, not a live test of this release:
+
+| Source | Outcome | Provider requests | Preserved source time |
+| --- | --- | ---: | --- |
+| Bing Search | SUCCESS / CACHED | 0 | `2026-11-25T01:32:55.620616Z` |
+| Google Trends/Search | SUCCESS / CACHED | 0 | `2026-11-25T01:31:25.412106Z` |
+| Wikimedia Pageviews | SUCCESS / CACHED | 0 | Observation date `2026-11-23`; cache evidence fetched `2026-11-25T01:33:20.581202Z` |
+| YouTube Search | PARTIAL / CACHED | 0 | Source fetched `2026-11-25T01:33:55.099599Z`; cache delivered `2026-11-25T01:33:56.792886Z` |
+
+No Fetch POST or provider endpoint was invoked during production verification. A cache-only request was intentionally not used to validate the optimization, so this release has no post-change production Fetch latency measurement.
 
 ## Risks and limits
 
