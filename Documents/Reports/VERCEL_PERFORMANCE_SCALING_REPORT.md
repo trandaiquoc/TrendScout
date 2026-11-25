@@ -1,6 +1,6 @@
 # Vercel Performance and Scaling Report
 
-**Status:** Implementation and consolidated offline verification complete; Production release is pending. No Production Fetch or provider endpoint was called.
+**Status:** Implementation and consolidated offline verification complete; application commit `27f861ed8e8c3bec190d0827c648b455bd3b9672` is deployed to Production and `READY`. Production verification used read-only GET requests; no Fetch or provider endpoint was called.
 **Updated:** 25 November 2026
 
 ## Baseline and Production evidence
@@ -73,7 +73,7 @@ The release therefore keeps the existing backward-compatible store and eliminate
 | Changed-data storage scales without whole-image snapshot cost | **Open**; exact no-change runs skip snapshot work | A backward-compatible incremental/partitioned store or approved database migration with integrity and rollback evidence |
 | Page reload and view transitions avoid duplicate reads | **Passed offline** | Frontend request-coalescing, expiry, invalidation, navigation, and browser recovery checks |
 | Fetch with no provider work completes under 5 seconds | **Unproven** | A Production cache-only Fetch with eligibility proven to forbid provider work, or equivalent Vercel runtime evidence. No Production Fetch has been run for this change. |
-| Commit is on `origin/main`; Production is `READY` on the exact release SHA | Pending | Git and Vercel deployment records |
+| Application release commit is on `origin/main`; Production is `READY` on that exact code SHA | **Passed** | Commit `27f861ed8e8c3bec190d0827c648b455bd3b9672` is deployed as `dpl_HbKCifTWYBbNmFFyn4K5nUEWFeLZ`; the Production alias points to that deployment. A later report-only commit is excluded from Vercel builds by `ignoreCommand`. |
 
 ### Consolidated offline verification
 
@@ -96,4 +96,10 @@ The tests use fixtures and mocked transports. No Production Fetch, provider endp
 
 ## Release record
 
-Verification, implementation commit, push result, Vercel deployment ID, Production `READY` status, and exact deployed SHA will be recorded here after the consolidated verification and release steps.
+**Application release:** `27f861ed8e8c3bec190d0827c648b455bd3b9672` (`perf(vercel): skip unchanged cached fetch processing`), pushed to `origin/main`.
+
+**Vercel Production:** deployment `dpl_HbKCifTWYBbNmFFyn4K5nUEWFeLZ`, state `READY`, source SHA `27f861ed8e8c3bec190d0827c648b455bd3b9672`, region `iad1`. Alias `trend-scout-mu.vercel.app` resolves to this deployment.
+
+**Read-only Production checks on 25 November 2026:** `GET /dashboard/`, `GET /api/v1/capabilities`, and `GET /api/v1/datasets/latest` returned HTTP 200. The latest-dataset response identifies owner run `7c47b79810ea4238a21c16d3967d2b41`, 1,580 received records, and distinct source delivery labels (`CACHED` and `STALE_CACHE`). These checks did not invoke a Fetch endpoint or a provider.
+
+The report-only commit that records this release is pushed separately. `Backend/vercel.json` configures Vercel to ignore commits with no `Backend` or `Frontend` changes, leaving the Production application on the exact release SHA above.
