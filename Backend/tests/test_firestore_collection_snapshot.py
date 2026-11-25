@@ -1,6 +1,8 @@
 """Collections Firestore snapshots are bounded, versioned and offline-testable."""
 
+import base64
 import copy
+import gzip
 import json
 import random
 import sqlite3
@@ -104,6 +106,47 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         payload_chars = 4 * ((firestore_snapshot._MAX_COMPRESSED_SEGMENT_BYTES + 2) // 3)
         encoded_record_size = len(envelope) + payload_chars
         self.assertLessEqual(encoded_record_size, firestore_snapshot_blobs._MAX_BLOB_BYTES)
+
+    def test_incremental_snapshot_reuses_unchanged_compressed_segments(self):
+        original = (b"first segment", b"second segment")
+        changed = (original[0], b"updated segment")
+        base_records = tuple([
+            [{
+                "encoding": "sqlite-segment-gzip-base64-v1",
+                "payload": base64.b64encode(gzip.compress(segment, mtime=0)).decode("ascii"),
+            }]
+            for segment in original
+        ])
+        base_fingerprints = tuple(
+            firestore_snapshot._snapshot_segment_fingerprint(segment)
+            for segment in original
+        )
+
+        with patch.object(
+            firestore_snapshot,
+            "_compress_snapshot_segment",
+            wraps=firestore_snapshot._compress_snapshot_segment,
+        ) as compress:
+            records, fingerprints, compressed_bytes = (
+                firestore_snapshot._prepare_snapshot_segment_records(
+                    [memoryview(segment) for segment in changed],
+                    base_fingerprints=base_fingerprints,
+                    base_records=base_records,
+                )
+            )
+
+        self.assertEqual(compress.call_count, 1)
+        self.assertEqual(records[0], base_records[0])
+        self.assertEqual(
+            gzip.decompress(base64.b64decode(records[1][0]["payload"])), changed[1]
+        )
+        self.assertEqual(fingerprints[0], base_fingerprints[0])
+        self.assertNotEqual(fingerprints[1], base_fingerprints[1])
+        self.assertEqual(
+            compressed_bytes,
+            sum(firestore_snapshot._snapshot_record_compressed_bytes(item)
+                for item in records),
+        )
 
     def test_load_reads_pointer_without_opening_a_transaction(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,6 +341,21 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             "item": {"dataset_id": "fetch-1", "status": "PARTIAL"},
             "analytics": {"keyword_totals": {"unique": 12}},
             "keywords": {"items": [{"id": "kw-1"}], "total": 12},
+            "collections": {
+                "items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {},
+                "keyword_page": {"items": [{"id": "kw-1"}], "total": 12,
+                                 "limit": 25, "offset": 0},
+            },
+            "algorithm_results": {
+                "summary": [], "items": [], "limit": 100,
+            },
+            "run_history": {"items": [], "has_more": False, "limit": 20},
+            "research": {
+                "keywords": {"items": [{"id": "kw-1"}], "total": 12,
+                              "limit": 100, "offset": 0},
+                "research": {"items": [], "total": 0, "limit": 50,
+                             "offset": 0, "next_offset": None},
+            },
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "collections.sqlite"
@@ -411,6 +469,49 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             self.assertFalse(snapshot.backfill_dashboard_bootstrap(projection))
 
         self.assertEqual(self.state.values["collections-live-snapshot-v1"]["version"], 2)
+
+    def test_workbench_projection_upgrade_replaces_only_same_snapshot_read_model(self):
+        old_projection = {
+            "item": None,
+            "analytics": {},
+            "keywords": {"items": [], "total": 0},
+            "collections": {"items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {}},
+        }
+        upgraded_projection = {
+            **old_projection,
+            "collections": {
+                **old_projection["collections"],
+                "keyword_page": {"items": [{"id": "kw-1"}], "total": 1,
+                                 "limit": 25, "offset": 0},
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.set_dashboard_bootstrap_provider(lambda: old_projection)
+            self.assertEqual(writer.save(), 1)
+            before = copy.deepcopy(self.state.values["collections-live-snapshot-v1"])
+
+            reader = self._snapshot(Path(directory) / "restored.sqlite")
+            available, current = reader.read_dashboard_bootstrap()
+            self.assertTrue(available)
+            self.assertEqual(current, old_projection)
+            self.assertEqual(reader.load(), before["version"])
+            self.assertTrue(reader.backfill_dashboard_bootstrap(
+                upgraded_projection, replace_existing=True,
+            ))
+
+            after = self.state.values["collections-live-snapshot-v1"]
+            available, restored = self._snapshot(Path(directory) / "unused.sqlite").read_dashboard_bootstrap()
+
+        self.assertEqual(after["version"], before["version"])
+        self.assertEqual(after["sqlite_sha256"], before["sqlite_sha256"])
+        self.assertEqual(restored, upgraded_projection)
+        self.assertTrue(available)
 
     def test_legacy_summary_fallback_reuses_pointer_read_for_restore(self):
         with tempfile.TemporaryDirectory() as directory:

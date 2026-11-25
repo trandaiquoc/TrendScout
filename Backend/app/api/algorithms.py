@@ -12,13 +12,7 @@ def list_algorithms():
     return catalog()
 
 
-@router.get('/algorithms/results')
-def list_algorithm_results(request: Request, limit: int = Query(default=100, ge=1, le=500)):
-    validate_public_request_origin(request, request.app.state.settings.environment_profile)
-    service = (getattr(getattr(request, 'state', None), 'collection_service', None)
-               or getattr(request.app.state, 'collection_service', None))
-    if service is None:
-        raise HTTPException(503, {'code': 'ANALYTICS_UNAVAILABLE'})
+def algorithm_results_for_service(service, *, limit=100):
     mode = service.store.data_mode_scope
     keyword_filter = " AND k.data_mode=?" if mode else ""
     parameters = (mode,) if mode else ()
@@ -37,4 +31,24 @@ def list_algorithm_results(request: Request, limit: int = Query(default=100, ge=
             + keyword_filter + ' ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ?',
             (*parameters, limit)).fetchall()
     return {'summary': [dict(row) for row in counts], 'items': [dict(row) for row in rows],
-            'limit': limit, 'evaluation_status': catalog()['evaluation_status']}
+            'limit': limit}
+
+
+@router.get('/algorithms/results')
+def list_algorithm_results(request: Request, limit: int = Query(default=100, ge=1, le=500)):
+    validate_public_request_origin(request, request.app.state.settings.environment_profile)
+    request_state = getattr(request, 'state', None)
+    if (getattr(request_state, 'algorithm_results_available', False)
+            and isinstance(getattr(request_state, 'algorithm_results', None), dict)
+            and limit <= 100):
+        projection = request_state.algorithm_results
+        result = {**projection, 'items': projection['items'][:limit], 'limit': limit}
+    else:
+        service = (getattr(request_state, 'collection_service', None)
+                   or getattr(request.app.state, 'collection_service', None))
+        if service is None:
+            raise HTTPException(503, {'code': 'ANALYTICS_UNAVAILABLE'})
+        result = algorithm_results_for_service(service, limit=limit)
+    algorithm_catalog = catalog()
+    return {**result, 'evaluation_status': algorithm_catalog['evaluation_status'],
+            'catalog': algorithm_catalog}

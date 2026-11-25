@@ -7,9 +7,17 @@ from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 
-from app.api.analytics import overview as analytics_overview
+from app.api.analytics import (
+    build_local_run_history_projection,
+    refresh_analytics_projection_ages,
+)
+from app.api.analytics import (
+    overview as analytics_overview,
+)
 from app.api.collections import collection_workbench_for_service
 from app.api.datasets import latest_dataset, latest_keywords, latest_keywords_for_service
+from app.api.fetches import validate_public_request_origin
+from app.api.research import research_bootstrap_for_service
 
 router = APIRouter()
 _LATEST_SUMMARY_NOT_PROVIDED = object()
@@ -19,6 +27,8 @@ def build_default_dashboard_bootstrap(
     service, *, available_sources, latest_summary=_LATEST_SUMMARY_NOT_PROVIDED,
 ):
     """Build the exact default dashboard response from one restored store."""
+    from app.api.algorithms import algorithm_results_for_service
+
     if service is None:
         raise ValueError("dashboard read model requires a collection service")
     latest = (service.store.latest_dataset()
@@ -36,22 +46,43 @@ def build_default_dashboard_bootstrap(
             settings=SimpleNamespace(environment_profile="vercel"),
         )),
     )
+    keyword_page = latest_keywords_for_service(
+        service, limit=100, offset=0, include_algorithm_results=False,
+    )
+    dashboard_keywords = {
+        **keyword_page,
+        "items": keyword_page.get("items", [])[:20],
+        "limit": 20,
+        "offset": 0,
+        "next_offset": 20 if keyword_page.get("total", 0) > 20 else None,
+    }
+    collection_keyword_page = {
+        **keyword_page,
+        "items": keyword_page.get("items", [])[:25],
+        "limit": 25,
+        "offset": 0,
+        "next_offset": 25 if keyword_page.get("total", 0) > 25 else None,
+    }
     return {
         "item": latest_dataset(request).get("item"),
         "analytics": analytics_overview(request),
-        "keywords": latest_keywords_for_service(
-            service, limit=20, offset=0, include_algorithm_results=False,
+        "keywords": dashboard_keywords,
+        "collections": collection_workbench_for_service(
+            service, keyword_page=collection_keyword_page,
         ),
-        "collections": collection_workbench_for_service(service),
+        "algorithm_results": algorithm_results_for_service(service, limit=100),
+        "run_history": build_local_run_history_projection(service, limit=20),
+        "research": research_bootstrap_for_service(
+            service, keyword_page=keyword_page,
+        ),
     }
 
 
 def _refresh_projection_ages(payload):
     value = deepcopy(payload)
     now = datetime.now(timezone.utc)
-    for item in (value.get("item"), value.get("analytics", {}).get("last_successful_fetch")):
-        if not isinstance(item, dict):
-            continue
+    item = value.get("item")
+    if isinstance(item, dict):
         timestamp = item.get("created_at") or item.get("fetched_at")
         try:
             observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -63,6 +94,8 @@ def _refresh_projection_ages(payload):
             item["age_seconds"] = max(
                 0, int((now - observed.astimezone(timezone.utc)).total_seconds())
             )
+    if isinstance(value.get("analytics"), dict):
+        value["analytics"] = refresh_analytics_projection_ages(value["analytics"])
     return value
 
 
@@ -94,6 +127,7 @@ def dashboard_bootstrap(
     )
     if (is_default and getattr(request.state, "dashboard_bootstrap_available", False)
             and isinstance(getattr(request.state, "dashboard_bootstrap", None), dict)):
+        validate_public_request_origin(request, request.app.state.settings.environment_profile)
         projection = _refresh_projection_ages(request.state.dashboard_bootstrap)
         return {key: projection[key] for key in ("item", "analytics", "keywords")}
 

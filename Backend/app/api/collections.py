@@ -115,15 +115,63 @@ def _mutating(request):
 def list_collections(request: Request):
     if (getattr(request.state, "collection_workbench_available", False)
             and isinstance(getattr(request.state, "collection_workbench", None), dict)):
+        validate_public_request_origin(request, request.app.state.settings.environment_profile)
         return request.state.collection_workbench
     service = _service(request)
     return collection_workbench_for_service(service)
 
 
-def collection_workbench_for_service(service):
+def collection_workbench_for_service(service, *, keyword_page=None):
     """Build the current Collections landing-page response from one store."""
-    return {"items": service.store.list_collections(), "suggestions": service.store.suggestions(),
-            "mode": _mode(service), "summary": service.store.workbench_summary()}
+    # This first page is bounded and uses the same snapshot as the workbench
+    # summary. Returning it here avoids a second serverless invocation and a
+    # second SQLite restore when Collections opens.
+    from app.api.datasets import latest_keywords_for_service
+
+    page = keyword_page or latest_keywords_for_service(
+        service, limit=25, offset=0, include_algorithm_results=False,
+    )
+    page = {**page, "items": list(page.get("items", []))}
+    page["items"] = [_compact_workbench_keyword(item) for item in page.get("items", [])]
+    return {
+        "items": service.store.list_collections(),
+        "suggestions": service.store.suggestions(),
+        "mode": _mode(service),
+        "summary": service.store.workbench_summary(),
+        "keyword_page": page,
+    }
+
+
+def _compact_workbench_keyword(item):
+    """Keep only list-row fields; the inspector fetches complete evidence on demand."""
+    evidence = item.get("evidence")
+    evidence = evidence if isinstance(evidence, dict) else {}
+    details = evidence.get("evidence")
+    measured = next((entry for entry in details if isinstance(entry, dict)
+                     and (entry.get("views_ceil") is not None
+                          or entry.get("approximate_views") is not None)), None) \
+        if isinstance(details, list) else None
+    measured = measured or evidence
+    compact_evidence = {
+        key: measured[key] for key in ("views_ceil", "approximate_views")
+        if measured.get(key) is not None
+    }
+    memberships = item.get("memberships")
+    return {
+        "id": item.get("id"),
+        "keyword": item.get("keyword"),
+        "source": item.get("source"),
+        "observed_at": item.get("observed_at"),
+        "eligible": item.get("eligible"),
+        "classification_status": item.get("classification_status"),
+        "classification_reason": item.get("classification_reason"),
+        "memberships": [
+            {key: membership[key] for key in ("id", "name", "origin", "category_id")
+             if key in membership}
+            for membership in memberships if isinstance(membership, dict)
+        ] if isinstance(memberships, list) else [],
+        "evidence": compact_evidence,
+    }
 
 
 def _mode(service):

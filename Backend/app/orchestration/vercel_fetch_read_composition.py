@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ async def vercel_fetch_read_composition(
     read_latest_dataset_summary: bool = True,
     restore_collection_snapshot: bool = False,
     allow_collection_restore: bool = False,
+    run_history_projection_only: bool = False,
 ):
     """Compose durable Fetch reads without creating provider clients."""
     if (os.environ.get("VERCEL") != "1" or not isinstance(user_agent, str)
@@ -52,9 +54,15 @@ async def vercel_fetch_read_composition(
             or type(read_latest_dataset_summary) is not bool
             or type(restore_collection_snapshot) is not bool
             or type(allow_collection_restore) is not bool
+            or type(run_history_projection_only) is not bool
             or restore_collection_snapshot and not allow_collection_restore
             or restore_collection_snapshot and not read_latest_dataset_summary):
         raise ValueError("Vercel Fetch reads require deferred Collections restoration")
+    if run_history_projection_only and (
+        restore_collection_snapshot or not allow_collection_restore
+        or not read_latest_dataset_summary
+    ):
+        raise ValueError("Run History projection reads require an optional restore fallback")
     _client_project_id(client)
 
     google = GoogleLiveSettings.from_environment()
@@ -122,6 +130,8 @@ async def vercel_fetch_read_composition(
     facade.available_sources = frozenset(policy.enabled_sources)
     facade.vercel_shared_live = True
     facade.provider_free_composition = True
+    facade.run_history_projection_available = False
+    facade.run_history_projection = None
     facade.youtube_capabilities = {
         "policy_status": "APPROVED" if google.youtube_policy_approved else "DRAFT",
         "policy_version": YOUTUBE_POLICY_VERSION,
@@ -154,6 +164,15 @@ async def vercel_fetch_read_composition(
             available, summary = snapshot.read_latest_dataset_summary()
             facade.latest_dataset_summary_available = available
             facade.latest_dataset_summary = summary
+
+            if run_history_projection_only:
+                dashboard_projection_available, projection_available, projection = (
+                    snapshot.read_run_history_projection()
+                )
+                if projection_available:
+                    facade.run_history_projection_available = True
+                    facade.run_history_projection = projection
+
             def load_collection_snapshot():
                 if getattr(facade, "collection_service", None) is not None:
                     return facade.collection_service
@@ -186,6 +205,27 @@ async def vercel_fetch_read_composition(
                 facade.load_collection_snapshot = load_collection_snapshot
             if restore_collection_snapshot:
                 load_collection_snapshot()
+            elif run_history_projection_only and not facade.run_history_projection_available:
+                service = load_collection_snapshot()
+                from app.api.dashboard import build_default_dashboard_bootstrap
+
+                bootstrap = await asyncio.to_thread(
+                    build_default_dashboard_bootstrap,
+                    service,
+                    available_sources=facade.available_sources,
+                    **({
+                        "latest_summary": facade.latest_dataset_summary,
+                    } if facade.latest_dataset_summary_available else {}),
+                )
+                await asyncio.to_thread(
+                    snapshot.backfill_dashboard_bootstrap,
+                    bootstrap,
+                    replace_existing=dashboard_projection_available,
+                )
+                projection = bootstrap.get("run_history")
+                if isinstance(projection, dict):
+                    facade.run_history_projection_available = True
+                    facade.run_history_projection = projection
             yield facade
     else:
         yield facade

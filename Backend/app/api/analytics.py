@@ -3,6 +3,7 @@
 import base64
 import binascii
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 
@@ -16,6 +17,26 @@ from app.taxonomy.classification_policy import VERSION as CLASSIFICATION_POLICY_
 from app.taxonomy.registry import TAXONOMY_VERSION
 
 router = APIRouter()
+
+
+def refresh_analytics_projection_ages(payload):
+    """Recalculate display age for the timestamped success record in a projection."""
+    value = deepcopy(payload)
+    item = value.get("last_successful_fetch") if isinstance(value, dict) else None
+    if not isinstance(item, dict):
+        return value
+    timestamp = item.get("created_at") or item.get("fetched_at")
+    try:
+        observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise ValueError("timezone missing")
+    except (AttributeError, TypeError, ValueError):
+        item["age_seconds"] = None
+    else:
+        item["age_seconds"] = max(
+            0, int((datetime.now(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds())
+        )
+    return value
 
 
 @router.get("/runtime")
@@ -97,7 +118,11 @@ def _scheduler_status(request: Request):
 
 @router.get("/analytics/overview")
 def overview(request: Request):
-    service = (getattr(getattr(request, "state", None), "collection_service", None)
+    request_state = getattr(request, "state", None)
+    if (getattr(request_state, "analytics_overview_available", False)
+            and isinstance(getattr(request_state, "analytics_overview", None), dict)):
+        return refresh_analytics_projection_ages(request_state.analytics_overview)
+    service = (getattr(request_state, "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
     if service is None:
         distributed = _request_distributed_fetch(request)
@@ -500,6 +525,23 @@ def _history_item_from_job(row):
     return item
 
 
+def build_local_run_history_projection(service, *, limit=20):
+    """Build a bounded first-page projection; filtered and later pages still query SQLite."""
+    if type(limit) is not int or not 1 <= limit <= 20:
+        raise ValueError("run history projection limit must be between 1 and 20")
+    with service.store.connect() as db:
+        rows = db.execute("""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
+            d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
+            d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
+            FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
+            ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""", (limit + 1,)).fetchall()
+    return {
+        "items": [_history_item_from_job(row) for row in rows[:limit]],
+        "has_more": len(rows) > limit,
+        "limit": limit,
+    }
+
+
 def _history_item_from_manual(run):
     run_id = str(run.get("run_id") or "")
     if not run_id:
@@ -583,27 +625,54 @@ def _merge_orphaned_collection_with_shared_fetch(local_item, shared_item):
 async def _run_history_cursor_page(request, q, status, mode, limit, token):
     filters = {"q": q, "status": status, "mode": mode}
     positions = _history_cursor_decode(token, filters)
-    service = (getattr(getattr(request, "state", None), "collection_service", None)
+    request_state = getattr(request, "state", None)
+    projection = getattr(request_state, "run_history_projection", None)
+    use_projection = (
+        not token and not q and not status and not mode and
+        getattr(request_state, "run_history_projection_available", False)
+        and isinstance(projection, dict)
+        and projection.get("limit") == limit
+        and isinstance(projection.get("items"), list)
+    )
+    service = (getattr(request_state, "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
-    local_rows = []
-    local_has_more = False
-    if service:
-        with service.store.connect() as db:
-            cursor = positions["local"]
-            after_sql = ""
-            parameters = []
-            if cursor:
-                after_sql = "WHERE (COALESCE(j.updated_at,d.fetched_at)<? OR (COALESCE(j.updated_at,d.fetched_at)=? AND j.fetch_id<?))"
-                parameters.extend((cursor[0], cursor[0], cursor[1]))
-            local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
-                d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-                d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
-                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
-                {after_sql} ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""",
-                (*parameters, limit + 1)).fetchall()
-        local_has_more = len(local_rows) > limit
-        local_rows = local_rows[:limit]
-    local_page = [_history_item_from_job(row) for row in local_rows]
+    if use_projection:
+        local_page = [dict(item) for item in projection["items"]]
+        local_has_more = projection.get("has_more") is True
+    else:
+        local_rows = []
+        local_has_more = False
+        if service:
+            with service.store.connect() as db:
+                cursor = positions["local"]
+                where_terms = []
+                parameters = []
+                if cursor:
+                    where_terms.append(
+                        "(COALESCE(j.updated_at,d.fetched_at)<? OR "
+                        "(COALESCE(j.updated_at,d.fetched_at)=? AND j.fetch_id<?))"
+                    )
+                    parameters.extend((cursor[0], cursor[0], cursor[1]))
+                if status:
+                    where_terms.append(
+                        "(CASE WHEN d.status='SUCCESS' THEN 'COMPLETED' "
+                        "WHEN d.status IN ('COMPLETED','PARTIAL','FAILED','ABORTED') "
+                        "THEN d.status ELSE j.status END)=?"
+                    )
+                    parameters.append(status)
+                if mode:
+                    where_terms.append("d.data_mode=?")
+                    parameters.append(mode)
+                where_sql = f"WHERE {' AND '.join(where_terms)}" if where_terms else ""
+                local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
+                    d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
+                    d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
+                    FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
+                    {where_sql} ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""",
+                    (*parameters, limit + 1)).fetchall()
+            local_has_more = len(local_rows) > limit
+            local_rows = local_rows[:limit]
+        local_page = [_history_item_from_job(row) for row in local_rows]
 
     history_status = "AVAILABLE"
     storage = _history_storage(request)

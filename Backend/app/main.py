@@ -120,6 +120,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             or path == "/api/v1/capabilities"
             or path == "/api/v1/runtime"
             or path == "/api/v1/research"
+            or path == "/api/v1/research/bootstrap"
             # The Collections workbench reads keyword rows through these
             # legacy dataset routes. They must share its request-scoped
             # Firestore-backed CollectionService instead of the empty Vercel
@@ -201,6 +202,69 @@ def _default_dashboard_bootstrap_request(scope):
         set(values) <= set(expected)
         and all(values.get(key, default) == default for key, default in expected.items())
     )
+
+
+def _algorithm_results_projection_request(scope):
+    """Use the bounded default algorithm read model for pages up to its limit."""
+    if scope.get("path") != "/api/v1/algorithms/results":
+        return False
+    try:
+        pairs = parse_qsl(
+            scope.get("query_string", b"").decode("ascii"),
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if any(key != "limit" for key, _value in pairs) or len(pairs) > 1:
+        return False
+    value = pairs[0][1] if pairs else "100"
+    return value.isdecimal() and len(value) <= 3 and 1 <= int(value) <= 100
+
+
+def _default_run_history_projection_request(scope):
+    """Use the saved first page only for the unfiltered initial cursor request."""
+    if scope.get("path") != "/api/v1/runs/history":
+        return False
+    try:
+        pairs = parse_qsl(
+            scope.get("query_string", b"").decode("ascii"),
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return False
+    values = {}
+    for key, value in pairs:
+        if key not in {"q", "status", "mode", "limit", "offset", "cursor"} or key in values:
+            return False
+        values[key] = value
+    return (
+        values.get("cursor", "") == ""
+        and all(values.get(key, default) == default for key, default in {
+            "q": "", "status": "", "mode": "", "limit": "20", "offset": "0",
+        }.items())
+    )
+
+
+def _default_research_bootstrap_request(scope):
+    """Use the saved first Research page only when it has no filters."""
+    if scope.get("path") != "/api/v1/research/bootstrap":
+        return False
+    try:
+        pairs = parse_qsl(
+            scope.get("query_string", b"").decode("ascii"),
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return False
+    values = {}
+    for key, value in pairs:
+        if key not in {"q", "status"} or key in values:
+            return False
+        values[key] = value
+    return all(values.get(key, "") == "" for key in ("q", "status"))
 
 
 def _vercel_fetch_read_composition_required(method, path):
@@ -523,12 +587,21 @@ class VercelSharedLiveMiddleware:
                         request_path == "/api/v1/runs/history"
                         or request_path.startswith("/api/v1/runs/history/")
                     )
+                    run_history_projection_only = (
+                        request_method.upper() == "GET"
+                        and _default_run_history_projection_request(scope)
+                    )
                     context_options["read_latest_dataset_summary"] = (
                         not use_fetch_submission_context
                     )
-                    context_options["restore_collection_snapshot"] = history_read
+                    context_options["restore_collection_snapshot"] = (
+                        history_read and not run_history_projection_only
+                    )
                     context_options["allow_collection_restore"] = (
                         history_read or use_fetch_recovery_context
+                    )
+                    context_options["run_history_projection_only"] = (
+                        run_history_projection_only
                     )
                 elif use_collection_read_context:
                     context_options["latest_dataset_summary_only"] = (
@@ -539,10 +612,22 @@ class VercelSharedLiveMiddleware:
                         request_method.upper() == "GET"
                         and _default_dashboard_bootstrap_request(scope)
                     )
+                    context_options["analytics_overview_only"] = (
+                        request_method.upper() == "GET"
+                        and request_path == "/api/v1/analytics/overview"
+                    )
                     context_options["collection_workbench_only"] = (
                         request_method.upper() == "GET"
                         and request_path == "/api/v1/collections"
                         and scope.get("query_string", b"") == b""
+                    )
+                    context_options["algorithm_results_only"] = (
+                        request_method.upper() == "GET"
+                        and _algorithm_results_projection_request(scope)
+                    )
+                    context_options["research_bootstrap_only"] = (
+                        request_method.upper() == "GET"
+                        and _default_research_bootstrap_request(scope)
                     )
                 else:
                     context_options["capability_metadata_request"] = (
@@ -585,11 +670,35 @@ class VercelSharedLiveMiddleware:
         state["dashboard_bootstrap"] = getattr(
             distributed, "dashboard_bootstrap", None
         )
+        state["analytics_overview_available"] = getattr(
+            distributed, "analytics_overview_available", False
+        )
+        state["analytics_overview"] = getattr(
+            distributed, "analytics_overview", None
+        )
         state["collection_workbench_available"] = getattr(
             distributed, "collection_workbench_available", False
         )
         state["collection_workbench"] = getattr(
             distributed, "collection_workbench", None
+        )
+        state["algorithm_results_available"] = getattr(
+            distributed, "algorithm_results_available", False
+        )
+        state["algorithm_results"] = getattr(
+            distributed, "algorithm_results", None
+        )
+        state["research_bootstrap_available"] = getattr(
+            distributed, "research_bootstrap_available", False
+        )
+        state["research_bootstrap"] = getattr(
+            distributed, "research_bootstrap", None
+        )
+        state["run_history_projection_available"] = getattr(
+            distributed, "run_history_projection_available", False
+        )
+        state["run_history_projection"] = getattr(
+            distributed, "run_history_projection", None
         )
         state["public_fetch_source_ids"] = tuple(sorted(
             getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})

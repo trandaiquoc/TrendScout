@@ -42,8 +42,10 @@ test('slow Firestore-backed dashboard reads allow Vercel cold starts', async () 
     '/api/v1/datasets/latest',
     '/api/v1/datasets/latest/keywords?limit=50',
     '/api/v1/analytics/overview',
+    '/api/v1/algorithms/results',
     '/api/v1/runs/history?limit=5&cursor=',
     '/api/v1/runs/history/abc123',
+    '/api/v1/research/bootstrap',
     '/api/health',
     '/api/v1/capabilities',
   ]) {
@@ -90,6 +92,41 @@ test('identical concurrent page reads share one same-origin request', async () =
     assert.notEqual(left, right);
   } finally {
     globalThis.fetch = previousFetch;
+  }
+});
+
+test('API requests report transport connectivity for the startup status indicator', async () => {
+  const previous = {
+    fetch: globalThis.fetch,
+    document: globalThis.document,
+    CustomEvent: globalThis.CustomEvent,
+  };
+  const events = [];
+  globalThis.document = { dispatchEvent: (event) => events.push(event) };
+  globalThis.CustomEvent = class {
+    constructor(type, options) {
+      this.type = type;
+      this.detail = options.detail;
+    }
+  };
+  globalThis.fetch = async () => new Response('{}', {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+  try {
+    await getJson(`/api/v1/capabilities?connectivity=${Date.now()}`);
+    assert.equal(events.at(-1).type, 'trendscout:api-connection');
+    assert.deepEqual(events.at(-1).detail, { connected: true });
+
+    globalThis.fetch = async () => { throw new TypeError('network unavailable'); };
+    await assert.rejects(getJson(`/api/v1/capabilities?connectivity=${Date.now()}`));
+    assert.deepEqual(events.at(-1).detail, { connected: false });
+  } finally {
+    globalThis.fetch = previous.fetch;
+    if (previous.document === undefined) delete globalThis.document;
+    else globalThis.document = previous.document;
+    if (previous.CustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = previous.CustomEvent;
   }
 });
 

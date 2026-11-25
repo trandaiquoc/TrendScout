@@ -401,6 +401,7 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(catalog_response.status_code, 200)
         self.assertEqual(len(catalog_response.json()["algorithms"]), 12)
         self.assertEqual(results_response.status_code, 200)
+        self.assertEqual(len(results_response.json()["catalog"]["algorithms"]), 12)
         summaries = {row["algorithm_id"]: row for row in results_response.json()["summary"]}
         self.assertEqual(summaries["observed-volume-rank"]["completed"], 2)
         self.assertIn("NOT_YET_EVALUATED", results_response.json()["evaluation_status"])

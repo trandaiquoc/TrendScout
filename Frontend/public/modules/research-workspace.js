@@ -17,7 +17,59 @@ export function initializeResearchWorkspace({ announce, localizedSourceName }) {
   let listTimer, keywordTimer;
   let keywordSequence = 0;
 async function loadResearchWorkspace() {
-  await Promise.all([loadResearchKeywords(),loadResearchRecords()]);
+  const keywordSeq = ++keywordSequence;
+  const recordSeq = ++state.researchSequence;
+  const priorKeyword = $('#research-keyword')?.value || '';
+  const params = new URLSearchParams();
+  const query = $('#research-list-search')?.value.trim() || '';
+  const status = $('#research-list-status')?.value || '';
+  if (query) params.set('q', query);
+  if (status) params.set('status', status);
+  const suffix = params.toString();
+  try {
+    const bootstrap = await getJson('/api/v1/research/bootstrap' + (suffix ? '?' + suffix : ''), {
+      locale: getLocale(),
+    });
+    if (keywordSeq === keywordSequence && bootstrap?.keywords) {
+      renderResearchKeywords(bootstrap.keywords, priorKeyword);
+    }
+    if (recordSeq === state.researchSequence && bootstrap?.research) {
+      renderResearchPage(bootstrap.research);
+    }
+  } catch (error) {
+    // Keep compatibility with deployments that have not yet picked up the
+    // combined endpoint; do not repeat a failed snapshot read as split calls.
+    if (error?.status === 404) {
+      await Promise.all([loadResearchKeywords(), loadResearchRecords()]);
+      return;
+    }
+    if (keywordSeq === keywordSequence) {
+      $('#research-keyword')?.replaceChildren(new Option(t('research.keywords-unavailable'), ''));
+    }
+    if (recordSeq === state.researchSequence) {
+      const root = $('#research-records');
+      if (root) root.replaceChildren(element('p', getErrorMessage(error, 'research.load-error')));
+      $('#research-list-count').textContent = '';
+      $('#research-list-more').hidden = true;
+    }
+  }
+}
+
+function renderResearchKeywords(data, prior) {
+  const select = $('#research-keyword');
+  if (!select) return;
+  state.researchKeywords = Array.isArray(data.items) ? data.items : [];
+  select.replaceChildren(new Option(t('research.no-linked-keyword'), ''), ...state.researchKeywords.map(item => new Option(`${item.keyword} · ${item.source || '—'} · ${item.observed_at || item.observation_date || '—'}`, item.keyword_id || item.id)));
+  if (state.researchKeywords.some(item => (item.keyword_id || item.id) === prior)) select.value = prior;
+}
+
+function renderResearchPage(result) {
+  state.researchRecords = Array.isArray(result.items) ? result.items : [];
+  state.researchNext = result.next_offset ?? null;
+  $('#research-list-more').hidden = state.researchNext === null;
+  $('#research-list-count').textContent = Number.isInteger(result.total)
+    ? t('workbench.results-count', { count: number(result.total) }) : t('common.unavailable');
+  renderResearchRecords(state.researchRecords);
 }
 
 async function loadResearchKeywords(query='') {
@@ -27,9 +79,7 @@ async function loadResearchKeywords(query='') {
   try {
     const data=await getJson('/api/v1/datasets/latest/keywords?'+params.toString(),{locale:getLocale()});
     if(sequence!==keywordSequence)return;
-    state.researchKeywords=data.items || [];
-    select.replaceChildren(new Option(t('research.no-linked-keyword'),''),...state.researchKeywords.map(item=>new Option(`${item.keyword} · ${item.source || '—'} · ${item.observed_at || item.observation_date || '—'}`,item.keyword_id || item.id)));
-    if(state.researchKeywords.some(item=>(item.keyword_id || item.id)===prior))select.value=prior;
+    renderResearchKeywords(data, prior);
   } catch(error) { if(sequence===keywordSequence)select.replaceChildren(new Option(t('research.keywords-unavailable'),'')); }
 }
 
@@ -42,11 +92,14 @@ async function loadResearchRecords({append = false} = {}) {
   try {
     const result=await getJson('/api/v1/research?'+params.toString(),{locale:getLocale()});
     if(sequence!==state.researchSequence)return;
-    state.researchRecords=append?[...state.researchRecords,...(result.items || [])]:(result.items || []);
-    state.researchNext=result.next_offset ?? null;
-    $('#research-list-more').hidden=state.researchNext===null;
-    $('#research-list-count').textContent=Number.isInteger(result.total)?t('workbench.results-count',{count:number(result.total)}):t('common.unavailable');
-    renderResearchRecords(state.researchRecords);
+    if (append) {
+      state.researchRecords = [...state.researchRecords, ...(result.items || [])];
+      state.researchNext = result.next_offset ?? null;
+      $('#research-list-more').hidden = state.researchNext === null;
+      $('#research-list-count').textContent = Number.isInteger(result.total)
+        ? t('workbench.results-count', { count: number(result.total) }) : t('common.unavailable');
+      renderResearchRecords(state.researchRecords);
+    } else renderResearchPage(result);
   } catch(error) { if(sequence===state.researchSequence){root.replaceChildren(element('p',getErrorMessage(error,'research.load-error')));$('#research-list-count').textContent='';$('#research-list-more').hidden=true;} }
 }
 

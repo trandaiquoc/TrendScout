@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.collections import _mutating, _service
+from app.api.fetches import validate_public_request_origin
 
 router = APIRouter()
 ResearchStatus = Literal["DRAFT", "RESEARCHING", "NEEDS_REVIEW", "VALIDATED", "ARCHIVED"]
@@ -42,15 +43,7 @@ class ResearchPatch(BaseModel):
     market_evidence: str | None = Field(default=None, max_length=4000)
 
 
-@router.get("/research")
-def list_research(
-    request: Request,
-    q: str = Query(default="", max_length=100),
-    status: ResearchStatus | None = None,
-    limit: int = Query(default=50, ge=1, le=100),
-    offset: int = Query(default=0, ge=0, le=100000),
-):
-    service = _service(request)
+def list_research_for_service(service, *, q="", status=None, limit=50, offset=0):
     query = " ".join(q.casefold().split())
     where = []
     parameters = []
@@ -84,6 +77,62 @@ def list_research(
         "offset": offset,
         "next_offset": offset + limit if offset + limit < total else None,
     }
+
+
+def research_bootstrap_for_service(service, *, q="", status=None, keyword_page=None):
+    """Build the Research landing payload, keeping its keyword selector compact."""
+    from app.api.datasets import latest_keywords_for_service
+
+    keyword_page = keyword_page or latest_keywords_for_service(
+        service, limit=100, offset=0, include_algorithm_results=False,
+    )
+    keyword_page = {
+        **keyword_page,
+        "items": [
+            {
+                key: item[key]
+                for key in ("id", "keyword_id", "keyword", "source", "observed_at", "observation_date")
+                if key in item
+            }
+            for item in keyword_page.get("items", []) if isinstance(item, dict)
+        ],
+    }
+    return {
+        "keywords": keyword_page,
+        "research": list_research_for_service(
+            service, q=q, status=status, limit=50, offset=0,
+        ),
+    }
+
+
+@router.get("/research")
+def list_research(
+    request: Request,
+    q: str = Query(default="", max_length=100),
+    status: ResearchStatus | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100000),
+):
+    return list_research_for_service(
+        _service(request), q=q, status=status, limit=limit, offset=offset,
+    )
+
+
+@router.get("/research/bootstrap")
+def research_bootstrap(
+    request: Request,
+    q: str = Query(default="", max_length=100),
+    status: ResearchStatus | None = None,
+):
+    """Load the initial Research page through one snapshot-backed request."""
+    request_state = getattr(request, "state", None)
+    projection = getattr(request_state, "research_bootstrap", None)
+    if (getattr(request_state, "research_bootstrap_available", False)
+            and not q and not status and isinstance(projection, dict)):
+        validate_public_request_origin(request, request.app.state.settings.environment_profile)
+        return projection
+    service = _service(request)
+    return research_bootstrap_for_service(service, q=q, status=status)
 
 
 @router.post("/research", status_code=201)

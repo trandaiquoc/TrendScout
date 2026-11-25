@@ -6,6 +6,14 @@ const inFlightGets = new Map();
 const pageReadCache = new Map();
 let readCacheGeneration = 0;
 
+function notifyApiConnectivity(connected) {
+  if (typeof document === 'undefined' || typeof document.dispatchEvent !== 'function'
+      || typeof CustomEvent !== 'function') return;
+  document.dispatchEvent(new CustomEvent('trendscout:api-connection', {
+    detail: { connected },
+  }));
+}
+
 function pageReadCacheable(path) {
   if (typeof path !== 'string') return false;
   const pathname = path.split('?', 1)[0];
@@ -21,7 +29,8 @@ function pageReadCacheable(path) {
     || pathname === '/api/v1/algorithms'
     || pathname === '/api/v1/algorithms/results'
     || pathname === '/api/v1/sources/library'
-    || pathname === '/api/v1/research';
+    || pathname === '/api/v1/research'
+    || pathname === '/api/v1/research/bootstrap';
 }
 
 function readRequestKey(path, locale, timeoutMs, headers) {
@@ -58,7 +67,9 @@ function requestTimeoutMs(path, requestedTimeoutMs) {
       || path.startsWith('/api/v1/datasets/latest/')
       || pathname === '/api/v1/dashboard/bootstrap'
       || path === '/api/v1/analytics/overview'
+      || pathname === '/api/v1/algorithms/results'
       || path.startsWith('/api/v1/runs/history')
+      || pathname === '/api/v1/research/bootstrap'
       || path === '/api/health'
       || path === '/api/v1/capabilities') {
     return COLLECTIONS_TIMEOUT_MS;
@@ -111,6 +122,7 @@ async function sendRequestJson(path, {
   const effectiveTimeoutMs = requestTimeoutMs(path, timeoutMs);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
+  let responseReceived = false;
   try {
     const response = await fetch(path, {
       method,
@@ -125,6 +137,8 @@ async function sendRequestJson(path, {
       cache: 'no-store',
       redirect: 'error',
     });
+    responseReceived = true;
+    notifyApiConnectivity(true);
     let body;
     try {
       body = await response.json();
@@ -151,6 +165,7 @@ async function sendRequestJson(path, {
     }
     return body;
   } catch (error) {
+    if (!responseReceived) notifyApiConnectivity(false);
     if (error instanceof ApiError) {
       throw error;
     }

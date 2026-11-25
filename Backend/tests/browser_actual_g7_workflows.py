@@ -202,10 +202,16 @@ def main():
               await go('overview');
               check(await until(()=>document.querySelector('#metric-records-stored').textContent==='3'),'Dashboard total comes from saved SQLite keywords');
               check(document.querySelector('#metric-topics-found').textContent==='1'&&document.querySelector('#metric-unclassified').textContent==='1','Dashboard separates classified and unclassified saved topics');
+              await go('quality');
+              check(await until(()=>window.__apiCalls.some(x=>x.url==='/api/v1/analytics/overview')&&document.querySelector('#metric-records-stored').textContent==='3'),'Quality page loads analytics when opened directly');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/analytics/overview'),'Quality page uses the analytics overview read path');
+              await go('overview');
               await go('collections');
               check(await until(()=>document.querySelectorAll('#workbench-summary .workbench-stat').length===4),'Collections summary loads from the SQLite backend');
+              check(await until(()=>document.querySelectorAll('#workbench-rows tr').length===3),'Collections default keyword rows load with the workbench');
+              check(!window.__apiCalls.some(x=>x.url.startsWith('/api/v1/datasets/latest/keywords')),'Collections uses its bundled keyword page without a second read request');
               const collectionCounts=[...document.querySelectorAll('#workbench-summary .workbench-stat strong')].map(x=>x.textContent);
-              check(collectionCounts.join(',')==='3,1,1,0','Collection cards show 3 stored, 1 assigned, 1 unclassified and 0 excluded');
+              check(collectionCounts.join(',')==='2,1,1,0','Collection cards show 2 eligible, 1 assigned, 1 unclassified and 0 excluded');
               check(document.querySelector('#workbench-summary').textContent.includes('1 kh\u00f4ng ph\u1ea3i ch\u1ee7 \u0111\u1ec1'),'Collection summary explains the ineligible topic count');
               const keywordSearch=document.querySelector('#workbench-query');keywordSearch.value='Unknown context topic';keywordSearch.dispatchEvent(new Event('input',{bubbles:true}));
               check(await until(()=>document.querySelectorAll('#workbench-rows tr').length===1&&document.querySelector('#workbench-rows').textContent.includes('Unknown context topic')),'keyword search filters actual saved records');
@@ -270,9 +276,20 @@ def main():
               check(Boolean(ewmaCard?.textContent.includes('Cần lịch sử hằng ngày đầy đủ')&&ewmaCard.textContent.includes('7–90')),'Vietnamese method details translate requirements and compress a contiguous supported window');
               check(Boolean(document.querySelector('#algorithm-evaluation-status').textContent.trim()),'Algorithm evaluation status is shown separately from the catalog');
               check(!document.querySelector('#algorithm-catalog').textContent.includes('INSUFFICIENT_DATA'),'Algorithm catalog does not expose raw evaluation status codes');
-              check(window.__apiCalls.some(x=>x.url==='/api/v1/algorithms')&&window.__apiCalls.some(x=>x.url==='/api/v1/algorithms/results'),'Algorithm catalog and results use actual backend endpoints');
+              check(window.__apiCalls.some(x=>x.url==='/api/v1/algorithms/results')&&!window.__apiCalls.some(x=>x.url==='/api/v1/algorithms'),'Algorithm catalogue and results share one backend request');
+              const researchCallsBefore=window.__apiCalls.length;
               await go('research');
               await until(()=>document.querySelector('#research-keyword option[value="g7-browser-keyword"]'));
+              const researchInitialCalls=window.__apiCalls.slice(researchCallsBefore);
+              check(researchInitialCalls.filter(x=>x.url.startsWith('/api/v1/research/bootstrap')).length===1
+                && !researchInitialCalls.some(x=>x.url.startsWith('/api/v1/research?')
+                  || x.url.startsWith('/api/v1/datasets/latest/keywords')),
+                'Research loads its first page and keyword selector with one API request');
+              const runHistoryCallsBefore=window.__apiCalls.length;
+              await go('runs');
+              check(await until(()=>window.__apiCalls.slice(runHistoryCallsBefore).some(x=>x.url.startsWith('/api/v1/runs/history?'))),'Run History loads its first page from the cursor endpoint');
+              check(window.__apiCalls.slice(runHistoryCallsBefore).filter(x=>x.url.startsWith('/api/v1/runs/history?')).length===1,'Run History starts with one bounded history request');
+              await go('research');
               const selector=document.querySelector('#research-keyword');selector.value='g7-browser-keyword';
               document.querySelector('#research-subject').value='Browser workflow hypothesis';
               document.querySelector('#research-hypothesis').value='A saved keyword may support this product hypothesis.';
@@ -468,14 +485,17 @@ def main():
               check(window.__apiCalls.some(x=>x.url.includes('/api/v1/research/')&&x.method==='PATCH'),'Research archive uses the real backend endpoint');
               check(window.__apiCalls.some(x=>x.url==='/api/v1/scheduler'&&x.method==='POST')&&window.__apiCalls.filter(x=>x.url.includes('/api/v1/scheduler/')&&x.method==='PATCH').length>=2,'schedule create/edit/disable use the real backend endpoints');
               check(window.__apiCalls.every(x=>x.url.startsWith('/')&&!x.url.startsWith('/api/v1/fetches')&&!x.url.startsWith('/api/runs')),'workflow uses only same-origin app routes and no Fetch/run endpoint');
-              return {ok:errors.length===0,errors,calls:window.__apiCalls,scheduleIds:[...document.querySelectorAll('#settings-schedules .schedule-item')].map(x=>x.textContent.slice(0,90))};
+              return {ok:errors.length===0,errors,runHistory:{filter:document.querySelector('#run-history-status')?.value,rowCount:document.querySelectorAll('#run-history tbody tr').length,rows:[...document.querySelectorAll('#run-history tbody tr')].map(row=>row.querySelector('[data-status]')?.dataset.status),calls:window.__apiCalls.filter(x=>x.url.startsWith('/api/v1/runs/history')).map(x=>({url:x.url,status:x.status,count:x.response?.items?.length,manual:x.response?.manual_history_status}))},scheduleIds:[...document.querySelectorAll('#settings-schedules .schedule-item')].map(x=>x.textContent.slice(0,90))};
             })()""".replace("TOKEN_VALUE", TOKEN)
             after_reload = after_reload.replace("COLLECTION_ID", first_result["collectionId"])
             after_reload = after_reload.replace("PARTIAL_HISTORY_TOTAL", str(expected_partial_history))
             after_reload = after_reload.replace("HISTORY_TOTAL", str(expected_history_total))
             browser_result = evaluate(after_reload)
             if not browser_result or not browser_result.get("ok"):
-                raise RuntimeError("Native Chrome workflow failed: " + json.dumps(browser_result))
+                raise RuntimeError("Native Chrome workflow failed: " + json.dumps({
+                    "errors": browser_result.get("errors"),
+                    "runHistory": browser_result.get("runHistory"),
+                }))
 
             run_detail_open = evaluate(r"""(async()=>{
               const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));

@@ -65,10 +65,12 @@ const state = {
   selectAllFiltered: false,
   latestKeywordTotal: 0,
   analytics: null,
+  backendProbes: { capabilities: null, dashboard: null, api: null },
 };
 let schedulerListSequence = 0;
 let schedulerEditId = null;
 let analyticsSequence = 0;
+let startupCapabilities = null;
 const collectionRecoveryInFlight = new Map();
 const collectionRecoverySucceeded = new Set();
 let collectionFiltersPromise = null;
@@ -86,6 +88,31 @@ function timestamp(value) {
   const rendered = formatTimestamp(value, getLocale());
   return rendered === '—' ? rendered : rendered + ' · ' + t('time.local');
 }
+
+function renderBackendConnection() {
+  const results = Object.values(state.backendProbes);
+  const connected = results.includes(true);
+  const completed = results.filter((result) => result !== null);
+  const disconnected = completed.length > 0
+    && completed.every((result) => result === false);
+  const dot = $('#connection-dot');
+  const text = $('#connection-text');
+  if (!dot || !text) return;
+  dot.className = `status-dot ${connected ? 'status-dot--green' : disconnected ? 'status-dot--red' : 'status-dot--muted'}`;
+  text.textContent = t(connected ? 'connection.online' : disconnected ? 'connection.offline' : 'connection.checking');
+}
+
+function recordBackendProbe(name, connected) {
+  state.backendProbes[name] = connected;
+  renderBackendConnection();
+}
+
+document.addEventListener('trendscout:locale', renderBackendConnection);
+document.addEventListener('trendscout:api-connection', (event) => {
+  if (typeof event.detail?.connected === 'boolean') {
+    recordBackendProbe('api', event.detail.connected);
+  }
+});
 
 function compactTimestamp(value) {
   const instant = new Date(value);
@@ -256,6 +283,7 @@ async function loadDashboardBootstrap() {
   const query = currentDatasetQuery().toString();
   try {
     const data = await getJson('/api/v1/dashboard/bootstrap?' + query, { locale: getLocale() });
+    recordBackendProbe('dashboard', true);
     if (!data?.analytics || !data?.keywords) return null;
     state.persistedDataset = data.item || null;
     state.persistedDatasetAvailable = Boolean(data.item);
@@ -268,9 +296,18 @@ async function loadDashboardBootstrap() {
     if (query === currentDatasetQuery().toString()) await loadKeywords(data.keywords);
     return data;
   } catch (error) {
+    recordBackendProbe('dashboard', false);
     setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'), 'error');
     return null;
   }
+}
+
+function loadDashboardView() {
+  return loadDashboardBootstrap().then((data) => {
+    if (!data || !data.item) {
+      void startupCapabilities?.then(() => recoverLatestVercelCollectionSnapshot());
+    }
+  });
 }
 
 function renderQualitySnapshot(snapshot) {
@@ -1187,7 +1224,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
       if (job.status === 'MODEL_UNAVAILABLE') {
         $('#workbench-status').textContent = t('collections.model-unavailable');
       } else if (job.status === 'COMPLETED') {
-        await loadCollections();
+        if (window.location.hash === '#collections') await loadCollections();
         const summary = $('#workbench-status');
         summary.replaceChildren(element('span', t('collections.completed', {
           assigned: number(job.assigned), collections: state.collections.filter((item) => item.membership_count > 0).length,
@@ -1197,14 +1234,13 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
         })));
       }
       if (!viewsAlreadyRefreshed) {
-        await loadLatestDataset();
-        await loadAnalytics();
-        if (state.persistedDatasetAvailable) loadKeywords();
+        if (window.location.hash !== '#collections') await loadDashboardBootstrap();
       }
       if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
   };
   if (isVercelSharedLive(state.capabilities)
+      && state.capabilities.deployment_environment === 'production'
       && terminalFetch?.fetch_id === fetchId
       && terminalFetch?.data_mode === 'LIVE'
       && ['COMPLETED', 'PARTIAL'].includes(terminalFetch.status)) {
@@ -1418,6 +1454,8 @@ async function loadPublicCapabilities() {
     state.capabilityRetryAttempt = 0;
     saveLastKnownCapabilities(capabilities);
     applyPublicCapabilities(capabilities);
+    recordBackendProbe('capabilities', true);
+    return capabilities;
   } catch (error) {
     state.fetchCapabilitiesLoading = false;
     state.capabilityCheckFailed = true;
@@ -1437,6 +1475,8 @@ async function loadPublicCapabilities() {
       scheduleCapabilityRefresh(retryDelay);
     }
     renderFetchPresentation();
+    recordBackendProbe('capabilities', false);
+    return state.capabilities;
   }
 }
 
@@ -1473,6 +1513,7 @@ function handleFetchState(presentation) {
 }
 
 function handleFetchTerminal(runId, fetchStatus) {
+    let dashboardRefreshHandled = false;
     if (runId) {
       state.publicFetchDiscovery = null;
       state.publicFetchSources = [];
@@ -1480,10 +1521,15 @@ function handleFetchTerminal(runId, fetchStatus) {
       loadRun(runId);
     } else if (isVercelSharedLive(state.capabilities)) {
       const hasDiscovery = acceptsDiscovery(state.capabilities, fetchStatus?.discovery);
-      if (fetchStatus?.collection_input_unchanged !== true) {
+      const unchangedDataset = fetchStatus?.collection_input_unchanged === true;
+      const missingPersistedDataset = !state.persistedDatasetAvailable;
+      if (!unchangedDataset && fetchStatus?.fetch_id) {
         refreshCollectionJob(fetchStatus?.fetch_id, fetchStatus);
-      } else if (!state.persistedDatasetAvailable) {
-        void loadLatestDataset();
+      } else if (unchangedDataset && missingPersistedDataset
+          && state.capabilities.deployment_environment === 'production') {
+        void loadDashboardBootstrap();
+      } else if (!fetchStatus?.fetch_id) {
+        void loadDashboardBootstrap();
       }
       state.publicFetchDiscovery = hasDiscovery ? fetchStatus.discovery : null;
       state.publicFetchSources = Array.isArray(fetchStatus?.sources) ? fetchStatus.sources : [];
@@ -1493,17 +1539,19 @@ function handleFetchTerminal(runId, fetchStatus) {
       state.dataRunId = null;
       state.run = null;
       state.offset = 0;
-      showView('overview');
+      showView('overview', { loadDashboard: false });
+      dashboardRefreshHandled = true;
       window.location.hash = 'overview';
       renderPublicFetchDiscovery();
-      if (state.capabilities.deployment_environment !== 'production') {
-        void loadLatestDataset().then((item) => {
-          if (item) loadKeywords();
-          else void recoverLatestVercelCollectionSnapshot(fetchStatus).then((recovered) => {
-            if (recovered && recovered !== 'REUSED') {
-              refreshCollectionJob(fetchStatus.fetch_id, fetchStatus);
-            }
-          });
+      if (unchangedDataset && missingPersistedDataset
+          && state.capabilities.deployment_environment !== 'production') {
+        void loadDashboardBootstrap().then((data) => {
+          if (!data?.item) return recoverLatestVercelCollectionSnapshot(fetchStatus);
+          return null;
+        }).then((recovered) => {
+          if (recovered && recovered !== 'REUSED') {
+            refreshCollectionJob(fetchStatus.fetch_id, fetchStatus);
+          }
         });
       }
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
@@ -1519,24 +1567,19 @@ function handleFetchTerminal(runId, fetchStatus) {
       state.offset = 0;
       const sharedLive = isVercelSharedLive(state.capabilities);
       if (localLive || sharedLive) {
-        showView('overview');
+        showView('overview', { loadDashboard: false });
+        dashboardRefreshHandled = true;
         window.location.hash = 'overview';
-        if (localLive) {
-          void loadLatestDataset().then(() => loadKeywords());
-        } else {
-          renderPublicFetchDiscovery();
-          void loadLatestDataset().then((item) => {
-            if (item) loadKeywords();
-          });
-        }
+        if (!fetchStatus?.fetch_id) void loadDashboardBootstrap();
+        if (sharedLive) renderPublicFetchDiscovery();
       } else {
         renderPublicFetchDiscovery();
         showView('collections');
         loadKeywords();
       }
     }
-    if (!isVercelSharedLive(state.capabilities)
-        || state.capabilities.deployment_environment !== 'production') void loadAnalytics();
+    if (!dashboardRefreshHandled && (!isVercelSharedLive(state.capabilities)
+        || state.capabilities.deployment_environment !== 'production')) void loadAnalytics();
     scheduleCapabilityRefresh(100);
 }
 
@@ -1561,7 +1604,7 @@ async function resumeRecoveredFetch(run) {
   const requestKind = run.request_kind || 'LATEST';
   const controller = requestKind === 'WIKIMEDIA_HISTORY'
     ? historyFetchController : fetchController;
-  showView('overview');
+  showView('overview', { loadDashboard: false });
   window.location.hash = 'overview';
   if (!hasCurrentYoutubeConsent(run.sources)) return;
   void controller.resumeAvailableJob({
@@ -2045,15 +2088,13 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
     if (!fetchId || latest.data_mode !== 'LIVE' || !terminalStatuses.has(status)) return false;
     if (latest.collection_input_unchanged === true) {
       collectionRecoverySucceeded.add(fetchId);
-      if (!state.persistedDatasetAvailable) await loadLatestDataset();
+      if (!state.persistedDatasetAvailable) await loadDashboardBootstrap();
       return 'REUSED';
     }
     if (collectionRecoverySucceeded.has(fetchId)) {
       // Another fetch or an edit may have changed the current dataset since
       // this recovery completed, even though this fetch needs no replay.
-      await loadLatestDataset();
-      await loadAnalytics();
-      if (state.persistedDatasetAvailable) loadKeywords();
+      await loadDashboardBootstrap();
       return true;
     }
     const inFlight = collectionRecoveryInFlight.get(fetchId);
@@ -2094,15 +2135,13 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
         }
         if (collectionReused) {
           collectionRecoverySucceeded.add(fetchId);
-          if (!state.persistedDatasetAvailable) await loadLatestDataset();
+          if (!state.persistedDatasetAvailable) await loadDashboardBootstrap();
           return 'REUSED';
         }
       }
-      await loadLatestDataset();
-      await loadAnalytics();
+      await loadDashboardBootstrap();
       if (state.persistedDatasetAvailable) {
         collectionRecoverySucceeded.add(fetchId);
-        loadKeywords();
         return true;
       }
       return false;
@@ -2534,7 +2573,7 @@ async function openDetail(id) {
   }
 }
 
-function showView(name, { refresh = true } = {}) {
+function showView(name, { refresh = true, loadDashboard = true } = {}) {
   if (name === 'main-content') {
     closeMobileNav();
     $('#main-content').focus();
@@ -2565,6 +2604,8 @@ function showView(name, { refresh = true } = {}) {
   setDashboardTab(dashboardTab, false);
   $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
   const shouldLoadView = viewChanged || refresh;
+  if (shouldLoadView && selected === 'overview' && loadDashboard) loadDashboardView();
+  if (shouldLoadView && selected === 'quality') loadAnalytics();
   if (shouldLoadView && selected === 'collections') loadCollections();
   if (shouldLoadView && selected === 'algorithms') loadAlgorithmCatalog();
   if (shouldLoadView && selected === 'runs') runHistory.load();
@@ -2646,13 +2687,17 @@ async function loadAlgorithmCatalog() {
   const root = $('#algorithm-catalog');
   root.replaceChildren(element('p', t('algorithms.loading-catalog')));
   try {
-    const [catalogResult, executionResult] = await Promise.all([
-      getJson('/api/v1/algorithms', { locale: getLocale() }),
+    const [executionResult, runtimeCapabilities] = await Promise.all([
       getJson('/api/v1/algorithms/results', { locale: getLocale() }).catch(() => null),
+      startupCapabilities
+        ? startupCapabilities.then(() => state.capabilities)
+        : Promise.resolve(state.capabilities),
     ]);
-    let runtimeCapabilities = null;
-    try { runtimeCapabilities = await getJson('/api/v1/capabilities', { locale: getLocale() }); }
-    catch { /* registry metadata remains useful when runtime health is unavailable */ }
+    // The results response carries the immutable registry catalogue. Keep the
+    // small registry-only request as a resilience fallback when storage is
+    // unavailable or an older backend is still serving the page.
+    const catalogResult = executionResult?.catalog
+      || await getJson('/api/v1/algorithms', { locale: getLocale() });
     state.algorithmCatalog = catalogResult;
     state.algorithmResults = executionResult;
     state.runtimeCapabilities = runtimeCapabilities;
@@ -3090,22 +3135,6 @@ function bindEvents() {
   });
 }
 
-async function checkBackend() {
-  let connected = false;
-  try {
-    await getJson('/api/health', { locale: getLocale() });
-    connected = true;
-    $('#connection-dot').className = 'status-dot status-dot--green';
-    $('#connection-text').textContent = t('connection.online');
-  } catch {
-    $('#connection-dot').className = 'status-dot status-dot--red';
-    $('#connection-text').textContent = t('connection.offline');
-  }
-  document.addEventListener('trendscout:locale', () => {
-    $('#connection-text').textContent = t(connected ? 'connection.online' : 'connection.offline');
-  });
-}
-
 initializeLocale();
 initializeTheme();
 initializeScheduleForm();
@@ -3116,14 +3145,8 @@ const runHistory = initializeRunHistory({
   onResumeRecovery: resumeRecoveredFetch,
 });
 bindEvents();
-showView(window.location.hash.slice(1));
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
-checkBackend();
 applyLastKnownCapabilities();
-const startupCapabilities = loadPublicCapabilities();
-void loadDashboardBootstrap().then((data) => {
-  if (!data || !data.item) {
-    void startupCapabilities.then(() => recoverLatestVercelCollectionSnapshot());
-  }
-});
+startupCapabilities = loadPublicCapabilities();
+showView(window.location.hash.slice(1));

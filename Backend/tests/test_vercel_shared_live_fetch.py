@@ -219,6 +219,7 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
             "suggestions": [],
             "mode": "AUTO_CREATE",
             "summary": {"collections": 1},
+            "keyword_page": {"items": [], "total": 0, "limit": 25, "offset": 0},
         }
 
         class Snapshot:
@@ -256,6 +257,7 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         events = []
+        replacements = []
 
         class Snapshot:
             def __init__(self, *_args, **_kwargs):
@@ -267,7 +269,8 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
             def load(self):
                 events.append("snapshot_loaded")
 
-            def backfill_dashboard_bootstrap(self, _value):
+            def backfill_dashboard_bootstrap(self, _value, **kwargs):
+                replacements.append(kwargs.get("replace_existing", False))
                 events.append("dashboard_backfilled")
 
         class Store:
@@ -288,7 +291,8 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
             "app.collections.service.CollectionService", Service,
         ), patch("app.api.dashboard.build_default_dashboard_bootstrap", return_value={
             "item": None, "analytics": {}, "keywords": {"items": []},
-            "collections": {"items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {}},
+            "collections": {"items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {},
+                             "keyword_page": {"items": [], "total": 0, "limit": 25, "offset": 0}},
         }):
             async with vercel_collection_read_composition(
                 object(), user_agent="TrendScoutTest/0.1",
@@ -298,6 +302,7 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(context.collection_workbench_available)
                 self.assertEqual(context.collection_workbench["items"], [])
         self.assertEqual(events, ["snapshot_loaded", "dashboard_backfilled"])
+        self.assertEqual(replacements, [True])
 
     async def test_versioned_dashboard_model_skips_sqlite_restore(self):
         from app.orchestration.vercel_collection_read_composition import (
@@ -338,6 +343,184 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, ["snapshot_created", "dashboard_read"])
 
+    async def test_analytics_projection_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        analytics = {"keyword_totals": {"unique": 42}}
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {
+                    "item": None,
+                    "analytics": analytics,
+                    "keywords": {"items": []},
+                }
+
+            def load(self):
+                raise AssertionError("current analytics projection must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                analytics_overview_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.analytics_overview_available)
+                self.assertEqual(context.analytics_overview, analytics)
+
+    async def test_algorithm_results_projection_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        results = {
+            "summary": [{"algorithm_id": "observed-volume-rank", "completed": 1}],
+            "items": [], "limit": 100,
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {
+                    "item": None, "analytics": {}, "keywords": {"items": []},
+                    "algorithm_results": results,
+                }
+
+            def load(self):
+                raise AssertionError("current algorithm results must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                algorithm_results_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.algorithm_results_available)
+                self.assertEqual(context.algorithm_results, results)
+
+    async def test_research_projection_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        research = {
+            "keywords": {"items": [{"id": "kw-1"}], "total": 1,
+                          "limit": 100, "offset": 0},
+            "research": {"items": [{"id": "research-1"}], "total": 1,
+                           "limit": 50, "offset": 0, "next_offset": None},
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {
+                    "item": None, "analytics": {}, "keywords": {"items": []},
+                    "research": research,
+                }
+
+            def load(self):
+                raise AssertionError("current Research projection must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                research_bootstrap_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.research_bootstrap_available)
+                self.assertEqual(context.research_bootstrap, research)
+
+    async def test_missing_research_projection_falls_back_when_collections_model_exists(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+        collection_model = {
+            "items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {},
+            "keyword_page": {"items": [], "total": 0, "limit": 25, "offset": 0},
+        }
+        rebuilt = {
+            "item": None, "analytics": {}, "keywords": {"items": []},
+            "collections": collection_model,
+            "research": {
+                "keywords": {"items": [], "total": 0, "limit": 100, "offset": 0},
+                "research": {
+                    "items": [], "total": 0, "limit": 50, "offset": 0,
+                    "next_offset": None,
+                },
+            },
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {
+                    "item": None, "analytics": {}, "keywords": {"items": []},
+                    "collections": collection_model,
+                }
+
+            def load(self):
+                events.append("snapshot_loaded")
+
+            def backfill_dashboard_bootstrap(self, _value, *, replace_existing=False):
+                events.append(("backfilled", replace_existing))
+
+        class Store:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class Service:
+            def __init__(self, store, *, fetch_model_inference_enabled):
+                self.store = store
+                self.fetch_model_inference_enabled = fetch_model_inference_enabled
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ), patch("app.collections.store.CollectionStore", Store), patch(
+            "app.collections.service.CollectionService", Service,
+        ), patch(
+            "app.api.dashboard.build_default_dashboard_bootstrap", return_value=rebuilt,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                research_bootstrap_only=True,
+            ) as context:
+                self.assertIsInstance(context.collection_service, Service)
+                self.assertTrue(context.research_bootstrap_available)
+                self.assertEqual(context.research_bootstrap, rebuilt["research"])
+
+        self.assertEqual(events, ["snapshot_loaded", ("backfilled", True)])
+
     async def test_missing_dashboard_model_restores_once_then_backfills(self):
         from app.orchestration.vercel_collection_read_composition import (
             vercel_collection_read_composition,
@@ -361,7 +544,7 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
             def load(self):
                 events.append("snapshot_loaded")
 
-            def backfill_dashboard_bootstrap(self, value):
+            def backfill_dashboard_bootstrap(self, value, **_kwargs):
                 self.assert_projection = value
                 events.append("dashboard_backfilled")
 
@@ -490,6 +673,78 @@ class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
             "snapshot_created", "summary_read", "snapshot_loaded",
             "store_created", "service_created",
         ])
+
+
+class VercelFetchReadCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_run_history_reads_projection_without_restoring_sqlite(self):
+        from app.orchestration.vercel_fetch_read_composition import (
+            vercel_fetch_read_composition,
+        )
+
+        sources = frozenset({
+            BING_SOURCE_ID, GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID,
+        })
+        policy = SimpleNamespace(enabled_sources=sources, receipt_seconds=30)
+        google = SimpleNamespace(
+            serpapi_daily_budget=1, serpapi_monthly_budget=1,
+            rss_daily_budget=1, rss_monthly_budget=1,
+            fetch_starts_per_hour=1, paid_bing_approved=True,
+            bing_daily_budget=1, youtube_policy_approved=True,
+        )
+        projection = {"items": [], "has_more": False, "limit": 20}
+        facade = SimpleNamespace()
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_latest_dataset_summary(self):
+                return True, {"dataset_id": "snapshot-1"}
+
+            def read_run_history_projection(self):
+                return True, True, projection
+
+            def load(self):
+                raise AssertionError("current Run History projection must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.vercel_fetch_read_composition._client_project_id",
+            return_value=_PROJECT,
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.GoogleLiveSettings.from_environment",
+            return_value=google,
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.normal_google_live_policy",
+            return_value=policy,
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.FirestoreAtomicStateStore",
+            return_value=object(),
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.FirestoreSnapshotBlobs",
+            return_value=object(),
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.PublicAdmission",
+            return_value=object(),
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.DistributedFetchWorker",
+            return_value=object(),
+        ), patch(
+            "app.orchestration.vercel_fetch_read_composition.DistributedPublicFetch",
+            return_value=facade,
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot",
+            Snapshot,
+        ):
+            async with vercel_fetch_read_composition(
+                object(),
+                user_agent="TrendScoutTest/0.1",
+                restore_collection_snapshot=False,
+                allow_collection_restore=True,
+                run_history_projection_only=True,
+            ) as context:
+                self.assertTrue(context.run_history_projection_available)
+                self.assertEqual(context.run_history_projection, projection)
+                self.assertTrue(context.latest_dataset_summary_available)
 
 
 class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
@@ -634,12 +889,17 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def read_context(_client, *, user_agent, defer_collection_snapshot,
                                latest_dataset_summary_only, dashboard_bootstrap_only,
-                               collection_workbench_only):
+                               analytics_overview_only, collection_workbench_only,
+                               algorithm_results_only,
+                               research_bootstrap_only):
             self.assertEqual(user_agent, settings.wikimedia_user_agent)
             self.assertFalse(defer_collection_snapshot)
             self.assertTrue(latest_dataset_summary_only)
             self.assertFalse(dashboard_bootstrap_only)
+            self.assertFalse(analytics_overview_only)
             self.assertFalse(collection_workbench_only)
+            self.assertFalse(algorithm_results_only)
+            self.assertFalse(research_bootstrap_only)
             events.append("read_context")
             yield SimpleNamespace(collection_service=service, available_sources=sources)
 
@@ -707,16 +967,23 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def read_context(_client, *, user_agent, defer_collection_snapshot,
                                read_latest_dataset_summary, restore_collection_snapshot,
-                               allow_collection_restore):
+                               allow_collection_restore, run_history_projection_only):
             self.assertEqual(user_agent, settings.wikimedia_user_agent)
             self.assertTrue(defer_collection_snapshot)
-            expected_restore = len(events) == 1
+            expected_restore = False
             expected_allow = len(events) in {1, 2}
+            expected_projection = len(events) == 1
             self.assertEqual(restore_collection_snapshot, expected_restore)
             self.assertEqual(allow_collection_restore, expected_allow)
+            self.assertEqual(run_history_projection_only, expected_projection)
             facade.latest_dataset_summary_available = read_latest_dataset_summary
             facade.latest_dataset_summary = ({"dataset_id": _JOB_ID}
                                              if read_latest_dataset_summary else None)
+            facade.run_history_projection_available = run_history_projection_only
+            facade.run_history_projection = (
+                {"items": [], "limit": 20, "has_more": False}
+                if run_history_projection_only else None
+            )
             if restore_collection_snapshot:
                 facade.collection_service = SimpleNamespace()
             events.append(read_latest_dataset_summary)
@@ -774,7 +1041,9 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(observed[0]["latest_dataset_summary_available"])
         self.assertIs(observed[1]["distributed_public_fetch"], facade)
         self.assertTrue(observed[1]["latest_dataset_summary_available"])
-        self.assertIs(observed[1]["collection_service"], facade.collection_service)
+        self.assertIsNone(observed[1]["collection_service"])
+        self.assertTrue(observed[1]["run_history_projection_available"])
+        self.assertEqual(observed[1]["run_history_projection"]["items"], [])
 
     async def test_initial_fetch_admission_uses_provider_free_composition(self):
         events = []
@@ -794,12 +1063,13 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def submit_context(_client, *, user_agent, defer_collection_snapshot,
                                  read_latest_dataset_summary, restore_collection_snapshot,
-                                 allow_collection_restore):
+                                 allow_collection_restore, run_history_projection_only):
             self.assertEqual(user_agent, settings.wikimedia_user_agent)
             self.assertTrue(defer_collection_snapshot)
             self.assertFalse(read_latest_dataset_summary)
             self.assertFalse(restore_collection_snapshot)
             self.assertFalse(allow_collection_restore)
+            self.assertFalse(run_history_projection_only)
             events.append("provider_free_context")
             yield facade
 
@@ -1243,6 +1513,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         settings = self.settings(enabled=True)
         for method, path in (
             ("GET", "/api/v1/research"),
+            ("GET", "/api/v1/research/bootstrap"),
             ("POST", "/api/v1/research"),
             ("PATCH", "/api/v1/research/research-id"),
         ):
@@ -1251,6 +1522,12 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                     settings, method, path, enabled=True,
                 ))
         self.assertTrue(_persists_vercel_collections("POST", "/api/v1/research"))
+        self.assertTrue(_vercel_collection_snapshot_required(
+            "GET", "/api/v1/research/bootstrap",
+        ))
+        self.assertTrue(_vercel_collection_read_composition_required(
+            "GET", "/api/v1/research/bootstrap",
+        ))
         self.assertTrue(_persists_vercel_collections(
             "PATCH", "/api/v1/research/research-id",
         ))
@@ -1303,6 +1580,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                         json={"status": "RESEARCHING"},
                     )
                     after = await browser.get("/api/v1/research", headers=headers)
+                    bootstrap = await browser.get(
+                        "/api/v1/research/bootstrap", headers=headers,
+                    )
 
         self.assertEqual(before.status_code, 200, before.text)
         self.assertEqual(created.status_code, 201, created.text)
@@ -1310,6 +1590,8 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after.status_code, 200, after.text)
         self.assertEqual(after.json()["total"], 1)
         self.assertEqual(after.json()["items"][0]["status"], "RESEARCHING")
+        self.assertEqual(bootstrap.status_code, 200, bootstrap.text)
+        self.assertEqual(bootstrap.json()["research"]["total"], 1)
         self.assertEqual(events.count("snapshot_saved"), 2)
 
     async def test_bing_only_request_adds_google_dependency_before_admission(self):

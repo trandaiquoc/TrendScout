@@ -505,6 +505,28 @@ class KeywordWorkbenchTests(unittest.TestCase):
         filtered = self._request("GET", "/api/v1/runs/history", params={"cursor": first_cursor, "status": "COMPLETED"})
         self.assertEqual(filtered.status_code, 422)
 
+    def test_run_history_status_filter_fills_page_before_applying_limit(self):
+        with self.store.connect() as db:
+            for index in range(25):
+                fetch_id = f"{index + 1:032x}"
+                status = "COMPLETED" if index % 5 == 0 else "PARTIAL"
+                stamp = f"2026-11-25T09:{index:02d}:00+00:00"
+                db.execute(
+                    """INSERT INTO fetch_jobs(fetch_id,status,available,processed,updated_at,stage,eligible)
+                    VALUES(?,?,?,?,?,?,?)""",
+                    (fetch_id, status, 10, 9, stamp, "COMPLETED", 9),
+                )
+
+        response = self._request(
+            "GET", "/api/v1/runs/history",
+            params={"limit": 20, "cursor": "", "status": "PARTIAL"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["items"]), 20)
+        self.assertTrue(all(item["outcome_status"] == "PARTIAL" for item in payload["items"]))
+        self.assertIsNone(payload["next_cursor"])
+
     def test_run_history_cursor_merges_local_jobs_with_analysis_storage(self):
         async def seed():
             storage = FakeStorage()

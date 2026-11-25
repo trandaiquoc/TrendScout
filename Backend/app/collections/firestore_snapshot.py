@@ -56,11 +56,98 @@ _MAX_LATEST_DATASET_SUMMARY_BYTES = 48_000
 _DASHBOARD_BOOTSTRAP_VERSION = 1
 _MAX_DASHBOARD_BOOTSTRAP_BYTES = 512_000
 _DASHBOARD_BOOTSTRAP_RETENTION = timedelta(days=30)
+_RUN_HISTORY_PROJECTION_LIMIT = 20
 _logger = logging.getLogger(__name__)
 _NO_PRELOADED_POINTER = object()
 _RESTORED_IMAGE_CACHE_SECONDS = 60
 _restored_image_cache_lock = Lock()
 _restored_image_cache = None
+
+
+def _valid_keyword_page(value):
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("items"), list)
+        and all(isinstance(item, dict) for item in value["items"])
+        and type(value.get("total")) is int
+        and value["total"] >= 0
+        and type(value.get("limit")) is int
+        and 1 <= value["limit"] <= 100
+        and len(value["items"]) <= value["limit"]
+        and type(value.get("offset")) is int
+        and value["offset"] >= 0
+    )
+
+
+def _valid_collections_bootstrap(value):
+    required = {"items", "suggestions", "mode", "summary"}
+    allowed = required | {"keyword_page"}
+    return (
+        isinstance(value, dict)
+        and required <= set(value) <= allowed
+        and isinstance(value.get("items"), list)
+        and isinstance(value.get("suggestions"), list)
+        and isinstance(value.get("summary"), dict)
+        and isinstance(value.get("mode"), str)
+        and ("keyword_page" not in value or _valid_keyword_page(value["keyword_page"]))
+    )
+
+
+def _valid_algorithm_results_projection(value):
+    return (
+        isinstance(value, dict)
+        and set(value) == {"summary", "items", "limit"}
+        and isinstance(value.get("summary"), list)
+        and all(isinstance(item, dict) for item in value["summary"])
+        and isinstance(value.get("items"), list)
+        and all(isinstance(item, dict) for item in value["items"])
+        and type(value.get("limit")) is int
+        and 1 <= value["limit"] <= 500
+    )
+
+
+def _valid_run_history_projection(value):
+    return (
+        isinstance(value, dict)
+        and set(value) == {"items", "has_more", "limit"}
+        and isinstance(value.get("items"), list)
+        and len(value["items"]) <= _RUN_HISTORY_PROJECTION_LIMIT
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("_cursor_local"), list)
+            and len(item["_cursor_local"]) == 2
+            and all(isinstance(part, str) for part in item["_cursor_local"])
+            for item in value["items"]
+        )
+        and type(value.get("has_more")) is bool
+        and type(value.get("limit")) is int
+        and value["limit"] == _RUN_HISTORY_PROJECTION_LIMIT
+    )
+
+
+def _valid_research_bootstrap(value):
+    if not isinstance(value, dict) or set(value) != {"keywords", "research"}:
+        return False
+    keywords = value.get("keywords")
+    research = value.get("research")
+    return (
+        _valid_keyword_page(keywords)
+        and keywords.get("limit") == 100
+        and isinstance(research, dict)
+        and set(research) == {"items", "total", "limit", "offset", "next_offset"}
+        and isinstance(research.get("items"), list)
+        and len(research["items"]) <= 50
+        and all(isinstance(item, dict) for item in research["items"])
+        and type(research.get("total")) is int
+        and research["total"] >= 0
+        and type(research.get("limit")) is int
+        and research["limit"] == 50
+        and type(research.get("offset")) is int
+        and research["offset"] == 0
+        and (research.get("next_offset") is None
+             or type(research.get("next_offset")) is int
+             and research["next_offset"] >= 0)
+    )
 
 
 def _cached_restored_image(key):
@@ -73,6 +160,63 @@ def _cached_restored_image(key):
             elif entry[0] == key:
                 return entry[2]
     return None
+
+
+def _snapshot_segment_fingerprint(segment):
+    return len(segment), hashlib.sha256(segment).hexdigest()
+
+
+def _snapshot_record_compressed_bytes(records):
+    payload = records[0]["payload"]
+    padding = len(payload) - len(payload.rstrip("="))
+    return len(payload) * 3 // 4 - padding
+
+
+def _prepare_snapshot_segment_records(
+    raw_segments, *, base_fingerprints=None, base_records=None,
+):
+    """Reuse restored compressed blocks and encode only changed SQLite pages."""
+    fingerprints = tuple(_snapshot_segment_fingerprint(segment) for segment in raw_segments)
+    record_sets = [None] * len(raw_segments)
+    changed = []
+    for index, segment in enumerate(raw_segments):
+        if (base_fingerprints is not None and base_records is not None
+                and index < len(base_fingerprints) and index < len(base_records)
+                and fingerprints[index] == base_fingerprints[index]
+                and isinstance(base_records[index], list)
+                and len(base_records[index]) == 1
+                and isinstance(base_records[index][0], dict)
+                and base_records[index][0].get("encoding") == "sqlite-segment-gzip-base64-v1"
+                and isinstance(base_records[index][0].get("payload"), str)):
+            record_sets[index] = [dict(base_records[index][0])]
+        else:
+            changed.append((index, segment))
+
+    if len(changed) == 1:
+        compressed = [_compress_snapshot_segment(changed[0][1])]
+    elif changed:
+        with ThreadPoolExecutor(max_workers=min(4, len(changed))) as executor:
+            compressed = list(executor.map(
+                _compress_snapshot_segment, (segment for _index, segment in changed),
+            ))
+    else:
+        compressed = []
+
+    compressed_bytes = 0
+    for payload in record_sets:
+        if payload is not None:
+            compressed_bytes += _snapshot_record_compressed_bytes(payload)
+    for (index, _segment), piece in zip(changed, compressed, strict=True):
+        compressed_bytes += len(piece)
+        record_sets[index] = [{
+            "encoding": "sqlite-segment-gzip-base64-v1",
+            "payload": base64.b64encode(piece).decode("ascii"),
+        }]
+    return record_sets, fingerprints, compressed_bytes
+
+
+def _compress_snapshot_segment(segment):
+    return gzip.compress(segment, compresslevel=6, mtime=0)
 
 
 def _remember_restored_image(key, raw):
@@ -156,6 +300,8 @@ class FirestoreCollectionSnapshot:
         self._dashboard_bootstrap_present = False
         self._dashboard_bootstrap_checked = False
         self._preloaded_pointer = _NO_PRELOADED_POINTER
+        self._base_snapshot_segment_fingerprints = None
+        self._base_snapshot_record_sets = None
         self._loaded = False
 
     def set_latest_dataset_summary_provider(self, provider) -> None:
@@ -247,9 +393,11 @@ class FirestoreCollectionSnapshot:
 
     def read_dashboard_bootstrap(self):
         """Read a version-matched dashboard view without restoring SQLite."""
-        read_many = getattr(self._state, "read_many", None)
-        state = (read_many([_STATE_KEY])[_STATE_KEY] if callable(read_many) else
-                 self._state.transact(_STATE_KEY, lambda current: (current, current)))
+        state = self._preloaded_pointer
+        if state is _NO_PRELOADED_POINTER:
+            read_many = getattr(self._state, "read_many", None)
+            state = (read_many([_STATE_KEY])[_STATE_KEY] if callable(read_many) else
+                     self._state.transact(_STATE_KEY, lambda current: (current, current)))
         self._preloaded_pointer = state
         if not state:
             self.version = 0
@@ -283,21 +431,22 @@ class FirestoreCollectionSnapshot:
             ).encode("utf-8")
             if (len(encoded) > _MAX_DASHBOARD_BOOTSTRAP_BYTES
                     or not {"item", "analytics", "keywords"} <= set(payload)
-                    or not set(payload) <= {"item", "analytics", "keywords", "collections"}
+                    or not set(payload) <= {
+                        "item", "analytics", "keywords", "collections", "algorithm_results",
+                        "run_history", "research",
+                    }
                     or (payload["item"] is not None and not isinstance(payload["item"], dict))
                     or not isinstance(payload["analytics"], dict)
                     or not isinstance(payload["keywords"], dict)
                     or not isinstance(payload["keywords"].get("items"), list)
-                    or "collections" in payload and (
-                        not isinstance(payload["collections"], dict)
-                        or set(payload["collections"]) != {
-                            "items", "suggestions", "mode", "summary",
-                        }
-                        or not isinstance(payload["collections"]["items"], list)
-                        or not isinstance(payload["collections"]["suggestions"], list)
-                        or not isinstance(payload["collections"]["summary"], dict)
-                        or not isinstance(payload["collections"]["mode"], str)
-                    )):
+                    or "collections" in payload
+                    and not _valid_collections_bootstrap(payload["collections"])
+                    or "algorithm_results" in payload
+                    and not _valid_algorithm_results_projection(payload["algorithm_results"])
+                    or "run_history" in payload
+                    and not _valid_run_history_projection(payload["run_history"])
+                    or "research" in payload
+                    and not _valid_research_bootstrap(payload["research"])):
                 raise ValueError("invalid dashboard bootstrap payload")
         except Exception as error:
             _logger.warning(
@@ -307,6 +456,15 @@ class FirestoreCollectionSnapshot:
             self._dashboard_bootstrap_present = False
             return False, None
         return True, json.loads(encoded)
+
+    def read_run_history_projection(self):
+        """Read the bounded local Run History page from the snapshot read model."""
+        available, bootstrap = self.read_dashboard_bootstrap()
+        if not available or not isinstance(bootstrap, dict):
+            return False, False, None
+        projection = bootstrap.get("run_history")
+        valid = _valid_run_history_projection(projection)
+        return True, valid, projection if valid else None
 
     def load(self) -> int:
         """Restore the last committed image; leave a missing ledger as an empty DB."""
@@ -325,6 +483,8 @@ class FirestoreCollectionSnapshot:
             self._content_sha256 = None
             self._latest_dataset_summary_present = False
             self._dashboard_bootstrap_present = False
+            self._base_snapshot_segment_fingerprints = None
+            self._base_snapshot_record_sets = None
             self._loaded = True
             return self.version
         if not self._valid_pointer(state):
@@ -392,6 +552,28 @@ class FirestoreCollectionSnapshot:
                 if hashlib.sha256(raw).hexdigest() != state["sqlite_sha256"]:
                     raise ValueError("Collections snapshot checksum mismatch")
                 _remember_restored_image(key, raw)
+            if snapshot_encoding == "sqlite-segment-gzip-base64-v1":
+                expected_segments = max(
+                    1, (len(raw) + _RAW_SNAPSHOT_SEGMENT_BYTES - 1)
+                    // _RAW_SNAPSHOT_SEGMENT_BYTES,
+                )
+                if len(references) != expected_segments:
+                    raise ValueError("Collections snapshot segment count is invalid")
+                raw_segments = [
+                    memoryview(raw)[offset:offset + _RAW_SNAPSHOT_SEGMENT_BYTES]
+                    for offset in range(0, len(raw), _RAW_SNAPSHOT_SEGMENT_BYTES)
+                ] or [memoryview(raw)]
+                self._base_snapshot_segment_fingerprints = tuple(
+                    _snapshot_segment_fingerprint(segment) for segment in raw_segments
+                )
+                if len(self._base_snapshot_segment_fingerprints) != len(references):
+                    raise ValueError("Collections snapshot segment count is invalid")
+                self._base_snapshot_record_sets = tuple(
+                    [[dict(records[0])] for records in results]
+                )
+            else:
+                self._base_snapshot_segment_fingerprints = None
+                self._base_snapshot_record_sets = None
             if self.path.exists() or self.path.is_symlink():
                 raise ValueError("Collections working path already exists")
             with self.path.open("xb") as target:
@@ -424,30 +606,39 @@ class FirestoreCollectionSnapshot:
                 payload = dict(payload)
             if (not isinstance(payload, dict)
                     or not {"item", "analytics", "keywords"} <= set(payload)
-                    or not set(payload) <= {"item", "analytics", "keywords", "collections"}
+                    or not set(payload) <= {
+                        "item", "analytics", "keywords", "collections", "algorithm_results",
+                        "run_history",
+                        "research",
+                    }
                     or (payload["item"] is not None and not isinstance(payload["item"], dict))
                     or not isinstance(payload["analytics"], dict)
                     or not isinstance(payload["keywords"], dict)
                     or not isinstance(payload["keywords"].get("items"), list)
-                    or "collections" in payload and (
-                        not isinstance(payload["collections"], dict)
-                        or set(payload["collections"]) != {
-                            "items", "suggestions", "mode", "summary",
-                        }
-                        or not isinstance(payload["collections"]["items"], list)
-                        or not isinstance(payload["collections"]["suggestions"], list)
-                        or not isinstance(payload["collections"]["summary"], dict)
-                        or not isinstance(payload["collections"]["mode"], str)
-                    )):
+                    or "collections" in payload
+                    and not _valid_collections_bootstrap(payload["collections"])
+                    or "algorithm_results" in payload
+                    and not _valid_algorithm_results_projection(payload["algorithm_results"])
+                    or "run_history" in payload
+                    and not _valid_run_history_projection(payload["run_history"])
+                    or "research" in payload
+                    and not _valid_research_bootstrap(payload["research"])):
                 raise ValueError("dashboard bootstrap provider returned an invalid payload")
             encoded = json.dumps(
                 payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
             ).encode("utf-8")
-            if len(encoded) > _MAX_DASHBOARD_BOOTSTRAP_BYTES and "collections" in payload:
-                payload.pop("collections")
-                encoded = json.dumps(
-                    payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-                ).encode("utf-8")
+            if len(encoded) > _MAX_DASHBOARD_BOOTSTRAP_BYTES:
+                for optional_key in (
+                    "algorithm_results", "collections", "run_history", "research",
+                ):
+                    if optional_key not in payload:
+                        continue
+                    payload.pop(optional_key)
+                    encoded = json.dumps(
+                        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                    ).encode("utf-8")
+                    if len(encoded) <= _MAX_DASHBOARD_BOOTSTRAP_BYTES:
+                        break
             if len(encoded) > _MAX_DASHBOARD_BOOTSTRAP_BYTES:
                 raise ValueError("dashboard bootstrap exceeds its bounded size")
         except Exception as error:
@@ -489,9 +680,9 @@ class FirestoreCollectionSnapshot:
             reference, snapshot_version=snapshot_version, sqlite_sha256=sqlite_sha256,
         )
 
-    def backfill_dashboard_bootstrap(self, payload) -> bool:
+    def backfill_dashboard_bootstrap(self, payload, *, replace_existing=False) -> bool:
         """Persist a read model for the exact restored snapshot version."""
-        if self._dashboard_bootstrap_present:
+        if self._dashboard_bootstrap_present and not replace_existing:
             return True
         if (type(self.version) is not int or self.version < 1
                 or not isinstance(self._sha256, str)
@@ -505,7 +696,9 @@ class FirestoreCollectionSnapshot:
         )
         if metadata:
             try:
-                self._backfill_optional_metadata(metadata)
+                self._backfill_optional_metadata(
+                    metadata, replace_dashboard_bootstrap=replace_existing,
+                )
             except CollectionSnapshotConflict:
                 # This is an optional read model. A concurrent writer may
                 # advance the SQLite pointer after this request restored it;
@@ -513,7 +706,9 @@ class FirestoreCollectionSnapshot:
                 return False
         return self._dashboard_bootstrap_present
 
-    def _backfill_optional_metadata(self, metadata: dict) -> None:
+    def _backfill_optional_metadata(
+        self, metadata: dict, *, replace_dashboard_bootstrap=False,
+    ) -> None:
         """Atomically add read models to their exact existing SQLite version."""
         if (type(self.version) is not int or self.version < 1
                 or not isinstance(self._sha256, str)
@@ -536,7 +731,8 @@ class FirestoreCollectionSnapshot:
                         ) if key in metadata
                     })
             if "dashboard_bootstrap_ref" in metadata:
-                if (self._dashboard_bootstrap_reference(current) is None
+                if (replace_dashboard_bootstrap
+                        or self._dashboard_bootstrap_reference(current) is None
                         or not self._dashboard_bootstrap_present):
                     updated.update(metadata)
             return updated, updated
@@ -678,19 +874,16 @@ class FirestoreCollectionSnapshot:
                 )
                 return self.version
             raw_segments = [
-                raw[offset:offset + _RAW_SNAPSHOT_SEGMENT_BYTES]
+                memoryview(raw)[offset:offset + _RAW_SNAPSHOT_SEGMENT_BYTES]
                 for offset in range(0, len(raw), _RAW_SNAPSHOT_SEGMENT_BYTES)
-            ]
-            if len(raw_segments) == 1:
-                compressed_segments = [gzip.compress(
-                    raw_segments[0], compresslevel=6, mtime=0,
-                )]
-            else:
-                with ThreadPoolExecutor(max_workers=min(4, len(raw_segments))) as executor:
-                    compressed_segments = list(executor.map(
-                        lambda segment: gzip.compress(segment, compresslevel=6, mtime=0),
-                        raw_segments,
-                    ))
+            ] or [memoryview(raw)]
+            snapshot_record_sets, segment_fingerprints, compressed_bytes = (
+                _prepare_snapshot_segment_records(
+                    raw_segments,
+                    base_fingerprints=self._base_snapshot_segment_fingerprints,
+                    base_records=self._base_snapshot_record_sets,
+                )
+            )
             compression_done = time.perf_counter()
         except (OSError, sqlite3.Error) as error:
             raise CollectionSnapshotUnavailable(
@@ -702,10 +895,10 @@ class FirestoreCollectionSnapshot:
                 backup_path.unlink(missing_ok=True)
             except OSError:
                 pass
-        compressed_bytes = sum(map(len, compressed_segments))
-        if (len(compressed_segments) > _MAX_SNAPSHOT_SEGMENTS
-                or any(len(segment) > _MAX_COMPRESSED_SEGMENT_BYTES
-                       for segment in compressed_segments)):
+        if (len(snapshot_record_sets) > _MAX_SNAPSHOT_SEGMENTS
+                or any(_snapshot_record_compressed_bytes(records)
+                       > _MAX_COMPRESSED_SEGMENT_BYTES
+                       for records in snapshot_record_sets)):
             raise CollectionSnapshotUnavailable(
                 "Collections snapshot exceeds its storage limit",
                 failure_reason="COMPRESSED_SNAPSHOT_TOO_LARGE",
@@ -718,11 +911,6 @@ class FirestoreCollectionSnapshot:
         summary_pointer = self._latest_dataset_summary_metadata()
         next_version = self.version + 1
         dashboard_records = self._dashboard_bootstrap_records()
-        snapshot_record_sets = [
-            [{"encoding": "sqlite-segment-gzip-base64-v1",
-              "payload": base64.b64encode(segment).decode("ascii")}]
-            for segment in compressed_segments
-        ]
         record_sets = [*snapshot_record_sets]
         if dashboard_records is not None:
             record_sets.append(dashboard_records)
@@ -811,6 +999,8 @@ class FirestoreCollectionSnapshot:
         self._latest_dataset_summary_present = bool(summary_pointer)
         self._dashboard_bootstrap_present = bool(dashboard_pointer)
         self._dashboard_bootstrap_checked = True
+        self._base_snapshot_segment_fingerprints = segment_fingerprints
+        self._base_snapshot_record_sets = tuple(snapshot_record_sets)
         finished = time.perf_counter()
         _logger.info(
             "Collections snapshot timing unchanged=false database_bytes=%d compressed_bytes=%d segments=%d "
