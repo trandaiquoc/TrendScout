@@ -18,6 +18,13 @@ def latest_dataset(request: Request):
         item = service.store.latest_dataset()
     if item is None:
         return {'item': None}
+    manifest = item.get('source_manifest')
+    if isinstance(manifest, list):
+        item['source_manifest'] = [
+            {key: value for key, value in source.items() if key != 'source_input_digest'}
+            if isinstance(source, dict) else source
+            for source in manifest
+        ]
     item['restoration_status'] = 'CACHED'
     collection_at = item.get('created_at') or item.get('fetched_at')
     if collection_at:

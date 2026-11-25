@@ -261,7 +261,8 @@ class KeywordWorkbenchTests(unittest.TestCase):
     def test_run_history_distinguishes_fetch_outcome_from_completed_processing(self):
         fetch_id = "e" * 32
         manifest = [{"source_id": "youtube_video_search", "status": "FAILED",
-                     "error_code": "SOURCE_EXECUTION_FAILED", "record_count": 0}]
+                     "error_code": "SOURCE_EXECUTION_FAILED", "record_count": 0,
+                     "source_input_digest": "a" * 64}]
         with self.store.connect() as db:
             db.execute("INSERT INTO fetch_jobs(fetch_id,status,updated_at) VALUES(?,?,?)",
                        (fetch_id, "COMPLETED", "2026-11-17T17:41:25Z"))
@@ -292,6 +293,17 @@ class KeywordWorkbenchTests(unittest.TestCase):
         self.assertEqual(detail["outcome_status"], "FAILED")
         self.assertEqual(detail["error_code"], "SOURCE_EXECUTION_FAILED")
         self.assertEqual(detail["dataset_status"], "FAILED")
+        for item in (item, offset_item, detail):
+            manifest_value = item["source_manifest"]
+            manifest_value = (json.loads(manifest_value)
+                              if isinstance(manifest_value, str) else manifest_value)
+            self.assertNotIn("source_input_digest", manifest_value[0])
+
+        latest = self._request("GET", "/api/v1/datasets/latest").json()["item"]
+        self.assertNotIn("source_input_digest", latest["source_manifest"][0])
+        overview = self._request("GET", "/api/v1/analytics/overview").json()
+        self.assertNotIn("source_input_digest",
+                         overview["latest_dataset"]["source_manifest"][0])
 
     def test_run_history_restores_shared_fetch_when_collections_failed_before_snapshot(self):
         fetch_id = "c" * 32
@@ -300,6 +312,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
             "status": "SUCCESS",
             "record_count": 999,
             "delivery_state": "CACHED",
+            "source_input_digest": "b" * 64,
         }, {
             "source_id": "google_web_serp",
             "status": "UNAVAILABLE",
@@ -360,6 +373,7 @@ class KeywordWorkbenchTests(unittest.TestCase):
             if isinstance(source_manifest, str):
                 source_manifest = json.loads(source_manifest)
             self.assertEqual(len(source_manifest), 4)
+            self.assertNotIn("source_input_digest", source_manifest[0])
             self.assertEqual(item["collection_processing_status"], "MODEL_UNAVAILABLE")
             self.assertEqual(item["collection_error_code"], "LOCAL_MODEL_UNAVAILABLE")
 

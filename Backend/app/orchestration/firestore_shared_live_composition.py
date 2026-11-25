@@ -99,6 +99,7 @@ def create_firestore_shared_live_composition(
         state_store,
         payload_blobs=snapshot_blobs,
         max_inline_bytes=cache_max_inline_bytes,
+        monotonic_read_clock=True,
     )
     admission = PublicAdmission(state_store, policy, state_key=state_key)
     handlers = handlers_factory(shared_cache)

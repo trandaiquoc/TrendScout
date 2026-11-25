@@ -1605,6 +1605,8 @@ class PublicAdmission:
                    updated_at=now.isoformat())
         return {"job_id": job["job_id"], "fence": job["fence"],
                 "lease_until": job["lease_until"], "expires_at": job["expires_at"],
+                "created_at": job["created_at"],
+                "source_checkpoints": deepcopy(job.get("source_checkpoints", {})),
                 "request_metadata": deepcopy(job.get("request_metadata", {}))}
 
     def claim_next(self, owner: str, *, now: datetime) -> dict | None:
@@ -1919,7 +1921,7 @@ class PublicAdmission:
         self._transaction(operation)
 
     def finish(self, job_id: str, owner: str, fence: int, *, now: datetime,
-               partial: bool = False, require_source_results: bool = False) -> None:
+               partial: bool = False, require_source_results: bool = False) -> dict:
         now = _utc(now)
         if type(partial) is not bool or type(require_source_results) is not bool:
             raise ValueError("finish flags must be boolean")
@@ -1936,7 +1938,11 @@ class PublicAdmission:
                        recovery_available=False,
                        continuation_available=False,
                        lease_until=None, updated_at=now.isoformat(), finished_at=now.isoformat())
-        self._transaction(op)
+            return {"job_id": job["job_id"], "state": job["state"],
+                    "created_at": job.get("created_at"),
+                    "updated_at": job["updated_at"],
+                    "finished_at": job["finished_at"]}
+        return self._transaction(op)
 
     def disable(self) -> None:
         """Persist a fail-closed switch; wiring authorization is a deployment concern."""

@@ -123,9 +123,14 @@ class FakeTransaction:
         return iter([FakeSnapshot(self.client.data.get(reference.path))])
 
     def set(self, reference, value):
+        self.client.set_calls += 1
         if self.client.fail_write_at is not None and len(self.pending) == self.client.fail_write_at:
             raise RuntimeError("injected transaction failure")
         self.pending.append(("set", reference.path, deepcopy(value)))
+
+    def update(self, reference, values):
+        self.client.update_calls += 1
+        self.pending.append(("update", reference.path, deepcopy(values)))
 
     def delete(self, reference):
         self.pending.append(("delete", reference.path, None))
@@ -136,11 +141,15 @@ class FakeClient:
         self.data, self.fail_write_at = {}, None
         self.document_gets = 0
         self.batch_gets = 0
+        self.transaction_calls = 0
+        self.set_calls = 0
+        self.update_calls = 0
 
     def collection(self, name):
         return FakeCollection(self, name)
 
     def transaction(self, max_attempts):
+        self.transaction_calls += 1
         return FakeTransaction(self)
 
     def get_all(self, references):
@@ -175,6 +184,10 @@ def fake_transactional(callback):
         for action, path, value in transaction.pending:
             if action == "set":
                 updated[path] = value
+            elif action == "update":
+                if path not in updated:
+                    raise RuntimeError("cannot update a missing document")
+                updated[path].update(value)
             else:
                 updated.pop(path, None)
         transaction.client.data = updated
@@ -203,9 +216,21 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         ref = self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))
         reopened = FirestoreSnapshotBlobs(self.client)
         self.assertEqual(reopened.get(ref, now=NOW + timedelta(seconds=5)), records)
+        set_calls = self.client.set_calls
+        self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=30))
+        self.assertEqual(self.client.set_calls, set_calls)
+        update_calls = self.client.update_calls
         self.assertEqual(
             self.blobs.put(records, now=NOW, retain_until=NOW + timedelta(seconds=40)), ref
         )
+        self.assertGreater(self.client.update_calls, update_calls)
+        self.assertEqual(self.client.set_calls, set_calls)
+        prefix = f"_ts_d5_cache_blobs/{ref['digest']}/chunks/"
+        chunk_retention = [value["retain_until"] for path, value in self.client.data.items()
+                           if path.startswith(prefix)]
+        self.assertTrue(chunk_retention)
+        self.assertTrue(all(value == (NOW + timedelta(seconds=40)).isoformat()
+                            for value in chunk_retention))
         self.assertEqual(reopened.get(ref, now=NOW + timedelta(seconds=35)), records)
         with self.assertRaisesRegex(ValueError, "expired"):
             reopened.get(ref, now=NOW + timedelta(seconds=40))
@@ -260,8 +285,10 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         import random
         import sqlite3
         from contextlib import closing
+
         from app.collections.firestore_snapshot import (
-            CollectionSnapshotUnavailable, FirestoreCollectionSnapshot,
+            CollectionSnapshotUnavailable,
+            FirestoreCollectionSnapshot,
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -421,6 +448,35 @@ class FirestoreSharedCacheTests(unittest.TestCase):
         other_scope = CacheScope(GOOGLE_SOURCE_ID, "serpapi_google", "other query", "a" * 64,
                                  "gl=us", "en", "7d", "v1", "policy-v1")
         self.assertEqual(cache_b.get(other_scope, grant=GRANT, now=NOW)["reason"], "CACHE_MISS")
+
+    def test_monotonic_cache_hit_uses_read_only_batch_and_clock_regression_falls_back(self):
+        class CountingStore:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.reads = self.transactions = 0
+
+            def read_many(self, keys):
+                self.reads += 1
+                return self.wrapped.read_many(keys)
+
+            def transact(self, key, operation):
+                self.transactions += 1
+                return self.wrapped.transact(key, operation)
+
+        store = CountingStore(FirestoreAtomicStateStore(self.client))
+        cache = SharedCache(store, monotonic_read_clock=True)
+        cache.put(SCOPE, grant=GRANT, origin="LIVE", payload={"value": "cached"},
+                  fetched_at=NOW, now=NOW)
+        store.reads = store.transactions = 0
+
+        hit = cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=5))
+        self.assertEqual(hit["status"], "CACHED")
+        self.assertEqual((store.reads, store.transactions), (1, 0))
+
+        regressed = cache.get(SCOPE, grant=GRANT, now=NOW - timedelta(seconds=1))
+        self.assertEqual((regressed["status"], regressed["reason"]),
+                         ("REJECTED", "INVALID_CACHE_TIME"))
+        self.assertEqual((store.reads, store.transactions), (2, 1))
 
     def test_all_four_source_scopes_round_trip_without_cross_source_data(self):
         writer = create_firestore_shared_cache(self.client, max_inline_bytes=64)
@@ -749,7 +805,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Provider quota status is unknown" in limitation
             for limitation in sources[YOUTUBE_SOURCE_ID]["known_limitations"]
         ))
-        self.assertEqual(client.batch_gets, 1)
+        self.assertEqual(client.batch_gets, 2)
         send_mock.assert_not_called()
 
     async def test_vercel_shared_live_composes_all_sources_without_provider_calls(self):

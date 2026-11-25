@@ -241,6 +241,9 @@ def overview(request: Request):
                 latest_item[key] = json.loads(latest_item[key])
             except (TypeError, ValueError):
                 latest_item[key] = []
+        latest_item["source_manifest"] = _public_source_manifest(
+            latest_item.get("source_manifest")
+        )
         latest_item["eligible_keyword_count"] = totals["eligible"] or 0
         latest_item["assigned_keyword_count"] = membership_count
         latest_item["unassigned_keyword_count"] = unassigned_topic_count
@@ -252,6 +255,7 @@ def overview(request: Request):
                 item[key] = json.loads(item[key])
             except (TypeError, ValueError):
                 item[key] = []
+        item["source_manifest"] = _public_source_manifest(item.get("source_manifest"))
         snapshots.append(item)
     cohorts = {}
     for row in top:
@@ -318,6 +322,9 @@ def overview(request: Request):
                 successful_item[key] = json.loads(successful_item[key])
             except (TypeError, ValueError):
                 successful_item[key] = []
+        successful_item["source_manifest"] = _public_source_manifest(
+            successful_item.get("source_manifest")
+        )
         try:
             stamp = datetime.fromisoformat(
                 (successful_item.get("created_at") or successful_item.get("fetched_at") or "").replace("Z", "+00:00")
@@ -456,11 +463,25 @@ def _attach_run_outcome(item, manifest):
                 break
 
 
+def _public_source_manifest(manifest):
+    if not isinstance(manifest, list):
+        return []
+    return [
+        {key: value for key, value in source.items() if key != "source_input_digest"}
+        if isinstance(source, dict) else source
+        for source in manifest
+    ]
+
+
 def _history_item_from_job(row):
     item = dict(row)
     try:
         manifest = json.loads(item.get("source_manifest") or "[]")
+        manifest = _public_source_manifest(manifest)
         item["sources"] = [source.get("source_id") for source in manifest if isinstance(source, dict)]
+        item["source_manifest"] = json.dumps(
+            manifest, ensure_ascii=False, separators=(",", ":")
+        )
     except (TypeError, ValueError):
         manifest = []
         item["sources"] = []
@@ -512,8 +533,7 @@ def _history_item_from_manual(run):
 
 def _history_item_from_distributed(run):
     manifest = run.get("source_manifest") or []
-    if not isinstance(manifest, list):
-        manifest = []
+    manifest = _public_source_manifest(manifest)
     item = dict(run)
     item["source_manifest"] = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     item["sources"] = [source["source_id"] for source in manifest
@@ -755,7 +775,12 @@ async def run_history(
         if item.get("source_manifest"):
             try:
                 manifest = json.loads(item["source_manifest"])
-                item["sources"] = [source.get("source_id") for source in manifest]
+                manifest = _public_source_manifest(manifest)
+                item["source_manifest"] = json.dumps(
+                    manifest, ensure_ascii=False, separators=(",", ":")
+                )
+                item["sources"] = [source.get("source_id") for source in manifest
+                                   if isinstance(source, dict)]
             except (TypeError, ValueError):
                 manifest = []
                 item["sources"] = []
@@ -957,6 +982,7 @@ async def run_history_detail(fetch_id: str, request: Request):
             item[key] = json.loads(item[key]) if item.get(key) else []
         except (TypeError, ValueError):
             item[key] = []
+    item["source_manifest"] = _public_source_manifest(item.get("source_manifest"))
     item["run_type"] = "FETCH" if item.get("dataset_id") else (
         "COLLECTION_RECONCILIATION" if item.get("membership_reconciliation_id")
         else "COLLECTION_PROCESSING"

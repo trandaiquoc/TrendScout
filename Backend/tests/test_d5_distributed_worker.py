@@ -9,6 +9,7 @@ from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Barrier
+from unittest.mock import patch
 
 import httpx
 from test_d5_live_gateway import Approvals, Credentials
@@ -174,6 +175,95 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         result = service.status(job_id, include_records=True)
         self.assertEqual([source["source_id"] for source in result["sources"]], sorted(SOURCES))
         self.assertTrue(all(source["record_count"] == 1 for source in result["sources"]))
+
+    async def test_terminal_worker_projection_matches_status_without_rereading_job(self):
+        job_id = self.admit()
+
+        def handler(context):
+            return self.source_result(1)
+
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = self.worker({source: handler for source in SOURCES})
+        worker_result = await worker.run_once("terminal-projection-worker")
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        expected = service.status(job_id, include_records=True)
+
+        with patch.object(service.admission, "read_job",
+                           side_effect=AssertionError("terminal projection reread the job")):
+            actual = service.terminal_status_from_worker_result(
+                worker_result, created_at=worker_result["created_at"]
+            )
+
+        self.assertIsNotNone(actual)
+        for key in (
+            "fetch_id", "status", "stage", "request_kind", "selected_sources",
+            "data_mode", "sources", "progress", "discovery", "created_at",
+            "updated_at", "finished_at", "terminal", "recovery_available",
+            "collection_input_unchanged",
+        ):
+            self.assertEqual(actual[key], expected[key], key)
+
+    async def test_claimed_checkpoint_snapshot_avoids_second_owned_transaction(self):
+        job_id = self.admit()
+        source_id = WIKIMEDIA_SOURCE_ID
+        first_claim = self.admission.claim(job_id, "checkpoint-worker-a", now=self.clock())
+        journal = SourceCheckpointJournal(self.admission)
+        grant = self.grant(source_id, self.clock())
+        journal.save(
+            job_id, "checkpoint-worker-a", first_claim["fence"],
+            source_id=source_id, grant=grant, now=self.clock(), expected_revision=0,
+            snapshot={
+                "schema": 1, "source_id": source_id, "data_mode": "SYNTHETIC",
+                "plan_fingerprint": self.config.plan_fingerprint,
+                "phase": "RUNNING", "progress": {"cursor": 1},
+            },
+        )
+
+        class CountingStore:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.transactions = 0
+
+            def transact(self, key, operation):
+                self.transactions += 1
+                return self.wrapped.transact(key, operation)
+
+        counted = CountingStore(self.admission.store)
+        self.admission.store = counted
+        self.clock.value += timedelta(seconds=self.config.lease_seconds + 1)
+        second_claim = self.admission.claim_next("checkpoint-worker-b", now=self.clock())
+        self.assertIsNotNone(second_claim)
+        before_load = counted.transactions
+
+        saved = journal.load(
+            job_id, "checkpoint-worker-b", second_claim["fence"],
+            source_id=source_id, grant=self.grant(source_id, self.clock()),
+            now=self.clock(), claimed_checkpoints=second_claim["source_checkpoints"],
+        )
+
+        self.assertEqual(saved["snapshot"]["progress"], {"cursor": 1})
+        self.assertEqual(counted.transactions, before_load)
+        restricted_grant = CheckpointGrant(
+            source_id, "SYNTHETIC", "fixture-policy-v1",
+            self.clock() + timedelta(minutes=10), 60, True,
+        )
+        shortened = journal.load(
+            job_id, "checkpoint-worker-b", second_claim["fence"],
+            source_id=source_id, grant=restricted_grant, now=self.clock(),
+            claimed_checkpoints=second_claim["source_checkpoints"],
+        )
+        self.assertEqual(shortened["retain_until"],
+                         (NOW + timedelta(seconds=60)).isoformat())
+        self.assertEqual(counted.transactions, before_load + 1)
+        with self.assertRaisesRegex(AdmissionDenied, "CHECKPOINT_INVALID"):
+            journal.load(
+                job_id, "checkpoint-worker-b", second_claim["fence"],
+                source_id=source_id, grant=self.grant(source_id, self.clock()),
+                now=self.clock(), claimed_checkpoints={source_id: []},
+            )
+        self.assertEqual(counted.transactions, before_load + 1)
 
     async def test_configured_source_order_is_used_for_fetch_all(self):
         self.admit()

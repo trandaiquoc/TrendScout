@@ -1145,6 +1145,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
       if (job.status === 'NOT_PROCESSED' && isVercelSharedLive(state.capabilities)
           && terminalFetch?.fetch_id === fetchId) {
         const recovered = await recoverLatestVercelCollectionSnapshot(terminalFetch);
+        if (recovered === 'REUSED') return;
         if (recovered && attempt < 120) window.setTimeout(() => poll(attempt + 1, true), 250);
         else if (!recovered) $('#workbench-status').textContent = t('runs.outcome.collection-failed');
         return;
@@ -1190,6 +1191,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
     // snapshot merely to discover that the new job has not been processed.
     void recoverLatestVercelCollectionSnapshot(terminalFetch, { replayTerminal: true })
       .then((recovered) => {
+        if (recovered === 'REUSED') return;
         if (recovered) void poll(0, true);
         else $('#workbench-status').textContent = t('runs.outcome.collection-failed');
       });
@@ -1454,7 +1456,11 @@ function handleFetchTerminal(runId, fetchStatus) {
       loadRun(runId);
     } else if (isVercelSharedLive(state.capabilities)) {
       const hasDiscovery = acceptsDiscovery(state.capabilities, fetchStatus?.discovery);
-      refreshCollectionJob(fetchStatus?.fetch_id, fetchStatus);
+      if (fetchStatus?.collection_input_unchanged !== true) {
+        refreshCollectionJob(fetchStatus?.fetch_id, fetchStatus);
+      } else if (!state.persistedDatasetAvailable) {
+        void loadLatestDataset();
+      }
       state.publicFetchDiscovery = hasDiscovery ? fetchStatus.discovery : null;
       state.publicFetchSources = Array.isArray(fetchStatus?.sources) ? fetchStatus.sources : [];
       state.publicFetchFinishedAt = typeof fetchStatus?.finished_at === 'string'
@@ -1469,7 +1475,11 @@ function handleFetchTerminal(runId, fetchStatus) {
       if (state.capabilities.deployment_environment !== 'production') {
         void loadLatestDataset().then((item) => {
           if (item) loadKeywords();
-          else void recoverLatestVercelCollectionSnapshot(fetchStatus);
+          else void recoverLatestVercelCollectionSnapshot(fetchStatus).then((recovered) => {
+            if (recovered && recovered !== 'REUSED') {
+              refreshCollectionJob(fetchStatus.fetch_id, fetchStatus);
+            }
+          });
         });
       }
     } else if (acceptsDiscovery(state.capabilities, fetchStatus?.discovery)) {
@@ -2009,6 +2019,11 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
     const fetchId = latest?.fetch_id;
     const status = latest?.outcome_status || latest?.status;
     if (!fetchId || latest.data_mode !== 'LIVE' || !terminalStatuses.has(status)) return false;
+    if (latest.collection_input_unchanged === true) {
+      collectionRecoverySucceeded.add(fetchId);
+      if (!state.persistedDatasetAvailable) await loadLatestDataset();
+      return 'REUSED';
+    }
     if (collectionRecoverySucceeded.has(fetchId)) {
       // Another fetch or an edit may have changed the current dataset since
       // this recovery completed, even though this fetch needs no replay.
@@ -2031,12 +2046,14 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
         // This endpoint only replays the already retained LIVE source checkpoints.
         // It does not admit a Fetch, reserve quota, or contact a provider.
         let recovered = false;
+        let collectionReused = false;
         for (let attempt = 0; attempt < 3 && !recovered; attempt += 1) {
           try {
-            await requestJson(
+            const result = await requestJson(
               `/api/v1/fetches/${encodeURIComponent(fetchId)}/collections`,
               { method: 'POST', locale: getLocale() },
             );
+            collectionReused = result?.collection_input_unchanged === true;
             recovered = true;
           } catch (error) {
             const code = error?.body?.detail?.code || error?.body?.code;
@@ -2050,6 +2067,11 @@ async function recoverLatestVercelCollectionSnapshot(terminalFetch = null, { rep
             if (!transient || attempt === 2) throw error;
             await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1000));
           }
+        }
+        if (collectionReused) {
+          collectionRecoverySucceeded.add(fetchId);
+          if (!state.persistedDatasetAvailable) await loadLatestDataset();
+          return 'REUSED';
         }
       }
       await loadLatestDataset();

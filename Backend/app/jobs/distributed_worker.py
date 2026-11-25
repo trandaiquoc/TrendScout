@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Awaitable, Callable, Mapping
 
+from app.collections.source_digest import source_input_digest
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
@@ -159,7 +160,8 @@ class DistributedFetchWorker:
                 raise AdmissionDenied("SOURCE_MODE_POLICY_MISMATCH")
             checkpoint_started = perf_counter()
             saved = self.journal.load(job_id, owner, fence, source_id=source_id,
-                                      grant=grant, now=now)
+                                      grant=grant, now=now,
+                                      claimed_checkpoints=claim.get("source_checkpoints"))
             checkpoint_finished = perf_counter()
             if saved and saved["snapshot"].get("phase") == "COMPLETE":
                 outcomes[source_id] = saved["snapshot"]["result"]
@@ -251,6 +253,7 @@ class DistributedFetchWorker:
                 "plan_fingerprint": self.admission.policy.plan_fingerprint,
                 "phase": "COMPLETE",
                 "result": result,
+                "source_input_digest": source_input_digest(source_id, result),
             }
             handler_finished = perf_counter()
             self.journal.save(job_id, owner, fence, source_id=source_id, grant=grant,
@@ -288,12 +291,14 @@ class DistributedFetchWorker:
             return {"job_id": job_id, "state": "DEFERRED", "sources": outcomes}
 
         partial = any(value["status"] != "SUCCESS" for value in outcomes.values())
-        self.admission.finish(
+        finished = self.admission.finish(
             job_id, owner, fence, now=self.utcnow(), partial=partial,
             require_source_results=True,
         )
         return {"job_id": job_id, "state": "PARTIAL" if partial else "COMPLETED",
-                "sources": outcomes}
+                "sources": outcomes,
+                "created_at": claim.get("created_at"),
+                "finished_at": finished.get("finished_at") if isinstance(finished, dict) else None}
 
     @staticmethod
     def _source_failure_result(source_id, data_mode, error, *, phase, reason):

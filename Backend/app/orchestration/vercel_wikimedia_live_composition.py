@@ -253,7 +253,10 @@ async def vercel_wikimedia_live_composition(
         on_rate_limited=pacer.defer,
     )
     try:
-        cache = SharedCache(state_store, payload_blobs=snapshot_blobs, max_inline_bytes=500_000)
+        cache = SharedCache(
+            state_store, payload_blobs=snapshot_blobs,
+            max_inline_bytes=500_000, monotonic_read_clock=True,
+        )
 
         def resolve_cache_grant(source_id, now):
             if source_id not in policy.enabled_sources:
@@ -423,6 +426,12 @@ async def vercel_shared_live_composition(
         collection_snapshot_loaded = not defer_collection_snapshot
         if collection_snapshot_loaded:
             collection_snapshot.load()
+        latest_dataset_summary_available = False
+        latest_dataset_summary = None
+        if defer_collection_snapshot:
+            latest_dataset_summary_available, latest_dataset_summary = (
+                collection_snapshot.read_latest_dataset_summary()
+            )
         collection_store = (None if defer_collection_snapshot else
                             CollectionStore(collection_path, data_mode_scope="LIVE"))
         if collection_store is not None:
@@ -447,6 +456,8 @@ async def vercel_shared_live_composition(
         ) as facade:
             facade.available_sources = frozenset(policy.enabled_sources)
             facade.vercel_shared_live = True
+            facade.latest_dataset_summary_available = latest_dataset_summary_available
+            facade.latest_dataset_summary = latest_dataset_summary
             # Retain the old attribute for callers during the Wikimedia-only rollout.
             facade.vercel_wikimedia_live = True
             facade.vercel_shared_live_policy_sync_status = policy_sync.status

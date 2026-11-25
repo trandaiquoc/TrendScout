@@ -129,7 +129,8 @@ window.fetch = (path, options = {}) => {
   } else if (value === '/api/v1/fetches/' + fetchId + '/collections' && method === 'POST') {
     window.collectionRecoveryPosts += 1;
     localStorage.setItem('collectionRecoveryPosts', String(window.collectionRecoveryPosts));
-    body = {status: 'COMPLETED'};
+    body = {status: 'COMPLETED', collection_input_unchanged: true,
+      dataset_id: 'existing-cache-only-dataset'};
   } else if (value === '/api/v1/collections') {
     window.collectionsReads += 1;
     body = {items: [], suggestions: [], mode: 'AUTO_CREATE', summary: {
@@ -201,9 +202,11 @@ window.fetch = (path, options = {}) => {
   'terminal Fetch starts idempotent recovery without a preceding Collections job read');
   const recoveryRequests = window.fetchRequests.slice(recoveryIndex + 1);
   check(recoveryRequests.filter((request) => request.path === '/api/v1/datasets/latest').length === 1,
-    'recovery refreshes the dataset once');
-  check(recoveryRequests.filter((request) => request.path === '/api/v1/analytics/overview').length === 1,
-    'recovery refreshes analytics once');
+    'reused source evidence loads the existing dataset once');
+  check(!recoveryRequests.some((request) => request.path === '/api/v1/analytics/overview'),
+    'unchanged source evidence does not refresh analytics');
+  check(!recoveryRequests.some((request) => request.path === '/api/v1/collections/jobs/' + fetchId),
+    'successful reuse does not poll for a deliberately absent Collections job');
   check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
   document.querySelector('[data-nav="collections"]').click();
   await wait(250);
@@ -266,7 +269,7 @@ window.fetch = (path, options = {}) => {
                 f"Vercel Shared LIVE Fetch Chrome E2E failed: {marker}; "
                 f"browser stderr={result.stderr[-700:]}"
             )
-    print("Vercel Shared LIVE Fetch completion stays on Overview and renders cached data: PASS")
+    print("Vercel Shared LIVE Fetch reuses cached Collections data without polling: PASS")
 
 
 if __name__ == "__main__":

@@ -491,6 +491,7 @@ async def normal_google_live_composition(*, user_agent,
         store,
         payload_blobs=snapshot_blobs if uses_firestore else None,
         max_inline_bytes=500_000 if uses_firestore else None,
+        monotonic_read_clock=vercel_shared_live,
     )
     youtube_cache_scope = CacheScope(
         source_id=YOUTUBE_SOURCE_ID,

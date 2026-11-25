@@ -257,7 +257,7 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
                                      cached_context_only: bool = False):
     result = await asyncio.to_thread(
-        distributed.status, fetch_id, include_records=True
+        distributed.status, fetch_id, include_records=True, include_discovery=False
     )
     if result and result.get("terminal"):
         shared_live = getattr(distributed, "firestore_shared_live", False)
@@ -278,7 +278,9 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
             processed = await service.process_fetch(fetch_id, result.get("sources", []))
         if processed.get("status") == "FAILED":
             raise RuntimeError("Fetch Collections processing failed")
-        if shared_live:
+        if shared_live and processed.get("dataset_reused") is True:
+            request.state.vercel_fetch_snapshot_unchanged = True
+        elif shared_live:
             request.state.vercel_fetch_snapshot_required = True
 
 
@@ -447,13 +449,14 @@ async def create_fetch(
                 and slice_result.get("state") in {"COMPLETED", "PARTIAL"}):
             results = slice_result.get("sources")
             if (isinstance(results, dict) and set(results) == set(request_sources)
-                    and all(isinstance(item, dict)
-                            and item.get("delivery_state") == "CACHED"
-                            and type(item.get("provider_request_count")) is int
-                            and item["provider_request_count"] == 0
-                            for item in results.values())):
+                    and all(isinstance(item, dict) for item in results.values())):
                 try:
-                    status = await asyncio.to_thread(distributed.status, fetch_id)
+                    build_terminal_status = getattr(
+                        distributed, "terminal_status_from_worker_result", None
+                    )
+                    status = (build_terminal_status(
+                        slice_result, created_at=accepted.get("created_at")
+                    ) if callable(build_terminal_status) else None)
                     if (isinstance(status, dict) and status.get("fetch_id") == fetch_id
                             and status.get("terminal") is True
                             and status.get("status") in {"COMPLETED", "PARTIAL"}):
@@ -596,7 +599,8 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                         "error_code": prior["error_code"]}
     try:
         result = await asyncio.to_thread(
-            distributed.status, fetch_id, include_records=True
+            distributed.status, fetch_id, include_records=True,
+            include_discovery=False,
         )
     except AdmissionDenied as exc:
         _raise_distributed_admission_error(exc.code, distributed)
@@ -616,8 +620,13 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
     if recovered.get("status") == "FAILED":
         raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
+    if recovered.get("dataset_reused") is True:
+        request.state.vercel_fetch_snapshot_unchanged = True
     return {"fetch_id": fetch_id, "status": recovered.get("status", "FAILED"),
-            "error_code": recovered.get("error_code")}
+            "error_code": recovered.get("error_code"),
+            **({"collection_input_unchanged": True,
+                "dataset_id": recovered.get("dataset_id")}
+               if recovered.get("dataset_reused") is True else {})}
 
 
 @router.post("/fetches/history", status_code=202)

@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from threading import local
 
 from app.collections import embeddings
+from app.collections.source_digest import reusable_collection_input, source_input_digest
 from app.collections.store import (
     CollectionStore,
     bing_verification_update,
@@ -231,6 +232,31 @@ class CollectionService:
                     or prior and prior["status"] == "MODEL_UNAVAILABLE"
                     and not (retry_missing_snapshot or retry_existing_snapshot)):
                 return dict(prior)
+            if not prior and cached_context_only and self.store.data_mode_scope == "LIVE":
+                latest = db.execute(
+                    "SELECT dataset_id,source_manifest,processing_status,received_record_count,"
+                    "rejected_record_count,eligible_keyword_count,unassigned_keyword_count "
+                    "FROM dataset_snapshots WHERE data_mode='LIVE' "
+                    "ORDER BY created_at DESC,dataset_id DESC LIMIT 1"
+                ).fetchone()
+                if latest is not None:
+                    try:
+                        previous_manifest = json.loads(latest["source_manifest"])
+                    except (TypeError, ValueError):
+                        previous_manifest = None
+                    if reusable_collection_input(
+                            sources, previous_manifest,
+                            processing_status=latest["processing_status"]):
+                        return {
+                            "fetch_id": fetch_id,
+                            "status": "REUSED",
+                            "dataset_reused": True,
+                            "dataset_id": latest["dataset_id"],
+                            "available": latest["received_record_count"],
+                            "skipped": latest["rejected_record_count"],
+                            "eligible": latest["eligible_keyword_count"],
+                            "unassigned": latest["unassigned_keyword_count"],
+                        }
             db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at)
                 VALUES(?,'PROCESSING','CLEANING',?)""", (fetch_id, now()))
         records, rejected, bing_updates = [], [], []
@@ -749,7 +775,7 @@ class CollectionService:
                                   policy_excluded=0):
         manifests, flags, modes = [], [], set()
         provider_count = 0
-        for source in sources:
+        for source_index, source in enumerate(sources):
             raw_records = source.get("records", []) if isinstance(source.get("records"), list) else []
             status = source.get("status", "SUCCESS")
             declared = source.get("record_count")
@@ -771,6 +797,10 @@ class CollectionService:
                 "source_id", "status", "data_mode", "delivery_state", "coverage",
                 "quality_flags", "error_code", "retry_after_seconds",
             ) if source.get(key) is not None}
+            manifest["source_input_digest"] = source_input_digest(
+                manifest.get("source_id") if isinstance(manifest.get("source_id"), str)
+                else f"UNKNOWN_{source_index}", source
+            )
             # Keep source-level counts so a later targeted deletion can redact one
             # provider from mixed Fetch history without guessing aggregate totals.
             manifest["record_count"] = declared

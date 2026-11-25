@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,121 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(manifest[0]["source_id"], "youtube_video_search")
         self.assertEqual(manifest[0]["record_count"], 1)
         self.assertEqual(manifest[0]["received_record_count"], 1)
+
+    def test_cache_only_collection_reuse_requires_completed_matching_source_evidence(self):
+        from app.collections.source_digest import reusable_collection_input
+
+        live_store = CollectionStore(Path(self.temp.name) / "cache-reuse.sqlite",
+                                     data_mode_scope="LIVE")
+        service = CollectionService(live_store)
+        source = {
+            "source_id": "youtube_video_search",
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "records": [{
+                "provider_video_id": "AbCdEf12345",
+                "canonical_video_url": "https://www.youtube.com/watch?v=AbCdEf12345",
+                "title": "Portable Solar Generator Review",
+                "description": "Consumer product evidence",
+                "published_at": "2026-11-15T00:00:00Z",
+                "result_rank": 1,
+                "data_mode": "LIVE",
+            }],
+            "coverage": {
+                "provider_method": "search.list",
+                "query": "portable solar generator",
+                "provider_request_count": 1,
+                "attempted_calls": 1,
+                "serp_verification_attempted": 1,
+                "serp_verification_failed_count": 0,
+                "serp_admission_blocked_count": 0,
+                "source_fetched_at": "2026-11-16T00:00:00+00:00",
+            },
+        }
+        first = service._process_fetch("cache-reuse-base", [source])
+        self.assertEqual(first["status"], "COMPLETED")
+        with live_store.connect() as db:
+            saved = db.execute(
+                "SELECT source_manifest,processing_status FROM dataset_snapshots "
+                "WHERE dataset_id='cache-reuse-base'"
+            ).fetchone()
+            previous_manifest = json.loads(saved["source_manifest"])
+
+        cached = deepcopy(source)
+        cached.update(delivery_state="CACHED", provider_request_count=0)
+        cached["records"][0]["delivery_state"] = "CACHED"
+        cached["coverage"].update({
+            "provider_request_count": 0,
+            "cached_provider_request_count": 1,
+            "cache_delivery_at": "2026-11-17T12:00:00+00:00",
+            "cache_fetched_at": "2026-11-16T00:00:00+00:00",
+            "cache_freshness": "CACHED",
+            "cache_status": "CACHED",
+            "cache_reason": "FRESH_ENTRY",
+            "refresh_attempted_at": "2026-11-17T11:59:59+00:00",
+            "attempted_calls": 0,
+            "serp_verification_attempted": 0,
+            "cached_serp_verification_attempted": 1,
+        })
+        self.assertTrue(reusable_collection_input(
+            [cached], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        self.assertFalse(reusable_collection_input(
+            [cached], previous_manifest, processing_status="MODEL_UNAVAILABLE",
+        ))
+        changed_scope = deepcopy(cached)
+        changed_scope["coverage"]["query"] = "different query"
+        self.assertFalse(reusable_collection_input(
+            [changed_scope], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        provider_work = deepcopy(cached)
+        provider_work["provider_request_count"] = 1
+        self.assertFalse(reusable_collection_input(
+            [provider_work], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        inconsistent_provider_work = deepcopy(cached)
+        inconsistent_provider_work["coverage"]["provider_request_count"] = 1
+        self.assertFalse(reusable_collection_input(
+            [inconsistent_provider_work], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        stale = deepcopy(cached)
+        stale["delivery_state"] = "STALE_CACHE"
+        self.assertFalse(reusable_collection_input(
+            [stale], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        legacy_manifest = [{key: value for key, value in previous_manifest[0].items()
+                            if key != "source_input_digest"}]
+        self.assertFalse(reusable_collection_input(
+            [cached], legacy_manifest, processing_status=saved["processing_status"],
+        ))
+
+        reused = service._process_fetch(
+            "cache-reuse-hit", [cached], cached_context_only=True
+        )
+        self.assertEqual(reused["status"], "REUSED")
+        self.assertEqual(reused["dataset_id"], "cache-reuse-base")
+        with live_store.connect() as db:
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM fetch_jobs WHERE fetch_id='cache-reuse-hit'"
+            ).fetchone())
+            self.assertEqual(db.execute("SELECT count(*) FROM dataset_snapshots").fetchone()[0], 1)
+
+        changed = deepcopy(cached)
+        changed["records"][0]["description"] = "Changed source evidence"
+        processed = service._process_fetch(
+            "cache-reuse-changed", [changed], cached_context_only=True
+        )
+        self.assertEqual(processed["status"], "COMPLETED")
+        with live_store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM dataset_snapshots").fetchone()[0], 2)
 
     def test_live_unavailable_source_is_preserved_in_run_history_manifest(self):
         live_store = CollectionStore(Path(self.temp.name) / "unavailable-live-collections.sqlite",
@@ -743,6 +859,7 @@ class SmartCollectionsTests(unittest.TestCase):
 
     def test_analysis_cache_invalidates_for_observation_result_and_registry_changes(self):
         from dataclasses import replace
+
         from app.collections.service import _analysis_state_digest
         from app.composition import algorithm_engine
 
@@ -820,9 +937,13 @@ class SmartCollectionsTests(unittest.TestCase):
 
     def test_cohort_digest_encoding_matches_original_for_each_excluded_keyword(self):
         from types import SimpleNamespace
+
         from app.collections.service import (
-            _COHORT_MARKER, _COHORT_MARKER_JSON, _serialized_cohort, _cohort_json_without,
+            _COHORT_MARKER,
+            _COHORT_MARKER_JSON,
             _cohort_json_index,
+            _cohort_json_without,
+            _serialized_cohort,
         )
         peers = [
             (identifier, SimpleNamespace(scope=SimpleNamespace(project=project, article=title),
@@ -857,9 +978,12 @@ class SmartCollectionsTests(unittest.TestCase):
 
     def test_algorithm_digest_encoding_matches_original_registry_inputs(self):
         from dataclasses import asdict
+
         from app.collections.service import (
-            _COHORT_MARKER, _COHORT_MARKER_JSON,
-            _algorithm_digest_input, _algorithm_digest_prefix,
+            _COHORT_MARKER,
+            _COHORT_MARKER_JSON,
+            _algorithm_digest_input,
+            _algorithm_digest_prefix,
         )
         from app.composition import algorithm_engine
 

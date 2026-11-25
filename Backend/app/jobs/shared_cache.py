@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -117,9 +118,12 @@ class CacheGrant:
 
 class SharedCache:
     def __init__(self, store: AtomicStateStore, *, payload_blobs=None,
-                 max_inline_bytes: int | None = None):
+                 max_inline_bytes: int | None = None,
+                 monotonic_read_clock: bool = False):
         if not callable(getattr(store, "transact", None)):
             raise TypeError("atomic state store required")
+        if type(monotonic_read_clock) is not bool:
+            raise TypeError("cache read clock policy must be boolean")
         if payload_blobs is not None and not all(
                 callable(getattr(payload_blobs, method, None)) for method in ("put", "get")):
             raise TypeError("payload blob store must support durable reads and writes")
@@ -130,6 +134,7 @@ class SharedCache:
         self.store = store
         self.payload_blobs = payload_blobs
         self.max_inline_bytes = max_inline_bytes
+        self.monotonic_read_clock = monotonic_read_clock
 
     @staticmethod
     def _authorized(scope: CacheScope, grant: CacheGrant | None, now: datetime) -> bool:
@@ -270,7 +275,33 @@ class SharedCache:
             else:
                 result["_payload_ref"] = record["payload_ref"]
             return record, result
-        result = self.store.transact(scope.key, op)
+        result = None
+        read_many = getattr(self.store, "read_many", None)
+        # The Vercel shared worker validates time against its admission state's
+        # durable high-water before calling source handlers. In that runtime,
+        # an immutable cache read does not need to mutate last_checked_at.
+        if callable(read_many) and self.monotonic_read_clock:
+            try:
+                current = read_many([scope.key])[scope.key]
+                updated, candidate = op(deepcopy(current))
+                same_record = dict(updated) if isinstance(updated, dict) else updated
+                original_record = dict(current) if isinstance(current, dict) else current
+                if isinstance(same_record, dict):
+                    same_record.pop("last_checked_at", None)
+                if isinstance(original_record, dict):
+                    original_record.pop("last_checked_at", None)
+                read_only = same_record == original_record
+                if current:
+                    checked = _utc(datetime.fromisoformat(current["last_checked_at"]))
+                    read_only = read_only and now >= checked
+                if read_only:
+                    result = candidate
+            except Exception:
+                # Keep the transactional path as the authoritative fallback
+                # when the optional Firestore batch read is unavailable.
+                result = None
+        if result is None:
+            result = self.store.transact(scope.key, op)
         payload_ref = result.pop("_payload_ref", None)
         if payload_ref is not None:
             try:

@@ -140,9 +140,52 @@ class SourceCheckpointJournal:
                 or hashlib.sha256(encoded).hexdigest() != entry["digest"]):
             raise ValueError("invalid inline checkpoint integrity")
 
-    def load(self, job_id, owner, fence, *, source_id, grant, now):
+    def load(self, job_id, owner, fence, *, source_id, grant, now,
+             claimed_checkpoints=None):
         now = _utc(now)
         self._authorize(source_id, grant, now)
+
+        # claim_job already read and fenced the complete coordination document.
+        # Reuse that immutable snapshot for the common read path instead of
+        # starting another transaction against the same hot document. A later
+        # checkpoint save still verifies the lease and fence transactionally.
+        # Expired or tightened entries keep the original mutation path so their
+        # retention changes and cleanup remain durable.
+        if claimed_checkpoints is not None:
+            if not isinstance(claimed_checkpoints, dict):
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            claimed_entry = claimed_checkpoints.get(source_id)
+            if claimed_entry is None:
+                return None
+            if not isinstance(claimed_entry, dict):
+                raise AdmissionDenied("CHECKPOINT_INVALID")
+            if not claimed_entry:
+                return None
+            if (claimed_entry.get("policy_version") != grant.policy_version
+                    or claimed_entry.get("data_mode") != grant.data_mode):
+                raise AdmissionDenied("CHECKPOINT_POLICY_MISMATCH")
+            try:
+                if type(claimed_entry.get("revision")) is not int or claimed_entry["revision"] < 1:
+                    raise ValueError("invalid checkpoint revision")
+                claimed_snapshot = self._resolve_snapshot(
+                    claimed_entry, source_id=source_id,
+                    data_mode=grant.data_mode, now=now,
+                )
+                claimed_expiry = min(
+                    _utc(datetime.fromisoformat(claimed_entry["retain_until"])),
+                    _utc(datetime.fromisoformat(claimed_entry["created_at"]))
+                    + timedelta(seconds=grant.max_retention_seconds),
+                    _utc(grant.expires_at),
+                )
+                stored_expiry = _utc(datetime.fromisoformat(claimed_entry["retain_until"]))
+            except AdmissionDenied:
+                raise
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                raise AdmissionDenied("CHECKPOINT_INVALID") from None
+            if now < claimed_expiry and claimed_expiry == stored_expiry:
+                return {"revision": claimed_entry["revision"],
+                        "snapshot": claimed_snapshot,
+                        "retain_until": claimed_expiry.isoformat()}
 
         def operation(job):
             entries = job.setdefault("source_checkpoints", {})

@@ -1,8 +1,8 @@
 """Bounded, content-addressed JSON snapshots split across Firestore documents.
 
-The client is injected by the caller. A manifest and every chunk are written
-inside one Firestore transaction, so readers cannot observe a partial blob.
-Production Vercel Shared LIVE and the local opt-in runtime use this adapter.
+New content is published with its manifest and chunks in one transaction.
+Active immutable content is reused without rewriting bytes; retention updates
+patch the TTL field on its manifest and chunks atomically.
 """
 
 from __future__ import annotations
@@ -113,6 +113,17 @@ class FirestoreSnapshotBlobs:
                 # Do not change the representation of a blob already referenced
                 # by an older snapshot or checkpoint.
                 encoding = previous.get("chunk_encoding", "base64")
+                if previous["expiry"] > now:
+                    if effective_expiry == previous["expiry"]:
+                        return
+                    # Chunks carry the same TTL field as the manifest. Patch
+                    # only that field so Firestore TTL cannot remove chunks
+                    # before the extended manifest, without resending bytes.
+                    retention_text = effective_expiry.isoformat()
+                    for reference in chunk_refs:
+                        tx.update(reference, {"retain_until": retention_text})
+                    tx.update(manifest_ref, {"retain_until": retention_text})
+                    return
             retention_text = effective_expiry.isoformat()
             for index, (reference, content) in enumerate(zip(chunk_refs, chunks, strict=True)):
                 tx.set(reference, {
@@ -197,8 +208,14 @@ class FirestoreSnapshotBlobs:
                 if (not isinstance(value, dict) or type(value.get("schema")) is not int
                         or value.get("schema") != 1 or value.get("digest") != digest
                         or type(value.get("index")) is not int or value.get("index") != index
-                        or value.get("retain_until") != manifest["retain_until"]):
+                        or not isinstance(value.get("retain_until"), str)):
                     raise ValueError("snapshot blob chunk is missing or invalid")
+                try:
+                    chunk_expiry = _utc(datetime.fromisoformat(value["retain_until"]))
+                except (TypeError, ValueError):
+                    raise ValueError("snapshot blob chunk retention is invalid") from None
+                if chunk_expiry != manifest["expiry"]:
+                    raise ValueError("snapshot blob chunk retention does not match its manifest")
                 if manifest.get("chunk_encoding", "base64") == "bytes":
                     if type(value.get("data_bytes")) is not bytes or "data_b64" in value:
                         raise ValueError("snapshot blob chunk encoding is invalid")

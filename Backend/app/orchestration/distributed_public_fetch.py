@@ -11,6 +11,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+from app.collections.source_digest import (
+    reusable_collection_input,
+    reusable_collection_manifest,
+)
 from app.discovery.source_results import discover_fetch_results
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import (
@@ -227,6 +231,8 @@ class DistributedPublicFetch:
         self.resolve_processing_grants = resolve_processing_grants
         self.provider_retry_after_seconds = provider_retry_after_seconds
         self.owner_fresh_acceptance_once = owner_fresh_acceptance_once
+        self.latest_dataset_summary_available = False
+        self.latest_dataset_summary = None
 
     def submit(self, idempotency_key: str, *, history_days: int | None = None,
                source_ids: list[str] | None = None,
@@ -280,7 +286,10 @@ class DistributedPublicFetch:
                 "status": accepted["status"], "created_at": accepted.get("created_at"),
                 "owner_fresh_acceptance": accepted.get("owner_fresh_acceptance", False)}
 
-    def status(self, job_id: str, *, include_records: bool = False) -> dict | None:
+    def status(self, job_id: str, *, include_records: bool = False,
+               include_discovery: bool = True) -> dict | None:
+        if type(include_records) is not bool or type(include_discovery) is not bool:
+            raise ValueError("status projection flags must be boolean")
         now = self.utcnow()
         job = self.admission.read_job(job_id, now=now)
         if job is None:
@@ -410,7 +419,7 @@ class DistributedPublicFetch:
                 else:
                     progress_sources.append({"source_id": source_id, "status": job["state"]})
         discovery = None
-        if terminal:
+        if terminal and include_discovery:
             try:
                 grants = self.resolve_processing_grants(now) if callable(self.resolve_processing_grants) else ()
                 discovery = discover_fetch_results(source_results, now=now, processing_grants=grants,
@@ -480,8 +489,129 @@ class DistributedPublicFetch:
                if isinstance(job.get("terminal_reason"), str) else {}),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
             "recovery_available": job.get("recovery_available") is True,
+            "collection_input_unchanged": bool(
+                terminal and self.firestore_shared_live
+                and self.latest_dataset_summary_available
+                and isinstance(self.latest_dataset_summary, dict)
+                and reusable_collection_input(
+                    source_results,
+                    self.latest_dataset_summary.get("source_manifest"),
+                    processing_status=self.latest_dataset_summary.get("processing_status"),
+                )
+            ),
             **({"retry_at": retry_at} if retry_at is not None else {}),
         }
+
+    def terminal_status_from_worker_result(self, worker_result: dict, *, created_at=None) -> dict | None:
+        """Build the terminal public response from results already in this worker.
+
+        A terminal continuation has just validated and checkpointed every
+        source. Re-reading the shared job and loading its immutable blobs here
+        would repeat the same work before the browser can display the result.
+        """
+        if (not isinstance(worker_result, dict)
+                or worker_result.get("state") not in {"COMPLETED", "PARTIAL"}
+                or not isinstance(worker_result.get("sources"), dict)):
+            return None
+        outcomes = worker_result["sources"]
+        selected_sources = sorted(outcomes)
+        if (not selected_sources or any(not isinstance(source_id, str)
+                                        or not isinstance(outcomes[source_id], dict)
+                                        for source_id in selected_sources)):
+            return None
+        source_results = []
+        modes = set()
+        for source_id in selected_sources:
+            result = outcomes[source_id]
+            result_mode = result.get("data_mode")
+            if result_mode in {"LIVE", "SYNTHETIC"}:
+                modes.add(result_mode)
+            coverage = result.get("coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            request_count = result.get("provider_request_count")
+            if type(request_count) is not int or request_count < 0:
+                request_count = coverage.get("provider_request_count")
+            if type(request_count) is not int or request_count < 0:
+                request_count = None
+            source_results.append({
+                "source_id": source_id,
+                "status": result.get("status"),
+                **({"data_mode": result_mode} if result_mode in {"LIVE", "SYNTHETIC"} else {}),
+                "delivery_state": result.get("delivery_state"),
+                "record_count": result.get("record_count"),
+                "records": result.get("records", []),
+                "coverage": coverage,
+                "provider_request_count": request_count,
+                "error_code": result.get("error_code"),
+                "retry_after_seconds": result.get("retry_after_seconds"),
+                "quality_flags": result.get("quality_flags", []),
+                **({"transport_diagnostic": result["transport_diagnostic"]}
+                   if "transport_diagnostic" in result else {}),
+            })
+        now = self.utcnow()
+        discovery = None
+        try:
+            grants = (self.resolve_processing_grants(now)
+                      if callable(self.resolve_processing_grants) else ())
+            discovery = discover_fetch_results(
+                source_results, now=now, processing_grants=grants,
+                empty_mode=self.data_mode,
+            )
+        except Exception as exc:
+            discovery = {
+                "status": "UNAVAILABLE", "data_mode": self.data_mode,
+                "error_code": type(exc).__name__, "candidate_count": 0,
+                "shown_count": 0, "rejected_record_count": 0, "candidates": [],
+                "limitations": ["DISCOVERY_PROCESSING_FAILED"],
+            }
+        if self.data_mode != "LIVE":
+            visible_sources = source_results
+        else:
+            visible_sources = []
+            for item in source_results:
+                if item.get("source_id") == YOUTUBE_SOURCE_ID:
+                    projected = [
+                        safe for record in item.get("records", [])
+                        if (safe := _public_youtube_record(record)) is not None
+                    ]
+                    visible = {key: value for key, value in item.items() if key != "records"}
+                    if projected:
+                        visible["records"] = projected
+                    visible_sources.append(visible)
+                else:
+                    visible_sources.append({
+                        key: value for key, value in item.items() if key != "records"
+                    })
+        finished_at = worker_result.get("finished_at")
+        result = {
+            "fetch_id": worker_result.get("job_id"),
+            "status": worker_result["state"],
+            "stage": worker_result["state"],
+            "request_kind": "LATEST",
+            "selected_sources": selected_sources,
+            "data_mode": (next(iter(modes)) if len(modes) == 1
+                          else "MIXED" if modes else None),
+            "sources": visible_sources,
+            "progress": {"completed_sources": len(selected_sources),
+                         "total_sources": len(selected_sources), "percent": 100},
+            "discovery": discovery,
+            "created_at": created_at or worker_result.get("created_at"),
+            "updated_at": finished_at,
+            "finished_at": finished_at,
+            "terminal": True,
+            "recovery_available": False,
+        }
+        summary = self.latest_dataset_summary
+        if (self.firestore_shared_live and self.latest_dataset_summary_available
+                and isinstance(summary, dict)
+                and reusable_collection_input(
+                    source_results, summary.get("source_manifest"),
+                    processing_status=summary.get("processing_status"),
+                )):
+            result["collection_input_unchanged"] = True
+        else:
+            result["collection_input_unchanged"] = False
+        return result
 
     def history(self, *, limit: int = 20) -> list[dict]:
         """Return shared job summaries without charging the per-job poll budget."""
@@ -526,15 +656,43 @@ class DistributedPublicFetch:
                 record_count = result.get("record_count") if complete else None
                 if type(record_count) is int and record_count >= 0:
                     received += record_count
+                provider_request_count = (
+                    result.get("provider_request_count") if complete else None
+                )
+                if (type(provider_request_count) is not int
+                        or provider_request_count < 0):
+                    provider_request_count = (
+                        coverage.get("provider_request_count")
+                        if isinstance(coverage, dict) else None
+                    )
+                if (type(provider_request_count) is not int
+                        or provider_request_count < 0):
+                    provider_request_count = None
                 manifest.append({
                     "source_id": source_id,
                     "status": status,
+                    "data_mode": result.get("data_mode") if complete else self.data_mode,
                     "delivery_state": result.get("delivery_state") if complete else None,
                     "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
-                    "provider_request_count": result.get("provider_request_count") if complete else None,
+                    "provider_request_count": provider_request_count,
+                    **({"source_input_digest": snapshot["source_input_digest"]}
+                       if complete and isinstance(snapshot.get("source_input_digest"), str)
+                       else {}),
                     "error_code": error_code,
                     "coverage": coverage if isinstance(coverage, dict) else {},
                 })
+            collection_input_unchanged = bool(
+                self.firestore_shared_live
+                and self.latest_dataset_summary_available
+                and isinstance(self.latest_dataset_summary, dict)
+                and reusable_collection_manifest(
+                    manifest,
+                    self.latest_dataset_summary.get("source_manifest"),
+                    processing_status=self.latest_dataset_summary.get("processing_status"),
+                )
+            )
+            for source in manifest:
+                source.pop("source_input_digest", None)
             items.append({
                 "fetch_id": job["job_id"],
                 "run_type": "FETCH",
@@ -563,6 +721,7 @@ class DistributedPublicFetch:
                     }),
                     "total_sources": len(manifest),
                 },
+                "collection_input_unchanged": collection_input_unchanged,
             })
         return items
 

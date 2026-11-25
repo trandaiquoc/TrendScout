@@ -442,6 +442,7 @@ class _FetchFacade:
         self.submitted_manual_source_refresh = None
         self.submitted_keys = []
         self.status_calls = 0
+        self.terminal_projection_calls = 0
         self.collection_service = None
         self.submit_status = "QUEUED"
         self.force_replay = False
@@ -509,7 +510,7 @@ class _FetchFacade:
         self.events.append("worker_finished")
         return {"job_id": fetch_id, "state": self.slice_state, "sources": {}}
 
-    def status(self, _fetch_id, *, include_records=False):
+    def status(self, _fetch_id, *, include_records=False, include_discovery=True):
         self.status_calls += 1
         result = self._history_item()
         result["terminal"] = True
@@ -523,6 +524,17 @@ class _FetchFacade:
                 "record_count": 1,
             }]
         return result
+
+    def terminal_status_from_worker_result(self, worker_result, *, created_at=None):
+        self.terminal_projection_calls += 1
+        return {
+            "fetch_id": worker_result["job_id"],
+            "status": worker_result["state"],
+            "terminal": True,
+            "data_mode": "LIVE",
+            "created_at": created_at,
+            "sources": [{"source_id": WIKIMEDIA_SOURCE_ID}],
+        }
 
     def history(self, *, limit=20):
         return [self._history_item()][:limit]
@@ -658,10 +670,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                                 if event == "context_exited")
         self.assertLess(events.index("worker_finished"), last_context_exit)
 
-    async def test_cached_terminal_slice_returns_validated_status_without_extra_poll(self):
-        for delivery, request_count, status_failure in (
-                ("CACHED", 0, False), ("FRESH", 1, False), ("CACHED", 0, True)):
-            with self.subTest(delivery=delivery, status_failure=status_failure):
+    async def test_terminal_slice_returns_validated_status_without_extra_poll(self):
+        for delivery, request_count in (("CACHED", 0), ("FRESH", 1)):
+            with self.subTest(delivery=delivery):
                 app, _events, _client, facade, factory = self.app(enabled=True)
                 factory.side_effect = lambda _token: _Client(_events)
                 facade.force_replay = True
@@ -672,8 +683,6 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                                               "provider_request_count": request_count}}}
 
                 facade.run_slice = run_slice
-                if status_failure:
-                    facade.status = Mock(side_effect=RuntimeError("status unavailable"))
                 headers = {"Origin": "https://trend-scout.example",
                            "x-vercel-oidc-token": "synthetic-test-token",
                            "Idempotency-Key": "vercel-cached-terminal-0001",
@@ -683,13 +692,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                                                  base_url="https://trend-scout.example") as browser:
                         response = await browser.post("/api/v1/fetches", headers=headers, json={})
                 self.assertEqual(response.status_code, 202)
-                if delivery == "CACHED" and not status_failure:
-                    self.assertEqual(response.json()["terminal_fetch"]["fetch_id"], _JOB_ID)
-                    self.assertEqual(facade.status_calls, 1)
-                else:
-                    self.assertNotIn("terminal_fetch", response.json())
-                    if not status_failure:
-                        self.assertEqual(facade.status_calls, 0)
+                self.assertEqual(response.json()["terminal_fetch"]["fetch_id"], _JOB_ID)
+                self.assertEqual(facade.terminal_projection_calls, 1)
+                self.assertEqual(facade.status_calls, 0)
 
     async def test_idempotent_recovery_post_dispatches_a_new_vercel_worker(self):
         app, events, _client, facade, client_factory = self.app(enabled=True)
@@ -1083,7 +1088,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         facade.history = lambda limit=20: [{
             **facade._history_item(), "source_manifest": old_manifest,
         }][:limit]
-        facade.status = lambda _fetch_id, include_records=False: {
+        facade.status = lambda _fetch_id, include_records=False, include_discovery=True: {
             **facade._history_item(),
             "terminal": True,
             "data_mode": None,
