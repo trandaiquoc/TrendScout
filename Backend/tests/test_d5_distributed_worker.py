@@ -6,6 +6,7 @@ import multiprocessing
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
+from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Barrier
@@ -205,6 +206,123 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(actual[key], expected[key], key)
 
+    def test_compact_external_stale_receipt_reuses_without_losing_provenance(self):
+        from types import SimpleNamespace
+
+        from app.collections.source_digest import source_input_digest
+
+        source_id = GOOGLE_SOURCE_ID
+        records = [{
+            "keyword": "portable solar generator",
+            "observed_at": "2026-11-24T00:00:00Z",
+            "quality_flags": ["STALE_SHARED_CACHE_REUSED"],
+        }]
+        source = {
+            "status": "PARTIAL",
+            "data_mode": "LIVE",
+            "delivery_state": "STALE_CACHE",
+            "provider_request_count": 0,
+            "record_count": 1,
+            "records": records,
+            "error_code": "MANUAL_REFRESH_COOLDOWN",
+            "quality_flags": ["STALE_SHARED_CACHE_REUSED"],
+            "coverage": {
+                "query": "portable solar generator",
+                "observation_window": "past_7_days",
+                "provider_request_count": 0,
+                "refresh_provider_request_count": 0,
+                "serp_verification_attempted": 0,
+                "refresh_state": "MANUAL_REFRESH_COOLDOWN",
+                "next_eligible_at": "2026-11-25T08:00:00+00:00",
+                "cache_fetched_at": "2026-11-25T00:00:00+00:00",
+            },
+        }
+        digest = source_input_digest(source_id, source)
+        previous = deepcopy(source)
+        previous.update(status="SUCCESS", delivery_state="CACHED", error_code=None,
+                        quality_flags=[])
+        previous["records"][0]["quality_flags"] = []
+        previous["coverage"].pop("refresh_state")
+        previous["coverage"].pop("next_eligible_at")
+        previous["coverage"].pop("cache_fetched_at")
+        previous["coverage"].update({
+            "provider_request_count": 1,
+            "refresh_provider_request_count": 1,
+            "serp_verification_attempted": 1,
+        })
+        previous_digest = source_input_digest(source_id, previous)
+        self.assertEqual(digest, previous_digest)
+
+        summary = {
+            "dataset_id": "b" * 32,
+            "processing_status": "COMPLETED",
+            "source_manifest": [{
+                "source_id": source_id,
+                "status": previous["status"],
+                "data_mode": "LIVE",
+                "delivery_state": "CACHED",
+                "record_count": 1,
+                "quality_flags": [],
+                "coverage": previous["coverage"],
+                "source_input_digest": previous_digest,
+                "source_input_digest_version": 2,
+            }],
+        }
+        job = {
+            "job_id": "c" * 32,
+            "state": "PARTIAL",
+            "request_metadata": {"kind": "LATEST", "sources": [source_id]},
+            "created_at": "2026-11-25T00:01:00+00:00",
+            "updated_at": "2026-11-25T00:01:02+00:00",
+            "finished_at": "2026-11-25T00:01:02+00:00",
+            "source_checkpoints": {
+                source_id: {
+                    "snapshot_storage": "EXTERNAL_RECORDS",
+                    "snapshot_ref": {
+                        "path": ["result", "records"],
+                        "item_count": 1,
+                        "digest": "a" * 64,
+                        "raw_bytes": 120,
+                    },
+                    "snapshot": {
+                        "phase": "COMPLETE",
+                        "result": {**source, "records": []},
+                        "source_input_digest": digest,
+                        "source_input_digest_version": 2,
+                    },
+                },
+            },
+        }
+        facade = SimpleNamespace(
+            firestore_shared_live=True,
+            latest_dataset_summary_available=True,
+            latest_dataset_summary=summary,
+            admission=SimpleNamespace(
+                policy=SimpleNamespace(enabled_sources=frozenset({source_id})),
+            ),
+        )
+
+        reuse = DistributedPublicFetch.collection_reuse_for_fetch(
+            facade, job["job_id"], job=job,
+        )
+        status = DistributedPublicFetch._reused_terminal_status(facade, job, reuse)
+
+        self.assertTrue(reuse["collection_input_unchanged"])
+        self.assertEqual(reuse["dataset_id"], summary["dataset_id"])
+        self.assertEqual(status["sources"][0]["delivery_state"], "STALE_CACHE")
+        self.assertEqual(status["sources"][0]["status"], "PARTIAL")
+        self.assertEqual(status["sources"][0]["error_code"], "MANUAL_REFRESH_COOLDOWN")
+        self.assertIn("STALE_SHARED_CACHE_REUSED", status["sources"][0]["quality_flags"])
+        self.assertEqual(status["sources"][0]["coverage"]["cache_fetched_at"],
+                         "2026-11-25T00:00:00+00:00")
+        self.assertEqual(status["sources"][0]["coverage"]["next_eligible_at"],
+                         "2026-11-25T08:00:00+00:00")
+        self.assertEqual(status["sources"][0]["coverage"]["observation_window"],
+                         "past_7_days")
+        self.assertEqual(status["created_at"], job["created_at"])
+        self.assertEqual(status["finished_at"], job["finished_at"])
+        self.assertNotIn("source_input_digest", status["sources"][0])
+
     async def test_claimed_checkpoint_snapshot_avoids_second_owned_transaction(self):
         job_id = self.admit()
         source_id = WIKIMEDIA_SOURCE_ID
@@ -288,6 +406,30 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["state"], "COMPLETED")
         self.assertEqual(seen, list(order))
 
+    async def test_later_source_receives_prior_completed_result_from_claim(self):
+        self.admit()
+        observed = []
+
+        def handler(context):
+            if context.source_id == BING_SOURCE_ID:
+                observed.append(context.completed_sources.get(GOOGLE_SOURCE_ID))
+            return self.source_result(1)
+
+        worker = DistributedFetchWorker(
+            coordinator(self.path, self.config),
+            handlers={source: handler for source in SOURCES},
+            resolve_grant=self.grant,
+            utcnow=self.clock,
+            source_order=(GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                          WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID),
+        )
+
+        outcome = await worker.run_once("worker-claimed-source-result")
+
+        self.assertEqual(outcome["state"], "COMPLETED")
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["records"], self.source_result(1)["records"])
+
     async def test_bounded_source_slices_resume_one_job_without_repeating_sources(self):
         job_id = self.admit()
         order = (GOOGLE_SOURCE_ID, BING_SOURCE_ID,
@@ -331,7 +473,8 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             seen.append(context.source_id)
             cached = context.source_id != WIKIMEDIA_SOURCE_ID
             return {**self.source_result(1),
-                    "delivery_state": "CACHED" if cached else "FRESH",
+                    "delivery_state": ("STALE_CACHE" if context.source_id == GOOGLE_SOURCE_ID
+                                        else "CACHED" if cached else "FRESH"),
                     "provider_request_count": 0 if cached else 1}
 
         worker = DistributedFetchWorker(
@@ -354,20 +497,37 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(context):
             seen.append(context.source_id)
-            return {**self.source_result(1), "delivery_state": "CACHED",
-                    "provider_request_count": 0}
+            result = {
+                **self.source_result(1),
+                "delivery_state": ("STALE_CACHE" if context.source_id == GOOGLE_SOURCE_ID
+                                   else "CACHED"),
+                "provider_request_count": 0,
+                "coverage": {"provider_request_count": 0},
+            }
+            context.checkpoint({"source_receipt": {"result": result}})
+            return result
 
         worker = self.worker({source: handler for source in SOURCES})
-        with self.assertLogs("app.jobs.distributed_worker", level="INFO") as captured:
+        with patch.object(worker.journal, "save_many",
+                          wraps=worker.journal.save_many) as save_many, \
+                self.assertLogs("app.jobs.distributed_worker", level="INFO") as captured:
             outcome = await worker.run_once("cached-slice", job_id=job_id,
                                             max_sources=1, continue_cached=True)
         self.assertEqual(outcome["state"], "COMPLETED")
         self.assertEqual(set(seen), set(SOURCES))
         self.assertTrue(all(value["provider_request_count"] == 0
                             for value in outcome["sources"].values()))
+        self.assertEqual(save_many.call_count, 1)
+        self.assertEqual(len(save_many.call_args.kwargs["checkpoints"]), len(SOURCES))
         self.assertEqual(len(captured.output), len(SOURCES))
         for line in captured.output:
-            self.assertIn("delivery=CACHED provider_requests=0", line)
+            self.assertIn("provider_requests=0", line)
+            self.assertIn("checkpoint_batch_size=4", line)
+            self.assertIn(
+                "delivery=STALE_CACHE" if f"source={GOOGLE_SOURCE_ID}" in line
+                else "delivery=CACHED",
+                line,
+            )
             self.assertIn("checkpoint_load_ms=", line)
             self.assertIn("handler_ms=", line)
             self.assertIn("checkpoint_save_ms=", line)
@@ -1583,6 +1743,43 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(public.status(accepted["job_id"]))
         with self.assertRaisesRegex(AdmissionDenied, "STATUS_POLL_LIMIT"):
             public.status(accepted["job_id"])
+
+    async def test_internal_receipt_read_does_not_charge_public_poll_budget(self):
+        config = policy(
+            enabled_sources=frozenset(SOURCES), pools=self.config.pools,
+            lease_seconds=10, cooldown_seconds=0, max_status_polls=1,
+            plan_fingerprint="a" * 64,
+        )
+        admission = coordinator(self.path, config)
+        accepted = admission.admit("internal-unmetered-receipt", now=self.clock())
+
+        class ReadManyStore:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.reads = 0
+                self.transactions = 0
+
+            def read_many(self, keys):
+                self.reads += 1
+                return {
+                    key: self.wrapped.transact(key, lambda state: (state, state))
+                    for key in keys
+                }
+
+            def transact(self, key, operation):
+                self.transactions += 1
+                return self.wrapped.transact(key, operation)
+
+        store = ReadManyStore(admission.store)
+        admission.store = store
+        internal = admission.read_job_unmetered(accepted["job_id"])
+
+        self.assertEqual(internal["status_polls"], 0)
+        self.assertEqual((store.reads, store.transactions), (1, 0))
+        public = admission.read_job(accepted["job_id"], now=self.clock())
+        self.assertEqual(public["status_polls"], 1)
+        with self.assertRaisesRegex(AdmissionDenied, "STATUS_POLL_LIMIT"):
+            admission.read_job(accepted["job_id"], now=self.clock())
 
     async def test_shared_history_preserves_recovery_request_scope(self):
         handlers = {}

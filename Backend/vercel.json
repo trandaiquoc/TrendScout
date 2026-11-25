@@ -1,5 +1,6 @@
 {
   "buildCommand": "python3 scripts/prepare_vercel.py",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ':(top)Backend' ':(top)Frontend'",
   "redirects": [
     {
       "source": "/",

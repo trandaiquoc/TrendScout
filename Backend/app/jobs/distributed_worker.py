@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Awaitable, Callable, Mapping
 
-from app.collections.source_digest import source_input_digest
+from app.collections.source_digest import (
+    COLLECTION_INPUT_DIGEST_VERSION,
+    legacy_source_input_digest_candidates,
+    source_input_digest,
+)
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
@@ -23,6 +27,12 @@ _SAFE_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _SAFE_SOURCE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_CACHE_DELIVERY_STATES = frozenset({"CACHED", "STALE_CACHE"})
+_ZERO_REQUEST_COVERAGE_FIELDS = (
+    "provider_request_count",
+    "refresh_provider_request_count",
+    "serp_verification_attempted",
+)
 _logger = logging.getLogger(__name__)
 _MAX_SOURCE_RESULT_BYTES = 4_900_000
 _TERMINAL_STATUSES = frozenset({"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"})
@@ -66,6 +76,7 @@ class SourceWorkContext:
     checkpoint: Callable[[dict], int]
     heartbeat: Callable[[], str]
     request_metadata: dict = field(default_factory=dict)
+    completed_sources: dict = field(default_factory=dict)
 
 
 SourceHandler = Callable[[SourceWorkContext], dict | Awaitable[dict]]
@@ -112,9 +123,12 @@ class DistributedFetchWorker:
 
     async def run_once(self, owner: str, *, job_id: str | None = None,
                        max_sources: int | None = None,
-                       continue_cached: bool = False) -> dict | None:
+                       continue_cached: bool = False,
+                       previous_source_manifest: list[dict] | None = None) -> dict | None:
         if (job_id is not None and (not isinstance(job_id, str) or not job_id)
                 or type(continue_cached) is not bool
+                or previous_source_manifest is not None
+                and not isinstance(previous_source_manifest, list)
                 or continue_cached and max_sources is None
                 or max_sources is not None and (
                     type(max_sources) is not int or not 1 <= max_sources <= len(self.handlers)
@@ -131,6 +145,54 @@ class DistributedFetchWorker:
         outcomes = {}
         deferred_until = None
         processed_sources = 0
+        pending_checkpoints = []
+        previous_by_source = {}
+        if isinstance(previous_source_manifest, list):
+            for item in previous_source_manifest:
+                source_id = item.get("source_id") if isinstance(item, dict) else None
+                if isinstance(source_id, str) and source_id not in previous_by_source:
+                    previous_by_source[source_id] = item
+
+        def flush_pending_checkpoints():
+            if not pending_checkpoints:
+                return
+            save_started = perf_counter()
+            revisions = self.journal.save_many(
+                job_id, owner, fence, now=self.utcnow(),
+                checkpoints=[{
+                    "source_id": item["source_id"],
+                    "grant": item["grant"],
+                    "expected_revision": item["expected_revision"],
+                    "snapshot": item["snapshot"],
+                } for item in pending_checkpoints],
+            )
+            save_finished = perf_counter()
+            batch_save_ms = int((save_finished - save_started) * 1000)
+            batch_size = len(pending_checkpoints)
+            for item in pending_checkpoints:
+                result = item["result"]
+                delivery = result.get("delivery_state")
+                if delivery not in ("FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE"):
+                    delivery = "UNKNOWN"
+                count = result.get("provider_request_count")
+                if type(count) is not int or count < 0:
+                    coverage = result.get("coverage")
+                    count = (coverage.get("provider_request_count")
+                             if isinstance(coverage, dict) else None)
+                if type(count) is not int or count < 0:
+                    count = "UNKNOWN"
+                _logger.info(
+                    "Fetch source timing source=%s status=%s delivery=%s provider_requests=%s "
+                    "checkpoint_load_ms=%d handler_ms=%d checkpoint_save_ms=%d "
+                    "checkpoint_batch_size=%d checkpoint_revision=%d",
+                    item["source_id"] if _SAFE_SOURCE.fullmatch(item["source_id"])
+                    else "unknown",
+                    result["status"], delivery, count,
+                    item["checkpoint_load_ms"], item["handler_ms"], batch_save_ms,
+                    batch_size, revisions[item["source_id"]],
+                )
+            pending_checkpoints.clear()
+
         request_metadata = claim.get("request_metadata", {})
         selected_sources = ([WIKIMEDIA_SOURCE_ID]
             if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
@@ -144,6 +206,7 @@ class DistributedFetchWorker:
             if source_id not in selected:
                 continue
             if max_sources is not None and processed_sources >= max_sources:
+                flush_pending_checkpoints()
                 self.admission.yield_for_continuation(
                     job_id, owner, fence, now=self.utcnow(),
                 )
@@ -173,6 +236,13 @@ class DistributedFetchWorker:
             def checkpoint(progress):
                 if not isinstance(progress, dict):
                     raise ValueError("source checkpoint progress must be an object")
+                # A terminal cache receipt is immediately followed by the
+                # worker's durable COMPLETE checkpoint. Writing it first as
+                # RUNNING doubles Firestore transactions without protecting a
+                # provider attempt: no provider work occurred and the worker
+                # will persist the returned result before finishing the job.
+                if self._is_cache_only_checkpoint(progress, grant.data_mode):
+                    return revision_box[0]
                 snapshot = {
                     "schema": 1,
                     "source_id": source_id,
@@ -194,7 +264,8 @@ class DistributedFetchWorker:
             context = SourceWorkContext(job_id, owner, fence, source_id,
                                         self.admission.policy.plan_fingerprint, job_expires_at, resume,
                                         checkpoint, heartbeat,
-                                        request_metadata=claim.get("request_metadata", {}))
+                                        request_metadata=claim.get("request_metadata", {}),
+                                        completed_sources=dict(outcomes))
             try:
                 handler_started = perf_counter()
                 result = self.handlers[source_id](context)
@@ -254,42 +325,87 @@ class DistributedFetchWorker:
                 "phase": "COMPLETE",
                 "result": result,
                 "source_input_digest": source_input_digest(source_id, result),
+                "source_input_digest_version": COLLECTION_INPUT_DIGEST_VERSION,
             }
+            previous_item = previous_by_source.get(source_id)
+            if (isinstance(previous_item, dict)
+                    and previous_item.get("source_input_digest_version") is None):
+                legacy_digests = legacy_source_input_digest_candidates(
+                    source_id, result, previous_item,
+                )
+                if legacy_digests:
+                    snapshot["legacy_source_input_digest"] = legacy_digests[0]
+                    snapshot["legacy_source_input_digests"] = legacy_digests
             handler_finished = perf_counter()
-            self.journal.save(job_id, owner, fence, source_id=source_id, grant=grant,
-                              now=self.utcnow(), expected_revision=revision_box[0],
-                              snapshot=snapshot)
-            checkpoint_saved = perf_counter()
             delivery = result.get("delivery_state")
             if delivery not in ("FRESH", "CACHED", "STALE_CACHE", "NOT_ELIGIBLE"):
                 delivery = "UNKNOWN"
             count = result.get("provider_request_count")
             if type(count) is not int or count < 0:
+                coverage = result.get("coverage")
+                count = (coverage.get("provider_request_count")
+                         if isinstance(coverage, dict) else None)
+            if type(count) is not int or count < 0:
                 count = "UNKNOWN"
-            _logger.info(
-                "Fetch source timing source=%s status=%s delivery=%s provider_requests=%s "
-                "checkpoint_load_ms=%d handler_ms=%d checkpoint_save_ms=%d",
-                source_id if isinstance(source_id, str) and _SAFE_SOURCE.fullmatch(source_id)
-                else "unknown",
-                result["status"], delivery, count,
-                int((checkpoint_finished - checkpoint_started) * 1000),
-                int((handler_finished - handler_started) * 1000),
-                int((checkpoint_saved - handler_finished) * 1000),
+            slice_provider_count = result.get("provider_request_count")
+            coverage = result.get("coverage")
+            if type(slice_provider_count) is not int or slice_provider_count < 0:
+                slice_provider_count = (coverage.get("provider_request_count")
+                                        if isinstance(coverage, dict) else None)
+            confirmed_zero_requests = (
+                type(slice_provider_count) is int and slice_provider_count == 0
+                and result.get("delivery_state") in {"CACHED", "STALE_CACHE"}
+                and all(
+                    type(coverage[field]) is int and coverage[field] == 0
+                    for field in ("provider_request_count",
+                                  "refresh_provider_request_count",
+                                  "serp_verification_attempted")
+                    if isinstance(coverage, dict) and field in coverage
+                )
             )
+            checkpoint_load_ms = int((checkpoint_finished - checkpoint_started) * 1000)
+            handler_ms = int((handler_finished - handler_started) * 1000)
+            if continue_cached and confirmed_zero_requests:
+                pending_checkpoints.append({
+                    "source_id": source_id,
+                    "grant": grant,
+                    "expected_revision": revision_box[0],
+                    "snapshot": snapshot,
+                    "result": result,
+                    "checkpoint_load_ms": checkpoint_load_ms,
+                    "handler_ms": handler_ms,
+                })
+            else:
+                # Preserve each provider-backed receipt immediately. Only
+                # confirmed zero-request cache results are safe to batch.
+                flush_pending_checkpoints()
+                save_started = perf_counter()
+                revision = self.journal.save(
+                    job_id, owner, fence, source_id=source_id, grant=grant,
+                    now=self.utcnow(), expected_revision=revision_box[0], snapshot=snapshot,
+                )
+                checkpoint_saved = perf_counter()
+                _logger.info(
+                    "Fetch source timing source=%s status=%s delivery=%s provider_requests=%s "
+                    "checkpoint_load_ms=%d handler_ms=%d checkpoint_save_ms=%d",
+                    source_id if _SAFE_SOURCE.fullmatch(source_id) else "unknown",
+                    result["status"], delivery, count, checkpoint_load_ms, handler_ms,
+                    int((checkpoint_saved - save_started) * 1000),
+                )
             outcomes[source_id] = result
             # A confirmed cache hit performs no provider request. Continue to
             # the next source in this invocation while retaining the live-source
             # slice bound and all normal checkpoints and quota checks.
-            if not (continue_cached and result.get("delivery_state") == "CACHED"
-                    and type(result.get("provider_request_count")) is int
-                    and result["provider_request_count"] == 0):
+            if not (continue_cached and confirmed_zero_requests):
                 processed_sources += 1
 
         if deferred_until is not None:
+            flush_pending_checkpoints()
             self.admission.defer(job_id, owner, fence, now=self.utcnow(),
                                  not_before=deferred_until)
             return {"job_id": job_id, "state": "DEFERRED", "sources": outcomes}
 
+        flush_pending_checkpoints()
         partial = any(value["status"] != "SUCCESS" for value in outcomes.values())
         finished = self.admission.finish(
             job_id, owner, fence, now=self.utcnow(), partial=partial,
@@ -323,6 +439,33 @@ class DistributedFetchWorker:
             "records": [], "record_count": 0, "error_code": code,
             "coverage": {"worker_failure_diagnostic": diagnostic},
         }
+
+    @staticmethod
+    def _is_cache_only_checkpoint(progress, expected_mode):
+        if not isinstance(progress, dict) or len(progress) != 1:
+            return False
+        receipt = next(iter(progress.values()))
+        if not isinstance(receipt, dict) or set(receipt) != {"result"}:
+            return False
+        result = receipt.get("result")
+        if (not isinstance(result, dict)
+                or result.get("status") not in {"SUCCESS", "PARTIAL"}
+                or result.get("data_mode") != expected_mode
+                or result.get("delivery_state") not in _CACHE_DELIVERY_STATES
+                or type(result.get("provider_request_count")) is not int
+                or result["provider_request_count"] != 0
+                or not isinstance(result.get("records"), list)
+                or type(result.get("record_count")) is not int
+                or result["record_count"] != len(result["records"])):
+            return False
+        coverage = result.get("coverage", {})
+        if not isinstance(coverage, dict):
+            return False
+        return all(
+            type(coverage[field]) is int and coverage[field] == 0
+            for field in _ZERO_REQUEST_COVERAGE_FIELDS
+            if field in coverage
+        )
 
     @staticmethod
     def _validate_result(value, *, expected_mode, expected_source_id=None):

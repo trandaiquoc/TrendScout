@@ -10,6 +10,7 @@ from app.sources.refresh_eligibility import (
     GOOGLE_REFRESH_STATE_KEY,
     YOUTUBE_REFRESH_STATE_KEY,
     eligible_slot,
+    manual_candidate_decision,
     manual_candidate_slot,
     manual_schedule_metadata,
     reserve_manual_source_slot,
@@ -148,6 +149,32 @@ class RefreshEligibilityTests(unittest.TestCase):
         self.assertTrue(result["google"]["initial_acceptance_available"])
         self.assertEqual(result["bing"]["next_eligible_at"], "2026-11-16T08:00:00+00:00")
         self.assertEqual(store.transact_calls, 2)
+
+    def test_single_source_eligibility_uses_read_only_batch_read(self):
+        class BatchStore:
+            def __init__(self):
+                self.read_many_calls = 0
+                self.transact_calls = 0
+
+            def read_many(self, keys):
+                self.read_many_calls += 1
+                return {key: {} for key in keys}
+
+            def transact(self, _key, _operation):
+                self.transact_calls += 1
+                raise AssertionError("read-only eligibility must not open a transaction")
+
+        store = BatchStore()
+        now = datetime(2026, 11, 16, 7, 5, tzinfo=LOCAL)
+        slot, metadata = manual_candidate_decision(
+            store, GOOGLE_REFRESH_STATE_KEY, now,
+            job_id="a" * 32, error_code="GOOGLE_SCHEDULE_STATE_INVALID",
+        )
+
+        self.assertEqual(slot, "MANUAL:" + "a" * 32)
+        self.assertEqual(metadata["next_eligible_at"], "2026-11-16T00:05:00+00:00")
+        self.assertEqual(store.read_many_calls, 1)
+        self.assertEqual(store.transact_calls, 0)
 
     def test_schedule_state_corruption_fails_closed(self):
         self.store.transact(

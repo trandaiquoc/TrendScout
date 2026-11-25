@@ -14,7 +14,11 @@ from datetime import date, datetime, timezone
 from threading import local
 
 from app.collections import embeddings
-from app.collections.source_digest import reusable_collection_input, source_input_digest
+from app.collections.source_digest import (
+    COLLECTION_INPUT_DIGEST_VERSION,
+    reusable_collection_input,
+    source_input_digest,
+)
 from app.collections.store import (
     CollectionStore,
     bing_verification_update,
@@ -801,6 +805,7 @@ class CollectionService:
                 manifest.get("source_id") if isinstance(manifest.get("source_id"), str)
                 else f"UNKNOWN_{source_index}", source
             )
+            manifest["source_input_digest_version"] = COLLECTION_INPUT_DIGEST_VERSION
             # Keep source-level counts so a later targeted deletion can redact one
             # provider from mixed Fetch history without guessing aggregate totals.
             manifest["record_count"] = declared

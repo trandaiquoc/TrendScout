@@ -23,7 +23,7 @@ from app.sources.refresh_eligibility import (
     BING_REFRESH_STATE_KEY,
     OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
-    manual_candidate_slot,
+    manual_candidate_decision,
     manual_schedule_metadata,
     reserve_manual_source_slot,
     reserve_owner_acceptance_slot,
@@ -180,7 +180,8 @@ class BingSavedCandidateHandler:
                  shared_cache: SharedCache | None = None, resolve_cache_grant=None):
         if (not callable(getattr(gateway, "fetch_page", None))
                 or (not callable(getattr(collection_store, "connect", None))
-                    and not callable(candidate_loader))
+                    and not callable(candidate_loader)
+                    and not callable(checkpoint_candidate_loader))
                 or not callable(getattr(atomic_store, "transact", None))
                 or not isinstance(policy_fingerprint, str) or len(policy_fingerprint) != 64
                 or (ensure_paid_budget is not None and not callable(ensure_paid_budget))
@@ -428,18 +429,21 @@ class BingSavedCandidateHandler:
             if cache_status == "CACHED" and not acceptance_fresh:
                 context.checkpoint({"bing_receipt": {"result": shared_result}})
                 return shared_result
-        slot = (
-            f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
-            if acceptance_fresh else manual_candidate_slot(
+        manual_schedule = None
+        if acceptance_fresh:
+            slot = f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
+        elif manual_refresh:
+            slot, manual_schedule = manual_candidate_decision(
                 self.atomic_store, BING_REFRESH_STATE_KEY, now,
                 job_id=context.job_id,
                 error_code="BING_SCHEDULE_STATE_INVALID",
-            ) if manual_refresh else candidate_slot(
+            )
+        else:
+            slot = candidate_slot(
                 self.atomic_store, BING_REFRESH_STATE_KEY, now,
                 error_code="BING_SCHEDULE_STATE_INVALID",
                 allow_initial_acceptance=self.allow_initial_acceptance,
             )
-        )
         if slot is None:
             error_code = "MANUAL_REFRESH_COOLDOWN" if manual_refresh else "NOT_YET_ELIGIBLE"
             coverage = {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
@@ -447,10 +451,11 @@ class BingSavedCandidateHandler:
                         "next_slots_timezone": "Asia/Ho_Chi_Minh"}
             if manual_refresh:
                 try:
-                    coverage["next_eligible_at"] = manual_schedule_metadata(
+                    metadata = (manual_schedule or manual_schedule_metadata(
                         self.atomic_store, BING_REFRESH_STATE_KEY, now,
                         error_code="BING_SCHEDULE_STATE_INVALID",
-                    ).get("next_eligible_at")
+                    ))
+                    coverage["next_eligible_at"] = metadata.get("next_eligible_at")
                 except AdmissionDenied as error:
                     fallback = self._refresh_failed_fallback(
                         cached_result or shared_cache_fallback, error.code,

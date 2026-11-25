@@ -175,19 +175,59 @@ class SmartCollectionsTests(unittest.TestCase):
             processing_status=saved["processing_status"],
         ))
         stale = deepcopy(cached)
-        stale["delivery_state"] = "STALE_CACHE"
-        self.assertFalse(reusable_collection_input(
+        stale.update({
+            "delivery_state": "STALE_CACHE",
+            "status": "PARTIAL",
+            "error_code": "MANUAL_REFRESH_COOLDOWN",
+            "quality_flags": ["STALE_SHARED_CACHE_REUSED"],
+        })
+        stale["records"][0]["quality_flags"] = ["STALE_SHARED_CACHE_REUSED"]
+        stale["coverage"].update({
+            "refresh_state": "MANUAL_REFRESH_COOLDOWN",
+            "eligible_slot": None,
+            "next_slots_timezone": "Asia/Ho_Chi_Minh",
+        })
+        self.assertTrue(reusable_collection_input(
             [stale], previous_manifest,
             processing_status=saved["processing_status"],
         ))
-        legacy_manifest = [{key: value for key, value in previous_manifest[0].items()
-                            if key != "source_input_digest"}]
+        changed_quality = deepcopy(cached)
+        changed_quality["records"][0]["quality_flags"] = ["MISSING_TITLE"]
         self.assertFalse(reusable_collection_input(
-            [cached], legacy_manifest, processing_status=saved["processing_status"],
+            [changed_quality], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        from app.collections.source_digest import legacy_source_input_digest
+        legacy_manifest = [deepcopy(previous_manifest[0])]
+        legacy_manifest[0].pop("source_input_digest_version", None)
+        legacy_manifest[0]["source_input_digest"] = legacy_source_input_digest(
+            cached["source_id"], cached, legacy_manifest[0],
+        )
+        self.assertTrue(reusable_collection_input(
+            [stale], legacy_manifest, processing_status=saved["processing_status"],
+        ))
+        legacy_changed_scope = deepcopy(stale)
+        legacy_changed_scope["coverage"]["query"] = "different query"
+        self.assertFalse(reusable_collection_input(
+            [legacy_changed_scope], legacy_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        legacy_changed_quality = deepcopy(stale)
+        legacy_changed_quality["quality_flags"] = ["MISSING_TITLE"]
+        self.assertFalse(reusable_collection_input(
+            [legacy_changed_quality], legacy_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        legacy_changed_count = deepcopy(stale)
+        legacy_changed_count["records"] = []
+        legacy_changed_count["record_count"] = 0
+        self.assertFalse(reusable_collection_input(
+            [legacy_changed_count], legacy_manifest,
+            processing_status=saved["processing_status"],
         ))
 
         reused = service._process_fetch(
-            "cache-reuse-hit", [cached], cached_context_only=True
+            "cache-reuse-hit", [stale], cached_context_only=True
         )
         self.assertEqual(reused["status"], "REUSED")
         self.assertEqual(reused["dataset_id"], "cache-reuse-base")

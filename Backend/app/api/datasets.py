@@ -5,6 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.collections import _service
+from app.collections.source_digest import PRIVATE_SOURCE_DIGEST_FIELDS
 
 router = APIRouter()
 
@@ -21,7 +22,8 @@ def latest_dataset(request: Request):
     manifest = item.get('source_manifest')
     if isinstance(manifest, list):
         item['source_manifest'] = [
-            {key: value for key, value in source.items() if key != 'source_input_digest'}
+            {key: value for key, value in source.items()
+             if key not in PRIVATE_SOURCE_DIGEST_FIELDS}
             if isinstance(source, dict) else source
             for source in manifest
         ]

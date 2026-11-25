@@ -865,6 +865,8 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                                  "VERCEL_SHARED_RUNTIME")
                 self.assertEqual(facade.google_account_quota_state["status"], "NOT_CHECKED")
                 self.assertTrue(facade.owner_fresh_acceptance_once)
+                self.assertIsNone(facade.provider_retry_after_seconds)
+                self.assertIsNotNone(facade.journal.snapshot_blobs._read_cache)
 
         send_mock.assert_not_called()
 
@@ -903,6 +905,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(facade.journal.snapshot_blobs._client, client)
                 self.assertTrue(facade.firestore_shared_live)
                 self.assertFalse(facade.normal_google_live)
+                self.assertTrue(callable(facade.provider_retry_after_seconds))
                 self.assertGreaterEqual(client.batch_gets, 1)
                 self.assertEqual(
                     facade.normal_google_live_sources,

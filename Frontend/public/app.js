@@ -53,6 +53,7 @@ const state = {
   collectionSelectedId: null,
   collectionJobStatus: null,
   collectionInboxTotal: 0,
+  activeView: null,
   collectionSelected: new Set(),
   collectionMembershipSelected: {},
   algorithmCatalog: null,
@@ -2510,7 +2511,7 @@ async function openDetail(id) {
   }
 }
 
-function showView(name) {
+function showView(name, { refresh = true } = {}) {
   if (name === 'main-content') {
     closeMobileNav();
     $('#main-content').focus();
@@ -2520,6 +2521,8 @@ function showView(name) {
   const dashboardTab = name === 'analysis' ? 'analysis' : 'overview';
   const valid = new Set(['overview', 'analysis', 'collections', 'sources', 'runs', 'algorithms', 'quality', 'research', 'settings']);
   const selected = legacyOverview ? 'collections' : !valid.has(name) ? 'overview' : name === 'analysis' ? 'overview' : name;
+  const viewChanged = state.activeView !== selected;
+  state.activeView = selected;
   if (legacyOverview) {
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#collections`);
   } else if (name && !valid.has(name)) {
@@ -2538,12 +2541,13 @@ function showView(name) {
   $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
   setDashboardTab(dashboardTab, false);
   $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
-  if (selected === 'collections') loadCollections();
-  if (selected === 'algorithms') loadAlgorithmCatalog();
-  if (selected === 'runs') runHistory.load();
-  if (selected === 'sources') sourceLibrary.load();
-  if (selected === 'settings') loadRuntimeStatus();
-  if (selected === 'research') researchWorkspace.load();
+  const shouldLoadView = viewChanged || refresh;
+  if (shouldLoadView && selected === 'collections') loadCollections();
+  if (shouldLoadView && selected === 'algorithms') loadAlgorithmCatalog();
+  if (shouldLoadView && selected === 'runs') runHistory.load();
+  if (shouldLoadView && selected === 'sources') sourceLibrary.load();
+  if (shouldLoadView && selected === 'settings') loadRuntimeStatus();
+  if (shouldLoadView && selected === 'research') researchWorkspace.load();
   closeMobileNav();
 }
 
@@ -2871,8 +2875,9 @@ function bindEvents() {
     }
   });
   window.addEventListener('resize', () => setMobileNav($('#app-shell').classList.contains('menu-open')));
-  window.addEventListener('hashchange', () => showView(window.location.hash.slice(1)));
-  window.addEventListener('popstate', () => showView(window.location.hash.slice(1)));
+  const handleViewNavigation = () => showView(window.location.hash.slice(1), { refresh: false });
+  window.addEventListener('hashchange', handleViewNavigation);
+  window.addEventListener('popstate', handleViewNavigation);
   $$('[data-dashboard-tab]').forEach((button) => {
     button.addEventListener('click', () => setDashboardTab(button.dataset.dashboardTab));
     button.addEventListener('keydown', (event) => {

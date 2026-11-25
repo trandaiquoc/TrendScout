@@ -5,18 +5,21 @@ import unittest
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
+from threading import Barrier
+from unittest.mock import patch
 
 from test_d5_public_admission import NOW, coordinator
 from test_d5_public_admission import policy as admission_policy
 
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
-from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID
 from app.storage.firestore_atomic_state import CommitOutcomeUnknown
 
 
-def grant(*, seconds=600, allowed=True, mode="SYNTHETIC", version="policy-v1"):
-    return CheckpointGrant(GOOGLE_SOURCE_ID, mode, version, NOW + timedelta(seconds=seconds),
+def grant(*, source_id=GOOGLE_SOURCE_ID, seconds=600, allowed=True,
+          mode="SYNTHETIC", version="policy-v1"):
+    return CheckpointGrant(source_id, mode, version, NOW + timedelta(seconds=seconds),
                            300, allowed)
 
 
@@ -52,6 +55,84 @@ class SourceCheckpointTests(unittest.TestCase):
         loaded = self.load()
         self.assertEqual(loaded["revision"], 1)
         self.assertEqual(loaded["snapshot"], self.snapshot)
+
+    def test_save_many_commits_multiple_source_receipts_in_one_owned_transaction(self):
+        checkpoints = []
+        for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+            result = {
+                "status": "SUCCESS",
+                "data_mode": "SYNTHETIC",
+                "record_count": 1,
+                "records": [{"evidence_id": source_id}],
+            }
+            checkpoints.append({
+                "source_id": source_id,
+                "grant": grant(source_id=source_id),
+                "expected_revision": 0,
+                "snapshot": {
+                    "schema": 1,
+                    "source_id": source_id,
+                    "data_mode": "SYNTHETIC",
+                    "plan_fingerprint": self.admission.policy.plan_fingerprint,
+                    "phase": "COMPLETE",
+                    "result": result,
+                },
+            })
+
+        with patch.object(self.admission, "transact_owned",
+                          wraps=self.admission.transact_owned) as transact_owned:
+            revisions = self.journal.save_many(
+                self.job, self.owner, self.fence, now=NOW,
+                checkpoints=checkpoints,
+            )
+
+        self.assertEqual(revisions, {GOOGLE_SOURCE_ID: 1, BING_SOURCE_ID: 1})
+        self.assertEqual(transact_owned.call_count, 1)
+        for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+            loaded = self.journal.load(
+                self.job, self.owner, self.fence, source_id=source_id,
+                grant=grant(source_id=source_id), now=NOW,
+            )
+            self.assertEqual(loaded["revision"], 1)
+            self.assertEqual(loaded["snapshot"]["result"]["records"], [
+                {"evidence_id": source_id},
+            ])
+
+    def test_save_many_uploads_independent_record_blobs_concurrently(self):
+        barrier = Barrier(2)
+
+        class SnapshotBlobs:
+            def put(self, records, *, now, retain_until):
+                barrier.wait(timeout=2)
+                source_id = records[0]["source_id"]
+                return {"digest": ("a" if source_id == GOOGLE_SOURCE_ID else "b") * 64,
+                        "raw_bytes": 170_000, "item_count": len(records)}
+
+        journal = SourceCheckpointJournal(self.admission, snapshot_blobs=SnapshotBlobs())
+        checkpoints = []
+        for source_id in (GOOGLE_SOURCE_ID, BING_SOURCE_ID):
+            result = {
+                "status": "SUCCESS", "data_mode": "SYNTHETIC",
+                "record_count": 1,
+                "records": [{"source_id": source_id, "description": "x" * 170_000}],
+            }
+            checkpoints.append({
+                "source_id": source_id,
+                "grant": grant(source_id=source_id),
+                "expected_revision": 0,
+                "snapshot": {
+                    "schema": 1, "source_id": source_id,
+                    "data_mode": "SYNTHETIC",
+                    "plan_fingerprint": self.admission.policy.plan_fingerprint,
+                    "phase": "COMPLETE", "result": result,
+                },
+            })
+
+        revisions = journal.save_many(
+            self.job, self.owner, self.fence, now=NOW, checkpoints=checkpoints,
+        )
+
+        self.assertEqual(revisions, {GOOGLE_SOURCE_ID: 1, BING_SOURCE_ID: 1})
 
     def test_large_collector_progress_records_use_existing_snapshot_blob_store(self):
         class SnapshotBlobs:

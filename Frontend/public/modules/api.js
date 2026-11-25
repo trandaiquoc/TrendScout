@@ -1,6 +1,44 @@
 const REQUEST_TIMEOUT_MS = 15000;
 const COLLECTIONS_TIMEOUT_MS = 65000;
 const FETCH_TIMEOUT_MS = 55000;
+const PAGE_READ_CACHE_MS = 3000;
+const inFlightGets = new Map();
+const pageReadCache = new Map();
+let readCacheGeneration = 0;
+
+function pageReadCacheable(path) {
+  if (typeof path !== 'string') return false;
+  const pathname = path.split('?', 1)[0];
+  // Job status is polled while Collections work is running. Keep only its
+  // in-flight dedupe; a short response cache would delay visible progress.
+  if (pathname.startsWith('/api/v1/collections/jobs/')) return false;
+  return pathname === '/api/v1/collections'
+    || pathname.startsWith('/api/v1/collections/')
+    || pathname === '/api/v1/datasets/latest'
+    || pathname.startsWith('/api/v1/datasets/latest/keywords')
+    || pathname === '/api/v1/analytics/overview'
+    || pathname === '/api/v1/algorithms'
+    || pathname === '/api/v1/algorithms/results'
+    || pathname === '/api/v1/sources/library'
+    || pathname === '/api/v1/research';
+}
+
+function readRequestKey(path, locale, timeoutMs, headers) {
+  const normalizedHeaders = Object.entries(headers || {})
+    .map(([key, value]) => [key.toLowerCase(), String(value)])
+    .sort(([left], [right]) => left.localeCompare(right));
+  return JSON.stringify([path, locale, timeoutMs, normalizedHeaders]);
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function invalidatePageReadCache() {
+  readCacheGeneration += 1;
+  pageReadCache.clear();
+  inFlightGets.clear();
+}
 
 function requestTimeoutMs(path, requestedTimeoutMs) {
   if (Number.isFinite(requestedTimeoutMs)) return requestedTimeoutMs;
@@ -54,7 +92,7 @@ const httpMessages = {
   },
 };
 
-export async function requestJson(path, {
+async function sendRequestJson(path, {
   method = 'GET',
   body: requestBody,
   headers = {},
@@ -119,6 +157,47 @@ export async function requestJson(path, {
     throw new ApiError(message, null);
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function requestJson(path, options = {}) {
+  const method = options.method || 'GET';
+  if (method !== 'GET') invalidatePageReadCache();
+  if (method !== 'GET' || typeof path !== 'string' || !path.startsWith('/api/')) {
+    return sendRequestJson(path, options);
+  }
+
+  const locale = options.locale || 'vi';
+  const timeoutMs = requestTimeoutMs(path, options.timeoutMs);
+  const key = readRequestKey(path, locale, timeoutMs, options.headers);
+  const cacheable = pageReadCacheable(path);
+  if (cacheable) {
+    const cached = pageReadCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cloneJson(cached.value);
+    if (cached) pageReadCache.delete(key);
+  }
+  const inFlight = inFlightGets.get(key);
+  if (inFlight) return cloneJson(await inFlight);
+
+  const generation = readCacheGeneration;
+  const operation = sendRequestJson(path, options).then((value) => {
+    if (cacheable && generation === readCacheGeneration) {
+      pageReadCache.set(key, {
+        value: cloneJson(value),
+        expiresAt: Date.now() + PAGE_READ_CACHE_MS,
+      });
+    }
+    if (/^\/api\/v1\/fetches\/[a-f0-9]{32}$/.test(path)
+        && value?.terminal === true) {
+      invalidatePageReadCache();
+    }
+    return value;
+  });
+  inFlightGets.set(key, operation);
+  try {
+    return cloneJson(await operation);
+  } finally {
+    if (inFlightGets.get(key) === operation) inFlightGets.delete(key);
   }
 }
 

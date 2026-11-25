@@ -1,136 +1,99 @@
-# Vercel Shared LIVE Performance and Scaling Report
+# Vercel Performance and Scaling Report
 
-**Status:** Implementation, consolidated offline verification, and read-only production acceptance complete. No Production Fetch was submitted.
+**Status:** Implementation and consolidated offline verification complete; Production release is pending. No Production Fetch or provider endpoint was called.
 **Updated:** 25 November 2026
-**Baseline revision:** `4c02c718b6177bc04aa4ab1b5069886236b620c5`
-**Baseline production deployment:** `dpl_HKevZoBtmXC4xJxevvUQpvWSQ33k`
-**Production alias:** `https://trend-scout-mu.vercel.app/`
 
-This report records targeted changes to the existing Vercel Shared LIVE path. It does not approve a new product architecture or make a claim that the whole application has been load-tested. Baseline timings are measurements from the existing production deployment; expected changes below are structural until the new deployment has been checked.
+## Baseline and Production evidence
 
-## Scope and constraints
+The repository was synchronized before work. `main` and `origin/main` both pointed to `b823b6f0c08a916766fdf231c76da309a0a70271`; the previously deployed code baseline was `d2cfafb2d5ed6f1ed9730f6231197071a9646580`.
 
-- Reduce repeated Firestore reads, checkpoint transactions, immutable blob writes, SQLite snapshot restoration, duplicate Collections analysis, and terminal response latency on the existing Shared LIVE path.
-- Preserve provider-call counts, source records, data mode, observation times, source scope, retention rules, public response safety, and the existing 120-second function cap in `Backend/vercel.json`.
-- Use only existing Vercel, Firestore, and application resources. No new service, dependency, plan, paid feature, provider permission, or data migration is introduced.
-- Do not make a Production LIVE Fetch for this acceptance. Production verification is limited to read-only routes and deployment/runtime inspection. The cache-only Fetch path is eligible only if zero provider requests are guaranteed; it is not required for this release.
+The owner-provided Production acceptance run is `7c47b79810ea4238a21c16d3967d2b41` from 25 November 2026:
 
-## Baseline measurements
+| Source | Delivery | Records |
+| --- | --- | ---: |
+| Wikimedia | `CACHED` | 1,000 |
+| Google | `STALE_CACHE` | 529 |
+| Bing | `STALE_CACHE` | 1 |
+| YouTube | `CACHED` | 50 |
+| **Total** |  | **1,580** |
 
-The pre-change observations below were collected from the baseline deployment. Request wall time includes application work and external waits; it is not a direct measurement of billed active CPU.
+Provider requests were reported as **0**. These run details and timings below were supplied by the owner; they have not been independently re-read from Production logs.
 
-| Operation or component | Baseline observation |
+| Logged segment | Duration |
 | --- | ---: |
-| Initial Fetch admission POST | 7.933 s |
-| Cached continuation POST | 76.748 s |
-| Terminal Fetch status GET after continuation | 11.832 s |
-| Source checkpoint load | 1.84–2.08 s per source |
-| Source handler | 1.84–8.74 s |
-| Source checkpoint save | 2.05–11.24 s |
-| Collections database image | 72.6 MB |
-| Compressed Collections snapshot | 6.75 MB |
-| Snapshot save | 44 s, including 40.4 s upload |
-| Collections processing request | 69.2 s |
-| Read APIs | Several seconds per request |
+| Initial Fetch POST | 8.477 s |
+| Google source slice | 19.673 s |
+| Bing source slice | 17.979 s |
+| Wikimedia and YouTube source slice | 21.394 s |
+| Collections processing | 59.480 s |
+| SQLite snapshot upload segment | 39.086 s |
+| Main request segments reported by owner | about 127 s |
 
-The project function is currently capped at 120 seconds. Vercel documents `maxDuration` as the maximum function execution duration and states that the function is terminated when the configured maximum is exceeded ([Vercel function duration configuration](https://vercel.com/docs/functions/configuring-functions/duration), checked 25 November 2026). At the measured 76.748-second continuation baseline, the nominal margin to this project cap was about 43.3 seconds. No duration, memory, or region setting was changed.
+The snapshot segment is part of or overlaps Collections processing and is not added again to the reported 127 seconds.
 
-The exact Firestore region was not confirmed during baseline inspection and remains unchanged. Source/provider limits, actual Vercel credentials, and production provider reachability are outside this report's verification.
+## Findings verified in the repository
 
-## Request path and bottlenecks
-
-```mermaid
-sequenceDiagram
-    participant UI as Browser
-    participant API as Vercel Fetch Function
-    participant FS as Firestore coordination and blobs
-    participant DB as Collections SQLite image
-
-    UI->>API: Initial Fetch POST
-    API->>FS: Admit job and return durable ID
-    UI->>API: Same-key continuation POST
-    API->>FS: Claim job, load checkpoints, run one source, save result
-    API->>FS: Previously, reread terminal status and checkpoint blobs
-    API-->>UI: Terminal result
-    UI->>API: Collections recovery POST
-    API->>FS: Read terminal source results
-    API->>DB: Previously, restore, reprocess, and write snapshot
-    DB->>FS: Upload content-addressed snapshot chunks
-```
-
-The dominant repeated-run cost was work after source delivery: another terminal status read, repeated checkpoint coordination transactions, full Collections restoration and analysis, and re-upload of unchanged snapshot bytes. The slow first Collections build remains a different case: when source evidence is new, it still needs to run the established processing and persistence path.
+- Google and Bing cache entries use a **one-hour freshness window** (`max_fresh_seconds=60*60`), while refresh eligibility uses `MIN_SOURCE_SPACING=8 hours`. A stale delivery is therefore expected when the cached evidence remains usable but another provider refresh is not yet eligible. Cache TTL was not extended.
+- Before this change, collection reuse accepted only `CACHED`. It also hashed operational delivery fields and status metadata, so otherwise identical `STALE_CACHE` evidence could force Collections analysis and another full SQLite snapshot.
+- The source result already carries distinct fields for delivery (`CACHED` / `STALE_CACHE`), provider request count, refresh eligibility, source coverage, warnings, and timestamps. Reuse can ignore delivery-only differences while keeping those fields in the Fetch receipt and Run History.
+- Cache-only source handling also incurred avoidable orchestration cost: terminal source receipts were written separately, some cache branches wrote a progress receipt before the terminal receipt, Bing could reread Google candidate data, and the initial admission and metadata-read paths built or queried more shared LIVE state than they needed.
 
 ## Implemented changes
 
-1. **Terminal response from the active worker.** The completed continuation builds its terminal public projection from the already validated worker result, avoiding the follow-up terminal status read and checkpoint blob reads. It retains normal status projections, source time/coverage fields, discovery output, and YouTube's existing public record projection. The ordinary status route remains the fallback when a projection cannot be built.
-2. **Skip discovery in Collections recovery.** Fetch processing and recovery request the source result projection without computing discovery that the Collections path does not use.
-3. **Exact cache-only Collections reuse.** A versioned SHA-256 digest covers each source's status, mode, count, quality/error fields, stable coverage and normalized records. Only transient delivery markers/counters are excluded. Reuse requires a completed prior dataset, the same complete source set, LIVE/CACHED delivery, valid record counts, zero provider requests in both the source result and coverage when reported, matching digests, and non-empty scope coverage. Fresh, stale, unavailable, partial-incomplete, changed-scope, changed-record, or malformed evidence continues through normal processing. `MODEL_UNAVAILABLE` remains retryable.
-4. **One-time legacy backfill.** Older dataset manifests have no input digest. Their first matching cache-only recovery will process and persist once to record digests; a later exact match can reuse that dataset. No database migration is needed because the digest is an additive source-manifest field.
-5. **Avoid redundant SQLite restoration.** Deferred Shared LIVE requests read the latest dataset summary from the existing Firestore snapshot pointer. Public dataset and analytics responses remove internal digest fields before returning manifests.
-6. **Read-only immutable cache hits.** Vercel Shared LIVE cache reads use Firestore's existing batch read when the admission clock is monotonic and the record would remain unchanged apart from `last_checked_at`. Expiry, malformed state, time regression, or retention tightening keeps the transactional path.
-7. **Checkpoint claim snapshot reuse.** Source checkpoint loads use the already fenced checkpoint snapshot returned by the claim transaction when the grant and retention are unchanged. Retention shortening and other invalidating cases still use the owned transaction.
-8. **Content-addressed blob reuse.** An active identical snapshot blob is not rewritten. Retention extension updates only the manifest/chunk retention fields atomically; expired content is rewritten. Reads continue to validate every chunk and its retention against the manifest.
-9. **Browser no-op recovery.** When the backend confirms that the latest cached source evidence already matches the saved dataset, the UI loads saved dataset metadata if needed and skips Collections job polling, duplicate recovery, and analytics refresh.
+1. **Business-input digest v2.** The digest now covers normalized records, source scope, record count, data mode, and meaningful quality flags. It excludes delivery state, refresh scheduling, operational status, retry/error metadata, and the two stale-cache warning flags that are added only when delivering cached records. `STALE_CACHE` remains visible and is never converted to `CACHED`.
+2. **Safe legacy matching.** A v1 dataset can be reused only when current business scope, count, data mode, and non-delivery quality flags still match its saved manifest. Exact and stale-warning-normalized v1 record fingerprints support the one-time upgrade path without accepting a changed query or changed evidence.
+3. **No-op before expensive work.** A compact terminal job receipt and the current Firestore latest-dataset summary are compared before checkpoint blobs or the SQLite image are restored. An exact unchanged cache-only match skips discovery, Collections processing, and SQLite snapshot publication. The original source receipt, warning flags, delivery state, provenance, and timestamps remain available to status and history responses.
+4. **Fewer checkpoint writes.** Confirmed zero-provider `CACHED` and `STALE_CACHE` sources can complete in one worker invocation. A terminal cache receipt is not first written as a redundant `RUNNING` checkpoint; terminal cache receipts are committed in one fenced batch. Provider-backed receipts continue to be persisted immediately. Oversized checkpoint blobs upload concurrently within the existing bounded storage design.
+5. **Fewer redundant reads.** Bing consumes the already validated Google result in the worker context. Refresh permission and manual cooldown metadata use one state read. Vercel no longer preflights Wikimedia pacing for a cache-only Fetch; the actual Wikimedia request boundary still enforces pacing.
+6. **Provider-free request contexts.** Latest-source Fetch admission, Fetch status, Run History, and Collections recovery avoid constructing source provider adapters. Initial admission skips the latest-dataset pointer read. Status and Run History retain one compact summary read so the no-op state is accurate; Run History still restores its existing SQLite ledger to preserve historical rows and joins. Collections recovery checks for unchanged inputs before restoring SQLite or source blobs, then lazily restores the database only when processing is required. A quota-preserving policy migration remains available only after an explicit policy mismatch.
+7. **Page read efficiency.** Identical in-flight GETs share a same-origin request. Safe dashboard reads have a three-second in-memory cache that is invalidated by mutations and terminal Fetch status. Duplicate hash/history events no longer reload the already active view.
+8. **Public contract.** Internal digest values stay out of public dataset and analytics manifests. Existing provider cache freshness, refresh spacing, provider budgets, LIVE mode, and stored data were not changed or reset.
+9. **One application release.** Vercel's repository `ignoreCommand` builds when `Backend` or `Frontend` changes and skips documentation-only commits, so recording the post-deploy report does not start a second application build. Exit-code behavior follows [Vercel's `ignoreCommand` configuration](https://vercel.com/docs/project-configuration/vercel-json#ignorecommand), checked 25 November 2026.
 
-The production workflow, source selection, provider adapters, request budgets, retention policy, and Vercel project configuration are unchanged. No provider request was added by these code changes.
+## Storage scalability assessment
 
-## Correctness and acceptance checklist
+The current design has two distinct storage roles: Firestore holds shared job/quota/checkpoint state and immutable snapshot blobs; SQLite remains the transactional query engine for Collections, keyword observations, and analysis results. The owner-provided 72.6 MB SQLite size and 6.75 MB compressed image show that changed-data persistence still scales with the entire working database. The existing 80 MB expanded-image and bounded segment limits prevent unbounded writes, but they are capacity limits rather than an incremental storage design.
 
-- [x] Consolidated offline verification passes for the touched backend, storage, API, and browser paths.
-- [x] Exact matching LIVE/CACHED evidence can reuse only a completed LIVE dataset and reports the saved dataset ID; regression coverage passed offline.
-- [x] Changed source scope or content, non-zero/conflicting provider counts, stale delivery, malformed digest, incomplete sources, and non-completed processing fail closed or use normal processing; regression coverage passed offline.
-- [x] The most recent saved production run still reports the four source outcomes, zero provider requests for each cached result, and original source timestamps/observation date (details below). No source adapter or timestamp logic changed in this release.
-- [x] Internal source digests are absent from public history, analytics, and latest dataset responses.
-- [x] Code commit `d2cfafb2d5ed6f1ed9730f6231197071a9646580` is pushed to `origin/main`; its Vercel Production deployment reached `READY` and the production alias mapped to it.
-- [x] Production read-only checks returned HTTP 200 for capabilities, latest dataset, run history, analytics overview, and runtime; connector wall times are recorded below.
-- [x] No Production LIVE Fetch or provider-call acceptance was performed.
-- [x] No cache-only Production Fetch was submitted; no Production provider-call condition was needed.
+Options considered for this release:
 
-## Verification and release record
+- **Keep SQLite plus bounded Firestore snapshots:** preserves local compatibility, existing joins, transaction semantics, and rollback behavior. Skip restore, analysis, and snapshot publication when the source business digest proves nothing changed. Changed data still pays whole-image backup, digest, compression, and upload costs.
+- **Write rows directly to Firestore:** could avoid moving a whole image, but Collections processing relies on relational joins and multi-table consistency. A safe change needs a versioned data model, query/index design, idempotent dual-write or backfill, consistency checks, and rollback path. It is not a small additive change and may increase document/index costs.
+- **Partition or delta snapshots:** could reduce bytes for a narrow update, but requires dependency-aware partitions, a versioned atomic manifest, compaction, conflict handling, and restore compatibility. The current schema does not expose a safe partition boundary for all collection, keyword, observation, and analysis relationships.
+- **Managed relational or hybrid storage:** better supports incremental SQL queries, but requires an approved service, credentials/IAM, connection-pooling and cost decisions, plus data migration and rollback. No such resource is configured or authorized in this repository.
+
+The release therefore keeps the existing backward-compatible store and eliminates whole-image work for exact no-change Fetches. This protects existing data and reduces repeated-run cost without a migration. The changed-data snapshot path and its eventual storage migration remain explicit scalability work; this release does not close that gate or claim faster fresh-data uploads.
+
+## Acceptance gates
+
+| Gate | Current state | Evidence required to close |
+| --- | --- | --- |
+| Unchanged business input skips analysis and snapshot work | **Passed offline** | Production timing remains unmeasured; the code path is covered by no-op and recovery tests |
+| `CACHED` and `STALE_CACHE` remain distinct and reusable when inputs match | **Passed offline** | Stale-state, warning, provenance, quality/scope, and legacy-manifest regression checks |
+| Cache-only checkpoint and Fetch overhead is reduced | **Passed offline** | Batch checkpoint, read-path, admission, and refresh-eligibility regression checks; Production timing remains pending |
+| Changed-data storage scales without whole-image snapshot cost | **Open**; exact no-change runs skip snapshot work | A backward-compatible incremental/partitioned store or approved database migration with integrity and rollback evidence |
+| Page reload and view transitions avoid duplicate reads | **Passed offline** | Frontend request-coalescing, expiry, invalidation, navigation, and browser recovery checks |
+| Fetch with no provider work completes under 5 seconds | **Unproven** | A Production cache-only Fetch with eligibility proven to forbid provider work, or equivalent Vercel runtime evidence. No Production Fetch has been run for this change. |
+| Commit is on `origin/main`; Production is `READY` on the exact release SHA | Pending | Git and Vercel deployment records |
 
 ### Consolidated offline verification
 
-**Passed 25 November 2026.** One consolidated PowerShell run completed:
+The final verification pass ran after implementation was complete:
 
-- Ruff passed on every changed Python application and test file.
-- Backend focused suites passed: `test_d5_distributed_worker.py` (35), `test_d5_firestore_shared_cache.py` (29), `test_smart_collections.py` (36), `test_keyword_workbench.py` (26), `test_vercel_shared_live_fetch.py` (34), and `test_public_fetch.py` (15): **175 tests passed**.
-- `browser_vercel_shared_fetch_e2e_offline.py`: **PASS**; unchanged cached evidence loads the saved dataset without analytics refresh or Collections polling.
-- Frontend `node --test tests/*.test.mjs`: **55 passed, 0 failed**.
-- `git diff --check`: **PASS**.
-- Node printed its existing experimental `localStorage` warning; it did not affect the suite.
+- **261 focused backend tests passed:** 232 tests across 10 modules ran under the strict offline HTTP guard (`real_constructions=0`, `requests=0`); 29 Firestore integration tests passed with fake Firestore and mocked transport methods that were asserted not to send requests.
+- **58 frontend Node tests passed**, with no failures.
+- The offline Chrome Fetch-recovery harness passed.
+- Ruff passed for every changed Python application and test file; Python compilation and `git diff --check` passed.
 
-These are offline/fake-provider checks. They do not establish live Firestore latency, provider reachability, or a production end-to-end timing improvement.
+The tests use fixtures and mocked transports. No Production Fetch, provider endpoint, or LIVE provider was called. A cache-only Production Fetch is not a safe performance probe until refresh eligibility for that request is proven to forbid provider work. The under-five-second gate therefore remains open; this report does not claim the target has been met.
 
-### Deployment and read-only production acceptance
+## Remaining limits
 
-**Code deployment:** `dpl_9RaBjs8tSihQ6LB7QaFhWBrLec4b`, Production `READY`, source commit `d2cfafb2d5ed6f1ed9730f6231197071a9646580`, branch `main`, function region `iad1`. Vercel reported the alias `trend-scout-mu.vercel.app`; a separate alias lookup mapped it to the same deployment without a redirect. No project, domain, protection, billing, or region settings were changed.
+- The no-op path avoids Collections analysis and full-image snapshot work when source business inputs match. A Fetch still needs to read/validate the source cache evidence and persist its Run History receipt.
+- When business input really changes, Collections continues to use the existing bounded, chunked SQLite snapshot. This work does not replace that storage model or claim that changed-data snapshot uploads are faster.
+- Firestore row-level, partitioned/delta, and managed relational alternatives require data-model, migration, consistency, cost, and rollback decisions that cannot be inferred safely from the current repository. The report records these as future decisions rather than selecting an unapproved production service.
+- SQL-backed analytics still require the SQLite working snapshot on a cold function instance. The page changes coalesce duplicate reads but do not eliminate that first restore.
+- Cold-start, Firestore, and end-to-end Production latency must be measured after release. Offline tests cannot establish the Vercel under-five-second performance gate.
 
-The five checks below were GET requests through the protected Vercel connector on 25 November 2026. The measured time is connector round-trip wall time and includes its access/share-link handling; it is not an isolated Vercel function duration and must not be compared directly with the baseline request timings.
+## Release record
 
-| Read-only route | HTTP | Connector round-trip | Result |
-| --- | ---: | ---: | --- |
-| `/api/v1/capabilities` | 200 | 5.409 s | Production, LIVE, Shared LIVE; all four sources enabled |
-| `/api/v1/datasets/latest` | 200 | 4.531 s | Latest dataset `be19f94dd725cc80810ffe9d78e48843`, LIVE/PARTIAL, 1,580 received records, 3,447 retained keywords |
-| `/api/v1/runs/history?limit=1&cursor=` | 200 | 5.544 s | Latest run is the same dataset; four CACHED source outcomes, zero requests each |
-| `/api/v1/analytics/overview` | 200 | 3.671 s | Overview loaded; latest dataset matches; no digest field exposed |
-| `/api/v1/runtime` | 200 | 3.294 s | System and SQLite available, integrity `OK`, 3,447 keyword rows, database 72,589,312 bytes |
-
-Public dataset and history responses did not expose `source_input_digest`; the overview response did not expose it either. The latest saved run, created before this code deployment, remains evidence of previously delivered cached inputs and their provenance, not a live test of this release:
-
-| Source | Outcome | Provider requests | Preserved source time |
-| --- | --- | ---: | --- |
-| Bing Search | SUCCESS / CACHED | 0 | `2026-11-25T01:32:55.620616Z` |
-| Google Trends/Search | SUCCESS / CACHED | 0 | `2026-11-25T01:31:25.412106Z` |
-| Wikimedia Pageviews | SUCCESS / CACHED | 0 | Observation date `2026-11-23`; cache evidence fetched `2026-11-25T01:33:20.581202Z` |
-| YouTube Search | PARTIAL / CACHED | 0 | Source fetched `2026-11-25T01:33:55.099599Z`; cache delivered `2026-11-25T01:33:56.792886Z` |
-
-No Fetch POST or provider endpoint was invoked during production verification. A cache-only request was intentionally not used to validate the optimization, so this release has no post-change production Fetch latency measurement.
-
-## Risks and limits
-
-- A fresh source result still requires the established Collections processing and snapshot commit. The measured 69.2-second Collections request and 44-second snapshot save are not claimed to be optimized for a first fresh build.
-- The first cache-only run against a legacy dataset without digests must process once. The saved digest then enables later no-change reuse.
-- A cache mismatch intentionally causes a false negative (extra processing) rather than risk reusing a dataset built from different inputs.
-- The report has no post-change live Fetch timing because Production LIVE Fetch testing is prohibited. Offline tests establish behavior and work-count reductions, not production latency or throughput.
-- The current 120-second Vercel function cap and current Firestore region remain as configured; this work does not claim an increased capacity limit or a specific regional latency improvement.
-- Vercel's current pricing documentation distinguishes active CPU and provisioned-memory usage on Fluid Compute; wall-clock timings here are not converted into a cost estimate ([Vercel Fluid Compute pricing](https://vercel.com/docs/functions/usage-and-pricing), checked 25 November 2026).
+Verification, implementation commit, push result, Vercel deployment ID, Production `READY` status, and exact deployed SHA will be recorded here after the consolidated verification and release steps.

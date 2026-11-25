@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.api.collections import _service
 from app.collections import embeddings
+from app.collections.source_digest import PRIVATE_SOURCE_DIGEST_FIELDS
 from app.ports.storage import StorageError
 from app.taxonomy.classification_policy import VERSION as CLASSIFICATION_POLICY_VERSION
 from app.taxonomy.registry import TAXONOMY_VERSION
@@ -467,7 +468,8 @@ def _public_source_manifest(manifest):
     if not isinstance(manifest, list):
         return []
     return [
-        {key: value for key, value in source.items() if key != "source_input_digest"}
+        {key: value for key, value in source.items()
+         if key not in PRIVATE_SOURCE_DIGEST_FIELDS}
         if isinstance(source, dict) else source
         for source in manifest
     ]

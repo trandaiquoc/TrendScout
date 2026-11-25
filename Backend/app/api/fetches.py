@@ -256,11 +256,24 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
 
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
                                      cached_context_only: bool = False):
+    shared_live = getattr(distributed, "firestore_shared_live", False)
+    if shared_live:
+        reuse_check = getattr(distributed, "collection_reuse_for_fetch", None)
+        reusable = (await asyncio.to_thread(reuse_check, fetch_id)
+                    if callable(reuse_check) else None)
+        if (isinstance(reusable, dict)
+                and reusable.get("terminal") is True
+                and reusable.get("collection_input_unchanged") is True):
+            request.state.vercel_fetch_snapshot_unchanged = True
+            _logger.info(
+                "Fetch Collections skipped reason=SOURCE_INPUT_UNCHANGED snapshot=SKIPPED"
+            )
+            return
+
     result = await asyncio.to_thread(
         distributed.status, fetch_id, include_records=True, include_discovery=False
     )
     if result and result.get("terminal"):
-        shared_live = getattr(distributed, "firestore_shared_live", False)
         if shared_live:
             load_snapshot = getattr(distributed, "load_collection_snapshot", None)
             if callable(load_snapshot):
@@ -386,22 +399,32 @@ async def create_fetch(
         shared_state_policy_sync = None
         policy_sync = (getattr(distributed, "prepare_for_shared_fetch", None)
                        or getattr(distributed, "prepare_for_wikimedia_fetch", None))
-        if callable(policy_sync):
-            try:
-                shared_state_policy_sync = policy_sync()
-            except AdmissionDenied as exc:
-                _raise_distributed_admission_error(exc.code, distributed)
-            except ValueError:
-                raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         try:
             submit_options = {"source_ids": request_sources}
             if manual_source_refresh:
                 submit_options["manual_source_refresh"] = True
-            accepted = await asyncio.to_thread(
-                distributed.submit, idempotency_key, **submit_options
-            )
+            accepted = await asyncio.to_thread(distributed.submit, idempotency_key,
+                                               **submit_options)
         except AdmissionDenied as exc:
-            _raise_distributed_admission_error(exc.code, distributed)
+            # Current-policy Fetches use the admission transaction as their
+            # single policy check. Only a recognized old ledger needs the
+            # explicit, quota-preserving migration before retrying admission.
+            if (exc.code != "POLICY_MISMATCH" or not callable(policy_sync)
+                    or vercel_shared_live and fetch_continuation):
+                _raise_distributed_admission_error(exc.code, distributed)
+            try:
+                shared_state_policy_sync = policy_sync()
+            except AdmissionDenied as sync_error:
+                _raise_distributed_admission_error(sync_error.code, distributed)
+            except ValueError:
+                raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
+            try:
+                accepted = await asyncio.to_thread(distributed.submit, idempotency_key,
+                                                   **submit_options)
+            except AdmissionDenied as retry_error:
+                _raise_distributed_admission_error(retry_error.code, distributed)
+            except ValueError:
+                raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         except ValueError:
             raise HTTPException(503, {"code": "ADMISSION_STATE_UNAVAILABLE"}) from None
         slice_result = None
@@ -553,13 +576,40 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     if not FETCH_ID_RE.fullmatch(fetch_id):
         raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
     distributed = _distributed_for_request(request)
-    service = (getattr(getattr(request, "state", None), "collection_service", None)
-               or getattr(request.app.state, "collection_service", None))
     if (distributed is None
             or not getattr(distributed, "firestore_shared_live", False)
-            or getattr(distributed, "data_mode", None) != "LIVE"
-            or service is None
-            or getattr(service.store, "data_mode_scope", None) != "LIVE"):
+            or getattr(distributed, "data_mode", None) != "LIVE"):
+        raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
+
+    # The compact Fetch receipt and latest dataset pointer are sufficient for
+    # unchanged cache-only recovery. Avoid restoring the complete SQLite image
+    # and downloading source record blobs unless Collections really needs work.
+    reuse_check = getattr(distributed, "collection_reuse_for_fetch", None)
+    reusable = (await asyncio.to_thread(reuse_check, fetch_id)
+                if callable(reuse_check) else None)
+    if (isinstance(reusable, dict)
+            and reusable.get("terminal") is True
+            and reusable.get("collection_input_unchanged") is True):
+        request.state.vercel_fetch_snapshot_unchanged = True
+        _logger.info(
+            "Fetch Collections recovery skipped reason=SOURCE_INPUT_UNCHANGED snapshot=SKIPPED"
+        )
+        return {
+            "fetch_id": fetch_id,
+            "status": "REUSED",
+            "error_code": None,
+            "collection_input_unchanged": True,
+            **({"dataset_id": reusable["dataset_id"]}
+               if isinstance(reusable.get("dataset_id"), str) else {}),
+        }
+
+    load_snapshot = getattr(distributed, "load_collection_snapshot", None)
+    if callable(load_snapshot):
+        await asyncio.to_thread(load_snapshot)
+    service = (getattr(getattr(request, "state", None), "collection_service", None)
+               or getattr(distributed, "collection_service", None)
+               or getattr(request.app.state, "collection_service", None))
+    if (service is None or getattr(service.store, "data_mode_scope", None) != "LIVE"):
         raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
 
     # A completed, persisted Collections job is already the outcome that

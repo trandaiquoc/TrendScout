@@ -20,7 +20,7 @@ from app.jobs.public_admission import (
     PublicAdmission,
 )
 from app.jobs.shared_cache import CacheGrant, CacheScope, SharedCache
-from app.jobs.source_checkpoints import CheckpointGrant, SourceCheckpointJournal
+from app.jobs.source_checkpoints import CheckpointGrant
 from app.normal_wikimedia_live_policy import (
     GOOGLE_POLICY_VERSION,
     GOOGLE_STATE_KEY,
@@ -346,11 +346,17 @@ async def normal_google_live_composition(*, user_agent,
     if uses_firestore:
         from app.orchestration.firestore_shared_live_composition import _client_project_id
         from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
-        from app.storage.firestore_snapshot_blobs import FirestoreSnapshotBlobs
+        from app.storage.firestore_snapshot_blobs import (
+            _WARM_COLLECTION_SNAPSHOT_READ_CACHE,
+            FirestoreSnapshotBlobs,
+        )
 
         _client_project_id(shared_firestore_client)
         store = FirestoreAtomicStateStore(shared_firestore_client)
-        snapshot_blobs = FirestoreSnapshotBlobs(shared_firestore_client)
+        snapshot_blobs = FirestoreSnapshotBlobs(
+            shared_firestore_client,
+            read_cache=_WARM_COLLECTION_SNAPSHOT_READ_CACHE,
+        )
     else:
         directory = Path(state_directory) if state_directory is not None else (
             Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
@@ -378,7 +384,7 @@ async def normal_google_live_composition(*, user_agent,
     )
     if uses_firestore:
         existing_state = (
-            {} if capability_metadata_request
+            {} if capability_metadata_request or vercel_shared_live
             else store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
         )
     else:
@@ -560,6 +566,9 @@ async def normal_google_live_composition(*, user_agent,
                 return None
             if source_id == YOUTUBE_SOURCE_ID:
                 return youtube_cache_grant_at(now)
+            # Freshness and refresh eligibility are separate dimensions. The
+            # paid-source slots are enforced by their handlers; do not stretch
+            # cache freshness to match the eight-hour refresh spacing.
             return CacheGrant(
                 source_id, GOOGLE_POLICY_VERSION,
                 now + timedelta(seconds=_MAX_CACHE_RETENTION_SECONDS),
@@ -580,23 +589,11 @@ async def normal_google_live_composition(*, user_agent,
                 now + timedelta(seconds=policy.receipt_seconds), policy.receipt_seconds, True,
             )
 
-        checkpoint_journal = SourceCheckpointJournal(
-            admission, snapshot_blobs=snapshot_blobs
-        )
-
         def checkpoint_google_candidates(context, now):
-            grant = resolve_checkpoint(GOOGLE_SOURCE_ID, now)
-            saved = checkpoint_journal.load(
-                context.job_id, context.owner, context.fence,
-                source_id=GOOGLE_SOURCE_ID, grant=grant, now=now,
-            )
-            if not isinstance(saved, dict):
-                raise AdmissionDenied("GOOGLE_SOURCE_CHECKPOINT_MISSING")
-            snapshot = saved.get("snapshot")
-            result = snapshot.get("result") if isinstance(snapshot, dict) else None
-            if (not isinstance(snapshot, dict) or snapshot.get("phase") != "COMPLETE"
-                    or not isinstance(result, dict)
-                    or result.get("data_mode") != "LIVE"):
+            # The worker has already loaded and validated completed source
+            # receipts from its fenced claim. Reuse that result in memory.
+            result = getattr(context, "completed_sources", {}).get(GOOGLE_SOURCE_ID)
+            if not isinstance(result, dict) or result.get("data_mode") != "LIVE":
                 raise AdmissionDenied("GOOGLE_SOURCE_CHECKPOINT_INVALID")
             records = result.get("records")
             if (not isinstance(records, list) or len(records) > _MAX_CANDIDATE_HISTORY
@@ -817,9 +814,12 @@ async def normal_google_live_composition(*, user_agent,
             allow_initial_acceptance=allow_initial_bing_acceptance,
             shared_cache=cache,
             resolve_cache_grant=resolve_cache_grant,
-            candidate_loader=lambda now: _shared_google_candidate_rows(
+            # On Shared LIVE, the preceding Google source receipt is the
+            # authoritative candidate input. Reading its shared cache again
+            # would fetch the same payload twice before Bing can use it.
+            candidate_loader=(None if uses_firestore else lambda now: _shared_google_candidate_rows(
                 cache, resolve_cache_grant, now=now
-            ),
+            )),
             checkpoint_candidate_loader=checkpoint_google_candidates,
         ) if bing_gateway is not None and budget is not None else None)
 
@@ -1009,7 +1009,12 @@ async def normal_google_live_composition(*, user_agent,
             normal_google_live=not uses_firestore,
             firestore_shared_live=uses_firestore,
             resolve_processing_grants=resolve_processing,
-            provider_retry_after_seconds=pace_request.retry_after_seconds,
+            # Shared LIVE guards pace at the actual Wikimedia request boundary.
+            # Preflighting every idempotent Fetch would read the pacing ledger
+            # even when every source is served from cache.
+            provider_retry_after_seconds=(
+                None if vercel_shared_live else pace_request.retry_after_seconds
+            ),
             owner_fresh_acceptance_once=(
                 uses_firestore and vercel_shared_live
                 and os.environ.get("VERCEL_ENV") == "production"

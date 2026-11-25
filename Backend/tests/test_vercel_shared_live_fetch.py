@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from fastapi import FastAPI
@@ -23,6 +23,9 @@ from app.main import (
     _persists_vercel_collections,
     _vercel_collection_read_composition_required,
     _vercel_collection_snapshot_required,
+    _vercel_fetch_collection_recovery_read_context_required,
+    _vercel_fetch_read_composition_required,
+    _vercel_fetch_submission_read_context_required,
     _vercel_timing_route,
     create_app,
 )
@@ -43,6 +46,42 @@ _JOB_ID = "a" * 32
 
 
 class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
+    def test_fetch_status_and_history_reads_use_the_provider_free_context(self):
+        for path in (
+            f"/api/v1/fetches/{_JOB_ID}",
+            "/api/v1/runs/history",
+            f"/api/v1/runs/history/{_JOB_ID}",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(_vercel_fetch_read_composition_required("GET", path))
+                self.assertFalse(_vercel_fetch_read_composition_required("POST", path))
+        for method, path in (
+            ("GET", "/api/v1/fetches/not-a-fetch-id"),
+            ("GET", f"/api/v1/fetches/{_JOB_ID}/collections"),
+            ("POST", "/api/v1/fetches"),
+            ("GET", "/api/v1/capabilities"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(_vercel_fetch_read_composition_required(method, path))
+        self.assertTrue(_vercel_fetch_collection_recovery_read_context_required(
+            "POST", f"/api/v1/fetches/{_JOB_ID}/collections",
+        ))
+        self.assertFalse(_vercel_fetch_collection_recovery_read_context_required(
+            "GET", f"/api/v1/fetches/{_JOB_ID}/collections",
+        ))
+
+    def test_initial_fetch_submission_uses_provider_free_admission_context(self):
+        self.assertTrue(_vercel_fetch_submission_read_context_required(
+            "POST", "/api/v1/fetches", [(b"idempotency-key", b"test")],
+        ))
+        self.assertFalse(_vercel_fetch_submission_read_context_required(
+            "POST", "/api/v1/fetches",
+            [(b"x-trendscout-fetch-continuation", b"1")],
+        ))
+        self.assertFalse(_vercel_fetch_submission_read_context_required(
+            "POST", "/api/v1/fetches/history", [],
+        ))
+
     def test_only_collection_data_routes_restore_the_sqlite_snapshot(self):
         for method, path in (
             ("GET", "/api/v1/runtime"),
@@ -407,6 +446,157 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(observed["collection_service"], service)
         self.assertIsNone(observed["distributed_public_fetch"])
         self.assertEqual(observed["public_fetch_source_ids"], tuple(sorted(sources)))
+
+    async def test_fetch_status_uses_provider_free_read_composition(self):
+        events = []
+        sources = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+                             YOUTUBE_SOURCE_ID})
+        facade = SimpleNamespace(
+            available_sources=sources,
+            firestore_shared_live=True,
+            latest_dataset_summary_available=True,
+            latest_dataset_summary={"dataset_id": _JOB_ID},
+        )
+        settings = SimpleNamespace(
+            environment_profile="vercel",
+            vercel_shared_live_enabled=True,
+            wikimedia_user_agent="TrendScoutTest/0.1",
+        )
+
+        @asynccontextmanager
+        async def read_context(_client, *, user_agent, defer_collection_snapshot,
+                               read_latest_dataset_summary, restore_collection_snapshot,
+                               allow_collection_restore):
+            self.assertEqual(user_agent, settings.wikimedia_user_agent)
+            self.assertTrue(defer_collection_snapshot)
+            expected_restore = len(events) == 1
+            expected_allow = len(events) in {1, 2}
+            self.assertEqual(restore_collection_snapshot, expected_restore)
+            self.assertEqual(allow_collection_restore, expected_allow)
+            facade.latest_dataset_summary_available = read_latest_dataset_summary
+            facade.latest_dataset_summary = ({"dataset_id": _JOB_ID}
+                                             if read_latest_dataset_summary else None)
+            if restore_collection_snapshot:
+                facade.collection_service = SimpleNamespace()
+            events.append(read_latest_dataset_summary)
+            yield facade
+
+        async def unused_live_context(*_args, **_kwargs):
+            raise AssertionError("Fetch status must not construct provider adapters")
+
+        observed = []
+
+        async def endpoint(scope, _receive, send):
+            observed.append(dict(scope["state"]))
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = VercelSharedLiveMiddleware(
+            endpoint,
+            settings=settings,
+            enabled=True,
+            client_factory=lambda _token: SimpleNamespace(close=lambda: None),
+        )
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/v1/fetches/{_JOB_ID}",
+            "headers": [(b"host", b"trend-scout.example"),
+                        (b"origin", b"https://trend-scout.example"),
+                        (b"x-vercel-oidc-token", b"test-token")],
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message):
+            return None
+
+        with patch(
+            "app.orchestration.vercel_fetch_read_composition.vercel_fetch_read_composition",
+            new=read_context,
+        ), patch(
+            "app.orchestration.vercel_wikimedia_live_composition.vercel_shared_live_composition",
+            new=unused_live_context,
+        ):
+            await middleware(scope, receive, send)
+            scope["path"] = "/api/v1/runs/history"
+            await middleware(scope, receive, send)
+            scope["method"] = "POST"
+            scope["path"] = f"/api/v1/fetches/{_JOB_ID}/collections"
+            with patch("app.main._save_vercel_collection_snapshot", new=AsyncMock(return_value=None)):
+                await middleware(scope, receive, send)
+
+        self.assertEqual(events, [True, True, True])
+        self.assertIs(observed[0]["distributed_public_fetch"], facade)
+        self.assertIsNone(observed[0]["collection_service"])
+        self.assertTrue(observed[0]["latest_dataset_summary_available"])
+        self.assertIs(observed[1]["distributed_public_fetch"], facade)
+        self.assertTrue(observed[1]["latest_dataset_summary_available"])
+        self.assertIs(observed[1]["collection_service"], facade.collection_service)
+
+    async def test_initial_fetch_admission_uses_provider_free_composition(self):
+        events = []
+        facade = SimpleNamespace(
+            available_sources=frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+                                         BING_SOURCE_ID, YOUTUBE_SOURCE_ID}),
+            firestore_shared_live=True,
+            latest_dataset_summary_available=True,
+            latest_dataset_summary={"dataset_id": _JOB_ID},
+        )
+        settings = SimpleNamespace(
+            environment_profile="vercel",
+            vercel_shared_live_enabled=True,
+            wikimedia_user_agent="TrendScoutTest/0.1",
+        )
+
+        @asynccontextmanager
+        async def submit_context(_client, *, user_agent, defer_collection_snapshot,
+                                 read_latest_dataset_summary, restore_collection_snapshot,
+                                 allow_collection_restore):
+            self.assertEqual(user_agent, settings.wikimedia_user_agent)
+            self.assertTrue(defer_collection_snapshot)
+            self.assertFalse(read_latest_dataset_summary)
+            self.assertFalse(restore_collection_snapshot)
+            self.assertFalse(allow_collection_restore)
+            events.append("provider_free_context")
+            yield facade
+
+        async def unused_live_context(*_args, **_kwargs):
+            raise AssertionError("initial Fetch admission must not build provider adapters")
+
+        async def endpoint(scope, _receive, send):
+            await send({"type": "http.response.start", "status": 202, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware = VercelSharedLiveMiddleware(
+            endpoint,
+            settings=settings,
+            enabled=True,
+            client_factory=lambda _token: SimpleNamespace(close=lambda: None),
+        )
+        scope = {
+            "type": "http", "method": "POST", "path": "/api/v1/fetches",
+            "headers": [(b"host", b"trend-scout.example"),
+                        (b"origin", b"https://trend-scout.example"),
+                        (b"x-vercel-oidc-token", b"test-token")],
+        }
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message):
+            return None
+
+        with patch(
+            "app.orchestration.vercel_fetch_read_composition.vercel_fetch_read_composition",
+            new=submit_context,
+        ), patch(
+            "app.orchestration.vercel_wikimedia_live_composition.vercel_shared_live_composition",
+            new=unused_live_context,
+        ):
+            await middleware(scope, receive, send)
+        self.assertEqual(events, ["provider_free_context"])
 
 
 class _Client:
@@ -1070,6 +1260,38 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facade.status_calls, 0)
             self.assertNotIn("snapshot_saved", events)
 
+    async def test_unchanged_collection_recovery_skips_sqlite_restore_and_snapshot_write(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.collection_reuse_for_fetch = lambda fetch_id: {
+            "fetch_id": fetch_id,
+            "terminal": True,
+            "collection_input_unchanged": True,
+            "dataset_id": "b" * 32,
+        }
+
+        def reject_snapshot_restore():
+            events.append("snapshot_restore_forbidden")
+            raise AssertionError("unchanged inputs must not restore SQLite")
+
+        facade.load_collection_snapshot = reject_snapshot_restore
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="https://trend-scout.example"
+            ) as browser:
+                response = await browser.post(
+                    f"/api/v1/fetches/{_JOB_ID}/collections",
+                    headers={"Origin": "https://trend-scout.example",
+                             "x-vercel-oidc-token": "synthetic-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "REUSED")
+        self.assertEqual(response.json()["dataset_id"], "b" * 32)
+        self.assertTrue(response.json()["collection_input_unchanged"])
+        self.assertEqual(facade.status_calls, 0)
+        self.assertNotIn("snapshot_restore_forbidden", events)
+        self.assertNotIn("snapshot_saved", events)
+
     async def test_expired_checkpoints_replay_only_retained_live_caches(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         source_ids = [WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID]
@@ -1172,8 +1394,14 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_recognized_policy_mismatch_exposes_explicit_sync_then_fetch(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         original_submit = facade.submit
+        submit_calls = 0
 
-        def submit_after_sync(idempotency_key, *, source_ids, manual_source_refresh=False):
+        def submit_after_mismatch(idempotency_key, *, source_ids, manual_source_refresh=False):
+            nonlocal submit_calls
+            submit_calls += 1
+            if submit_calls == 1:
+                events.append("policy_mismatch")
+                raise AdmissionDenied("POLICY_MISMATCH")
             events.append("fetch_submitted")
             return original_submit(
                 idempotency_key, source_ids=source_ids,
@@ -1184,7 +1412,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             events.append("policy_reconciled")
             return "RECONCILED"
 
-        facade.submit = submit_after_sync
+        facade.submit = submit_after_mismatch
         facade.prepare_for_wikimedia_fetch = prepare_for_fetch
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -1200,6 +1428,8 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(response.json()["shared_state_policy_sync"], "RECONCILED")
+        self.assertEqual(submit_calls, 2)
+        self.assertLess(events.index("policy_mismatch"), events.index("policy_reconciled"))
         self.assertLess(events.index("policy_reconciled"), events.index("fetch_submitted"))
         self.assertNotIn("worker_finished", events)
 
@@ -1224,9 +1454,14 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
     async def test_policy_sync_failure_stops_before_job_admission_or_provider_worker(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
 
+        def policy_mismatch(_key, *, source_ids, manual_source_refresh=False):
+            events.append("policy_mismatch")
+            raise AdmissionDenied("POLICY_MISMATCH")
+
         def reject_policy_sync():
             raise AdmissionDenied("POLICY_MISMATCH")
 
+        facade.submit = policy_mismatch
         facade.prepare_for_wikimedia_fetch = reject_policy_sync
         async with app.router.lifespan_context(app):
             async with httpx.AsyncClient(
@@ -1244,6 +1479,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["code"], "POLICY_MISMATCH")
+        self.assertIn("policy_mismatch", events)
         self.assertIsNone(facade.submitted_sources)
         self.assertNotIn("worker_finished", events)
 

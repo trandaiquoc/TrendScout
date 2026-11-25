@@ -30,7 +30,7 @@ from app.sources.refresh_eligibility import (
     GOOGLE_REFRESH_STATE_KEY,
     OWNER_ACCEPTANCE_SLOT_PREFIX,
     candidate_slot,
-    manual_candidate_slot,
+    manual_candidate_decision,
     manual_schedule_metadata,
     reserve_manual_source_slot,
     reserve_owner_acceptance_slot,
@@ -324,19 +324,22 @@ class GoogleTrendsDiscoveryHandler:
                                  "attempted_calls": 0},
                 }
         else:
+            manual_schedule = None
             try:
-                eligible_slot = (
-                    f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
-                    if acceptance_fresh else manual_candidate_slot(
+                if acceptance_fresh:
+                    eligible_slot = f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"
+                elif manual_refresh:
+                    eligible_slot, manual_schedule = manual_candidate_decision(
                         self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                         job_id=context.job_id,
                         error_code="GOOGLE_SCHEDULE_STATE_INVALID",
-                    ) if manual_refresh else candidate_slot(
+                    )
+                else:
+                    eligible_slot = candidate_slot(
                         self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                         error_code="GOOGLE_SCHEDULE_STATE_INVALID",
                         allow_initial_acceptance=self.allow_initial_acceptance,
                     )
-                )
             except AdmissionDenied as error:
                 return {
                     "status": "FAILED", "data_mode": self.data_mode,
@@ -352,10 +355,11 @@ class GoogleTrendsDiscoveryHandler:
                             "next_slots_timezone": "Asia/Ho_Chi_Minh"}
                 if manual_refresh:
                     try:
-                        coverage["next_eligible_at"] = manual_schedule_metadata(
+                        metadata = (manual_schedule or manual_schedule_metadata(
                             self.atomic_store, GOOGLE_REFRESH_STATE_KEY, self.utcnow(),
                             error_code="GOOGLE_SCHEDULE_STATE_INVALID",
-                        ).get("next_eligible_at")
+                        ))
+                        coverage["next_eligible_at"] = metadata.get("next_eligible_at")
                     except AdmissionDenied as error:
                         return {
                             "status": "FAILED", "data_mode": self.data_mode,

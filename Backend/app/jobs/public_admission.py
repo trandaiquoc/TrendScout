@@ -1480,6 +1480,36 @@ class PublicAdmission:
             return state, deepcopy(job)
         return self.store.transact(self.state_key, operation)
 
+    def read_job_unmetered(self, job_id: str) -> dict | None:
+        """Read a compact internal receipt without charging the public poll budget.
+
+        This is reserved for server-side recovery and reuse decisions that only
+        inspect durable job metadata. Public status endpoints must continue to
+        use ``read_job``.
+        """
+        if not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id):
+            return None
+
+        def operation(state):
+            if (not state or state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+            jobs = state.get("jobs")
+            if not isinstance(jobs, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            job = jobs.get(job_id)
+            if job is not None and (not isinstance(job, dict)
+                                    or job.get("job_id") != job_id):
+                raise AdmissionDenied("JOB_STATE_INVALID")
+            return state, deepcopy(job) if job is not None else None
+
+        read_many = getattr(self.store, "read_many", None)
+        if callable(read_many):
+            state = read_many([self.state_key])[self.state_key]
+            _updated, job = operation(deepcopy(state))
+            return job
+        return self.store.transact(self.state_key, operation)
+
     def list_jobs(self, *, limit: int, now: datetime) -> list[dict]:
         """Return a bounded newest-first job snapshot without charging status polls."""
         now = _utc(now)

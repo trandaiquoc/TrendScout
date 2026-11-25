@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from app.collections.source_digest import (
+    PRIVATE_SOURCE_DIGEST_FIELDS,
     reusable_collection_input,
     reusable_collection_manifest,
 )
@@ -286,6 +287,60 @@ class DistributedPublicFetch:
                 "status": accepted["status"], "created_at": accepted.get("created_at"),
                 "owner_fresh_acceptance": accepted.get("owner_fresh_acceptance", False)}
 
+    def _reused_terminal_status(self, job, reuse_check):
+        metadata = job.get("request_metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        selected_sources = sorted(item["source_id"]
+                                  for item in reuse_check["source_manifest"])
+        source_results = []
+        modes = set()
+        for item in reuse_check["source_manifest"]:
+            data_mode = item.get("data_mode")
+            if item.get("status") != "UNAVAILABLE" and data_mode in {"LIVE", "SYNTHETIC"}:
+                modes.add(data_mode)
+            source_results.append({
+                "source_id": item["source_id"],
+                "status": item.get("status"),
+                **({"data_mode": data_mode} if data_mode in {"LIVE", "SYNTHETIC"} else {}),
+                "delivery_state": item.get("delivery_state"),
+                "record_count": item.get("record_count"),
+                "coverage": item.get("coverage", {}),
+                "provider_request_count": item.get("provider_request_count"),
+                "error_code": item.get("error_code"),
+                "retry_after_seconds": item.get("retry_after_seconds"),
+                "quality_flags": item.get("quality_flags", []),
+                **({"transport_diagnostic": item["transport_diagnostic"]}
+                   if "transport_diagnostic" in item else {}),
+            })
+        request_kind = metadata.get("kind", "LATEST")
+        return {
+            "fetch_id": job["job_id"],
+            "status": job["state"],
+            "stage": job["state"],
+            **({"lease_until": job["lease_until"]}
+               if job.get("state") == "RUNNING"
+               and isinstance(job.get("lease_until"), str) else {}),
+            "request_kind": request_kind,
+            "selected_sources": selected_sources,
+            **({"history_days": metadata["history_days"]}
+               if request_kind == "WIKIMEDIA_HISTORY" else {}),
+            "data_mode": (next(iter(modes)) if len(modes) == 1
+                          else "MIXED" if modes else None),
+            "sources": source_results,
+            "progress": {"completed_sources": len(selected_sources),
+                         "total_sources": len(selected_sources), "percent": 100},
+            "discovery": None,
+            "created_at": job["created_at"],
+            "updated_at": job.get("updated_at") or job.get("available_at"),
+            "finished_at": job.get("finished_at"),
+            **({"terminal_reason": job["terminal_reason"]}
+               if isinstance(job.get("terminal_reason"), str) else {}),
+            "terminal": True,
+            "recovery_available": job.get("recovery_available") is True,
+            "collection_input_unchanged": True,
+        }
+
     def status(self, job_id: str, *, include_records: bool = False,
                include_discovery: bool = True) -> dict | None:
         if type(include_records) is not bool or type(include_discovery) is not bool:
@@ -297,6 +352,11 @@ class DistributedPublicFetch:
         source_results = []
         modes = set()
         terminal = job["state"] in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
+        if terminal and not include_records:
+            reuse_check = self.collection_reuse_for_fetch(job_id, job=job)
+            if (isinstance(reuse_check, dict)
+                    and reuse_check.get("collection_input_unchanged") is True):
+                return self._reused_terminal_status(job, reuse_check)
         if terminal:
             request_metadata = job.get("request_metadata", {})
             selected_sources = ([WIKIMEDIA_SOURCE_ID]
@@ -418,8 +478,18 @@ class DistributedPublicFetch:
                     })
                 else:
                     progress_sources.append({"source_id": source_id, "status": job["state"]})
+        collection_input_unchanged = bool(
+            terminal and self.firestore_shared_live
+            and self.latest_dataset_summary_available
+            and isinstance(self.latest_dataset_summary, dict)
+            and reusable_collection_input(
+                source_results,
+                self.latest_dataset_summary.get("source_manifest"),
+                processing_status=self.latest_dataset_summary.get("processing_status"),
+            )
+        )
         discovery = None
-        if terminal and include_discovery:
+        if terminal and include_discovery and not collection_input_unchanged:
             try:
                 grants = self.resolve_processing_grants(now) if callable(self.resolve_processing_grants) else ()
                 discovery = discover_fetch_results(source_results, now=now, processing_grants=grants,
@@ -489,16 +559,7 @@ class DistributedPublicFetch:
                if isinstance(job.get("terminal_reason"), str) else {}),
             "terminal": terminal or job["state"] in {"FAILED", "EXPIRED"},
             "recovery_available": job.get("recovery_available") is True,
-            "collection_input_unchanged": bool(
-                terminal and self.firestore_shared_live
-                and self.latest_dataset_summary_available
-                and isinstance(self.latest_dataset_summary, dict)
-                and reusable_collection_input(
-                    source_results,
-                    self.latest_dataset_summary.get("source_manifest"),
-                    processing_status=self.latest_dataset_summary.get("processing_status"),
-                )
-            ),
+            "collection_input_unchanged": collection_input_unchanged,
             **({"retry_at": retry_at} if retry_at is not None else {}),
         }
 
@@ -548,22 +609,32 @@ class DistributedPublicFetch:
                 **({"transport_diagnostic": result["transport_diagnostic"]}
                    if "transport_diagnostic" in result else {}),
             })
-        now = self.utcnow()
-        discovery = None
-        try:
-            grants = (self.resolve_processing_grants(now)
-                      if callable(self.resolve_processing_grants) else ())
-            discovery = discover_fetch_results(
-                source_results, now=now, processing_grants=grants,
-                empty_mode=self.data_mode,
+        summary = self.latest_dataset_summary
+        collection_input_unchanged = bool(
+            self.firestore_shared_live and self.latest_dataset_summary_available
+            and isinstance(summary, dict)
+            and reusable_collection_input(
+                source_results, summary.get("source_manifest"),
+                processing_status=summary.get("processing_status"),
             )
-        except Exception as exc:
-            discovery = {
-                "status": "UNAVAILABLE", "data_mode": self.data_mode,
-                "error_code": type(exc).__name__, "candidate_count": 0,
-                "shown_count": 0, "rejected_record_count": 0, "candidates": [],
-                "limitations": ["DISCOVERY_PROCESSING_FAILED"],
-            }
+        )
+        discovery = None
+        if not collection_input_unchanged:
+            now = self.utcnow()
+            try:
+                grants = (self.resolve_processing_grants(now)
+                          if callable(self.resolve_processing_grants) else ())
+                discovery = discover_fetch_results(
+                    source_results, now=now, processing_grants=grants,
+                    empty_mode=self.data_mode,
+                )
+            except Exception as exc:
+                discovery = {
+                    "status": "UNAVAILABLE", "data_mode": self.data_mode,
+                    "error_code": type(exc).__name__, "candidate_count": 0,
+                    "shown_count": 0, "rejected_record_count": 0, "candidates": [],
+                    "limitations": ["DISCOVERY_PROCESSING_FAILED"],
+                }
         if self.data_mode != "LIVE":
             visible_sources = source_results
         else:
@@ -601,17 +672,118 @@ class DistributedPublicFetch:
             "terminal": True,
             "recovery_available": False,
         }
-        summary = self.latest_dataset_summary
-        if (self.firestore_shared_live and self.latest_dataset_summary_available
-                and isinstance(summary, dict)
-                and reusable_collection_input(
-                    source_results, summary.get("source_manifest"),
-                    processing_status=summary.get("processing_status"),
-                )):
-            result["collection_input_unchanged"] = True
-        else:
-            result["collection_input_unchanged"] = False
+        result["collection_input_unchanged"] = collection_input_unchanged
         return result
+
+    def collection_reuse_for_fetch(self, job_id: str, *, job=None) -> dict | None:
+        """Compare compact terminal receipts with the latest dataset manifest.
+
+        The checkpoint shell contains counts, provenance, and the source input
+        digest even when its records are stored in immutable blobs. This check
+        avoids downloading those blobs or restoring the SQLite snapshot when a
+        Fetch is an exact cache-only replay of the current dataset.
+        """
+        if (not self.firestore_shared_live
+                or not self.latest_dataset_summary_available
+                or not isinstance(self.latest_dataset_summary, dict)):
+            return None
+        if job is None:
+            read_receipt = getattr(self.admission, "read_job_unmetered", None)
+            if not callable(read_receipt):
+                return None
+            job = read_receipt(job_id)
+        if job is None or job.get("state") not in {
+            "COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED",
+        }:
+            return None
+        metadata = job.get("request_metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        selected = ([WIKIMEDIA_SOURCE_ID]
+                    if metadata.get("kind") == "WIKIMEDIA_HISTORY"
+                    else metadata.get("sources", sorted(self.admission.policy.enabled_sources)))
+        checkpoints = job.get("source_checkpoints", {})
+        if (not isinstance(selected, list) or not selected
+                or not isinstance(checkpoints, dict)):
+            return None
+        manifest = []
+        for source_id in sorted(selected):
+            entry = checkpoints.get(source_id)
+            snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
+            source = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if (not isinstance(snapshot, dict) or snapshot.get("phase") != "COMPLETE"
+                    or not isinstance(source, dict)):
+                return None
+            record_count = source.get("record_count")
+            if type(record_count) is not int or record_count < 0:
+                return None
+            storage = entry.get("snapshot_storage", "INLINE")
+            if storage == "EXTERNAL_RECORDS":
+                reference = entry.get("snapshot_ref")
+                if (not isinstance(reference, dict)
+                        or reference.get("path") != ["result", "records"]
+                        or reference.get("item_count") != record_count
+                        or not isinstance(reference.get("digest"), str)
+                        or re.fullmatch(r"[a-f0-9]{64}", reference["digest"]) is None
+                        or type(reference.get("raw_bytes")) is not int
+                        or reference["raw_bytes"] < 0):
+                    return None
+            elif storage == "INLINE":
+                records = source.get("records")
+                if not isinstance(records, list) or len(records) != record_count:
+                    return None
+            else:
+                return None
+            coverage = source.get("coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            request_count = source.get("provider_request_count")
+            if type(request_count) is not int or request_count < 0:
+                request_count = coverage.get("provider_request_count")
+            if type(request_count) is not int or request_count < 0:
+                request_count = None
+            item = {
+                "source_id": source_id,
+                "status": source.get("status"),
+                "data_mode": source.get("data_mode"),
+                "delivery_state": source.get("delivery_state"),
+                "record_count": record_count,
+                "provider_request_count": request_count,
+                "coverage": coverage,
+                "quality_flags": source.get("quality_flags", []),
+                "error_code": source.get("error_code"),
+                "retry_after_seconds": source.get("retry_after_seconds"),
+            }
+            if "transport_diagnostic" in source:
+                item["transport_diagnostic"] = source["transport_diagnostic"]
+            if isinstance(snapshot.get("source_input_digest"), str):
+                item["source_input_digest"] = snapshot["source_input_digest"]
+            if type(snapshot.get("source_input_digest_version")) is int:
+                item["source_input_digest_version"] = snapshot[
+                    "source_input_digest_version"
+                ]
+            if isinstance(snapshot.get("legacy_source_input_digest"), str):
+                item["legacy_source_input_digest"] = snapshot[
+                    "legacy_source_input_digest"
+                ]
+            if isinstance(snapshot.get("legacy_source_input_digests"), list):
+                item["legacy_source_input_digests"] = snapshot[
+                    "legacy_source_input_digests"
+                ]
+            manifest.append(item)
+        summary = self.latest_dataset_summary
+        unchanged = reusable_collection_manifest(
+            manifest, summary.get("source_manifest"),
+            processing_status=summary.get("processing_status"),
+        )
+        return {
+            "fetch_id": job_id,
+            "status": job["state"],
+            "terminal": True,
+            "collection_input_unchanged": unchanged,
+            "source_manifest": manifest,
+            **({"dataset_id": summary.get("dataset_id")}
+               if unchanged and isinstance(summary.get("dataset_id"), str) else {}),
+        }
 
     def history(self, *, limit: int = 20) -> list[dict]:
         """Return shared job summaries without charging the per-job poll budget."""
@@ -656,6 +828,9 @@ class DistributedPublicFetch:
                 record_count = result.get("record_count") if complete else None
                 if type(record_count) is int and record_count >= 0:
                     received += record_count
+                quality_flags = result.get("quality_flags", []) if complete else []
+                if not isinstance(quality_flags, list):
+                    quality_flags = []
                 provider_request_count = (
                     result.get("provider_request_count") if complete else None
                 )
@@ -674,9 +849,19 @@ class DistributedPublicFetch:
                     "data_mode": result.get("data_mode") if complete else self.data_mode,
                     "delivery_state": result.get("delivery_state") if complete else None,
                     "record_count": record_count if type(record_count) is int and record_count >= 0 else None,
+                    "quality_flags": quality_flags,
                     "provider_request_count": provider_request_count,
                     **({"source_input_digest": snapshot["source_input_digest"]}
                        if complete and isinstance(snapshot.get("source_input_digest"), str)
+                       else {}),
+                    **({"source_input_digest_version": snapshot["source_input_digest_version"]}
+                       if complete and type(snapshot.get("source_input_digest_version")) is int
+                       else {}),
+                    **({"legacy_source_input_digest": snapshot["legacy_source_input_digest"]}
+                       if complete and isinstance(snapshot.get("legacy_source_input_digest"), str)
+                       else {}),
+                    **({"legacy_source_input_digests": snapshot["legacy_source_input_digests"]}
+                       if complete and isinstance(snapshot.get("legacy_source_input_digests"), list)
                        else {}),
                     "error_code": error_code,
                     "coverage": coverage if isinstance(coverage, dict) else {},
@@ -692,7 +877,8 @@ class DistributedPublicFetch:
                 )
             )
             for source in manifest:
-                source.pop("source_input_digest", None)
+                for field in PRIVATE_SOURCE_DIGEST_FIELDS:
+                    source.pop(field, None)
             items.append({
                 "fetch_id": job["job_id"],
                 "run_type": "FETCH",
@@ -730,7 +916,14 @@ class DistributedPublicFetch:
 
     async def run_slice(self, owner: str, fetch_id: str, *, max_sources: int = 1):
         """Continue one requested shared Fetch through a bounded source slice."""
+        previous_manifest = None
+        if (self.firestore_shared_live and self.latest_dataset_summary_available
+                and isinstance(self.latest_dataset_summary, dict)):
+            candidate = self.latest_dataset_summary.get("source_manifest")
+            if isinstance(candidate, list):
+                previous_manifest = candidate
         return await self.worker.run_once(
             owner, job_id=fetch_id, max_sources=max_sources,
             continue_cached=self.firestore_shared_live,
+            previous_source_manifest=previous_manifest,
         )

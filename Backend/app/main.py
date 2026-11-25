@@ -170,6 +170,36 @@ def _vercel_collection_read_composition_required(method, path):
             and _vercel_collection_snapshot_required(method, path))
 
 
+def _vercel_fetch_read_composition_required(method, path):
+    """Avoid constructing provider adapters for durable Fetch metadata reads."""
+    if method.upper() not in {"GET", "HEAD"}:
+        return False
+    parts = path.split("/")
+    fetch_status = (
+        len(parts) == 5 and parts[:3] == ["", "api", "v1"]
+        and parts[3] == "fetches" and re.fullmatch(r"[a-f0-9]{32}", parts[4])
+    )
+    return (fetch_status or path == "/api/v1/runs/history"
+            or path.startswith("/api/v1/runs/history/"))
+
+
+def _vercel_fetch_submission_read_context_required(method, path, headers):
+    """Use provider-free admission composition before any source continuation."""
+    if method.upper() != "POST" or path != "/api/v1/fetches":
+        return False
+    continuation = any(
+        name.lower() == b"x-trendscout-fetch-continuation"
+        and value.strip().lower() in {b"1", b"true", b"yes", b"on"}
+        for name, value in headers
+    )
+    return not continuation
+
+
+def _vercel_fetch_collection_recovery_read_context_required(method, path):
+    """Use durable Fetch receipts to fast-path collection recovery before providers."""
+    return method.upper() == "POST" and _is_vercel_fetch_collections_recovery(path)
+
+
 def _is_vercel_fetch_collections_recovery(path):
     parts = path.split("/")
     return (len(parts) == 6 and parts[:3] == ["", "api", "v1"]
@@ -379,8 +409,38 @@ class VercelSharedLiveMiddleware:
             context_factory = self.context_factory
             use_default_context = context_factory is None
             use_collection_read_context = False
+            use_fetch_read_context = False
+            use_fetch_submission_context = False
+            use_fetch_recovery_context = False
             if context_factory is None:
-                if _vercel_collection_read_composition_required(
+                if _vercel_fetch_submission_read_context_required(
+                    scope.get("method", ""), scope.get("path", ""),
+                    scope.get("headers", ()),
+                ):
+                    from app.orchestration.vercel_fetch_read_composition import (
+                        vercel_fetch_read_composition,
+                    )
+                    context_factory = vercel_fetch_read_composition
+                    use_fetch_read_context = True
+                    use_fetch_submission_context = True
+                elif _vercel_fetch_collection_recovery_read_context_required(
+                    scope.get("method", ""), scope.get("path", "")
+                ):
+                    from app.orchestration.vercel_fetch_read_composition import (
+                        vercel_fetch_read_composition,
+                    )
+                    context_factory = vercel_fetch_read_composition
+                    use_fetch_read_context = True
+                    use_fetch_recovery_context = True
+                elif _vercel_fetch_read_composition_required(
+                    scope.get("method", ""), scope.get("path", "")
+                ):
+                    from app.orchestration.vercel_fetch_read_composition import (
+                        vercel_fetch_read_composition,
+                    )
+                    context_factory = vercel_fetch_read_composition
+                    use_fetch_read_context = True
+                elif _vercel_collection_read_composition_required(
                     scope.get("method", ""), scope.get("path", "")
                 ):
                     from app.orchestration.vercel_collection_read_composition import (
@@ -396,13 +456,25 @@ class VercelSharedLiveMiddleware:
             request_method = scope.get("method", "")
             request_path = scope.get("path", "")
             defer_collection_snapshot = (
-                _is_vercel_fetch_submission(request_method, request_path)
+                _is_vercel_fetch_collection_action(request_method, request_path)
                 or not _vercel_collection_snapshot_required(request_method, request_path)
             )
             context_options = {"user_agent": self.settings.wikimedia_user_agent}
             if use_default_context:
                 context_options["defer_collection_snapshot"] = defer_collection_snapshot
-                if use_collection_read_context:
+                if use_fetch_read_context:
+                    history_read = (
+                        request_path == "/api/v1/runs/history"
+                        or request_path.startswith("/api/v1/runs/history/")
+                    )
+                    context_options["read_latest_dataset_summary"] = (
+                        not use_fetch_submission_context
+                    )
+                    context_options["restore_collection_snapshot"] = history_read
+                    context_options["allow_collection_restore"] = (
+                        history_read or use_fetch_recovery_context
+                    )
+                elif use_collection_read_context:
                     context_options["latest_dataset_summary_only"] = (
                         request_method.upper() == "GET"
                         and request_path == "/api/v1/datasets/latest"
@@ -417,8 +489,11 @@ class VercelSharedLiveMiddleware:
             distributed = await context_manager.__aenter__()
             composition_ready_at = perf_counter()
             context_entered = True
-        except Exception:
-            _logger.error("Vercel shared LIVE composition failed")
+        except Exception as error:
+            _logger.error(
+                "Vercel shared LIVE composition failed exception_class=%s",
+                _safe_exception_class(error),
+            )
             await _close_request_client(client)
             response = JSONResponse(
                 {"detail": {"code": "SHARED_FETCH_UNAVAILABLE"}},

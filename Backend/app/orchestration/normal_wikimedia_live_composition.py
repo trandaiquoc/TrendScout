@@ -85,6 +85,10 @@ class _PersistentOneSecondPacer:
             remaining = max(0, math.ceil((until - now).total_seconds()))
             return (state if remaining else {}, remaining)
 
+        read_many = getattr(self.store, "read_many", None)
+        if callable(read_many):
+            state = read_many([_PACING_STATE_KEY])[_PACING_STATE_KEY]
+            return inspect(state)[1]
         return self.store.transact(_PACING_STATE_KEY, inspect)
 
 
