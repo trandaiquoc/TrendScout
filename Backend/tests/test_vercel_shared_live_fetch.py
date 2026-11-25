@@ -161,6 +161,244 @@ class VercelCollectionSnapshotPolicyTests(unittest.TestCase):
 
 
 class VercelCollectionReadCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_metadata_context_skips_unused_latest_dataset_read(self):
+        from app.orchestration.vercel_wikimedia_live_composition import (
+            vercel_shared_live_composition,
+        )
+
+        events = []
+
+        class Client:
+            def collection(self, _name):
+                return object()
+
+            def transaction(self, **_kwargs):
+                return object()
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_latest_dataset_summary(self):
+                events.append("dataset_summary_read")
+                return True, {"dataset_id": _JOB_ID}
+
+        @asynccontextmanager
+        async def metadata_only_normal_runtime(**_kwargs):
+            yield SimpleNamespace(
+                google_capabilities={}, youtube_capabilities={},
+                normal_youtube_live=False,
+            )
+
+        with patch.dict("os.environ", {"VERCEL": "1", "VERCEL_ENV": "production"}), patch(
+            "app.orchestration.vercel_wikimedia_live_composition._client_project_id",
+            return_value=_PROJECT,
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ), patch(
+            "app.orchestration.normal_google_live_composition.normal_google_live_composition",
+            new=metadata_only_normal_runtime,
+        ):
+            async with vercel_shared_live_composition(
+                Client(), user_agent="TrendScoutTest/0.1",
+                defer_collection_snapshot=True,
+                capability_metadata_request=True,
+            ) as context:
+                self.assertFalse(context.latest_dataset_summary_available)
+                self.assertIsNone(context.latest_dataset_summary)
+
+        self.assertEqual(events, [])
+
+    async def test_collections_projection_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        projection = {
+            "items": [{"collection_id": "c1", "name": "Home"}],
+            "suggestions": [],
+            "mode": "AUTO_CREATE",
+            "summary": {"collections": 1},
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {
+                    "item": None,
+                    "analytics": {},
+                    "keywords": {"items": []},
+                    "collections": projection,
+                }
+
+            def load(self):
+                raise AssertionError("current Collections projection must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                collection_workbench_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.collection_workbench_available)
+                self.assertEqual(context.collection_workbench, projection)
+
+    async def test_dashboard_model_without_collections_falls_back_for_workbench(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def read_dashboard_bootstrap(self):
+                return True, {"item": None, "analytics": {}, "keywords": {"items": []}}
+
+            def load(self):
+                events.append("snapshot_loaded")
+
+            def backfill_dashboard_bootstrap(self, _value):
+                events.append("dashboard_backfilled")
+
+        class Store:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+        class Service:
+            def __init__(self, store, *, fetch_model_inference_enabled):
+                self.store = store
+                self.fetch_model_inference_enabled = fetch_model_inference_enabled
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ), patch("app.collections.store.CollectionStore", Store), patch(
+            "app.collections.service.CollectionService", Service,
+        ), patch("app.api.dashboard.build_default_dashboard_bootstrap", return_value={
+            "item": None, "analytics": {}, "keywords": {"items": []},
+            "collections": {"items": [], "suggestions": [], "mode": "AUTO_CREATE", "summary": {}},
+        }):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                collection_workbench_only=True,
+            ) as context:
+                self.assertIsInstance(context.collection_service, Service)
+                self.assertTrue(context.collection_workbench_available)
+                self.assertEqual(context.collection_workbench["items"], [])
+        self.assertEqual(events, ["snapshot_loaded", "dashboard_backfilled"])
+
+    async def test_versioned_dashboard_model_skips_sqlite_restore(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+        projection = {
+            "item": {"dataset_id": "cached-dataset"},
+            "analytics": {"keyword_totals": {"unique": 1}},
+            "keywords": {"items": [], "total": 1},
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                events.append("snapshot_created")
+
+            def read_dashboard_bootstrap(self):
+                events.append("dashboard_read")
+                return True, projection
+
+            def load(self):
+                raise AssertionError("a current dashboard model must avoid SQLite restore")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ):
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                dashboard_bootstrap_only=True,
+            ) as context:
+                self.assertIsNone(context.collection_service)
+                self.assertTrue(context.dashboard_bootstrap_available)
+                self.assertEqual(context.dashboard_bootstrap, projection)
+
+        self.assertEqual(events, ["snapshot_created", "dashboard_read"])
+
+    async def test_missing_dashboard_model_restores_once_then_backfills(self):
+        from app.orchestration.vercel_collection_read_composition import (
+            vercel_collection_read_composition,
+        )
+
+        events = []
+        projection = {
+            "item": None,
+            "analytics": {"keyword_totals": {"unique": 0}},
+            "keywords": {"items": [], "total": 0},
+        }
+
+        class Snapshot:
+            def __init__(self, *_args, **_kwargs):
+                events.append("snapshot_created")
+
+            def read_dashboard_bootstrap(self):
+                events.append("dashboard_read")
+                return False, None
+
+            def load(self):
+                events.append("snapshot_loaded")
+
+            def backfill_dashboard_bootstrap(self, value):
+                self.assert_projection = value
+                events.append("dashboard_backfilled")
+
+        class Store:
+            def __init__(self, *_args, **_kwargs):
+                events.append("store_created")
+
+        class Service:
+            def __init__(self, store, *, fetch_model_inference_enabled):
+                self.store = store
+                self.fetch_model_inference_enabled = fetch_model_inference_enabled
+                events.append("service_created")
+
+        with patch.dict("os.environ", {"VERCEL": "1"}), patch(
+            "app.orchestration.firestore_shared_live_composition._client_project_id",
+            return_value="test-project",
+        ), patch(
+            "app.collections.firestore_snapshot.FirestoreCollectionSnapshot", Snapshot,
+        ), patch("app.collections.store.CollectionStore", Store), patch(
+            "app.collections.service.CollectionService", Service,
+        ), patch(
+            "app.api.dashboard.build_default_dashboard_bootstrap", return_value=projection,
+        ) as build_projection:
+            async with vercel_collection_read_composition(
+                object(), user_agent="TrendScoutTest/0.1",
+                dashboard_bootstrap_only=True,
+            ) as context:
+                self.assertIsInstance(context.collection_service, Service)
+                self.assertTrue(context.dashboard_bootstrap_available)
+                self.assertEqual(context.dashboard_bootstrap, projection)
+            build_projection.assert_called_once()
+
+        self.assertEqual(events, [
+            "snapshot_created", "dashboard_read", "snapshot_loaded",
+            "store_created", "service_created", "dashboard_backfilled",
+        ])
+
     async def test_valid_summary_skips_sqlite_restore(self):
         from app.orchestration.vercel_collection_read_composition import (
             vercel_collection_read_composition,
@@ -395,10 +633,13 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
 
         @asynccontextmanager
         async def read_context(_client, *, user_agent, defer_collection_snapshot,
-                               latest_dataset_summary_only):
+                               latest_dataset_summary_only, dashboard_bootstrap_only,
+                               collection_workbench_only):
             self.assertEqual(user_agent, settings.wikimedia_user_agent)
             self.assertFalse(defer_collection_snapshot)
             self.assertTrue(latest_dataset_summary_only)
+            self.assertFalse(dashboard_bootstrap_only)
+            self.assertFalse(collection_workbench_only)
             events.append("read_context")
             yield SimpleNamespace(collection_service=service, available_sources=sources)
 
@@ -745,9 +986,18 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         events = []
         client = _Client(events)
         facade = _FetchFacade(events, client)
-        facade.collection_snapshot = SimpleNamespace(
-            save=lambda: events.append("snapshot_saved")
-        )
+
+        class Snapshot:
+            def set_latest_dataset_summary_provider(self, _provider):
+                self.latest_summary_provider = _provider
+
+            def set_dashboard_bootstrap_provider(self, _provider):
+                self.dashboard_bootstrap_provider = _provider
+
+            def save(self):
+                events.append("snapshot_saved")
+
+        facade.collection_snapshot = Snapshot()
         client_factory = Mock(return_value=client)
 
         @asynccontextmanager

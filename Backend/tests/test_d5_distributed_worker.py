@@ -497,12 +497,18 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(context):
             seen.append(context.source_id)
+            coverage = {"provider_request_count": 0}
+            if context.source_id == GOOGLE_SOURCE_ID:
+                coverage.update({
+                    "refresh_provider_request_count": 0,
+                    "serp_verification_attempted": False,
+                })
             result = {
                 **self.source_result(1),
                 "delivery_state": ("STALE_CACHE" if context.source_id == GOOGLE_SOURCE_ID
                                    else "CACHED"),
                 "provider_request_count": 0,
-                "coverage": {"provider_request_count": 0},
+                "coverage": coverage,
             }
             context.checkpoint({"source_receipt": {"result": result}})
             return result

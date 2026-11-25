@@ -52,6 +52,7 @@ class FakeSnapshotBlobs:
     def __init__(self):
         self.records = {}
         self.writes = 0
+        self.batch_writes = 0
         self.reads = 0
         self.lock = Lock()
 
@@ -61,6 +62,11 @@ class FakeSnapshotBlobs:
             digest = str(self.writes)
             self.records[digest] = copy.deepcopy(records)
         return {"digest": digest, "item_count": len(records), "raw_bytes": 1}
+
+    def put_many(self, record_sets, *, now, retain_until, binary_chunks=False):
+        self.batch_writes += 1
+        return [self.put(records, now=now, retain_until=retain_until,
+                         binary_chunks=binary_chunks) for records in record_sets]
 
     def get(self, reference, *, now):
         self.reads += 1
@@ -92,10 +98,10 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
 
     def test_compressed_limit_fits_existing_firestore_blob_budget(self):
         envelope = json.dumps(
-            [{"encoding": "sqlite-gzip-base64-v1", "payload": ""}],
+            [{"encoding": "sqlite-segment-gzip-base64-v1", "payload": ""}],
             separators=(",", ":"),
         ).encode("utf-8")
-        payload_chars = 4 * ((firestore_snapshot._MAX_COMPRESSED_BYTES + 2) // 3)
+        payload_chars = 4 * ((firestore_snapshot._MAX_COMPRESSED_SEGMENT_BYTES + 2) // 3)
         encoded_record_size = len(envelope) + payload_chars
         self.assertLessEqual(encoded_record_size, firestore_snapshot_blobs._MAX_BLOB_BYTES)
 
@@ -144,6 +150,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             writer.load()
             self.assertEqual(writer.save(), 1)
             self.assertEqual(self.blobs.writes, 1)
+            self.assertEqual(self.blobs.batch_writes, 1)
             self.assertEqual(writer.save(), 1)
             self.assertEqual(self.blobs.writes, 1)
 
@@ -166,7 +173,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
 
     def test_large_snapshot_segments_round_trip_and_failed_upload_keeps_pointer(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+            firestore_snapshot, "_RAW_SNAPSHOT_SEGMENT_BYTES", 64 * 1024
         ):
             path = Path(directory) / "collections.sqlite"
             payload = random.Random(120).randbytes(180_000)
@@ -210,7 +217,7 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
 
     def test_multiple_snapshot_segments_are_read_concurrently(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+            firestore_snapshot, "_RAW_SNAPSHOT_SEGMENT_BYTES", 64 * 1024
         ):
             path = Path(directory) / "source.sqlite"
             payload = random.Random(34).randbytes(90_000)
@@ -236,9 +243,9 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             with closing(sqlite3.connect(reader.path)) as db:
                 self.assertEqual(db.execute("SELECT value FROM records").fetchone()[0], payload)
 
-    def test_multiple_snapshot_segments_are_uploaded_concurrently_and_in_order(self):
+    def test_multiple_snapshot_segments_are_batched_and_keep_pointer_order(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(
-            firestore_snapshot, "_MAX_COMPRESSED_BYTES", 64 * 1024
+            firestore_snapshot, "_RAW_SNAPSHOT_SEGMENT_BYTES", 64 * 1024
         ):
             path = Path(directory) / "source.sqlite"
             payload = random.Random(43).randbytes(90_000)
@@ -248,15 +255,17 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
                 db.commit()
             writer = self._snapshot(path)
             writer.load()
-            barrier = Barrier(2, timeout=10)
-            original = self.blobs.put
+            original = self.blobs.put_many
+            observed = []
 
-            def concurrent_put(*args, **kwargs):
-                barrier.wait()
-                return original(*args, **kwargs)
+            def record_batch(records, **kwargs):
+                observed.append(records)
+                return original(records, **kwargs)
 
-            with patch.object(self.blobs, "put", side_effect=concurrent_put):
+            with patch.object(self.blobs, "put_many", side_effect=record_batch):
                 self.assertEqual(writer.save(), 1)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(len(observed[0]), 2)
             reader = self._snapshot(Path(directory) / "restored.sqlite")
             self.assertEqual(reader.load(), 1)
             with closing(sqlite3.connect(reader.path)) as db:
@@ -283,6 +292,125 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
         self.assertEqual(self.blobs.reads, 0)
         self.assertEqual(self.state.values["collections-live-snapshot-v1"][
             "latest_dataset_summary_version"], 1)
+
+    def test_versioned_dashboard_projection_reads_without_restoring_sqlite(self):
+        projection = {
+            "item": {"dataset_id": "fetch-1", "status": "PARTIAL"},
+            "analytics": {"keyword_totals": {"unique": 12}},
+            "keywords": {"items": [{"id": "kw-1"}], "total": 12},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.execute("INSERT INTO collections VALUES ('c1')")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.set_dashboard_bootstrap_provider(lambda: projection)
+            self.assertEqual(writer.save(), 1)
+            self.assertEqual(self.blobs.batch_writes, 1)
+            pointer = copy.deepcopy(self.state.values["collections-live-snapshot-v1"])
+            self.assertEqual(pointer["dashboard_snapshot_version"], pointer["version"])
+            self.assertEqual(pointer["dashboard_sqlite_sha256"], pointer["sqlite_sha256"])
+
+            read_many_before = self.state.read_many_calls
+            reader = self._snapshot(Path(directory) / "unused.sqlite")
+            available, restored = reader.read_dashboard_bootstrap()
+
+        self.assertTrue(available)
+        self.assertEqual(restored, projection)
+        self.assertFalse(reader.path.exists())
+        self.assertEqual(self.state.read_many_calls, read_many_before + 1)
+        self.assertEqual(self.blobs.reads, 1)
+
+    def test_optional_dashboard_blob_failure_retries_required_snapshot_only(self):
+        projection = {
+            "item": None,
+            "analytics": {},
+            "keywords": {"items": []},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records (value TEXT)")
+                db.execute("INSERT INTO records VALUES ('kept')")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.set_dashboard_bootstrap_provider(lambda: projection)
+            original = self.blobs.put_many
+            attempts = []
+
+            def fail_optional(record_sets, **kwargs):
+                attempts.append(record_sets)
+                if any(records[0].get("encoding") == "dashboard-bootstrap-json-v1"
+                       for records in record_sets):
+                    raise RuntimeError("optional read-model write failed")
+                return original(record_sets, **kwargs)
+
+            with patch.object(self.blobs, "put_many", side_effect=fail_optional):
+                self.assertEqual(writer.save(), 1)
+            pointer = self.state.values["collections-live-snapshot-v1"]
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(attempts[0]), 2)
+        self.assertEqual(len(attempts[1]), 1)
+        self.assertNotIn("dashboard_bootstrap_ref", pointer)
+        self.assertEqual(self.blobs.batch_writes, 1)
+
+    def test_missing_dashboard_projection_backfills_only_the_current_pointer(self):
+        projection = {
+            "item": None,
+            "analytics": {"keyword_totals": {"unique": 0}},
+            "keywords": {"items": [], "total": 0},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collections.sqlite"
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE collections (id TEXT PRIMARY KEY)")
+                db.execute("INSERT INTO collections VALUES ('c1')")
+                db.commit()
+            writer = self._snapshot(path)
+            writer.load()
+            writer.save()
+            pointer = self.state.values["collections-live-snapshot-v1"]
+
+            reader = self._snapshot(Path(directory) / "restored.sqlite")
+            available, value = reader.read_dashboard_bootstrap()
+            self.assertFalse(available)
+            self.assertIsNone(value)
+            self.assertEqual(reader.load(), pointer["version"])
+            self.assertTrue(reader.backfill_dashboard_bootstrap(projection))
+
+            current = self.state.values["collections-live-snapshot-v1"]
+            self.assertEqual(current["version"], pointer["version"])
+            self.assertEqual(current["sqlite_sha256"], pointer["sqlite_sha256"])
+            available, value = self._snapshot(Path(directory) / "unused.sqlite").read_dashboard_bootstrap()
+
+        self.assertTrue(available)
+        self.assertEqual(value, projection)
+        self.assertEqual(self.blobs.writes, 2)
+
+    def test_dashboard_projection_backfill_does_not_fail_read_on_concurrent_update(self):
+        projection = {
+            "item": None,
+            "analytics": {},
+            "keywords": {"items": []},
+        }
+        self.state.values["collections-live-snapshot-v1"] = {
+            "schema": 1,
+            "version": 2,
+            "snapshot_ref": {"digest": "b" * 64, "raw_bytes": 1, "item_count": 1},
+            "sqlite_sha256": "b" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = self._snapshot(Path(directory) / "unused.sqlite")
+            snapshot.version = 1
+            snapshot._sha256 = "a" * 64
+            self.assertFalse(snapshot.backfill_dashboard_bootstrap(projection))
+
+        self.assertEqual(self.state.values["collections-live-snapshot-v1"]["version"], 2)
 
     def test_legacy_summary_fallback_reuses_pointer_read_for_restore(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -424,7 +552,8 @@ class FirestoreCollectionSnapshotTests(unittest.TestCase):
             snapshot = self._snapshot(path)
             snapshot.load()
             self.assertEqual(snapshot.save(), 1)
-            self.assertEqual(self.blobs.writes, 1)
+            self.assertEqual(self.blobs.batch_writes, 1)
+            self.assertGreater(self.blobs.writes, 1)
 
             restored_path = Path(directory) / "restored.sqlite"
             restored = self._snapshot(restored_path)

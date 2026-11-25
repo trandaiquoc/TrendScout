@@ -428,7 +428,7 @@ async def vercel_shared_live_composition(
             collection_snapshot.load()
         latest_dataset_summary_available = False
         latest_dataset_summary = None
-        if defer_collection_snapshot:
+        if defer_collection_snapshot and not capability_metadata_request:
             latest_dataset_summary_available, latest_dataset_summary = (
                 collection_snapshot.read_latest_dataset_summary()
             )

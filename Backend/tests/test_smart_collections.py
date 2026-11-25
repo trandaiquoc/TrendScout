@@ -191,6 +191,18 @@ class SmartCollectionsTests(unittest.TestCase):
             [stale], previous_manifest,
             processing_status=saved["processing_status"],
         ))
+        stale_boolean_verification = deepcopy(stale)
+        stale_boolean_verification["coverage"]["serp_verification_attempted"] = False
+        self.assertTrue(reusable_collection_input(
+            [stale_boolean_verification], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
+        attempted_verification = deepcopy(stale_boolean_verification)
+        attempted_verification["coverage"]["serp_verification_attempted"] = True
+        self.assertFalse(reusable_collection_input(
+            [attempted_verification], previous_manifest,
+            processing_status=saved["processing_status"],
+        ))
         changed_quality = deepcopy(cached)
         changed_quality["records"][0]["quality_flags"] = ["MISSING_TITLE"]
         self.assertFalse(reusable_collection_input(

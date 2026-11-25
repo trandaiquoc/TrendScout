@@ -28,11 +28,6 @@ _SAFE_ATTEMPT_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SAFE_EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _SAFE_SOURCE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _CACHE_DELIVERY_STATES = frozenset({"CACHED", "STALE_CACHE"})
-_ZERO_REQUEST_COVERAGE_FIELDS = (
-    "provider_request_count",
-    "refresh_provider_request_count",
-    "serp_verification_attempted",
-)
 _logger = logging.getLogger(__name__)
 _MAX_SOURCE_RESULT_BYTES = 4_900_000
 _TERMINAL_STATUSES = frozenset({"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"})
@@ -355,13 +350,7 @@ class DistributedFetchWorker:
             confirmed_zero_requests = (
                 type(slice_provider_count) is int and slice_provider_count == 0
                 and result.get("delivery_state") in {"CACHED", "STALE_CACHE"}
-                and all(
-                    type(coverage[field]) is int and coverage[field] == 0
-                    for field in ("provider_request_count",
-                                  "refresh_provider_request_count",
-                                  "serp_verification_attempted")
-                    if isinstance(coverage, dict) and field in coverage
-                )
+                and self._zero_request_coverage(coverage)
             )
             checkpoint_load_ms = int((checkpoint_finished - checkpoint_started) * 1000)
             handler_ms = int((handler_finished - handler_started) * 1000)
@@ -441,6 +430,25 @@ class DistributedFetchWorker:
         }
 
     @staticmethod
+    def _zero_request_coverage(coverage):
+        """Validate numeric counters and the optional boolean verification flag."""
+        if coverage is None:
+            return True
+        if not isinstance(coverage, dict):
+            return False
+        for coverage_field in ("provider_request_count", "refresh_provider_request_count"):
+            if (coverage_field in coverage
+                    and (type(coverage[coverage_field]) is not int
+                         or coverage[coverage_field] != 0)):
+                return False
+        verification = coverage.get("serp_verification_attempted")
+        return (
+            verification is None
+            or type(verification) is int and verification == 0
+            or type(verification) is bool and verification is False
+        )
+
+    @staticmethod
     def _is_cache_only_checkpoint(progress, expected_mode):
         if not isinstance(progress, dict) or len(progress) != 1:
             return False
@@ -461,11 +469,7 @@ class DistributedFetchWorker:
         coverage = result.get("coverage", {})
         if not isinstance(coverage, dict):
             return False
-        return all(
-            type(coverage[field]) is int and coverage[field] == 0
-            for field in _ZERO_REQUEST_COVERAGE_FIELDS
-            if field in coverage
-        )
+        return DistributedFetchWorker._zero_request_coverage(coverage)
 
     @staticmethod
     def _validate_result(value, *, expected_mode, expected_source_id=None):

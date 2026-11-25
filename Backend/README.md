@@ -8,16 +8,24 @@ evidence remains available from `GET /api/v1/collections/keywords/{keyword_id}`.
 
 ## Vercel shared Collections snapshot format
 
-The shared SQLite image is stored as a gzip stream in one or more bounded,
-content-addressed Firestore blobs. Independent blobs can be uploaded concurrently;
-each blob is committed independently, and the
-versioned pointer is changed only after all blobs are stored. Readers verify the
-complete SQLite SHA-256 before opening the working copy. Existing single-blob
-`snapshot_ref` pointers remain readable. Multi-blob pointers use `snapshot_refs`;
-releases predating this format cannot read them, so a rollback after the first
-multi-blob write must use a release with multi-blob reader support. This change
-does not reset quota or replace the shared database. Unreferenced blobs from an
-interrupted upload follow the existing blob retention and cleanup policy.
+Changed SQLite snapshots are backed up and hashed as a complete image, then
+split into independently compressed 4 MiB byte segments. Each segment is
+content-addressed, and bounded Firestore transaction batches upload concurrently;
+the versioned pointer is published only after all required snapshot segments are
+durable. Readers restore segments in order and verify the complete SQLite
+SHA-256 before opening the working copy. This is not SQLite page-level or
+row-level incremental storage: a changed snapshot still pays for a full backup,
+content digest, and compression, while identical segment bytes can be reused.
+
+New pointers identify the encoding with
+`sqlite_snapshot_encoding=sqlite-segment-gzip-base64-v1`; a one-segment image
+uses `snapshot_ref`, and a multi-segment image uses ordered `snapshot_refs`. The
+reader also supports legacy single-blob `snapshot_ref` and older
+`sqlite-gzip-base64-v1` multi-blob pointers. Releases predating segmented-encoding
+support cannot read new-format pointers, so a rollback after the first
+new-format write must use a release with this reader. This change does not reset
+quota or replace the shared database. Unreferenced blobs from an interrupted
+upload follow the existing blob retention and cleanup policy.
 
 New Collections blobs store their JSON chunks as Firestore byte values instead
 of wrapping each chunk in another base64 string. Existing blobs retain their
@@ -30,11 +38,21 @@ here is at most 196,608 bytes. See [Firestore value types](https://docs.cloud.go
 accessed 2026-11-24. This verification does not establish project connectivity
 or measure deployed write latency.
 
-Terminal Fetch status and multi-blob Collections restores read independent
+Terminal Fetch status and multi-segment Collections restores read independent
 Firestore blobs concurrently, while preserving order and retention checks. Google documents
 that the Firestore Python gRPC client can be shared across threads
 ([documentation](https://docs.cloud.google.com/python/docs/reference/firestore/latest/multiprocessing),
 accessed 2026-11-24); actual latency depends on the deployment and database.
+
+The default dashboard and Collections landing page can use a bounded Firestore
+read model tied to the exact SQLite snapshot version and SHA-256. New changed
+snapshots batch this optional model with the required segment blobs; older
+snapshots can be backfilled after a GET restores and reads the matching SQLite
+version. Dashboard delivery and observation fields are preserved; only the
+displayed age is recalculated at read time. If the optional model cannot be
+written, the snapshot remains publishable and those routes use the SQLite
+fallback. The projection is an acceleration cache, not a replacement for the
+SQLite ledger.
 
 Worker logs include per-source checkpoint-load, handler/validation, and
 checkpoint-save durations, delivery state, and provider-request count. They do

@@ -51,6 +51,21 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
                     limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=1000000),
                     include_algorithm_results: bool = True):
     service = _service(request)
+    return latest_keywords_for_service(
+        service, q=q, state=state, classification=classification, evidence=evidence,
+        collection_ids=collection_ids, source=source, sort=sort,
+        date_from=date_from.isoformat() if date_from else "",
+        date_to=date_to.isoformat() if date_to else "",
+        limit=limit, offset=offset,
+        include_algorithm_results=include_algorithm_results,
+    )
+
+
+def latest_keywords_for_service(service, *, q="", state="all", classification="all",
+                                evidence="all", collection_ids=(), source="", sort="recent",
+                                date_from="", date_to="", limit=50, offset=0,
+                                include_algorithm_results=True):
+    """Run the validated keyword query for an already-authorized service."""
     if len(collection_ids) > 20 or any(not value or len(value) > 64 for value in collection_ids):
         raise HTTPException(422, {'code': 'INVALID_COLLECTION_FILTER'})
     if date_from and date_to and date_from > date_to:
@@ -60,8 +75,7 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
                                                source=source, sort=sort, limit=limit, offset=offset,
                                                classification=classification, evidence=evidence,
                                                include_algorithm_results=include_algorithm_results,
-                                               date_from=date_from.isoformat() if date_from else '',
-                                               date_to=date_to.isoformat() if date_to else '')
+                                               date_from=date_from, date_to=date_to)
     except ValueError:
         raise HTTPException(422, {'code': 'INVALID_KEYWORD_QUERY'}) from None
     result['state'] = state

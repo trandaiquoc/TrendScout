@@ -113,7 +113,15 @@ def _mutating(request):
 
 @router.get("/collections")
 def list_collections(request: Request):
+    if (getattr(request.state, "collection_workbench_available", False)
+            and isinstance(getattr(request.state, "collection_workbench", None), dict)):
+        return request.state.collection_workbench
     service = _service(request)
+    return collection_workbench_for_service(service)
+
+
+def collection_workbench_for_service(service):
+    """Build the current Collections landing-page response from one store."""
     return {"items": service.store.list_collections(), "suggestions": service.store.suggestions(),
             "mode": _mode(service), "summary": service.store.workbench_summary()}
 

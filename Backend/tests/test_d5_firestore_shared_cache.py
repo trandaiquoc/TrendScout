@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from unittest.mock import patch
 
 import httpx
@@ -144,6 +145,7 @@ class FakeClient:
         self.transaction_calls = 0
         self.set_calls = 0
         self.update_calls = 0
+        self.commit_lock = Lock()
 
     def collection(self, name):
         return FakeCollection(self, name)
@@ -180,17 +182,18 @@ class _LiveMockWikimediaGateway(WikimediaTopPageGateway):
 def fake_transactional(callback):
     def run(transaction):
         result = callback(transaction)
-        updated = deepcopy(transaction.client.data)
-        for action, path, value in transaction.pending:
-            if action == "set":
-                updated[path] = value
-            elif action == "update":
-                if path not in updated:
-                    raise RuntimeError("cannot update a missing document")
-                updated[path].update(value)
-            else:
-                updated.pop(path, None)
-        transaction.client.data = updated
+        with transaction.client.commit_lock:
+            updated = deepcopy(transaction.client.data)
+            for action, path, value in transaction.pending:
+                if action == "set":
+                    updated[path] = value
+                elif action == "update":
+                    if path not in updated:
+                        raise RuntimeError("cannot update a missing document")
+                    updated[path].update(value)
+                else:
+                    updated.pop(path, None)
+            transaction.client.data = updated
         return result
     return run
 
@@ -256,6 +259,32 @@ class FirestoreSharedCacheTests(unittest.TestCase):
             self.blobs.get(ref, now=NOW + timedelta(seconds=30))
         self.assertEqual(self.blobs.purge_expired(now=NOW + timedelta(seconds=30)), 1)
 
+    def test_snapshot_put_many_batches_immutable_contents_into_one_transaction(self):
+        before = self.client.transaction_calls
+        references = self.blobs.put_many(
+            [[{"payload": "first"}], [{"payload": "second"}]],
+            now=NOW,
+            retain_until=NOW + timedelta(seconds=30),
+            binary_chunks=True,
+        )
+        self.assertEqual(self.client.transaction_calls, before + 1)
+        self.assertEqual(len(references), 2)
+        self.assertEqual(self.blobs.get(references[0], now=NOW), [{"payload": "first"}])
+        self.assertEqual(self.blobs.get(references[1], now=NOW), [{"payload": "second"}])
+
+    def test_snapshot_put_many_splits_large_transaction_batches_safely(self):
+        before = self.client.transaction_calls
+        with patch("app.storage.firestore_snapshot_blobs._MAX_BATCH_RAW_BYTES", 1):
+            references = self.blobs.put_many(
+                [[{"payload": "first"}], [{"payload": "second"}]],
+                now=NOW,
+                retain_until=NOW + timedelta(seconds=30),
+                binary_chunks=True,
+            )
+        self.assertEqual(self.client.transaction_calls, before + 2)
+        self.assertEqual(self.blobs.get(references[0], now=NOW), [{"payload": "first"}])
+        self.assertEqual(self.blobs.get(references[1], now=NOW), [{"payload": "second"}])
+
     def test_binary_chunk_survives_firestore_protobuf_serialization(self):
         from google.cloud.firestore_v1._helpers import decode_dict, encode_dict
         from google.cloud.firestore_v1.types import Document
@@ -315,6 +344,55 @@ class FirestoreSharedCacheTests(unittest.TestCase):
             with self.assertRaises(CollectionSnapshotUnavailable):
                 reader.save()
             self.assertEqual(self.client.data, pointer)
+
+    def test_collection_snapshot_reuses_unchanged_sqlite_blocks_after_a_small_update(self):
+        import random
+        import sqlite3
+        from contextlib import closing
+
+        from app.collections.firestore_snapshot import FirestoreCollectionSnapshot
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.collections.firestore_snapshot._RAW_SNAPSHOT_SEGMENT_BYTES", 64 * 1024,
+        ):
+            path = Path(directory) / "source.sqlite"
+            writer = FirestoreCollectionSnapshot(self.client, path, utcnow=lambda: NOW)
+            writer.load()
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("CREATE TABLE records(id INTEGER PRIMARY KEY, value BLOB)")
+                db.execute("CREATE TABLE metadata(id INTEGER PRIMARY KEY, value TEXT)")
+                db.execute("INSERT INTO records VALUES(1, ?)",
+                           (random.Random(29).randbytes(300_000),))
+                db.execute("INSERT INTO metadata VALUES(1, 'before')")
+                db.commit()
+            self.assertEqual(writer.save(), 1)
+            snapshot_key = "_ts_d5_coordination/collections-live-snapshot-v1"
+            initial = self.client.data[snapshot_key]
+            initial_digests = {item["digest"] for item in initial["snapshot_refs"]}
+
+            reader = FirestoreCollectionSnapshot(
+                self.client, Path(directory) / "restored.sqlite", utcnow=lambda: NOW,
+            )
+            self.assertEqual(reader.load(), 1)
+            with closing(sqlite3.connect(reader.path)) as db:
+                db.execute("UPDATE metadata SET value='after' WHERE id=1")
+                db.commit()
+            self.assertEqual(reader.save(), 2)
+            updated = self.client.data[snapshot_key]
+            updated_digests = {item["digest"] for item in updated["snapshot_refs"]}
+
+            self.assertGreaterEqual(len(initial_digests), 4)
+            self.assertGreaterEqual(len(initial_digests & updated_digests),
+                                    len(initial_digests) - 2)
+            self.assertNotEqual(initial["sqlite_sha256"], updated["sqlite_sha256"])
+            reopened = FirestoreCollectionSnapshot(
+                self.client, Path(directory) / "reopened.sqlite", utcnow=lambda: NOW,
+            )
+            self.assertEqual(reopened.load(), 2)
+            with closing(sqlite3.connect(reopened.path)) as db:
+                self.assertEqual(db.execute("SELECT value FROM metadata").fetchone()[0], "after")
+                self.assertEqual(db.execute("SELECT length(value) FROM records").fetchone()[0],
+                                 300_000)
 
     def test_chunk_reads_use_one_order_independent_batch_get(self):
         records = [{"text": "x" * 500_000}]
@@ -805,7 +883,7 @@ class FirestoreSharedFetchIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Provider quota status is unknown" in limitation
             for limitation in sources[YOUTUBE_SOURCE_ID]["known_limitations"]
         ))
-        self.assertEqual(client.batch_gets, 2)
+        self.assertEqual(client.batch_gets, 1)
         send_mock.assert_not_called()
 
     async def test_vercel_shared_live_composes_all_sources_without_provider_calls(self):

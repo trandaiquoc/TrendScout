@@ -1,14 +1,69 @@
 """Combined read for the first dashboard view."""
 
-from datetime import date
+from copy import deepcopy
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 
 from app.api.analytics import overview as analytics_overview
-from app.api.datasets import latest_dataset, latest_keywords
+from app.api.collections import collection_workbench_for_service
+from app.api.datasets import latest_dataset, latest_keywords, latest_keywords_for_service
 
 router = APIRouter()
+_LATEST_SUMMARY_NOT_PROVIDED = object()
+
+
+def build_default_dashboard_bootstrap(
+    service, *, available_sources, latest_summary=_LATEST_SUMMARY_NOT_PROVIDED,
+):
+    """Build the exact default dashboard response from one restored store."""
+    if service is None:
+        raise ValueError("dashboard read model requires a collection service")
+    latest = (service.store.latest_dataset()
+              if latest_summary is _LATEST_SUMMARY_NOT_PROVIDED else latest_summary)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            collection_service=service,
+            latest_dataset_summary_available=True,
+            latest_dataset_summary=latest,
+        ),
+        app=SimpleNamespace(state=SimpleNamespace(
+            collection_service=service,
+            public_fetch_enabled=True,
+            public_fetch_source_ids=tuple(sorted(available_sources)),
+            settings=SimpleNamespace(environment_profile="vercel"),
+        )),
+    )
+    return {
+        "item": latest_dataset(request).get("item"),
+        "analytics": analytics_overview(request),
+        "keywords": latest_keywords_for_service(
+            service, limit=20, offset=0, include_algorithm_results=False,
+        ),
+        "collections": collection_workbench_for_service(service),
+    }
+
+
+def _refresh_projection_ages(payload):
+    value = deepcopy(payload)
+    now = datetime.now(timezone.utc)
+    for item in (value.get("item"), value.get("analytics", {}).get("last_successful_fetch")):
+        if not isinstance(item, dict):
+            continue
+        timestamp = item.get("created_at") or item.get("fetched_at")
+        try:
+            observed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                raise ValueError("timezone missing")
+        except (AttributeError, TypeError, ValueError):
+            item["age_seconds"] = None
+        else:
+            item["age_seconds"] = max(
+                0, int((now - observed.astimezone(timezone.utc)).total_seconds())
+            )
+    return value
 
 
 @router.get("/dashboard/bootstrap")
@@ -31,6 +86,17 @@ def dashboard_bootstrap(
     include_algorithm_results: bool = False,
 ):
     """Read initial dashboard data from one restored SQLite snapshot."""
+    is_default = (
+        q == "" and state == "all" and classification == "all" and evidence == "all"
+        and not collection_ids and source == "" and sort == "recent"
+        and date_from is None and date_to is None and limit == 20 and offset == 0
+        and include_algorithm_results is False
+    )
+    if (is_default and getattr(request.state, "dashboard_bootstrap_available", False)
+            and isinstance(getattr(request.state, "dashboard_bootstrap", None), dict)):
+        projection = _refresh_projection_ages(request.state.dashboard_bootstrap)
+        return {key: projection[key] for key in ("item", "analytics", "keywords")}
+
     dataset = latest_dataset(request)
     analytics = analytics_overview(request)
     keywords = latest_keywords(

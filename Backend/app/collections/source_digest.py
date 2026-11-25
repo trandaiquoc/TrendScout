@@ -143,14 +143,16 @@ def _reports_zero_provider_requests(source):
     coverage = source.get("coverage")
     if not isinstance(coverage, dict) or not coverage:
         return False
-    for field in (
-        "provider_request_count",
-        "refresh_provider_request_count",
-        "serp_verification_attempted",
-    ):
+    for field in ("provider_request_count", "refresh_provider_request_count"):
         count = coverage.get(field)
         if count is not None and (type(count) is not int or count != 0):
             return False
+    verification_attempted = coverage.get("serp_verification_attempted")
+    if verification_attempted is not None and not (
+        type(verification_attempted) is int and verification_attempted == 0
+        or type(verification_attempted) is bool and verification_attempted is False
+    ):
+        return False
     return True
 
 

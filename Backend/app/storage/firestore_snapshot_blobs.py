@@ -14,6 +14,7 @@ import json
 import logging
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
@@ -23,6 +24,8 @@ _COLLECTION = "_ts_d5_cache_blobs"
 _MAX_BLOB_BYTES = 5_700_000
 _MAX_ITEMS = 5000
 _CHUNK_BYTES = 196_608
+_MAX_BATCH_RAW_BYTES = 7_000_000
+_MAX_BATCH_WRITES = 450
 _READ_CACHE_TTL = timedelta(seconds=60)
 _DIGEST = re.compile(r"^[a-f0-9]{64}$")
 _logger = logging.getLogger(__name__)
@@ -78,74 +81,155 @@ class FirestoreSnapshotBlobs:
 
     def put(self, records, *, now: datetime, retain_until: datetime,
             binary_chunks: bool = False) -> dict:
+        return self.put_many(
+            [records], now=now, retain_until=retain_until,
+            binary_chunks=binary_chunks,
+        )[0]
+
+    def put_many(self, record_sets, *, now: datetime, retain_until: datetime,
+                 binary_chunks: bool = False) -> list[dict]:
+        """Publish bounded blobs in a small number of Firestore transactions.
+
+        Each blob remains content-addressed and independently readable. A
+        failed later batch leaves only unreferenced immutable content; callers
+        publish their pointer after every batch has completed.
+        """
         now, retain_until = _utc(now), _utc(retain_until)
-        if (type(binary_chunks) is not bool or not isinstance(records, list) or len(records) > _MAX_ITEMS
-                or retain_until <= now):
+        if (type(binary_chunks) is not bool or not isinstance(record_sets, list)
+                or not record_sets or len(record_sets) > 256 or retain_until <= now):
             raise ValueError("bounded records and a future retention deadline are required")
-        try:
-            raw = json.dumps(records, ensure_ascii=False, allow_nan=False,
-                             separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError, UnicodeError):
-            raise ValueError("snapshot records must be finite UTF-8 JSON") from None
-        if len(raw) > _MAX_BLOB_BYTES:
-            raise ValueError("snapshot record blob exceeds its bounded storage budget")
-
-        digest = hashlib.sha256(raw).hexdigest()
-        chunks = [raw[offset:offset + _CHUNK_BYTES]
-                  for offset in range(0, len(raw), _CHUNK_BYTES)] or [b""]
-        manifest_ref = self._manifest_ref(digest)
-        chunk_refs = [self._chunk_ref(digest, index) for index in range(len(chunks))]
-        transaction = self._client.transaction(max_attempts=self._max_attempts)
-
-        def write_snapshot(tx):
-            snapshot = next(iter(tx.get(manifest_ref)))
-            effective_expiry = retain_until
-            encoding = "bytes" if binary_chunks else "base64"
-            if snapshot.exists:
-                previous = _manifest(snapshot, digest)
-                if (previous["raw_bytes"] != len(raw)
-                        or previous["item_count"] != len(records)
-                        or previous["chunk_count"] != len(chunks)):
-                    raise ValueError("snapshot digest collision or invalid manifest")
-                # A shared digest can be referenced by several cache scopes;
-                # storage must outlive every live reference to those bytes.
-                effective_expiry = max(previous["expiry"], retain_until)
-                # Do not change the representation of a blob already referenced
-                # by an older snapshot or checkpoint.
-                encoding = previous.get("chunk_encoding", "base64")
-                if previous["expiry"] > now:
-                    if effective_expiry == previous["expiry"]:
-                        return
-                    # Chunks carry the same TTL field as the manifest. Patch
-                    # only that field so Firestore TTL cannot remove chunks
-                    # before the extended manifest, without resending bytes.
-                    retention_text = effective_expiry.isoformat()
-                    for reference in chunk_refs:
-                        tx.update(reference, {"retain_until": retention_text})
-                    tx.update(manifest_ref, {"retain_until": retention_text})
-                    return
-            retention_text = effective_expiry.isoformat()
-            for index, (reference, content) in enumerate(zip(chunk_refs, chunks, strict=True)):
-                tx.set(reference, {
-                    "schema": 1,
+        prepared_by_digest = {}
+        output_digests = []
+        for records in record_sets:
+            if not isinstance(records, list) or len(records) > _MAX_ITEMS:
+                raise ValueError("bounded records and a future retention deadline are required")
+            try:
+                raw = json.dumps(records, ensure_ascii=False, allow_nan=False,
+                                 separators=(",", ":")).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError):
+                raise ValueError("snapshot records must be finite UTF-8 JSON") from None
+            if len(raw) > _MAX_BLOB_BYTES:
+                raise ValueError("snapshot record blob exceeds its bounded storage budget")
+            digest = hashlib.sha256(raw).hexdigest()
+            output_digests.append(digest)
+            if digest not in prepared_by_digest:
+                chunks = [raw[offset:offset + _CHUNK_BYTES]
+                          for offset in range(0, len(raw), _CHUNK_BYTES)] or [b""]
+                prepared_by_digest[digest] = {
                     "digest": digest,
-                    "index": index,
-                    **({"data_bytes": content} if encoding == "bytes" else
-                       {"data_b64": base64.b64encode(content).decode("ascii")}),
-                    "retain_until": retention_text,
-                })
-            tx.set(manifest_ref, {
-                "schema": 1,
-                "digest": digest,
-                "raw_bytes": len(raw),
-                "item_count": len(records),
-                "chunk_count": len(chunks),
-                "retain_until": retention_text,
-                **({"chunk_encoding": "bytes"} if encoding == "bytes" else {}),
-            })
+                    "raw": raw,
+                    "item_count": len(records),
+                    "chunks": chunks,
+                }
 
-        firestore.transactional(write_snapshot)(transaction)
-        return {"digest": digest, "raw_bytes": len(raw), "item_count": len(records)}
+        # Keep transactions below Firestore's 10 MiB API request size and this
+        # conservative operation-count ceiling, including document overhead.
+        batches = []
+        batch = []
+        batch_bytes = 0
+        batch_writes = 0
+        for item in prepared_by_digest.values():
+            item_writes = len(item["chunks"]) + 1
+            if batch and (batch_bytes + len(item["raw"]) > _MAX_BATCH_RAW_BYTES
+                          or batch_writes + item_writes > _MAX_BATCH_WRITES):
+                batches.append(batch)
+                batch, batch_bytes, batch_writes = [], 0, 0
+            batch.append(item)
+            batch_bytes += len(item["raw"])
+            batch_writes += item_writes
+        if batch:
+            batches.append(batch)
+
+        def write_batch(items):
+            references_by_digest = {item["digest"]: self._manifest_ref(item["digest"])
+                                    for item in items}
+            chunk_references = {
+                item["digest"]: [
+                    self._chunk_ref(item["digest"], index)
+                    for index in range(len(item["chunks"]))
+                ]
+                for item in items
+            }
+            transaction = self._client.transaction(max_attempts=self._max_attempts)
+
+            def write_batch(tx):
+                # Firestore transactions require all reads to precede writes.
+                snapshots = {}
+                for item in items:
+                    snapshots[item["digest"]] = next(iter(tx.get(
+                        references_by_digest[item["digest"]]
+                    )))
+
+                writes = []
+                for item in items:
+                    digest = item["digest"]
+                    snapshot = snapshots[digest]
+                    manifest_ref = references_by_digest[digest]
+                    chunks_refs = chunk_references[digest]
+                    effective_expiry = retain_until
+                    encoding = "bytes" if binary_chunks else "base64"
+                    if snapshot.exists:
+                        previous = _manifest(snapshot, digest)
+                        if (previous["raw_bytes"] != len(item["raw"])
+                                or previous["item_count"] != item["item_count"]
+                                or previous["chunk_count"] != len(item["chunks"])):
+                            raise ValueError("snapshot digest collision or invalid manifest")
+                        effective_expiry = max(previous["expiry"], retain_until)
+                        encoding = previous.get("chunk_encoding", "base64")
+                        if previous["expiry"] > now:
+                            if effective_expiry == previous["expiry"]:
+                                continue
+                            retention_text = effective_expiry.isoformat()
+                            writes.extend(("update", reference, {"retain_until": retention_text})
+                                          for reference in chunks_refs)
+                            writes.append(("update", manifest_ref,
+                                           {"retain_until": retention_text}))
+                            continue
+
+                    retention_text = effective_expiry.isoformat()
+                    for index, (reference, content) in enumerate(
+                            zip(chunks_refs, item["chunks"], strict=True)):
+                        writes.append(("set", reference, {
+                            "schema": 1,
+                            "digest": digest,
+                            "index": index,
+                            **({"data_bytes": content} if encoding == "bytes" else
+                               {"data_b64": base64.b64encode(content).decode("ascii")}),
+                            "retain_until": retention_text,
+                        }))
+                    writes.append(("set", manifest_ref, {
+                        "schema": 1,
+                        "digest": digest,
+                        "raw_bytes": len(item["raw"]),
+                        "item_count": item["item_count"],
+                        "chunk_count": len(item["chunks"]),
+                        "retain_until": retention_text,
+                        **({"chunk_encoding": "bytes"} if encoding == "bytes" else {}),
+                    }))
+                if len(writes) > _MAX_BATCH_WRITES:
+                    raise ValueError("snapshot transaction exceeds its bounded write count")
+                for operation, reference, value in writes:
+                    getattr(tx, operation)(reference, value)
+
+            firestore.transactional(write_batch)(transaction)
+
+        if len(batches) == 1:
+            write_batch(batches[0])
+        else:
+            # Immutable blobs have independent manifests. A bounded pool keeps
+            # large snapshot uploads from paying one Firestore round trip per
+            # batch while the owner pointer remains the publication boundary.
+            with ThreadPoolExecutor(max_workers=min(4, len(batches))) as executor:
+                list(executor.map(write_batch, batches))
+
+        return [
+            {
+                "digest": digest,
+                "raw_bytes": len(prepared_by_digest[digest]["raw"]),
+                "item_count": prepared_by_digest[digest]["item_count"],
+            }
+            for digest in output_digests
+        ]
 
     def get(self, reference, *, now: datetime) -> list:
         now = _utc(now)

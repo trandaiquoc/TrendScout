@@ -256,14 +256,20 @@ async function loadDashboardBootstrap() {
   const query = currentDatasetQuery().toString();
   try {
     const data = await getJson('/api/v1/dashboard/bootstrap?' + query, { locale: getLocale() });
-    if (!data?.analytics || !data?.keywords) return;
+    if (!data?.analytics || !data?.keywords) return null;
     state.persistedDataset = data.item || null;
     state.persistedDatasetAvailable = Boolean(data.item);
     if (data.item) renderPersistedDataset(data.item);
+    else {
+      $('#overview-context').textContent = t('overview.no-fetch-context');
+      renderAnalysisSourceVolume(null);
+    }
     await loadAnalytics(data.analytics);
     if (query === currentDatasetQuery().toString()) await loadKeywords(data.keywords);
+    return data;
   } catch (error) {
     setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'), 'error');
+    return null;
   }
 }
 
@@ -1400,13 +1406,7 @@ function applyPublicCapabilities(capabilities) {
 }
 
 async function loadPublicCapabilities() {
-  if (!state.capabilities) {
-    const cached = readLastKnownCapabilities();
-    if (cached) {
-      state.capabilitiesStale = true;
-      applyPublicCapabilities(cached.capabilities);
-    }
-  }
+  applyLastKnownCapabilities();
   state.fetchCapabilitiesLoading = true;
   state.capabilityCheckFailed = false;
   renderFetchPresentation();
@@ -1438,6 +1438,14 @@ async function loadPublicCapabilities() {
     }
     renderFetchPresentation();
   }
+}
+
+function applyLastKnownCapabilities() {
+  if (state.capabilities) return;
+  const cached = readLastKnownCapabilities();
+  if (!cached) return;
+  state.capabilitiesStale = true;
+  applyPublicCapabilities(cached.capabilities);
 }
 
 function retryCapabilityCheck() {
@@ -3112,9 +3120,10 @@ showView(window.location.hash.slice(1));
 setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 checkBackend();
+applyLastKnownCapabilities();
 const startupCapabilities = loadPublicCapabilities();
-const startupDataset = loadLatestDataset();
-void startupDataset.then((item) => {
-  if (item) void loadDashboardBootstrap();
-  else void startupCapabilities.then(() => recoverLatestVercelCollectionSnapshot());
+void loadDashboardBootstrap().then((data) => {
+  if (!data || !data.item) {
+    void startupCapabilities.then(() => recoverLatestVercelCollectionSnapshot());
+  }
 });

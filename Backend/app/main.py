@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
+from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -174,6 +175,34 @@ def _vercel_collection_read_composition_required(method, path):
             and _vercel_collection_snapshot_required(method, path))
 
 
+def _default_dashboard_bootstrap_request(scope):
+    """Only the unfiltered first dashboard page may use the read model."""
+    if scope.get("path") != "/api/v1/dashboard/bootstrap":
+        return False
+    try:
+        pairs = parse_qsl(
+            scope.get("query_string", b"").decode("ascii"),
+            keep_blank_values=True,
+            strict_parsing=True,
+        )
+    except (UnicodeDecodeError, ValueError):
+        return False
+    values = {}
+    for key, value in pairs:
+        if key in values:
+            return False
+        values[key] = value
+    expected = {
+        "q": "", "state": "all", "classification": "all", "evidence": "all",
+        "source": "", "sort": "recent", "limit": "20", "offset": "0",
+        "include_algorithm_results": "false",
+    }
+    return (
+        set(values) <= set(expected)
+        and all(values.get(key, default) == default for key, default in expected.items())
+    )
+
+
 def _vercel_fetch_read_composition_required(method, path):
     """Avoid constructing provider adapters for durable Fetch metadata reads."""
     if method.upper() not in {"GET", "HEAD"}:
@@ -285,6 +314,29 @@ async def _save_vercel_collection_snapshot(distributed, *, failure_code):
             headers={"Cache-Control": "no-store"},
         )
     try:
+        service = getattr(distributed, "collection_service", None)
+        if service is not None:
+            from app.api.dashboard import build_default_dashboard_bootstrap
+
+            # The pointer summary and dashboard projection use the same restored
+            # SQLite version; share one aggregate query during changed-data saves.
+            summary_not_loaded = object()
+            latest_summary = summary_not_loaded
+
+            def read_latest_summary():
+                nonlocal latest_summary
+                if latest_summary is summary_not_loaded:
+                    latest_summary = service.store.latest_dataset()
+                return latest_summary
+
+            snapshot.set_latest_dataset_summary_provider(read_latest_summary)
+            snapshot.set_dashboard_bootstrap_provider(
+                lambda: build_default_dashboard_bootstrap(
+                    service,
+                    available_sources=getattr(distributed, "available_sources", ()),
+                    latest_summary=read_latest_summary(),
+                )
+            )
         await asyncio.to_thread(snapshot.save)
     except Exception as error:
         from app.collections.firestore_snapshot import CollectionSnapshotConflict
@@ -483,6 +535,15 @@ class VercelSharedLiveMiddleware:
                         request_method.upper() == "GET"
                         and request_path == "/api/v1/datasets/latest"
                     )
+                    context_options["dashboard_bootstrap_only"] = (
+                        request_method.upper() == "GET"
+                        and _default_dashboard_bootstrap_request(scope)
+                    )
+                    context_options["collection_workbench_only"] = (
+                        request_method.upper() == "GET"
+                        and request_path == "/api/v1/collections"
+                        and scope.get("query_string", b"") == b""
+                    )
                 else:
                     context_options["capability_metadata_request"] = (
                         request_method.upper() == "GET"
@@ -517,6 +578,18 @@ class VercelSharedLiveMiddleware:
         )
         state["latest_dataset_summary"] = getattr(
             distributed, "latest_dataset_summary", None
+        )
+        state["dashboard_bootstrap_available"] = getattr(
+            distributed, "dashboard_bootstrap_available", False
+        )
+        state["dashboard_bootstrap"] = getattr(
+            distributed, "dashboard_bootstrap", None
+        )
+        state["collection_workbench_available"] = getattr(
+            distributed, "collection_workbench_available", False
+        )
+        state["collection_workbench"] = getattr(
+            distributed, "collection_workbench", None
         )
         state["public_fetch_source_ids"] = tuple(sorted(
             getattr(distributed, "available_sources", {"wikimedia_pageviews_top_per_country"})
