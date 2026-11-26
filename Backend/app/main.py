@@ -524,7 +524,11 @@ class VercelSharedLiveMiddleware:
             else:
                 client = self.client_factory(oidc_token)
             client_ready_at = perf_counter()
-        except Exception:
+        except Exception as error:
+            _logger.error(
+                "Vercel Firestore client construction failed exception_class=%s",
+                _safe_exception_class(error),
+            )
             response = JSONResponse(
                 {"detail": {"code": "FIRESTORE_IDENTITY_REJECTED"}},
                 status_code=403,
@@ -1033,6 +1037,13 @@ def create_app(
                 or vercel_firestore_client_factory is not None
                 or vercel_live_context_factory is not None):
             raise ValueError("Vercel PostgreSQL runtime requires one validated PostgreSQL configuration")
+        from app.storage.postgres_runtime import verify_postgres_runtime
+
+        verify_postgres_runtime(
+            vercel_postgres_environment,
+            schema=vercel_postgres_schema,
+            require_cutover_data=True,
+        )
     elif (vercel_postgres_environment is not None
           or vercel_postgres_context_factory is not None):
         raise ValueError("Vercel PostgreSQL options require the PostgreSQL runtime setting")

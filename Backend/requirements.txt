@@ -1,3 +1,4 @@
-# Runtime pins live in pyproject.toml. Keep legacy Firestore/migration support
-# and the Uvicorn launcher available for explicit local workflows.
--e .[legacy-firestore,local-firestore,local-runtime]
+# Runtime pins live in pyproject.toml. The Vercel runtime keeps Firestore
+# required until the legacy data path is safely cut over; local-only support
+# and the Uvicorn launcher remain explicit extras.
+-e .[local-firestore,local-runtime]

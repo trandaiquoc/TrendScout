@@ -1,13 +1,13 @@
 # TrendScout UI integration contract
 
-- **Status:** UI branch contract, implemented locally for review
+- **Status:** UI contract integrated from `origin/main` into `feature/postgresql` for compatibility review
 - **Date:** 26 November 2026
 - **Branch:** `feature/ui-overhaul`
 **Scope:** Frontend behavior and the existing same-origin APIs it consumes. This document records observable contracts and UI requirements; it does not approve a permanent source, scoring model, runtime, or hosting choice.
 
 ## 1. Route and navigation contract
 
-The browser uses clean paths. The application and Vercel configuration serve the single page at those paths; the FastAPI app serves its root page and retains backward redirects for old `/dashboard` URLs. The Vercel `installCommand` remains the Database Goal's existing `python3 -m pip install -e '.[legacy-firestore]'` command.
+The browser uses clean paths. The application and Vercel configuration serve the single page at those paths; the FastAPI app serves its root page and retains backward redirects for old `/dashboard` URLs. Vercel keeps the Database Goal's existing install behavior with no custom `installCommand`: Firestore is a core dependency while the legacy Firestore runtime remains active. The UI integration adds clean-path rewrites without changing dependency installation.
 
 | Path | View | Behavior |
 | --- | --- | --- |

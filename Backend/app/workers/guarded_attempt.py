@@ -1,7 +1,8 @@
 """Run one fixed-source attempt only after durable, fenced budget reservation.
 
-This worker primitive is not connected to public endpoints or live adapters.
-Its timeout guarantee requires a cancellation-cooperative transport.
+The live source gateways use this boundary to couple a durable reservation to
+one outbound attempt. Its timeout guarantee requires a cancellation-cooperative
+transport.
 """
 
 import asyncio

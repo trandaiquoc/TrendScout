@@ -3,6 +3,7 @@
 import asyncio
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,6 +92,45 @@ class GuardedAttemptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, 0)
         self.assertEqual((await self.runner.run(**self.args())).status, "ALREADY_RESERVED")
         self.assertEqual(self.calls, 0)
+
+    async def test_dispatch_interruption_keeps_attempt_and_quota_reserved(self):
+        clock = [NOW]
+        self.runner = GuardedAttemptRunner(self.control, clock=lambda: clock[0])
+        dispatches = 0
+
+        async def dispatched_then_cancelled():
+            nonlocal dispatches
+            dispatches += 1
+            await asyncio.to_thread(
+                self.control.record_provider_request_started,
+                self.job, "worker", self.fence,
+                attempt_id="one-physical-attempt", source_id=GOOGLE_SOURCE_ID,
+                now=clock[0],
+            )
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.runner.run(**{
+                **self.args(), "request": dispatched_then_cancelled,
+            })
+
+        clock[0] = NOW + timedelta(seconds=self.control.policy.lease_seconds + 1)
+        successor = self.control.claim(self.job, "worker-two", now=clock[0])
+        outcome = await self.runner.run(
+            job_id=self.job, owner="worker-two", fence=successor["fence"],
+            source_id=GOOGLE_SOURCE_ID, attempt_id="one-physical-attempt",
+            timeout_seconds=1, request=self.request,
+        )
+
+        self.assertEqual(outcome.status, "ALREADY_RESERVED")
+        self.assertEqual(dispatches, 1)
+        self.assertEqual(self.calls, 0)
+        quota = self.control.quota_snapshot("serpapi", now=clock[0])
+        self.assertEqual(quota["daily"]["used"], 1)
+        self.assertEqual(
+            self.control.last_provider_request_at(GOOGLE_SOURCE_ID),
+            NOW.isoformat(),
+        )
 
     async def test_revocation_before_request_is_fail_closed(self):
         original = self.control.check_attempt

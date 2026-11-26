@@ -33,6 +33,57 @@ class _NeverReadCredentials:
         raise AssertionError("composition must not read provider credentials")
 
 
+def _seed_cutover_readiness(connection, environment, schema, *, now):
+    namespace = sql.Identifier(schema)
+    connection.execute(sql.SQL("""INSERT INTO {}.keywords
+        (id, keyword, normalized, source, project, observed_at, data_mode, evidence)
+        VALUES (%s,%s,%s,%s,%s,%s,'LIVE','{{}}'::jsonb)""").format(namespace),
+        ("runtime-readiness", "runtime readiness fixture", "runtime readiness fixture",
+         "fixture", "test", now.date().isoformat()),
+    )
+    connection.execute(sql.SQL("""INSERT INTO {}.dataset_snapshots
+        (dataset_id,status,data_mode,source_manifest,provider_record_count,
+         received_record_count,retained_keyword_count,rejected_record_count,
+         observation_start,observation_end,fetched_at,quality_flags,processing_status,
+         eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at)
+        VALUES (%s,'PARTIAL','LIVE','[]'::jsonb,0,0,1,0,%s,%s,%s,'[]'::jsonb,
+                'MODEL_UNAVAILABLE',1,0,1,%s)""").format(namespace),
+        ("runtime-readiness", now.date().isoformat(), now.date().isoformat(), now, now),
+    )
+
+    google = GoogleLiveSettings()
+    policy = normal_google_live_policy(
+        serpapi_daily_budget=google.serpapi_daily_budget,
+        serpapi_monthly_budget=google.serpapi_monthly_budget,
+        rss_daily_budget=google.rss_daily_budget,
+        rss_monthly_budget=google.rss_monthly_budget,
+        fetch_starts_per_hour=google.fetch_starts_per_hour,
+        bing_enabled=google.paid_bing_approved,
+        bing_daily_budget=google.bing_daily_budget,
+        youtube_enabled=True,
+    )
+    store = PostgresAtomicStateStore(environment, schema=schema)
+    admission = PublicAdmission(store, policy, state_key=GOOGLE_STATE_KEY)
+    quota = {}
+    for pool_name in policy.pools:
+        pool_day = admission._quota_day(pool_name, now).isoformat()
+        quota[f"{pool_name}:day:{pool_day}"] = {"requests": 0, "cost": 0}
+        quota[f"{pool_name}:month:{now.strftime('%Y-%m')}"] = {
+            "requests": 0, "cost": 0,
+        }
+    state = {
+        "schema": 1,
+        "policy_digest": admission.policy_digest,
+        "operational_enabled": True,
+        "jobs": {},
+        "keys": {},
+        "starts": [],
+        "quota": quota,
+        "inflight": {},
+    }
+    store.transact(GOOGLE_STATE_KEY, lambda _current: (state, None))
+
+
 class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_postgres_composition_constructs_without_provider_requests(self):
         url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
@@ -50,6 +101,9 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 apply_migrations(connection, schema=schema)
                 created = True
+                _seed_cutover_readiness(
+                    connection, environment, schema, now=clock[0]
+                )
                 async with normal_google_live_composition(
                     user_agent="TrendScoutTest/1.0 (https://example.invalid)",
                     google_settings=GoogleLiveSettings(),

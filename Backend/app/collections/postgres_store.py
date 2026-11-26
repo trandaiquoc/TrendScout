@@ -19,6 +19,10 @@ from psycopg.types.json import Jsonb
 from app.collections.analysis_storage import analysis_state_digest
 from app.collections.identity import fingerprint
 from app.collections.postgres_reads import PostgresCollectionReader, _json_result
+from app.collections.source_lineage import (
+    build_source_evidence,
+    remap_source_evidence_keyword_ids,
+)
 from app.storage.postgres_connection import PostgresConnectionError, postgres_connection
 
 
@@ -116,6 +120,9 @@ class PostgresAlgorithmAnalysisSession:
 
 
 class PostgresCollectionStore(PostgresCollectionReader):
+    supports_source_evidence_lineage = True
+    supports_incremental_fetch_persistence = True
+
     def _write(self, operation, *, serialize=True):
         try:
             with postgres_connection(self._environment) as db:
@@ -170,6 +177,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
     def upsert_entity_context(self, rows):
         if not rows:
             return
+        lineage = build_source_evidence([], entity_context_rows=rows)
         columns = ("keyword_id", "title", "page_id", "entity_id", "description", "page_namespace",
                    "is_disambiguation", "redirected_from", "page_language", "is_main_page",
                    "is_main_page_known", "entity_type", "occupations", "category_ids", "instance_types",
@@ -198,6 +206,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     context_version=EXCLUDED.context_version,captured_at=EXCLUDED.captured_at""")
                     .format(self._table("entity_context"), sql.SQL(",").join(map(sql.Identifier, columns)),
                             sql.SQL(",").join(sql.Placeholder() for _ in columns)), values)
+            self._persist_source_evidence(db, None, lineage["rows"])
 
         return self._write(write)
 
@@ -244,7 +253,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
         return self._write(lambda db: operation(PostgresAlgorithmAnalysisSession(
             db, self._table, self.data_mode_scope)))
 
-    def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=()):
+    def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=(),
+                                 source_evidence_rows=None):
         """Persist a bounded Fetch ingestion batch with native set-based SQL.
 
         The caller supplies records already validated by the existing source
@@ -265,6 +275,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
         def operation(db):
             identifiers = list(dict.fromkeys(record["id"] for record in records))
             existing_modes = {}
+            id_remap = {}
             if self.data_mode_scope and identifiers:
                 rows = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
                                   .format(self._table("keywords")), (identifiers,)).fetchall()
@@ -272,9 +283,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 for record in records:
                     if (record["id"] in existing_modes
                             and existing_modes[record["id"]] != self.data_mode_scope):
+                        original_id = record["id"]
                         record["id"] = hashlib.sha256(
                             f"{self.data_mode_scope}:{record['id']}".encode("utf-8")
                         ).hexdigest()
+                        id_remap[original_id] = record["id"]
                 resolved_ids = list(dict.fromkeys(record["id"] for record in records))
                 collisions = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
                                         .format(self._table("keywords")),
@@ -347,6 +360,31 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                 self._table("keywords"), self._table("keyword_decisions")), params)
 
             skipped_bing = 0
+            original_candidate_ids = list(dict.fromkeys(
+                update.get("candidate_id") for update in bing_updates
+                if isinstance(update.get("candidate_id"), str)
+            ))
+            if self.data_mode_scope and original_candidate_ids:
+                mapped_candidates = {
+                    identifier: hashlib.sha256(
+                        f"{self.data_mode_scope}:{identifier}".encode("utf-8")
+                    ).hexdigest()
+                    for identifier in original_candidate_ids
+                }
+                lookup_ids = list(dict.fromkeys([
+                    *original_candidate_ids, *mapped_candidates.values(),
+                ]))
+                rows = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
+                                  .format(self._table("keywords")), (lookup_ids,)).fetchall()
+                modes_by_id = {row["id"]: row["data_mode"] for row in rows}
+                for identifier, mapped_id in mapped_candidates.items():
+                    if (modes_by_id.get(mapped_id) == self.data_mode_scope
+                            and modes_by_id.get(identifier) != self.data_mode_scope):
+                        id_remap[identifier] = mapped_id
+            for update in bing_updates:
+                candidate_id = update.get("candidate_id")
+                if isinstance(candidate_id, str):
+                    update["candidate_id"] = id_remap.get(candidate_id, candidate_id)
             candidate_ids = list(dict.fromkeys(
                 update.get("candidate_id") for update in bing_updates
                 if isinstance(update.get("candidate_id"), str)
@@ -412,7 +450,16 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     FROM (VALUES {}) AS v(id,evidence) WHERE k.id=v.id
                       AND k.source='google_web_serp' AND k.data_mode='LIVE'""").format(
                           self._table("keywords"), values), params)
-            return {"records": records, "skipped_bing_updates": skipped_bing}
+            if source_evidence_rows:
+                self._persist_source_evidence(
+                    db, None,
+                    remap_source_evidence_keyword_ids(source_evidence_rows, id_remap),
+                )
+            return {
+                "records": records,
+                "skipped_bing_updates": skipped_bing,
+                "id_remap": id_remap,
+            }
 
         return self._write(operation)
 
@@ -766,7 +813,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                  provider_record_count, received_record_count,
                                  retained_keyword_count, rejected_record_count,
                                  observation_start, observation_end, fetched_at, quality_flags,
-                                 processing_status, created_at):
+                                 processing_status, created_at, source_evidence_rows=None):
         def operation(db):
             mode_scope = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
             keyword_scope = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
@@ -802,9 +849,90 @@ class PostgresCollectionStore(PostgresCollectionReader):
                  received_record_count, retained_keyword_count, rejected_record_count, observation_start,
                  observation_end, fetched_at, Jsonb(quality_flags), processing_status,
                  counts["eligible"], counts["assigned"], counts["unassigned"], created_at))
+            if source_evidence_rows:
+                self._persist_source_evidence(db, dataset_id, source_evidence_rows)
             return counts
 
         return self._write(operation)
+
+    def _persist_source_evidence(self, db, dataset_id, evidence_rows):
+        """Write lineage and both relationship sets in the snapshot transaction."""
+        rows = [row for row in evidence_rows if isinstance(row, dict)]
+        if not rows:
+            return
+        source_names = {}
+        for row in rows:
+            source_id = row["source_id"]
+            policy = row.get("retention_policy")
+            if (not isinstance(policy, dict)
+                    or not isinstance(policy.get("version"), str)
+                    or policy.get("review_status") not in {"reviewed", "partial"}
+                    or (policy.get("provider_max_age_days") is not None
+                        and (type(policy["provider_max_age_days"]) is not int
+                             or policy["provider_max_age_days"] < 1))
+                    or not isinstance(policy.get("scope"), str)):
+                raise ValueError("source evidence has no valid retention policy")
+            source_entry = (row["source_display_name"], policy)
+            previous = source_names.get(source_id)
+            if previous is not None and previous != source_entry:
+                raise ValueError("source evidence has conflicting retention policy metadata")
+            source_names[source_id] = source_entry
+        with db.cursor() as cursor:
+            cursor.executemany(sql.SQL("""INSERT INTO {} AS stored_source(
+                    id,display_name,configuration)
+                VALUES (%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name=EXCLUDED.display_name,
+                    configuration=stored_source.configuration || EXCLUDED.configuration,
+                    updated_at=clock_timestamp()
+                WHERE stored_source.display_name IS DISTINCT FROM EXCLUDED.display_name
+                   OR stored_source.configuration->'retention_policy'
+                      IS DISTINCT FROM EXCLUDED.configuration->'retention_policy'""")
+                .format(self._table("sources")), [
+                    (source_id, display_name, Jsonb({"retention_policy": policy}))
+                    for source_id, (display_name, policy) in sorted(source_names.items())
+                ])
+
+            insert_evidence = sql.SQL("""INSERT INTO {} AS stored_evidence(
+                id,source_id,external_id,content_digest,
+                query_scope,geography,observed_at,collected_at,payload,expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                    expires_at=LEAST(stored_evidence.expires_at,EXCLUDED.expires_at),
+                    payload=COALESCE(stored_evidence.payload,EXCLUDED.payload)""").format(
+                        self._table("source_evidence"))
+            for offset in range(0, len(rows), 500):
+                batch = rows[offset:offset + 500]
+                cursor.executemany(insert_evidence, [(
+                    row["id"], row["source_id"], row.get("external_id"), row["content_digest"],
+                    Jsonb(row["query_scope"]),
+                    Jsonb(row["geography"]) if row.get("geography") is not None else None,
+                    row.get("observed_at"), row["collected_at"],
+                    Jsonb(row["payload"]) if row.get("payload") is not None else None,
+                    row["expires_at"],
+                ) for row in batch])
+
+            if dataset_id is not None:
+                cursor.executemany(sql.SQL("""INSERT INTO {}(dataset_id,evidence_id)
+                    VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("dataset_evidence")),
+                    [(dataset_id, row["id"]) for row in rows])
+
+            requested_keyword_ids = sorted({keyword_id for row in rows
+                                            for keyword_id in row.get("keyword_ids", ())})
+            existing_keyword_ids = set()
+            for offset in range(0, len(requested_keyword_ids), 500):
+                batch = requested_keyword_ids[offset:offset + 500]
+                if batch:
+                    found = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s)")
+                                       .format(self._table("keywords")), (batch,)).fetchall()
+                    existing_keyword_ids.update(item["id"] for item in found)
+            links = sorted({(row["id"], keyword_id) for row in rows
+                            for keyword_id in row.get("keyword_ids", ())
+                            if keyword_id in existing_keyword_ids})
+            for offset in range(0, len(links), 500):
+                cursor.executemany(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
+                    VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("evidence_keywords")),
+                    links[offset:offset + 500])
 
     def create(self, data, *, created_by="USER", reason=""):
         identifier = str(uuid.uuid4())

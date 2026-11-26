@@ -1,5 +1,6 @@
 """Concurrent collection mutations on an isolated PostgreSQL schema."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,6 +16,9 @@ from app.collections.entity_context import EntityContext, WikimediaEntityContext
 from app.collections.identity import fingerprint
 from app.collections.postgres_store import PostgresCollectionStore
 from app.collections.service import CollectionService
+from app.collections.source_lineage import build_source_evidence
+from app.collections.store import keyword_record
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import apply_migrations
 
@@ -196,6 +200,15 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                             "status": "VERIFIED", "results": []}
             bing_update = {"candidate_id": bing_id, "identity": bing_identity,
                            "observed_at": "2026-11-25T12:00:00+00:00", "verification": verification}
+            collision_verification = {
+                "fetched_at": "2026-11-25T12:06:00Z",
+                "query_fingerprint": "fp-collision", "status": "VERIFIED", "results": [],
+            }
+            collision_bing_update = {
+                "candidate_id": collision_id, "identity": collision_id,
+                "observed_at": "2026-11-25T12:00:00+00:00",
+                "verification": collision_verification,
+            }
             bulk_ids = [hashlib.sha256(f"bulk:{index}".encode()).hexdigest()
                         for index in range(501)]
             bulk_records = [{"id": identifier, "keyword": f"Bulk topic {index}",
@@ -206,7 +219,7 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                             for index, identifier in enumerate(bulk_ids)]
             result = store.persist_cleaned_keywords(
                 [*records, *bulk_records], rejected=[(rejected_id, "INVALID_SOURCE_RECORD")],
-                bing_updates=[bing_update],
+                bing_updates=[bing_update, collision_bing_update],
             )
 
             mapped_id = hashlib.sha256(f"LIVE:{collision_id}".encode()).hexdigest()
@@ -226,6 +239,7 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
             assert len(result["records"]) == len(records) + len(bulk_records)
             assert result["records"][0]["id"] == excluded_id
             assert next(row["id"] for row in result["records"] if row["keyword"] == "Live topic") == mapped_id
+            assert result["id_remap"] == {collision_id: mapped_id}
             excluded = connection.execute(sql.SQL("SELECT eligible,rejection_reason FROM {} WHERE id=%s")
                                           .format(keyword_table), (excluded_id,)).fetchone()
             assert excluded == (0, "USER_EXCLUDED")
@@ -243,6 +257,12 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                                              .format(keyword_table), (bing_id,)).fetchone()[0]
             assert bing_saved["bing_verification"] == verification
             assert bing_saved["bing_verification_history"] == [verification]
+            collision_saved = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (mapped_id,)).fetchone()[0]
+            assert collision_saved["bing_verification"] == collision_verification
+            legacy_saved = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (collision_id,)).fetchone()[0]
+            assert legacy_saved == {"legacy": True}
 
             replay = store.persist_cleaned_keywords([records[-1]], bing_updates=[bing_update])
             assert replay["skipped_bing_updates"] == 0
@@ -328,6 +348,176 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                 (rejected_id, 0, "CLASSIFICATION_INELIGIBLE"),
                 (restore_id, 1, None),
             ]
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_incremental_source_persistence_remaps_lineage_to_live_keyword_id():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            created = True
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+            raw = {
+                "article_display": "Portable Solar Generator",
+                "article_original": "Portable_Solar_Generator",
+                "project": "en.wikipedia",
+                "observation_date": "2026-11-25",
+                "fetched_at": "2026-11-26T12:00:00Z",
+                "provider_rank": 1,
+                "views_ceil": 8400,
+                "country_scope": "US",
+                "access": "all-access",
+            }
+            synthetic = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "SYNTHETIC")
+            live = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "LIVE")
+            assert synthetic["id"] == live["id"]
+            keyword_table = sql.Identifier(schema, "keywords")
+            synthetic_values = [synthetic[key] for key in (
+                "id", "keyword", "normalized", "source", "project", "observed_at",
+                "data_mode", "evidence", "context",
+            )]
+            synthetic_values[7] = Jsonb(json.loads(synthetic_values[7]))
+            connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
+                .format(keyword_table), synthetic_values)
+            source_evidence_rows = build_source_evidence([{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "records": [raw],
+            }])["rows"]
+
+            persisted = store.persist_cleaned_keywords(
+                [live], source_evidence_rows=source_evidence_rows,
+            )
+
+            expected_live_id = hashlib.sha256(
+                f"LIVE:{live['id']}".encode("utf-8")
+            ).hexdigest()
+            assert persisted["id_remap"] == {live["id"]: expected_live_id}
+            assert persisted["records"][0]["id"] == expected_live_id
+            evidence_id = source_evidence_rows[0]["id"]
+            evidence_links = connection.execute(sql.SQL("SELECT keyword_id FROM {} "
+                "WHERE evidence_id=%s").format(sql.Identifier(schema, "evidence_keywords")),
+                (evidence_id,)).fetchall()
+            assert evidence_links == [(expected_live_id,)]
+            payload = connection.execute(sql.SQL("SELECT payload FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "source_evidence")), (evidence_id,)).fetchone()[0]
+            field_ids = {entry["keyword_id"] for entry in
+                         payload["retention_lineage"]["keyword_fields"]}
+            assert field_ids == {expected_live_id}
+            legacy_evidence = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (live["id"],)).fetchone()[0]
+            assert legacy_evidence == json.loads(synthetic["evidence"])
+            replay = store.persist_cleaned_keywords(
+                [live], source_evidence_rows=source_evidence_rows,
+            )
+            assert replay["id_remap"] == {live["id"]: expected_live_id}
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")),
+                (evidence_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "source_evidence")),
+                (evidence_id,)).fetchone()[0] == 1
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_failed_source_batch_retry_reuses_committed_postgres_evidence():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            created = True
+            apply_migrations(connection, schema=schema)
+
+            class InterruptOnceStore(PostgresCollectionStore):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.persistence_calls = 0
+                    self.interrupt_second_source = True
+
+                def persist_cleaned_keywords(self, *args, **kwargs):
+                    self.persistence_calls += 1
+                    if self.interrupt_second_source and self.persistence_calls == 2:
+                        self.interrupt_second_source = False
+                        raise RuntimeError("simulated interruption after first source commit")
+                    return super().persist_cleaned_keywords(*args, **kwargs)
+
+            store = InterruptOnceStore(environment, schema=schema, data_mode_scope="LIVE")
+            service = CollectionService(store, fetch_model_inference_enabled=False)
+            fetch_id = "retry-" + uuid.uuid4().hex
+            raw = {
+                "article_display": "Portable Solar Generator",
+                "article_original": "Portable_Solar_Generator",
+                "project": "en.wikipedia",
+                "observation_date": "2026-11-25",
+                "fetched_at": "2026-11-26T12:00:00Z",
+                "provider_rank": 1,
+                "views_ceil": 8400,
+                "country_scope": "US",
+                "access": "all-access",
+            }
+            sources = [
+                {
+                    "source_id": WIKIMEDIA_SOURCE_ID,
+                    "data_mode": "LIVE",
+                    "status": "SUCCESS",
+                    "records": [raw],
+                },
+                {
+                    "source_id": "google_web_serp",
+                    "data_mode": "LIVE",
+                    "status": "SUCCESS",
+                    "records": [],
+                },
+            ]
+
+            interrupted = asyncio.run(service.process_fetch(fetch_id, sources))
+            keyword_id = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "LIVE")["id"]
+            assert interrupted["status"] == "FAILED"
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(sql.Identifier(schema, "source_evidence"))).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE dataset_id=%s")
+                .format(sql.Identifier(schema, "dataset_snapshots")), (fetch_id,)).fetchone()[0] == 0
+
+            recovered = asyncio.run(service.process_fetch(fetch_id, sources))
+
+            assert recovered["status"] == "MODEL_UNAVAILABLE"
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(sql.Identifier(schema, "source_evidence"))).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")), (keyword_id,)).fetchone()[0] == 1
+            snapshot = connection.execute(sql.SQL("SELECT processing_status FROM {} WHERE dataset_id=%s")
+                .format(sql.Identifier(schema, "dataset_snapshots")), (fetch_id,)).fetchone()
+            assert snapshot == ("MODEL_UNAVAILABLE",)
         finally:
             if created:
                 connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
