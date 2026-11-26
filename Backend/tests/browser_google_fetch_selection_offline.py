@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from browser_support import find_chrome, require_linux_network_isolation
+from browser_support import find_chrome, require_linux_network_isolation, serve_offline_frontend
 from browser_workspace_offline import FAKE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +64,8 @@ CHECK = r"""<script>
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const until=async predicate=>{for(let i=0;i<100;i++){if(predicate())return true;await wait(20)}return false};
   try{
+    check(await until(()=>typeof window.releaseCapabilities==='function'),'capability fixture reaches its held response');
+    window.releaseCapabilities?.();
     check(await until(()=>document.querySelector('#fetch-source-select').options.length===3
       &&!document.querySelector('#open-fetch').disabled),'capabilities make the source selector ready');
     const select=document.querySelector('#fetch-source-select');
@@ -156,8 +158,6 @@ def main():
     if not chrome:
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    phoenix_css = (PUBLIC / "phoenix.css").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory(prefix="trendscout-google-fetch-browser-") as directory:
         root = Path(directory)
         public = root / "public"
@@ -169,23 +169,19 @@ def main():
         if call not in fetch_source:
             raise AssertionError("Fetch controller terminal callback was not found")
         fetch_module.write_text(fetch_source.replace(call, instrumented, 1), encoding="utf-8")
-        html = html.replace('<link rel="stylesheet" href="/dashboard/styles.css">', "<style>" + css + "</style>")
-        html = html.replace('<link rel="stylesheet" href="/dashboard/phoenix.css">', "<style>" + phoenix_css + "</style>")
-        html = html.replace('src="/dashboard/app.js"', 'src="' + (public / "app.js").as_uri() + '"')
-        page = root / "index.html"
-        page.write_text(html.replace("</body>", configured_fake() + CHECK + "</body>"),
-                        encoding="utf-8")
-        command = [
-            chrome, "--headless", "--no-sandbox", "--disable-gpu",
-            "--disable-background-networking", "--disable-extensions", "--no-proxy-server",
-            "--disable-sync", "--disable-component-update", "--allow-file-access-from-files",
-            "--no-first-run", "--user-data-dir=" + directory + "/profile",
-            "--window-size=1280,1000", "--virtual-time-budget=12000", "--dump-dom", page.as_uri(),
-        ]
-        env = {key: value for key, value in os.environ.items()
-               if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
-                                errors="replace", timeout=30, env=env)
+        html = html.replace("</body>", configured_fake() + CHECK + "</body>")
+        with serve_offline_frontend(public, html) as frontend_url:
+            command = [
+                chrome, "--headless", "--no-sandbox", "--disable-gpu",
+                "--disable-background-networking", "--disable-extensions", "--no-proxy-server",
+                "--disable-sync", "--disable-component-update",
+                "--no-first-run", "--user-data-dir=" + directory + "/profile",
+                "--window-size=1280,1000", "--virtual-time-budget=12000", "--dump-dom", frontend_url,
+            ]
+            env = {key: value for key, value in os.environ.items()
+                   if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                    errors="replace", timeout=30, env=env)
         if result.returncode or 'data-browser-result="PASS"' not in result.stdout:
             marker = (result.stdout.split("data-browser-result=", 1)[-1][:4000]
                       if "data-browser-result=" in result.stdout

@@ -33,7 +33,9 @@ test('initial dashboard uses one bootstrap read and does not preflight a separat
   assert.notEqual(startupStart, -1);
   const startup = app.slice(startupStart);
   assert.match(startup, /startupCapabilities = loadPublicCapabilities\(\);/);
-  assert.match(startup, /showView\(window\.location\.hash\.slice\(1\)\)/);
+  assert.match(startup, /resolveLocation\(\{ pathname: window\.location\.pathname, search: window\.location\.search, hash: window\.location\.hash \}\)/);
+  assert.match(startup, /renderRoute\(initialRoute\)/);
+  assert.doesNotMatch(startup, /window\.location\.hash\.slice\(1\)/);
   assert.doesNotMatch(startup, /const startupDataset = loadLatestDataset\(\)/);
   assert.doesNotMatch(startup, /void loadAnalytics\(\)/);
   assert.doesNotMatch(startup, /if \(item\) void loadKeywords\(\)/);

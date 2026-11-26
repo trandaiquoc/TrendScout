@@ -1341,7 +1341,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
             return rows
         return self._read(operation)
 
-    def resolve_proposal(self, proposal_id, accept):
+    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None):
         def operation(db):
             row = db.execute(sql.SQL("SELECT * FROM {} WHERE id=%s AND status='PENDING' FOR UPDATE")
                              .format(self._table("proposals")), (proposal_id,)).fetchone()
@@ -1369,9 +1369,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     .format(self._table("suppression")), (fingerprint(row["name"]), stamp, row["name"]))
                 return ""
             identifier = str(uuid.uuid4())
+            collection_name = name if name is not None else row["name"]
+            collection_description = description if description is not None else row["description"]
             db.execute(sql.SQL("""INSERT INTO {}(id,name,description,created_by,reason,created_at,updated_at)
                 VALUES (%s,%s,%s,'AI',%s,%s,%s)""").format(self._table("collections")),
-                (identifier, row["name"], row["description"], row["reason"], stamp, stamp))
+                (identifier, collection_name, collection_description, row["reason"], stamp, stamp))
             if support_ids:
                 with db.cursor() as cursor:
                     cursor.executemany(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,

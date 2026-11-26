@@ -147,8 +147,8 @@ def main():
     html = (public / "index.html").read_text(encoding="utf-8")
     css = (public / "styles.css").read_text(encoding="utf-8")
     bridge = browser_page(run, keyword_page, detail)
-    html = html.replace('href="/dashboard/styles.css"', f"<style>{css}</style>", 1)
-    html = html.replace('src="/dashboard/app.js"', f'src="{(public / "app.js").as_uri()}"', 1)
+    html = html.replace('href="/styles.css"', f"<style>{css}</style>", 1)
+    html = html.replace('src="/app.js"', f'src="{(public / "app.js").as_uri()}"', 1)
     expectation = json.dumps(
         {
             "run_id": run["run_id"],

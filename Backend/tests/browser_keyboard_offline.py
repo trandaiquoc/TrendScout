@@ -8,7 +8,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+from browser_support import (
+    ChromeDevTools,
+    find_chrome,
+    require_linux_network_isolation,
+    serve_offline_frontend,
+)
 from browser_workspace_offline import FAKE, PUBLIC
 
 if os.name != "nt":
@@ -21,13 +26,8 @@ def main():
     if not chrome:
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
-    html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     html = html.replace("</body>", FAKE + "</body>")
     with tempfile.TemporaryDirectory(prefix="trendscout-cdp-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
         if os.name == "nt":
             browser = ChromeDevTools(chrome, Path(directory) / "profile")
             call = browser.call
@@ -88,6 +88,8 @@ def main():
                     pending += chunk
                 raise RuntimeError("Chrome DevTools response timeout")
 
+        frontend_server = serve_offline_frontend(PUBLIC, html)
+        frontend_url = frontend_server.__enter__()
         try:
             target = call("Target.createTarget", {"url": "about:blank"})["targetId"]
             session = call("Target.attachToTarget", {"targetId": target, "flatten": True})[
@@ -99,7 +101,7 @@ def main():
                 {"width": 375, "height": 820, "deviceScaleFactor": 1, "mobile": True},
                 session,
             )
-            call("Page.navigate", {"url": page.as_uri()}, session)
+            call("Page.navigate", {"url": frontend_url}, session)
 
             def evaluate(expression):
                 result = call(
@@ -135,6 +137,9 @@ def main():
                 raise RuntimeError("visual viewport is not 375px: " + str(evaluate("visualViewport.width")))
             if evaluate("document.documentElement.scrollWidth > innerWidth"):
                 raise RuntimeError("375px page has horizontal overflow")
+            if not evaluate("typeof window.releaseCapabilities === 'function'"):
+                raise RuntimeError("offline capability fixture is not ready to release")
+            evaluate("window.releaseCapabilities()")
 
             evaluate("document.querySelector('#menu-toggle').click()")
             if not evaluate("document.querySelector('#app-shell').classList.contains('menu-open')"):
@@ -152,8 +157,22 @@ def main():
                     },
                     session,
                 )
+            if evaluate("document.activeElement.dataset.nav") != "keywords":
+                raise RuntimeError("Tab did not advance from Overview to Keywords")
+            for event in ("keyDown", "keyUp"):
+                call(
+                    "Input.dispatchKeyEvent",
+                    {
+                        "type": event,
+                        "key": "Tab",
+                        "code": "Tab",
+                        "windowsVirtualKeyCode": 9,
+                        "nativeVirtualKeyCode": 9,
+                    },
+                    session,
+                )
             if evaluate("document.activeElement.dataset.nav") != "collections":
-                raise RuntimeError("Tab did not advance to Collections")
+                raise RuntimeError("Tab did not advance from Keywords to Collections")
             for event in ("keyDown", "keyUp"):
                 call(
                     "Input.dispatchKeyEvent",
@@ -171,7 +190,7 @@ def main():
                     break
                 time.sleep(0.01)
             else:
-                raise RuntimeError("Enter did not navigate to Collections")
+                raise RuntimeError("Enter did not navigate to Collections: " + str(evaluate("JSON.stringify({active:document.activeElement?.outerHTML,path:location.pathname,menu:document.querySelector('#app-shell')?.classList.contains('menu-open'),viewHidden:document.querySelector('[data-view=collections]')?.hidden})")))
             if evaluate("document.querySelector('#app-shell').classList.contains('menu-open')"):
                 raise RuntimeError("navigation did not close the mobile menu")
             time.sleep(0.15)
@@ -401,6 +420,7 @@ def main():
                     process.wait()
                 os.close(p2c_w)
                 os.close(c2p_r)
+            frontend_server.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

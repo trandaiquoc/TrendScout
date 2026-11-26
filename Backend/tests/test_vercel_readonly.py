@@ -73,12 +73,13 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(sys.modules, {'app.dashboard_assets': dashboard_bundle_module()}):
                 async with app.router.lifespan_context(app):
                     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-                        self.assertEqual((await client.get('/')).status_code, 307)
-                        self.assertEqual((await client.get('/')).headers['location'], '/dashboard/')
+                        self.assertEqual((await client.get('/')).status_code, 200)
                         self.assertEqual((await client.get('/api/health')).status_code, 200)
                         self.assertEqual((await client.get('/api/runs/' + RUN)).status_code, 401)
                         self.assertEqual((await client.get('/api/v1/capabilities')).status_code, 200)
-                        for path in ['/dashboard/', '/dashboard/app.js', '/dashboard/styles.css', '/dashboard/modules/api.js', '/dashboard/modules/i18n/en.js']:
+                        for path in ['/', '/keywords', '/products', '/collections/collection-a',
+                                     '/sources/google_web_serp', '/app.js', '/styles.css',
+                                     '/modules/api.js', '/modules/i18n/en.js']:
                             response = await client.get(path)
                             self.assertEqual(response.status_code, 200, path)
                         self.assertEqual((await client.post('/api/runs', headers={'Authorization': AUTH})).status_code, 405)
@@ -88,8 +89,9 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(response.status_code, 200, path)
                             self.assertEqual(response.headers['cache-control'], 'no-store')
                         self.assertEqual((await client.get('/api/runs/' + RUN, headers={'Authorization': 'Basic invalid'})).status_code, 401)
-                        self.assertEqual((await client.get('/dashboard/AGENTS.md')).status_code, 404)
-                        self.assertEqual((await client.get('/dashboard/modules/../app/main.py')).status_code, 404)
+                        self.assertEqual((await client.get('/AGENTS.md')).status_code, 404)
+                        self.assertEqual((await client.get('/dashboard/AGENTS.md', follow_redirects=False)).status_code, 308)
+                        self.assertEqual((await client.get('/modules/../app/main.py')).status_code, 404)
                         self.assertTrue((await client.get('/api/config')).json()['read_only'])
 
     async def test_vercel_shared_mode_is_writable_but_legacy_run_reads_fail_closed(self):
@@ -99,11 +101,10 @@ class ReadOnlyTests(unittest.IsolatedAsyncioTestCase):
             app = create_app(read_storage_factory=read_storage_factory)
             async with app.router.lifespan_context(app):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-                    self.assertEqual((await client.get('/')).status_code, 307)
-                    self.assertEqual((await client.get('/')).headers['location'], '/dashboard/')
-                    self.assertEqual((await client.get('/dashboard/')).status_code, 200)
-                    self.assertEqual((await client.get('/dashboard/styles.css')).status_code, 200)
-                    self.assertEqual((await client.get('/dashboard/modules/i18n/en.js')).status_code, 200)
+                    self.assertEqual((await client.get('/')).status_code, 200)
+                    self.assertEqual((await client.get('/products')).status_code, 200)
+                    self.assertEqual((await client.get('/styles.css')).status_code, 200)
+                    self.assertEqual((await client.get('/modules/i18n/en.js')).status_code, 200)
                     self.assertEqual((await client.get('/api/health')).status_code, 200)
                     self.assertEqual((await client.get('/api/v1/capabilities')).status_code, 200)
                     self.assertFalse((await client.get('/api/config')).json()['read_only'])

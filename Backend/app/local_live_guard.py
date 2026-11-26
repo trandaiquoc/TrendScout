@@ -80,12 +80,25 @@ class LocalLiveGuard:
         )) or (method == "DELETE" and re.fullmatch(
             rf"/api/v1/collections/{collection_id}(?:/keywords/[a-f0-9]{{64}})?", path
         ))
+        frontend_page = method == "GET" and path.rstrip("/") in {
+            "", "/keywords", "/collections", "/products", "/trends", "/sources",
+            "/research", "/settings", "/runs", "/algorithms", "/quality",
+            "/privacy", "/terms", "/privacy.html", "/terms.html", "/policy.css",
+        }
+        frontend_asset = method == "GET" and (
+            path in {"/app.js", "/styles.css", "/phoenix.css"}
+            or path.startswith(("/modules/", "/assets/", "/licenses/"))
+        )
+        frontend_detail = method == "GET" and re.fullmatch(
+            r"/(?:sources|collections|trends)/[^/]{1,128}", path
+        )
         allowed = (
             (method == "GET" and path in {
-                "/", "/dashboard", "/dashboard/", "/api/v1/capabilities", "/api/health",
+                "/dashboard", "/dashboard/", "/api/v1/capabilities", "/api/health",
                 "/api/v1/algorithms", "/api/v1/algorithms/results",
             })
             or (method == "GET" and path.startswith("/dashboard/"))
+            or frontend_page or frontend_asset or frontend_detail
             or (method == "POST" and path == "/api/v1/fetches")
             or (method == "POST" and path == "/api/v1/fetches/history")
             or (method == "GET" and path.startswith("/api/v1/fetches/"))
@@ -94,7 +107,10 @@ class LocalLiveGuard:
         )
         if not allowed:
             status = 405 if path in {
-                "/", "/dashboard", "/dashboard/", "/api/v1/capabilities",
+                "/", "/dashboard", "/dashboard/", "/keywords", "/collections", "/products",
+                "/trends", "/sources", "/research", "/settings", "/runs", "/algorithms",
+                "/quality", "/privacy", "/terms", "/privacy.html", "/terms.html",
+                "/app.js", "/styles.css", "/phoenix.css", "/policy.css", "/api/v1/capabilities",
                 "/api/health", "/api/v1/fetches", "/api/v1/fetches/history",
                 "/api/v1/algorithms", "/api/v1/algorithms/results",
                 "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",

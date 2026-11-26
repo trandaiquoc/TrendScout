@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 import httpx
-from browser_support import find_chrome, require_linux_network_isolation
+from browser_support import find_chrome, require_linux_network_isolation, serve_offline_frontend
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "Backend"
@@ -47,9 +47,6 @@ def main():
     capability_payload = json.dumps(capabilities, ensure_ascii=True, separators=(",", ":"))
     status_payload = json.dumps(status, ensure_ascii=True, separators=(",", ":"))
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    html = html.replace('href="/dashboard/styles.css"', "<style>" + css + "</style>")
-    html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
 const fetchRequests=[];let statusReads=0;
 const demoCapabilities={capability_payload};
@@ -70,18 +67,18 @@ window.fetch=(path,options={{}})=>{{
 (async()=>{const errors=[];const check=(value,message)=>{if(!value)errors.push(message)};const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 await wait(200);const button=document.querySelector('#open-fetch');check(!button.disabled,'capability-enabled Fetch button');
 button.click();const policySettings=document.querySelector('#youtube-policy-settings');
-check(!policySettings.hidden&&window.location.hash==='#settings','YouTube consent opens in Settings before Fetch');
+check(!policySettings.hidden&&window.location.pathname==='/settings'&&window.location.hash==='','YouTube consent opens in Settings before Fetch');
 check(document.querySelector('#settings-youtube-policy-version').textContent==='d6-youtube-v2','current YouTube policy version is shown');
 check(!fetchRequests.some(request=>request.path==='/api/v1/fetches'&&request.method==='POST'),'no Fetch is submitted before consent');
 document.querySelector('#settings-youtube-policy-consent').click();
 check(localStorage.getItem('trendscout.youtube-policy.version')==='d6-youtube-v2','all three policies are accepted for the current version');
-window.location.hash='#overview';await wait(50);
+document.querySelector('[data-nav=overview]').click();await wait(50);
 button.click();button.click();await wait(300);
 const posts=fetchRequests.filter(request=>request.path==='/api/v1/fetches'&&request.method==='POST');
 check(posts.length===1,'duplicate click submits one POST');check(posts[0]?.body==='{}','empty server-controlled request body');
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'idempotency key is present');check(statusReads===1,'one status poll reaches terminal result');
 check(document.querySelector('#fetch-status').textContent.includes('Google Search'),'localized source status is visible');
-check(document.querySelector('#fetch-status').textContent.includes('SYNTHETIC'),'synthetic origin is visible');
+check(document.querySelector('#fetch-badge').textContent.toLocaleUpperCase('vi').includes('TỔNG HỢP')||document.querySelector('#fetch-badge').textContent.includes('SYNTHETIC'),'offline synthetic mode is visible');
 check(document.querySelector('#fetch-status').textContent.includes('dữ liệu mới'),'localized fresh delivery is visible');
 check(document.querySelector('#rows').textContent.includes('quiet luxury'),'public Fetch populates keyword discovery table');
 check(document.querySelector('#rows').textContent.toLocaleUpperCase('vi').includes('CHƯA ĐỦ DỮ LIỆU'),'single-snapshot candidate is labeled insufficient');
@@ -97,15 +94,14 @@ check(!/token|secret|credential|password|api_key/i.test(JSON.stringify(fetchRequ
 document.body.setAttribute('data-distributed-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>"""
     html = html.replace("</body>", bridge + check + "</body>")
-    with tempfile.TemporaryDirectory(prefix="trendscout-distributed-fetch-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="trendscout-distributed-fetch-") as directory, \
+            serve_offline_frontend(PUBLIC, html) as frontend_url:
         command = [
             chrome, "--headless", "--no-sandbox", "--disable-gpu",
             "--disable-background-networking", "--disable-extensions", "--no-proxy-server",
-            "--disable-sync", "--disable-component-update", "--allow-file-access-from-files",
+            "--disable-sync", "--disable-component-update",
             "--no-first-run", f"--user-data-dir={directory}/profile", "--window-size=1280,900",
-            "--virtual-time-budget=5000", "--dump-dom", page.as_uri(),
+            "--virtual-time-budget=5000", "--dump-dom", frontend_url,
         ]
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=30)

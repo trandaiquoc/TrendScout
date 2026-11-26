@@ -48,7 +48,10 @@ def _evaluate(devtools, expression, *, await_promise=False, session=None):
         "userGesture": True,
     }, session=session)
     if result.get("exceptionDetails"):
-        raise AssertionError(result["exceptionDetails"].get("text", "browser evaluation failed"))
+        details = result["exceptionDetails"]
+        exception = details.get("exception", {})
+        message = exception.get("description") or details.get("text") or "browser evaluation failed"
+        raise AssertionError(message)
     return result.get("result", {}).get("value")
 
 
@@ -91,6 +94,9 @@ def main():
                 raise AssertionError("dashboard application startup requested the fixture")
             with tempfile.TemporaryDirectory(prefix="d6-2-3-chrome-profile-") as profile:
                 devtools = ChromeDevTools(chrome, profile)
+                # The scripted browser assertion includes bounded 10-second waits;
+                # allow the DevTools transport to return those diagnostics first.
+                devtools.socket.settimeout(30)
                 if isolation["kind"] == "linux-loopback-only-netns":
                     isolation = require_loopback_only_network_isolation(devtools.process.pid)
                 try:
@@ -106,6 +112,7 @@ def main():
 (() => {
   try { localStorage.setItem('trendscout.locale', 'en'); } catch {}
   window.__d623Requests = [];
+  window.__d623Responses = [];
   const nativeFetch = window.fetch.bind(window);
   window.fetch = (input, init = {}) => {
     const url = new URL(String(input), location.href);
@@ -119,6 +126,9 @@ def main():
       sessionStorage.setItem('d6-test-post-count', String(count));
     }
     const pending = nativeFetch(input, init);
+    pending.then((response) => response.clone().text().then((body) => {
+      window.__d623Responses.push({path: url.pathname, status: response.status, body});
+    })).catch(() => {});
     if (/^\/api\/v1\/fetches\/[a-f0-9]{32}$/i.test(url.pathname) && method === 'GET') {
       pending.then((response) => response.clone().json())
         .then((payload) => { window.__d623StatusPayload = payload; });
@@ -127,7 +137,7 @@ def main():
   };
 })();
 """}, session=session)
-                    devtools.call("Page.navigate", {"url": base_url + "/dashboard/"},
+                    devtools.call("Page.navigate", {"url": base_url + "/"},
                                   session=session)
 
                     script = r"""
@@ -150,7 +160,22 @@ def main():
 
   check(await waitFor(() => document.querySelector('#open-fetch')
     && !document.querySelector('#open-fetch').disabled), 'synthetic Fetch enabled by actual capabilities');
+  const sourceSelect = document.querySelector('#fetch-source-select');
+  check(await waitFor(() => sourceSelect && [...sourceSelect.options].some((option) =>
+    option.value === 'wikimedia_pageviews_top_per_country')),
+    'Wikimedia is selectable from the current source registry');
+  if (sourceSelect) {
+    sourceSelect.value = 'wikimedia_pageviews_top_per_country';
+    sourceSelect.dispatchEvent(new Event('change', {bubbles: true}));
+  }
   const button = document.querySelector('#open-fetch');
+  if (!button) {
+    window.__d623Result = {failures, postCount: 0, statusPolls: 0,
+      requestCount: window.__d623Requests.length, path: location.pathname,
+      title: document.title, hasShell: Boolean(document.querySelector('#app-shell')),
+      htmlStart: document.body?.innerHTML.slice(0, 800), requests: window.__d623Requests};
+    return window.__d623Result;
+  }
   button.click();
   button.click();
   check(await waitFor(() => !document.querySelector('#demo-discovery').hidden
@@ -161,8 +186,15 @@ def main():
   const requests = window.__d623Requests;
   const posts = requests.filter((item) => item.path === '/api/v1/fetches' && item.method === 'POST');
   const statusReads = requests.filter((item) => /^\/api\/v1\/fetches\/[a-f0-9]{32}$/i.test(item.path));
-  check(posts.length === 1, 'two quick clicks create one Fetch job');
-  check(posts[0]?.body === '{}', 'browser sends the server-default empty Fetch body');
+  check(posts.length === 2, 'two quick clicks create one enqueue plus one bounded continuation');
+  check(posts.length === 2 && posts.every((item) =>
+    item.headers['idempotency-key'] === posts[0].headers['idempotency-key']),
+    'continuation reuses the original idempotency key');
+  check(posts.length === 2 && posts[0].headers['x-trendscout-fetch-continuation'] === undefined
+    && posts[1].headers['x-trendscout-fetch-continuation'] === '1',
+    'only the continuation carries the continuation marker');
+  check(posts[0]?.body === JSON.stringify({sources: ['wikimedia_pageviews_top_per_country']}),
+    'browser sends the user-selected Wikimedia scope only');
   check(Boolean(posts[0]?.headers['idempotency-key']), 'Fetch request includes idempotency key');
   check(!/token|secret|credential|password/i.test(JSON.stringify(posts[0]?.headers || {})),
     'browser sends no credential');
@@ -181,17 +213,20 @@ def main():
   const sourceText = document.querySelector('#demo-source-list').textContent;
   check(sourceText.includes('Wikimedia') && sourceText.includes('SYNTHETIC'),
     'Wikimedia source and synthetic mode shown');
-  check(sourceText.includes('Google / SerpApi') && sourceText.includes('UNAVAILABLE'),
-    'Google shows unavailable');
-  check(sourceText.includes('Bing / SerpApi') && sourceText.includes('UNAVAILABLE'),
-    'Bing shows unavailable');
-  check(sourceText.includes('YouTube') && sourceText.includes('UNAVAILABLE'),
-    'YouTube shows unavailable');
+  check(!sourceText.includes('Google') && !sourceText.includes('Bing') && !sourceText.includes('YouTube'),
+    'unselected search/video providers are excluded from this Fetch result');
   check(!sourceText.includes('LIVE_VERIFIED'), 'no source is represented as live verified');
   check(document.querySelector('#demo-discovery-list').textContent.includes('INSUFFICIENT_EVIDENCE'),
     'single snapshot classification remains insufficient');
   check(await waitFor(() => window.__d623StatusPayload), 'status response is captured for semantic checks');
   const statusPayload = window.__d623StatusPayload;
+  if (!statusPayload) {
+    window.__d623Result = {failures, postCount: posts.length, statusPolls: statusReads.length,
+      requestCount: requests.length, buttonDisabled: button.disabled,
+      buttonText: button.textContent, fetchStatus: document.querySelector('#fetch-status').textContent,
+      sourceText, requests};
+    return window.__d623Result;
+  }
   check(statusPayload.discovery.candidates.every((candidate) => candidate.score === null),
     'insufficient evidence keeps candidate scores null');
   check(!JSON.stringify(statusPayload).toLowerCase().includes('search_volume'),
@@ -208,12 +243,19 @@ def main():
   search.value = '';
   search.dispatchEvent(new Event('input', {bubbles: true}));
   await wait(450);
-  document.querySelector('[data-category="fashion"]').click();
-  shown = document.querySelector('#demo-discovery-list').textContent;
-  check(shown.includes('linen pants') && !shown.includes('kitchen organizer'), 'Fashion filter works');
-  document.querySelector('[data-category="home_goods"]').click();
-  shown = document.querySelector('#demo-discovery-list').textContent;
-  check(shown.includes('kitchen organizer') && !shown.includes('linen pants'), 'Home & Living filter works');
+  const fashionFilter = document.querySelector('[data-category="fashion"]');
+  const homeGoodsFilter = document.querySelector('[data-category="home_goods"]');
+  if (fashionFilter && homeGoodsFilter) {
+    fashionFilter.click();
+    shown = document.querySelector('#demo-discovery-list').textContent;
+    check(shown.includes('linen pants') && !shown.includes('kitchen organizer'), 'Fashion filter works');
+    homeGoodsFilter.click();
+    shown = document.querySelector('#demo-discovery-list').textContent;
+    check(shown.includes('kitchen organizer') && !shown.includes('linen pants'), 'Home & Living filter works');
+  } else {
+    check(!fashionFilter && !homeGoodsFilter,
+      'source scope does not advertise category filters without matching category evidence');
+  }
   const evidence = document.querySelector('#demo-discovery-list details');
   if (evidence) evidence.open = true;
   const evidenceText = document.querySelector('#demo-discovery-list').textContent;
@@ -222,7 +264,7 @@ def main():
   check(evidenceText.includes('Nov 10, 2026'), 'evidence displays fixed observation date');
   check(evidenceText.includes('SYNTHETIC'), 'evidence displays synthetic provenance');
 
-  document.querySelector('[data-category="all"]').click();
+  document.querySelector('[data-category="all"]')?.click();
   document.querySelector('[data-theme-toggle]').click();
   check(document.documentElement.dataset.theme === 'dark', 'dark theme toggle remains available');
   document.querySelector('[data-theme-toggle]').click();
@@ -230,9 +272,12 @@ def main():
   check(document.documentElement.lang === 'vi', 'Vietnamese locale toggle remains available');
   document.querySelector('[data-locale-toggle]').click();
   check(document.documentElement.lang === 'en', 'English locale toggle remains available');
-  check(Number(sessionStorage.getItem('d6-test-post-count')) === 1, 'one browser job submitted before reload');
+  check(Number(sessionStorage.getItem('d6-test-post-count')) === 2,
+    'one browser job uses an enqueue and a same-key continuation before reload');
   window.__d623Result = {failures, postCount: posts.length, statusPolls: statusReads.length,
-    requestCount: requests.length, assertionCount, sourceText, evidenceText};
+    requestCount: requests.length, assertionCount, sourceText, evidenceText,
+    fetchRequests: requests.filter((item) => item.path === '/api/v1/fetches'),
+    fetchResponses: window.__d623Responses.filter((item) => item.path === '/api/v1/fetches')};
   return window.__d623Result;
 })()
 """
@@ -261,8 +306,8 @@ def main():
     discoveryHidden: document.querySelector('#demo-discovery').hidden};
 })()
 """, await_promise=True, session=session)
-                    if not reload_result or reload_result["postCount"] != 1:
-                        raise AssertionError(f"reload submitted a duplicate job: {reload_result}")
+                    if not reload_result or reload_result["postCount"] != 2:
+                        raise AssertionError(f"reload submitted another Fetch request: {reload_result}")
                     if app.state.d6_2_3_mock_request_counts[WIKIMEDIA_SOURCE_ID] != 1:
                         raise AssertionError("browser reload or polling repeated the Wikimedia fixture request")
                     if isolation["kind"] == "linux-loopback-only-netns":

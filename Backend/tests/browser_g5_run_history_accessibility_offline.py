@@ -6,7 +6,12 @@ import time
 from pathlib import Path
 
 from browser_d2_visual_offline import FAKE
-from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+from browser_support import (
+    ChromeDevTools,
+    find_chrome,
+    require_linux_network_isolation,
+    serve_offline_frontend,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
@@ -20,14 +25,6 @@ def main():
         raise SystemExit("Chrome unavailable")
 
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    html = html.replace(
-        'href="/dashboard/styles.css"',
-        'href="' + (PUBLIC / "styles.css").as_uri() + '"',
-    )
-    html = html.replace(
-        'src="/dashboard/app.js"',
-        'src="' + (PUBLIC / "app.js").as_uri() + '"',
-    )
     fallback = "  return Promise.resolve(new Response('{}',{status:404}));"
     detail = (
         "  if(value==='/api/v1/runs/history/'+ 'e'.repeat(32))"
@@ -51,9 +48,9 @@ def main():
     html = html.replace("</body>", fake + "</body>")
 
     with tempfile.TemporaryDirectory(prefix="trendscout-g5-run-detail-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
         browser = ChromeDevTools(chrome, Path(directory) / "profile")
+        frontend_server = serve_offline_frontend(PUBLIC, html)
+        frontend_url = frontend_server.__enter__()
         try:
             call = browser.call
             target = call("Target.createTarget", {"url": "about:blank"})["targetId"]
@@ -63,7 +60,7 @@ def main():
             call("Page.enable", session=session)
             call("Runtime.enable", session=session)
             call("Accessibility.enable", session=session)
-            call("Page.navigate", {"url": page.as_uri()}, session)
+            call("Page.navigate", {"url": frontend_url}, session)
 
             def evaluate(expression):
                 response = call(
@@ -183,6 +180,7 @@ def main():
             )
         finally:
             browser.close()
+            frontend_server.__exit__(None, None, None)
 
 
 if __name__ == "__main__":
