@@ -69,6 +69,14 @@ lookups returned 404, so the exact exception is still unknown; a credential or
 identity failure is not ruled out. No IAM workaround or authentication bypass
 was attempted.
 
+A further authenticated, GET-only check during the current goal resume again
+returned HTTP 200 for `/api/health` and HTTP 403
+`FIRESTORE_IDENTITY_REJECTED` for both `/api/v1/capabilities` and
+`/api/v1/datasets/latest`. The response IDs again show the `sin1:iad1` route.
+This reconfirms the incident; it does not identify the exact client-construction
+exception. No Fetch, provider request, IAM change, deployment, or alias change
+was made.
+
 ## Rolling retention implementation — G6 subcriterion, not a new gate
 
 The owner's seven-local-calendar-day policy is defined in
@@ -137,12 +145,14 @@ is a minimum fail-closed guard; it does not prove that every SQLite/Firestore
 domain, payload, user edit, reservation, job, or schedule has been reconciled.
 No PostgreSQL flag was enabled and no production deployment was made for this
 change. The isolated composition fixture now seeds explicit synthetic readiness
-rows, with no provider requests. Consolidated regression is pending.
+rows, with no provider requests. The affected-area suite and isolated Neon
+retention integration now pass; the Firestore emulator suite remains unrun.
 
 The Windows inventory utility described below has been added with an owner-only
-backup directory and SQLite online-backup capture. It has not been run against
-either Windows host; it does not inspect or export Production Firestore. G1 and
-G3 remain open until real captures can be reviewed.
+backup directory and SQLite online-backup capture. A first-host capture is now
+available below; the second Windows host and Production Firestore still need
+separate authorized inventories. G1 and G3 remain open until these captures can
+be reconciled.
 
 ## Verified starting point
 
@@ -839,10 +849,42 @@ read path, followed by active-job reconciliation and writer fencing.
 | Model files and vectors | FastEmbed model assets are cached under the local model directory; embedding vectors are stored in the Collections `cache` table | Preserve business vectors and their model/version metadata in PostgreSQL. Model assets are derived local files, not proof of Vercel model availability. |
 
 This is a code-level inventory, not a complete production data census. The
-current local ADC identity was denied a read-only Firestore probe, and the
-second Windows host has not been inventoried. Actual local database paths,
-ledger contents, namespace volumes, retention and active consumers must still
-be captured from both hosts and the live project before G1 can pass.
+current host has now been captured, but its current Collections row count
+differs from the older local backup used for the earlier comparator. The local
+ADC identity was denied a read-only Firestore probe, and the second Windows
+host has not been inventoried. Namespace volumes, retention and active
+consumers must still be checked against current, consistent captures before
+G1 can pass.
+
+### Current Windows host capture — 26 November 2026
+
+The Owner-only inventory utility captured three local SQLite databases using
+SQLite's online-backup API. All three standalone backups passed
+`integrity_check`, had zero foreign-key violations, and reported no source-file
+change during capture. Two expected locations were missing; there were no
+capture failures.
+
+| Store | Capture | Tables | Rows | Integrity | FK violations |
+| --- | --- | ---: | ---: | --- | ---: |
+| Collections | Captured | 18 | 31,954 | `ok` | 0 |
+| Normal Google LIVE | Captured | 2 | 10 | `ok` | 0 |
+| Normal Wikimedia LIVE | Captured | 2 | 1 | `ok` | 0 |
+| Scheduler SQLite | Missing | — | — | — | — |
+| D6 smoke ledger | Missing | — | — | — | — |
+
+The full backups remain in the owner-only
+`%LOCALAPPDATA%\TrendScout\migration-backups` folder outside the Git
+repository; the inventory manifest exposes only schema and row-count metadata.
+I attempted a PostgreSQL type-staging dry run against the Collections backup,
+but its execution output was not retained, so this is not counted as a passing
+staging result. The CLI uses temporary tables for dry-run and no import action
+was run. This capture is per database and is not a cross-database transaction
+snapshot.
+The previous local standalone image used by the comparator had 50,783 rows;
+it is not present in the current migration-backups folder for a same-file
+comparison. The Production Collections snapshot available in the report is
+from 25 November and had 55,332 rows. The differences do not establish which
+snapshot is authoritative and are not migration or deletion instructions.
 
 ### Second Windows host: safe local capture
 
@@ -1130,9 +1172,9 @@ Production cold/warm TTFB, and post-migration behavior remain unmeasured.
 
 | Gate | State | Remaining evidence |
 | --- | --- | --- |
-| G1 | Open | Actual Production function region `iad1` is now confirmed on read-only GETs from the `sin1` edge path. Neon reports 13,000,704 database bytes and 1/112 connections including the probe, but project-level storage/compute usage and headroom are unavailable. The second Windows host capture is now available as a one-line tool but has not been run; Vercel-to-Neon latency and the final migration plan also remain. |
+| G1 | Open | The current Windows host's 26 November inventory captured 3 SQLite stores (31,965 total rows) with valid integrity and no FK violations; Scheduler and D6 smoke SQLite files were missing. Its 31,954-row Collections image differs from the prior 50,783-row local comparator image, which is unavailable for same-file verification. The second host and a fresh authorized Production capture remain missing. Production GETs confirm function execution in `iad1` from `sin1`; Neon SQL reports 13,000,704 database bytes and 1/112 connections including the probe, but project-level capacity and Vercel-to-Neon latency are unavailable. |
 | G2 | **PASS** | Versions 1–9 applied and checksum-verified in `trendscout`; 36 tables total, with all 35 non-ledger tables empty and only the nine-row migration ledger populated. Local pooled/direct URLs share the verified Neon identity and pass TLS connectivity checks. Runtime cutover remains G5. |
-| G3 | Open | Reconcile 15,875 shared rows with changed values and source-only rows (33,979 local / 38,528 Production); no canonical winner is selected, and the second Windows host is missing. |
+| G3 | Open | The earlier local/Production comparator (50,783 / 55,332 rows) found 15,875 changed shared rows and source-only rows (33,979 local / 38,528 Production); no canonical winner was selected. The current first-host capture has 31,954 Collections rows and no matching Production snapshot is available for a fresh comparison. The second Windows host has not been inventoried; per-domain authority and reconciliation are open. |
 | G4 | Open | 25 November real-data captures reconciled in isolated schemas, but the 26 November local read-only probe was denied; final current capture through an authorized path, writer fence, quota/payload reconciliation and production staging remain. |
 | G5 | Open | Local LIVE `create_app` selects PostgreSQL collection, analysis and scheduler stores. In one isolated Neon schema, Vercel without OIDC read a Local collection write; the Local store observed a Vercel collection write; eight major read routes returned 200. A fail-closed startup guard now requires business rows and imported LIVE quota state, but the Neon schema is still migration-only; the Vercel flag remains off by default, and Local's normal default path and Production have not switched. |
 | G6 | Open | New G6-R subcriterion: rolling seven-local-date expiry is calculated and a 500-row transactional/audited payload cleanup is wired into the explicit PostgreSQL LIVE composition. A real Neon isolated-schema test verifies dry-run, batch continuation, reference expiry, audit, and protected-row preservation. It does not yet purge source evidence or provider copies in keyword/classification/algorithm/research records because complete collection-time and lineage are missing; these are retained. Neon business/operational import, default Local SQLite removal, broader incremental-ingestion coverage, project-level capacity, and end-to-end retention proof remain. |
