@@ -94,6 +94,7 @@ assert not any(name.startswith(('google.cloud.firestore', 'google.api_core',
 
     def test_vercel_function_excludes_development_sources(self):
         config = json.loads((BACKEND / 'vercel.json').read_text(encoding='utf-8'))
+        self.assertIn(".[legacy-firestore]", config['installCommand'])
         patterns = config['functions']['app/main.py']['excludeFiles']
         self.assertIn('tests/**', patterns)
         self.assertIn('emulator_tests/**', patterns)

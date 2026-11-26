@@ -4,9 +4,149 @@
 report records the new 12-gate goal, which is distinct from the earlier
 nine-gate performance goal. Three gates have passed: **3 / 12 (25%)**.
 
+## Production dependency regression and recovery — 26 November 2026
+
+Owner pushed `cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4` to `origin/main`, and
+Vercel created READY Production deployment `dpl_8khsVQLtwEmBqapb2Gum3k4nJmXx`
+from that SHA in `iad1`. Authorized, read-only Production GETs returned 200 for
+`/api/health`, but 403 `FIRESTORE_IDENTITY_REJECTED` for
+`/api/v1/capabilities` and `/api/v1/datasets/latest`.
+
+The code/package path identifies a concrete regression candidate: `cf09b2e`
+moved `google-cloud-firestore` and its pinned support packages out of the
+default project dependencies into the `legacy-firestore` extra. The Vercel
+FastAPI build reads dependencies from `pyproject.toml`; before this correction,
+`Backend/vercel.json` did not install that extra. The legacy request path
+imports `google.cloud.firestore` while constructing the Firestore client, and
+the middleware maps any client-construction exception to the observed 403.
+Vercel's Hobby runtime-log query did not provide retained logs for the
+deployment window, so the exact exception class could not be read; a WIF token
+or identity configuration error is not ruled out solely by the HTTP response.
+
+Compatible deployment `dpl_4nrYBmDRyoKDVgYg97Mbub9CDCjs` (SHA
+`7faacb8cd9ee47c52bdbee0cc8318a1ca4b66c2a`) was checked before recovery:
+health, capabilities, and latest-dataset GETs all returned 200. The Production
+alias `trend-scout-mu.vercel.app` was then assigned back to that deployment and
+read back from Vercel. The same three GETs against the Production alias returned
+200 afterward. No fetch POST, provider request, PostgreSQL runtime switch, IAM
+change, or data write was made. The `cf09b2e` commit and its deployment remain intact.
+
+`Backend/vercel.json` now explicitly installs the existing
+`.[legacy-firestore]` extra while this codebase's Vercel runtime remains on the
+legacy Firestore path. This is a local source correction and has not been
+deployed. PostgreSQL stays disabled until its business and operational data,
+writer fencing, and cutover gates are complete. The extra must only be removed
+after that runtime cutover is safely verified. Vercel Python dependency
+configuration was checked against its official [Python runtime](https://vercel.com/docs/functions/runtimes/python)
+and [build/install command](https://vercel.com/docs/builds/configure-a-build)
+documentation on 26 November 2026.
+
+## Production regression recheck under the current deployment restriction — 26 November 2026
+
+Read-only Vercel metadata currently maps `trend-scout-mu.vercel.app` to READY
+Production deployment `dpl_AizETu6tMZXvScnxWTSLa22GXW8j`, source SHA
+`cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4`, region `iad1`. Fresh authenticated
+GETs returned HTTP 200 for `/api/health`, and HTTP 403
+`FIRESTORE_IDENTITY_REJECTED` for `/api/v1/capabilities` and
+`/api/v1/datasets/latest`. The response request IDs include the `sin1:iad1`
+edge/function route.
+
+The previous compatible deployment `dpl_4nrYBmDRyoKDVgYg97Mbub9CDCjs` (SHA
+`7faacb8cd9ee47c52bdbee0cc8318a1ca4b66c2a`) was checked directly: the same
+three GETs returned HTTP 200 there. That verifies a compatible release is
+available; it does not restore the Production alias. The current instruction
+explicitly disallows a new Production deployment or alias change, so the alias
+was left on `cf09b2e`. No Fetch POST, provider call, IAM change, or data write
+was made.
+
+The optional Firestore SDK packaging change remains the leading code-level
+regression candidate: `cf09b2e` moved `google-cloud-firestore` into the
+`legacy-firestore` extra, while the legacy request path still constructs a
+Firestore client. This branch's `Backend/vercel.json` installs that extra,
+but the correction has not been built or deployed. A read-only 30-minute
+runtime-log query returned no matching entries and the two request trace
+lookups returned 404, so the exact exception is still unknown; a credential or
+identity failure is not ruled out. No IAM workaround or authentication bypass
+was attempted.
+
+## Rolling retention implementation — G6 subcriterion, not a new gate
+
+The owner's seven-local-calendar-day policy is defined in
+`app/retention/policy.py`: on date D, keep D-6 through D in
+`Asia/Ho_Chi_Minh`; store instants as UTC. Provider expiry shortens that
+deadline. The Postgres retention runner is bounded to 500 payloads per batch,
+uses a schema-scoped transaction advisory lock and `SKIP LOCKED`, releases
+expired payload-reference rows and deletes their blobs in one transaction,
+records an aggregate audit row, supports dry run, and reports remaining
+payload backlog. Missed batches can continue on a later invocation. It makes
+no provider requests and is reached opportunistically from the explicit
+PostgreSQL LIVE composition. No Vercel Cron or paid service was added.
+
+The runner deliberately does **not** delete `source_evidence` yet. It reports
+rows whose `collected_at` or provider `expires_at` is due, but the current
+schema also stores provider-derived content in keyword and classification
+JSON, algorithm values, and saved research without complete field-level source
+lineage. `algorithm_observations` has no reliable collection timestamp. A
+delete could therefore leave expired content in derived or saved rows, or
+invalidate user assignments. Those rows remain intact until the shared schema
+has reliable collection timestamps, source references, and dependent-record
+redaction/invalidation contracts. No user Collections, Research, settings,
+quota, reservation, cooldown, or refresh-eligibility state is age-purged.
+Current YouTube cache limits remain unchanged and are not extended by this
+default policy.
+
+`Documents/Integration/DB_CONTRACT.md` publishes the database ownership and
+cross-goal storage/migration requirements. At this fetch there were no remote
+AI, Algorithms, or Frontend contract branches to reconcile. The retention
+acceptance subcriterion **G6-R** requires end-to-end expiry for every provider
+content copy, provider-specific shorter limits, no orphan references,
+transactional/idempotent bounded cleanup, durable audit and dry-run evidence,
+backlog recovery, and proof that protected user/operational rows survive. It
+does not add a thirteenth gate; G6 remains open.
+
+Vercel Cron was assessed against the official docs on 26 November 2026. Cron
+invokes Vercel Functions and is available on all plans; Hobby permits one run
+per day with up to 59 minutes of timing variance, schedules use UTC, and
+invocations consume Function usage. The Cron feature is marked legacy and is
+planned to migrate to Schedules. The connected project metadata did not verify
+the team's plan or remaining usage, so this branch uses opportunistic cleanup
+and does not configure a schedule. See Vercel's [Cron behavior and timezone
+documentation](https://vercel.com/docs/cron-jobs) and [Cron usage and pricing
+limits](https://vercel.com/docs/cron-jobs/usage-and-pricing). No Cron was
+configured or deployed.
+
+Migration 9 adds the aggregate retention-audit table and expiry indexes. It
+was applied to Neon only after confirming the existing `trendscout` ledger was
+exactly versions 1–8 and all 34 existing non-ledger tables were empty. The
+checksum ledger now verifies versions 1–9; the schema has 36 tables total,
+including 35 non-ledger tables, all still empty. The new audit table is empty,
+and no runtime or Production deployment was switched. An isolated Neon test
+found that the process-local sweep throttle could skip a follow-up batch while
+backlog remained; that behavior is fixed. The same test now passes for dry-run,
+backlog continuation, the `retain_until <= now` expiry boundary, durable audit,
+and preservation of saved and operational rows.
+
+## Fail-closed PostgreSQL activation guard — 26 November 2026
+
+The explicit PostgreSQL LIVE composition and Vercel app construction now
+validate readiness before exposing PostgreSQL-backed runtime stores. The
+readiness query requires at least one migrated keyword row and dataset snapshot,
+plus the normal Google LIVE coordination policy digest and quota entries. Empty
+schema-only PostgreSQL therefore cannot be selected as the runtime store. This
+is a minimum fail-closed guard; it does not prove that every SQLite/Firestore
+domain, payload, user edit, reservation, job, or schedule has been reconciled.
+No PostgreSQL flag was enabled and no production deployment was made for this
+change. The isolated composition fixture now seeds explicit synthetic readiness
+rows, with no provider requests. Consolidated regression is pending.
+
+The Windows inventory utility described below has been added with an owner-only
+backup directory and SQLite online-backup capture. It has not been run against
+either Windows host; it does not inspect or export Production Firestore. G1 and
+G3 remain open until real captures can be reviewed.
+
 ## Verified starting point
 
-After `git fetch origin`, local `main` and `origin/main` both resolved to
+At the previous report checkpoint, after `git fetch origin`, local `main` and `origin/main` resolved to
 `47a4b54db6883f5e5fbe7ead0bc45c4cab8f4726`. The existing untracked
 `.playwright-cli/` directory was left untouched. Read-only Vercel metadata on
 26 November 2026 confirmed that `trend-scout-mu.vercel.app` aliases to READY
@@ -704,6 +844,53 @@ second Windows host has not been inventoried. Actual local database paths,
 ledger contents, namespace volumes, retention and active consumers must still
 be captured from both hosts and the live project before G1 can pass.
 
+### Second Windows host: safe local capture
+
+`Backend/scripts/inventory_windows_storage.py` now captures the known local
+Collections, Scheduler, Google LIVE, Wikimedia LIVE and D6 SQLite stores. It
+uses SQLite's online backup API, so committed WAL pages are included; checks
+the standalone copy's integrity and foreign keys; and records only table names,
+columns, row counts, file hashes and timing metadata in `inventory.json`. The
+full SQLite data exists only in the local backup files. The tool never reads
+`.env`, starts Fetch, or writes to a source database. Each file is a consistent
+per-database snapshot; the group is not an atomic cross-database snapshot, so
+this inventory is evidence for reconciliation and not a cutover capture.
+Backups and the manifest are placed in an owner-only folder beneath
+`%LOCALAPPDATA%\TrendScout\migration-backups` and must be handled as private
+business and operational data.
+
+When the second Windows host is available, the Owner can run this one
+PowerShell line from the TrendScout checkout:
+
+```powershell
+Set-Location F:\TrendScout\Backend; .\.venv\Scripts\python.exe scripts\inventory_windows_storage.py
+```
+
+The command prints the capture folder. Transfer that folder back for comparison;
+no SQL or manual row export is needed. G1 and G3 remain open until the capture
+is reviewed with the current host and Production evidence.
+
+## Proposed per-domain authority and reconciliation rules
+
+These are staging rules derived from the current schemas and storage contracts;
+they are not a claim that any source database has been approved as the winner.
+Apply them to records only after the third-host inventory and final authorized
+Production capture are available.
+
+| Domain | Authority evidence | Reconciliation rule |
+| --- | --- | --- |
+| User-authored Collections, feedback, decisions and research | Stable record identity, `created_by`/membership `origin`, explicit user actions, and timezone-aware edit timestamps | Union non-conflicting identities. Preserve explicit user edits and deletions with their provenance. If edit provenance or ordering is missing, keep both source versions in review staging; do not overwrite by database recency. |
+| Provider observations and Fetch evidence | Source/provider ID, query or sampling scope, observation time, fetch/collection time, source URL and source record identity | Deduplicate only when the documented identity and evidence digest match. Preserve distinct observations and query relationships. A newer provider observation does not erase older source evidence. |
+| Classifications and algorithm results | Input digest, algorithm/model and taxonomy versions, source evidence, and timezone-aware calculation time | Reuse only when the input digest and version match. Preserve divergent outputs as stale/review evidence or recompute after source rows are reconciled; timestamps alone do not select a winner. |
+| Quotas, reservations, idempotency and cooldowns | Provider account/source scope, reservation ID, attempt receipt, request timestamps, settlement and policy version | Never add stored counters blindly. Reconcile unique reservations and receipts; treat an attempt with uncertain dispatch as consumed until proven otherwise. Preserve the most restrictive outstanding cooldown/eligibility and do not create new refresh eligibility during migration. |
+| Jobs, checkpoints and scheduler occurrences | Stable job/occurrence IDs, idempotency key, attempt receipt, lease/fence token, expiry and terminal state | Keep unresolved or possibly dispatched work non-runnable until reconciled. Fence every old writer before issuing new PostgreSQL claims. Do not replay work solely because an old lease appears expired. |
+| Payloads, cache and snapshot references | Content digest plus each cache/checkpoint/job reference and its own retention deadline | Deduplicate only byte-identical payloads. Union valid references while preserving each reference's source and expiry; remove expired payloads only after all references are reconciled. Cache-only reads must remain distinguishable from fresh provider observations. |
+| Identity and relationships | Source-local primary keys plus verified natural/business keys and foreign-key relationships | Preserve source IDs and build explicit cross-source mappings. Do not infer identity from row order, matching counts or a single matching label. |
+
+Until current records provide those fields with compatible timestamps, the
+authoritative value for a conflicting row remains unresolved. PostgreSQL's
+empty business tables are a staging destination, not an authority source.
+
 ## Firestore staging verification — synthetic fixtures
 
 On 26 November 2026, 12 focused tests passed against randomly named PostgreSQL
@@ -943,22 +1130,23 @@ Production cold/warm TTFB, and post-migration behavior remain unmeasured.
 
 | Gate | State | Remaining evidence |
 | --- | --- | --- |
-| G1 | Open | Actual Production function region `iad1` is now confirmed on read-only GETs from the `sin1` edge path. Neon reports 13,000,704 database bytes and 1/112 connections including the probe, but project-level storage/compute usage and headroom are unavailable. The second Windows host inventory/backup, Vercel-to-Neon latency and final migration plan remain. |
-| G2 | **PASS** | Versions 1–8 applied and checksum-verified in `trendscout`; 35 tables, only the eight-row migration ledger populated. Local pooled/direct URLs share the verified Neon identity and pass TLS connectivity checks. Runtime cutover remains G5. |
+| G1 | Open | Actual Production function region `iad1` is now confirmed on read-only GETs from the `sin1` edge path. Neon reports 13,000,704 database bytes and 1/112 connections including the probe, but project-level storage/compute usage and headroom are unavailable. The second Windows host capture is now available as a one-line tool but has not been run; Vercel-to-Neon latency and the final migration plan also remain. |
+| G2 | **PASS** | Versions 1–9 applied and checksum-verified in `trendscout`; 36 tables total, with all 35 non-ledger tables empty and only the nine-row migration ledger populated. Local pooled/direct URLs share the verified Neon identity and pass TLS connectivity checks. Runtime cutover remains G5. |
 | G3 | Open | Reconcile 15,875 shared rows with changed values and source-only rows (33,979 local / 38,528 Production); no canonical winner is selected, and the second Windows host is missing. |
 | G4 | Open | 25 November real-data captures reconciled in isolated schemas, but the 26 November local read-only probe was denied; final current capture through an authorized path, writer fence, quota/payload reconciliation and production staging remain. |
-| G5 | Open | Local LIVE `create_app` selects PostgreSQL collection, analysis and scheduler stores. In one isolated Neon schema, Vercel without OIDC read a Local collection write; the Local store observed a Vercel collection write; eight major read routes returned 200. The Vercel flag remains off by default; Local's normal default path and Production have not switched. |
-| G6 | Open | PostgreSQL payload references and bounded expiry cleanup are now used by explicit Local/Vercel LIVE compositions, and coordination writes are keyed and transactional. Default Local still selects SQLite, imported business/operational state is absent, broader incremental-ingestion coverage and project-level capacity monitoring remain. |
+| G5 | Open | Local LIVE `create_app` selects PostgreSQL collection, analysis and scheduler stores. In one isolated Neon schema, Vercel without OIDC read a Local collection write; the Local store observed a Vercel collection write; eight major read routes returned 200. A fail-closed startup guard now requires business rows and imported LIVE quota state, but the Neon schema is still migration-only; the Vercel flag remains off by default, and Local's normal default path and Production have not switched. |
+| G6 | Open | New G6-R subcriterion: rolling seven-local-date expiry is calculated and a 500-row transactional/audited payload cleanup is wired into the explicit PostgreSQL LIVE composition. A real Neon isolated-schema test verifies dry-run, batch continuation, reference expiry, audit, and protected-row preservation. It does not yet purge source evidence or provider copies in keyword/classification/algorithm/research records because complete collection-time and lineage are missing; these are retained. Neon business/operational import, default Local SQLite removal, broader incremental-ingestion coverage, project-level capacity, and end-to-end retention proof remain. |
 | G7 | Open | PostgreSQL cached continuation, terminal checkpoint readback, compact manifest reuse, Collections no-op, same-key replay, lease fencing and recovery after a simulated interruption have focused regression coverage (110 tests, 46 subtests; isolated Neon atomic-state, composition and collection-read integration passed). Offline Chrome verifies continuation after transient status failures, single recovery and reload without repeat POST using a stubbed API. Real backend interruption, adapter attempt receipts, provider reliability and end-to-end latency acceptance remain. |
 | G8 | **PASS** | Explicit cache-only API/UI and separate worker registry; provider/cache tests and isolated Neon composition prove no LIVE handler invocation and zero reported provider requests, with cache misses failing closed. Same-Fetch checkpoint replay, exact keyword filtering, concurrent retry protection, and offline inference with the installed local model passed. Production availability/timing is not claimed; latency belongs to G12. |
 | G9 | **PASS** | PostgreSQL read routes and the five-minute identity/schema validation cache; PostgreSQL request-timing and credential-safe route logging; 9 frontend API tests for in-flight coalescing/cache invalidation, 32 Fetch-controller tests and offline Chrome workflow; isolated Neon scheduler claim/recovery/fencing; PostgreSQL-only core dependency profile with legacy/local extras and function file exclusions. Production latency and browser measurements are G12. |
-| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. Eight Neon migration checksums and zero leftover test schemas were confirmed. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
+| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. This retention update's focused suite passed 80 tests and 59 subtests with 4 skips; its isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
 | G11 | Open | Fenced cutover, proven rollback, release and exact deployed SHA. |
-| G12 | Open | Protected Production GET checks now return 200 for health, capabilities, dashboard, Collections, algorithm results, analytics, research, Run History and latest dataset; scheduler remains 503. These were the existing Firestore/SQLite release. The current GET tool did not expose TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
+| G12 | Open | The current alias still serves `cf09b2e`: health GET returns 200, while capabilities and latest dataset return 403 `FIRESTORE_IDENTITY_REJECTED`. The compatible `7faacb8` deployment returns 200 for those direct GETs, but the alias was not changed under the current no-deploy instruction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
 
 No business-data migration, runtime cutover, Production deployment, live
 provider request, quota reset or business-row modification has been performed.
-The durable Neon schema change in the earlier continuation was the additive
-version 8 payload-reference migration; all 34 non-ledger tables remain empty.
-The isolated Fetch read test created and removed only its random temporary
-schema; no business rows or persistent test schemas were left behind.
+The durable Neon schema now includes additive migrations 8 (payload
+references) and 9 (retention audit); versions 1–9 checksum-verify, and all 35
+non-ledger tables remain empty. The isolated retention and Fetch integration
+tests created and removed only their random temporary schemas; no persistent
+test schemas were left behind.

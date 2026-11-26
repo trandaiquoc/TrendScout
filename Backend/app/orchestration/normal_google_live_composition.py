@@ -362,6 +362,7 @@ async def normal_google_live_composition(*, user_agent,
             raise ValueError("owner manual YouTube LIVE requires an approved local owner host")
 
     uses_firestore = shared_firestore_client is not None
+    retention_store = None
     if uses_firestore:
         from app.orchestration.firestore_shared_live_composition import _client_project_id
         from app.storage.firestore_atomic_state import FirestoreAtomicStateStore
@@ -379,17 +380,22 @@ async def normal_google_live_composition(*, user_agent,
     elif uses_postgres:
         from app.storage.postgres_atomic_state import PostgresAtomicStateStore
         from app.storage.postgres_payloads import PostgresSourcePayloads
+        from app.storage.postgres_retention import PostgresRetentionStore
         from app.storage.postgres_runtime import verify_postgres_runtime
 
-        verify_postgres_runtime(postgres_environment, schema=postgres_schema)
+        verify_postgres_runtime(
+            postgres_environment, schema=postgres_schema, require_cutover_data=True
+        )
         store = PostgresAtomicStateStore(postgres_environment, schema=postgres_schema)
         store.vercel_runtime_enabled = vercel_postgres_runtime
         snapshot_blobs = PostgresSourcePayloads(
             postgres_environment, schema=postgres_schema,
             preserve_expired=preserve_expired_data,
         )
-        if not preserve_expired_data:
-            snapshot_blobs.purge_expired(now=utcnow())
+        retention_store = PostgresRetentionStore(
+            postgres_environment, schema=postgres_schema,
+            preserve_expired=preserve_expired_data,
+        )
     else:
         directory = Path(state_directory) if state_directory is not None else (
             Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
@@ -421,7 +427,7 @@ async def normal_google_live_composition(*, user_agent,
             or vercel_shared_live and not vercel_postgres_runtime
             else store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
         )
-        if vercel_postgres_runtime and not capability_metadata_request and not existing_state:
+        if uses_postgres and not existing_state and not capability_metadata_request:
             raise ValueError(
                 "PostgreSQL operational state has not been reconciled"
             )
@@ -442,6 +448,15 @@ async def normal_google_live_composition(*, user_agent,
             "PostgreSQL LIVE quota policy differs from stored state; "
             "refusing an implicit quota migration"
         )
+    if uses_postgres and existing_state and (
+        existing_state.get("schema") != 1
+        or not isinstance(existing_state.get("policy_digest"), str)
+        or any(not isinstance(existing_state.get(name), dict)
+               for name in ("jobs", "keys", "quota", "inflight"))
+        or not existing_state["quota"]
+        or not isinstance(existing_state.get("starts"), list)
+    ):
+        raise ValueError("PostgreSQL operational state is incomplete")
     if (not uses_firestore and not uses_postgres and existing_state
             and existing_state.get("policy_digest") != admission.policy_digest):
         def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
@@ -575,12 +590,15 @@ async def normal_google_live_composition(*, user_agent,
                 "expired_blobs": int(snapshot_blobs.purge_expired(now=now)),
             }
         checkpoint_counts = purge_expired_youtube_checkpoints(
-            store, snapshot_blobs, now=now, state_key=GOOGLE_STATE_KEY
+            store, snapshot_blobs, now=now, state_key=GOOGLE_STATE_KEY,
+            purge_payloads=not uses_postgres,
         )
         if uses_postgres:
+            retention_summary = retention_store.sweep(now=now)
             return {
                 "cache_entries": int(cache_deleted),
-                "expired_blobs": int(snapshot_blobs.purge_expired(now=now)),
+                "expired_blobs": int(retention_summary["payload_deleted_count"]),
+                "retention": retention_summary,
                 **checkpoint_counts,
             }
         return {"cache_entries": int(cache_deleted), **checkpoint_counts}

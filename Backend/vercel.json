@@ -1,4 +1,5 @@
 {
+  "installCommand": "python3 -m pip install -e '.[legacy-firestore]'",
   "buildCommand": "python3 scripts/prepare_vercel.py",
   "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ':(top)Backend' ':(top)Frontend'",
   "redirects": [

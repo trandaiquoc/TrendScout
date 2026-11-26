@@ -43,7 +43,8 @@ def purge_expired_youtube_checkpoints(
     *,
     now: datetime,
     state_key: str,
-) -> dict[str, int]:
+    purge_payloads: bool = True,
+) -> dict:
     """Remove only expired YouTube checkpoints and their expired, unshared blobs."""
     local_pair = (
         type(store) is LocalSQLiteAtomicStateStore
@@ -66,6 +67,7 @@ def purge_expired_youtube_checkpoints(
         postgres_pair = False
     if (not (local_pair or postgres_pair)
             or not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
+            or type(purge_payloads) is not bool
             or not isinstance(state_key, str) or not state_key):
         raise ValueError("matching LIVE state and blob stores, aware time and state key required")
     now = now.astimezone(timezone.utc)
@@ -119,8 +121,10 @@ def purge_expired_youtube_checkpoints(
 
     result = store.transact(state_key, operation)
     candidate_digests = result.pop("candidate_blob_digests", set())
-    blob_result = snapshot_blobs.delete_expired_unreferenced(
-        candidate_digests, now=now
+    blob_result = (
+        snapshot_blobs.delete_expired_unreferenced(candidate_digests, now=now)
+        if purge_payloads
+        else {"deleted": 0, "retained_referenced": 0}
     )
     result.update(deleted_blobs=blob_result["deleted"],
                   retained_referenced_blobs=blob_result["retained_referenced"])
