@@ -87,7 +87,7 @@ class Settings:
     allowed_fetch_operations: frozenset[str]
     public_fetch_enabled: bool = False
     vercel_shared_live_enabled: bool = False
-    vercel_postgres_runtime_enabled: bool = False
+    postgres_runtime_enabled: bool = False
     public_fetch_deadline_seconds: float = 60.0
     scheduler_enabled: bool = False
 
@@ -129,16 +129,16 @@ class Settings:
             raise ValueError("Public Fetch setting must be boolean")
         if type(self.vercel_shared_live_enabled) is not bool:
             raise ValueError("Vercel shared LIVE setting must be boolean")
-        if type(self.vercel_postgres_runtime_enabled) is not bool:
-            raise ValueError("Vercel PostgreSQL runtime setting must be boolean")
-        if self.vercel_postgres_runtime_enabled and (
-            self.environment_profile != "vercel"
+        if type(self.postgres_runtime_enabled) is not bool:
+            raise ValueError("PostgreSQL runtime setting must be boolean")
+        if self.postgres_runtime_enabled and (
+            self.environment_profile not in {"local", "vercel"}
             or self.read_only
             or self.run_mode != "live"
             or self.public_fetch_enabled
             or self.vercel_shared_live_enabled
         ):
-            raise ValueError("Vercel PostgreSQL runtime requires a writable LIVE Vercel profile")
+            raise ValueError("PostgreSQL runtime requires a writable LIVE local or Vercel profile")
         if self.vercel_shared_live_enabled and (
             self.environment_profile != "vercel"
             or self.read_only
@@ -200,6 +200,11 @@ class Settings:
         object.__setattr__(
             self, "credential_references", MappingProxyType(dict(self.credential_references))
         )
+
+    @property
+    def vercel_postgres_runtime_enabled(self) -> bool:
+        """Backward-compatible alias for the shared PostgreSQL runtime flag."""
+        return self.postgres_runtime_enabled
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -293,15 +298,15 @@ class Settings:
         vercel_shared_live_enabled = _boolean(
             environment, "TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED", False
         )
-        vercel_postgres_runtime_enabled = _boolean(
+        postgres_runtime_enabled = _boolean(
             environment, "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED", False
         )
-        if vercel_postgres_runtime_enabled and any(
+        if postgres_runtime_enabled and any(
             not environment.get(name, "").strip()
             for name in ("DATABASE_URL", "DATABASE_URL_UNPOOLED")
         ):
             raise ValueError(
-                "Vercel PostgreSQL runtime requires pooled and direct database URLs"
+                "PostgreSQL runtime requires pooled and direct database URLs"
             )
         public_fetch_deadline_seconds = _bounded_float(
             environment, "TREND_SCOUT_PUBLIC_FETCH_DEADLINE_SECONDS", 60.0, 1.0, 300.0
@@ -339,7 +344,7 @@ class Settings:
             allowed_fetch_operations=allowed_fetch_operations,
             public_fetch_enabled=public_fetch_enabled,
             vercel_shared_live_enabled=vercel_shared_live_enabled,
-            vercel_postgres_runtime_enabled=vercel_postgres_runtime_enabled,
+            postgres_runtime_enabled=postgres_runtime_enabled,
             public_fetch_deadline_seconds=public_fetch_deadline_seconds,
             scheduler_enabled=scheduler_enabled,
         )

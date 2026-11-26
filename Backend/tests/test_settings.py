@@ -80,13 +80,24 @@ class SettingsTests(unittest.TestCase):
                 "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
                 "DATABASE_URL": "postgresql://runtime.invalid/db",
             })
-        with self.assertRaisesRegex(ValueError, "writable LIVE Vercel"):
+        with self.assertRaisesRegex(ValueError, "writable LIVE local or Vercel"):
             Settings.from_environment({
                 "TREND_SCOUT_ENVIRONMENT": "local",
                 "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
                 "DATABASE_URL": "postgresql://runtime.invalid/db",
                 "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
             })
+
+    def test_local_postgres_runtime_is_explicit_and_writable(self):
+        settings = Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "local",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+            "DATABASE_URL": "postgresql://runtime.invalid/db",
+            "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
+        })
+        self.assertTrue(settings.postgres_runtime_enabled)
+        self.assertTrue(settings.vercel_postgres_runtime_enabled)
 
     def test_manual_run_operation_requires_non_read_only_operator_configuration(self):
         settings = Settings.from_environment(

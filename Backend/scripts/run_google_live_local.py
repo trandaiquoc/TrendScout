@@ -6,6 +6,7 @@ import socket
 import sys
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 
 from app.google_live_settings import GoogleLiveSettings
 from app.main import create_normal_google_live_app, run_normal_google_live
@@ -13,6 +14,7 @@ from app.orchestration.normal_google_live_composition import (
     normal_google_live_composition,
     owner_manual_runtime_supported,
 )
+from app.orchestration.postgres_live_composition import postgres_live_composition
 from app.settings import Settings
 
 
@@ -103,6 +105,13 @@ def main(argv=None):
         parser.error("choose either --youtube-owner-acceptance or --youtube-owner-manual-live")
     if arguments.youtube_owner_force_fresh_test and not arguments.youtube_owner_manual_live:
         parser.error("--youtube-owner-force-fresh-test requires --youtube-owner-manual-live")
+    postgres_runtime_enabled = os.environ.get(
+        "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if postgres_runtime_enabled and arguments.firestore_shared_live:
+        parser.error("PostgreSQL runtime cannot be combined with Firestore Shared LIVE")
+    if postgres_runtime_enabled and os.environ.get("VERCEL"):
+        parser.error("Local PostgreSQL runtime is restricted to the local demo runtime")
     firestore_client = None
     if arguments.firestore_shared_live:
         if os.environ.get("VERCEL"):
@@ -137,32 +146,58 @@ def main(argv=None):
         )
         if arguments.youtube_owner_force_fresh_test:
             print("One YouTube cache bypass is armed for the next selected Fetch.")
-    settings = Settings.from_environment({
+    settings_environment = {
         "TREND_SCOUT_ENVIRONMENT": "local",
         "TREND_SCOUT_RUN_MODE": "live",
         "TREND_SCOUT_READ_ONLY": "false",
         "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
         "TREND_SCOUT_OPERATOR_TOKEN": os.environ.get("TREND_SCOUT_OPERATOR_TOKEN", ""),
-    })
+    }
+    database_environment = None
+    postgres_schema = os.environ.get("TREND_SCOUT_POSTGRES_SCHEMA", "trendscout")
+    if postgres_runtime_enabled:
+        from app.storage.postgres_config import postgres_environment as read_postgres_environment
+
+        database_environment = read_postgres_environment(
+            os.environ, env_file=Path(__file__).resolve().parents[2] / ".env"
+        )
+        settings_environment.update(database_environment)
+        settings_environment["TREND_SCOUT_POSTGRES_RUNTIME_ENABLED"] = "true"
+    settings = Settings.from_environment(settings_environment)
+    composition_options = {
+        "user_agent": settings.wikimedia_user_agent,
+        "google_settings": google_settings,
+        "force_refresh_trends": True,
+        "allow_initial_google_acceptance": True,
+        "allow_initial_bing_acceptance": True,
+        "preserve_expired_data": (arguments.youtube_owner_acceptance
+                                   or arguments.youtube_owner_manual_live),
+        "youtube_max_queries": (1 if (arguments.youtube_owner_acceptance
+                                      or arguments.youtube_owner_manual_live) else 2),
+        "youtube_manual_live": arguments.youtube_owner_manual_live,
+        "youtube_force_fresh_test_once": arguments.youtube_owner_force_fresh_test,
+        "shared_firestore_client": firestore_client,
+    }
+    if settings.postgres_runtime_enabled:
+        composition_factory = partial(
+            postgres_live_composition,
+            runtime_scope="LOCAL",
+            postgres_environment=database_environment,
+            postgres_schema=postgres_schema,
+            **{key: value for key, value in composition_options.items()
+               if key != "shared_firestore_client"},
+        )
+    else:
+        composition_factory = partial(
+            normal_google_live_composition, **composition_options,
+        )
     application = create_normal_google_live_app(
         enabled=True,
         workers=1,
         settings=settings,
-        composition_factory=partial(
-            normal_google_live_composition,
-            user_agent=settings.wikimedia_user_agent,
-            google_settings=google_settings,
-            force_refresh_trends=True,
-            allow_initial_google_acceptance=True,
-            allow_initial_bing_acceptance=True,
-            preserve_expired_data=(arguments.youtube_owner_acceptance
-                                   or arguments.youtube_owner_manual_live),
-            youtube_max_queries=(1 if (arguments.youtube_owner_acceptance
-                                       or arguments.youtube_owner_manual_live) else 2),
-            youtube_manual_live=arguments.youtube_owner_manual_live,
-            youtube_force_fresh_test_once=arguments.youtube_owner_force_fresh_test,
-            shared_firestore_client=firestore_client,
-        ),
+        composition_factory=composition_factory,
+        postgres_environment=database_environment,
+        postgres_schema=postgres_schema,
     )
     run_normal_google_live(application, port=arguments.port)
 

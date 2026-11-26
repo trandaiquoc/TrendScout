@@ -946,6 +946,8 @@ def create_app(
     vercel_postgres_environment=None,
     vercel_postgres_schema=None,
     vercel_postgres_context_factory=None,
+    postgres_environment=None,
+    postgres_schema=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -1026,30 +1028,49 @@ def create_app(
     ):
         raise ValueError("Synthetic supplement requires an enabled offline fixture runtime")
     effective_lock_path = lock_path or settings.lock_path
-    if settings.vercel_postgres_runtime_enabled:
-        if vercel_postgres_schema is None:
-            vercel_postgres_schema = os.environ.get(
-                "TREND_SCOUT_POSTGRES_SCHEMA", "trendscout"
-            )
-        if vercel_postgres_environment is None:
+    resolved_postgres_environment = (
+        postgres_environment if postgres_environment is not None
+        else vercel_postgres_environment
+    )
+    if postgres_environment is not None and vercel_postgres_environment is not None:
+        if postgres_environment != vercel_postgres_environment:
+            raise ValueError("PostgreSQL runtime accepts one database configuration")
+    resolved_postgres_schema = (
+        postgres_schema if postgres_schema is not None else vercel_postgres_schema
+    )
+    if postgres_schema is not None and vercel_postgres_schema is not None:
+        if postgres_schema != vercel_postgres_schema:
+            raise ValueError("PostgreSQL runtime accepts one schema")
+    if settings.postgres_runtime_enabled:
+        if resolved_postgres_schema is None:
+            resolved_postgres_schema = os.environ.get("TREND_SCOUT_POSTGRES_SCHEMA", "trendscout")
+        if resolved_postgres_environment is None:
             from app.storage.postgres_config import (
                 postgres_environment as read_postgres_environment,
             )
-            vercel_postgres_environment = read_postgres_environment(os.environ)
-        if (not isinstance(vercel_postgres_environment, dict)
-                or not isinstance(vercel_postgres_schema, str)
-                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", vercel_postgres_schema)
-                or vercel_firestore_client_factory is not None
-                or vercel_live_context_factory is not None):
-            raise ValueError("Vercel PostgreSQL runtime requires one validated PostgreSQL configuration")
+            resolved_postgres_environment = read_postgres_environment(os.environ)
+        if (not isinstance(resolved_postgres_environment, dict)
+                or not isinstance(resolved_postgres_schema, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", resolved_postgres_schema)):
+            raise ValueError("PostgreSQL runtime requires one validated PostgreSQL configuration")
+        if settings.environment_profile == "vercel":
+            if (vercel_firestore_client_factory is not None
+                    or vercel_live_context_factory is not None):
+                raise ValueError("Vercel PostgreSQL runtime cannot use Firestore composition")
+        elif (settings.environment_profile != "local" or not local_live_opt_in
+              or os.environ.get("VERCEL") or vercel_firestore_client_factory is not None
+              or vercel_live_context_factory is not None
+              or vercel_postgres_context_factory is not None):
+            raise ValueError("Local PostgreSQL runtime requires the guarded local LIVE app")
         from app.storage.postgres_runtime import initialize_postgres_runtime_defaults
 
         initialize_postgres_runtime_defaults(
-            vercel_postgres_environment, schema=vercel_postgres_schema
+            resolved_postgres_environment, schema=resolved_postgres_schema
         )
-    elif (vercel_postgres_environment is not None
+    elif (resolved_postgres_environment is not None
+          or resolved_postgres_schema is not None
           or vercel_postgres_context_factory is not None):
-        raise ValueError("Vercel PostgreSQL options require the PostgreSQL runtime setting")
+        raise ValueError("PostgreSQL options require the PostgreSQL runtime setting")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -1058,7 +1079,7 @@ def create_app(
         app.state.operator_token = (
             operator_token if operator_token is not None else settings.operator_token
         )
-        if not settings.vercel_postgres_runtime_enabled:
+        if not settings.postgres_runtime_enabled:
             app.state.scheduler_store = scheduler_store
             app.state.postgres_analysis_storage = None
         runtime_guard = None
@@ -1071,27 +1092,49 @@ def create_app(
                     ai_service = None
                     postgres_environment = getattr(local_live_fetch, "postgres_environment", None)
                     collection_store = getattr(local_live_fetch, "collection_store", None)
-                    if postgres_environment is not None and collection_store is not None:
-                        try:
-                            from app.ai.openrouter import OpenRouterAdapter
-                            from app.ai.runtime import AIConfig, AIService
-                            from app.collections.postgres_store import PostgresCollectionStore
-                            from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+                    if settings.postgres_runtime_enabled:
+                        from app.ai.runtime import AIService
+                        from app.collections.postgres_store import PostgresCollectionStore
+                        from app.collections.service import CollectionService
+                        from app.scheduling.postgres import PostgresScheduleStore
+                        from app.storage.postgres_analysis import PostgresAnalysisStorage
+                        from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 
-                            if not isinstance(collection_store, PostgresCollectionStore):
-                                raise RuntimeError("AI requires the PostgreSQL Collection store")
-                            ai_provider = OpenRouterAdapter(os.environ.get("OPENROUTER_API_KEY"))
-                            postgres_schema = getattr(local_live_fetch, "postgres_schema", "trendscout")
-                            ai_service = AIService(
-                                PostgresAtomicStateStore(postgres_environment, schema=postgres_schema),
-                                config=AIConfig.from_environment(),
-                                provider=ai_provider,
+                        postgres_schema = getattr(local_live_fetch, "postgres_schema", None)
+                        runtime_analysis_storage = getattr(local_live_fetch, "analysis_storage", None)
+                        runtime_scheduler_store = getattr(local_live_fetch, "scheduler_store", None)
+                        ai_service = getattr(local_live_fetch, "ai_service", None)
+                        runtime_collection_service = getattr(
+                            local_live_fetch, "collection_service", None
+                        )
+                        if (
+                            getattr(local_live_fetch, "runtime_persistence_backend", None)
+                            != "POSTGRESQL"
+                            or getattr(local_live_fetch, "postgres_runtime_scope", None) != "LOCAL"
+                            or not isinstance(postgres_environment, dict)
+                            or postgres_environment != resolved_postgres_environment
+                            or postgres_schema != resolved_postgres_schema
+                            or not isinstance(collection_store, PostgresCollectionStore)
+                            or not isinstance(runtime_collection_service, CollectionService)
+                            or runtime_collection_service.store is not collection_store
+                            or not isinstance(ai_service, AIService)
+                            or not isinstance(ai_service.state_store, PostgresAtomicStateStore)
+                            or not isinstance(runtime_analysis_storage, PostgresAnalysisStorage)
+                            or not isinstance(runtime_scheduler_store, PostgresScheduleStore)
+                        ):
+                            raise RuntimeError(
+                                "POSTGRES_RUNTIME_UNAVAILABLE: Local composition is not fully PostgreSQL-backed"
                             )
-                        except Exception:
-                            _logger.exception("PostgreSQL AI service could not start")
-                            if ai_provider is not None:
-                                ai_provider.close()
-                            ai_provider = None
+                        app.state.collection_service = runtime_collection_service
+                        app.state.postgres_analysis_storage = runtime_analysis_storage
+                        app.state.scheduler_store = runtime_scheduler_store
+                        app.state.read_storage_factory = (
+                            lambda _oidc_token: app.state.postgres_analysis_storage
+                        )
+                    elif postgres_environment is not None:
+                        raise RuntimeError(
+                            "PostgreSQL composition requires TREND_SCOUT_POSTGRES_RUNTIME_ENABLED"
+                        )
                     retention_task = None
                     youtube_retention_cleanup = getattr(
                         local_live_fetch, "youtube_retention_cleanup", None
@@ -1101,44 +1144,30 @@ def create_app(
                             _run_youtube_retention_sweeper(youtube_retention_cleanup),
                             name="trendscout-youtube-retention",
                         )
-                    try:
-                        from app.collections.service import CollectionService
-                        collection_store = getattr(
-                            local_live_fetch, "collection_store", None
-                        )
-                        if collection_store is None:
-                            from app.collections.store import CollectionStore
-                            collection_store = CollectionStore.local()
-                        app.state.collection_service = CollectionService(
-                            collection_store,
-                            entity_context_resolver=WikimediaEntityContextResolver(
-                                collection_store,
-                                before_request=getattr(local_live_fetch,
-                                                       "entity_lookup_before_request", None),
-                            ),
-                            ai_engine=ai_service,
-                        )
-                    except Exception:
-                        _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")
-                        app.state.collection_service = None
-                    app.state.ai_service = ai_service
-                    if postgres_environment is not None:
-                        postgres_schema = getattr(
-                            local_live_fetch, "postgres_schema", "trendscout"
-                        )
-                        from app.scheduling.postgres import PostgresScheduleStore
-                        from app.storage.postgres_analysis import PostgresAnalysisStorage
-
-                        app.state.postgres_analysis_storage = PostgresAnalysisStorage(
-                            postgres_environment, schema=postgres_schema
-                        )
-                        if scheduler_store is None:
-                            app.state.scheduler_store = PostgresScheduleStore(
-                                postgres_environment, schema=postgres_schema
+                    if not settings.postgres_runtime_enabled:
+                        try:
+                            from app.collections.service import CollectionService
+                            collection_store = getattr(
+                                local_live_fetch, "collection_store", None
                             )
-                        app.state.read_storage_factory = (
-                            lambda _oidc_token: app.state.postgres_analysis_storage
-                        )
+                            if collection_store is None:
+                                from app.collections.store import CollectionStore
+                                collection_store = CollectionStore.local()
+                            app.state.collection_service = CollectionService(
+                                collection_store,
+                                entity_context_resolver=WikimediaEntityContextResolver(
+                                    collection_store,
+                                    before_request=getattr(local_live_fetch,
+                                                           "entity_lookup_before_request", None),
+                                ),
+                                ai_engine=ai_service,
+                            )
+                        except Exception:
+                            _logger.exception(
+                                "Local Collections storage could not start; Wikimedia Fetch remains available"
+                            )
+                            app.state.collection_service = None
+                    app.state.ai_service = ai_service
                     app.state.public_fetch_source_ids = tuple(sorted(
                         local_live_fetch.admission.policy.enabled_sources
                     ))
@@ -1258,17 +1287,17 @@ def create_app(
     application.state.vercel_firestore_client_factory = vercel_firestore_client_factory
     application.state.vercel_live_context_factory = vercel_live_context_factory
     application.state.vercel_postgres_context_factory = vercel_postgres_context_factory
-    if settings.vercel_postgres_runtime_enabled:
+    if settings.postgres_runtime_enabled:
         from app.scheduling.postgres import PostgresScheduleStore
         from app.storage.postgres_analysis import PostgresAnalysisStorage
 
         if scheduler_store is not None:
-            raise ValueError("Vercel PostgreSQL runtime cannot use a second scheduler store")
+            raise ValueError("PostgreSQL runtime cannot use a second scheduler store")
         application.state.postgres_analysis_storage = PostgresAnalysisStorage(
-            vercel_postgres_environment, schema=vercel_postgres_schema
+            resolved_postgres_environment, schema=resolved_postgres_schema
         )
         application.state.scheduler_store = PostgresScheduleStore(
-            vercel_postgres_environment, schema=vercel_postgres_schema
+            resolved_postgres_environment, schema=resolved_postgres_schema
         )
         application.state.read_storage_factory = (
             lambda _oidc_token: application.state.postgres_analysis_storage
@@ -1363,8 +1392,8 @@ def create_app(
             enabled=public_fetch_enabled and run_mode == "live" and not read_only,
             client_factory=vercel_firestore_client_factory,
             context_factory=vercel_live_context_factory,
-            postgres_environment=vercel_postgres_environment,
-            postgres_schema=vercel_postgres_schema,
+            postgres_environment=resolved_postgres_environment,
+            postgres_schema=resolved_postgres_schema or "trendscout",
             postgres_context_factory=vercel_postgres_context_factory,
         )
     frontend_source = Path(__file__).resolve().parents[2] / "Frontend" / "public"
@@ -1416,7 +1445,34 @@ def create_app(
 
     @application.exception_handler(StorageError)
     async def storage_error(_request: Request, _exc: StorageError):
+        if settings.postgres_runtime_enabled:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": {"code": "POSTGRES_RUNTIME_UNAVAILABLE"}},
+                headers={"Cache-Control": "no-store"},
+            )
         return JSONResponse(status_code=503, content={"detail": "Storage operation failed"})
+
+    if settings.postgres_runtime_enabled:
+        from app.collections.postgres_reads import CollectionReadError
+        from app.collections.postgres_store import CollectionWriteError
+        from app.scheduling.postgres import ScheduleStorageError
+        from app.storage.postgres_atomic_state import PostgresCoordinationError
+
+        async def postgres_storage_error(_request: Request, _exc: Exception):
+            return JSONResponse(
+                status_code=503,
+                content={"detail": {"code": "POSTGRES_RUNTIME_UNAVAILABLE"}},
+                headers={"Cache-Control": "no-store"},
+            )
+
+        for error_type in (
+            CollectionReadError,
+            CollectionWriteError,
+            ScheduleStorageError,
+            PostgresCoordinationError,
+        ):
+            application.add_exception_handler(error_type, postgres_storage_error)
 
     return LocalLiveGuard(application) if local_live_opt_in else application
 
@@ -1466,7 +1522,8 @@ def create_normal_wikimedia_live_app(*, enabled=False, workers=1,
 
 
 def create_normal_google_live_app(*, enabled=False, workers=1,
-                                 composition_factory=None, settings=None):
+                                 composition_factory=None, settings=None,
+                                 postgres_environment=None, postgres_schema=None):
     """Create the separately approved, local-only Wikimedia + Google LIVE app."""
     if (enabled is not True or type(workers) is not int or workers != 1
             or not callable(composition_factory)):
@@ -1479,7 +1536,9 @@ def create_normal_google_live_app(*, enabled=False, workers=1,
             "WIKIMEDIA_USER_AGENT": DEFAULT_WIKIMEDIA_USER_AGENT,
         })
     return create_app(settings=settings, local_live_opt_in=True,
-                      local_live_context_factory=composition_factory)
+                      local_live_context_factory=composition_factory,
+                      postgres_environment=postgres_environment,
+                      postgres_schema=postgres_schema)
 
 
 def run_normal_wikimedia_live(application, *, port=8001):

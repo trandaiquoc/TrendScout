@@ -18,9 +18,10 @@ from app.api.runs import read_storage
 from app.collections.postgres_store import PostgresCollectionStore
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
-from app.main import create_app
+from app.main import VercelSharedLiveMiddleware, create_app
 from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_live_policy
 from app.orchestration.normal_google_live_composition import normal_google_live_composition
+from app.orchestration.postgres_live_composition import postgres_live_composition
 from app.scheduling.postgres import PostgresScheduleStore
 from app.settings import Settings
 from app.sources.catalog import GOOGLE_SOURCE_ID, SOURCE_CAPABILITIES
@@ -86,6 +87,246 @@ def _seed_cutover_readiness(connection, environment, schema, *, now):
 
 
 class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_postgres_unavailable_fails_closed_without_firestore_fallback(self):
+        settings = Settings.from_environment({
+            "VERCEL": "1",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+            "DATABASE_URL": "postgresql://runtime.invalid/db",
+            "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
+        })
+        firestore_calls = []
+
+        @asynccontextmanager
+        async def unavailable_context(**_kwargs):
+            raise RuntimeError("connection unavailable")
+            yield None
+
+        async def firestore_factory(_token):
+            firestore_calls.append(True)
+            raise AssertionError("PostgreSQL runtime must not fall back to Firestore")
+
+        async def app(_scope, _receive, _send):
+            raise AssertionError("unavailable PostgreSQL request reached the app")
+
+        middleware = VercelSharedLiveMiddleware(
+            app,
+            settings=settings,
+            enabled=True,
+            client_factory=firestore_factory,
+            postgres_environment={
+                "DATABASE_URL": "postgresql://runtime.invalid/db",
+                "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
+            },
+            postgres_context_factory=unavailable_context,
+        )
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        await middleware({
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/collections",
+            "headers": [],
+            "state": {},
+        }, receive, send)
+        starts = [item for item in messages if item["type"] == "http.response.start"]
+        bodies = [item.get("body", b"") for item in messages if item["type"] == "http.response.body"]
+        self.assertEqual(starts[0]["status"], 503)
+        self.assertIn(b"POSTGRES_RUNTIME_UNAVAILABLE", b"".join(bodies))
+        self.assertEqual(firestore_calls, [])
+
+    async def test_shared_local_and_vercel_composition_reads_and_writes_one_schema(self):
+        url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+        if not url:
+            self.skipTest("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+        environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+        schema = "ts_test_" + uuid.uuid4().hex
+        namespace = sql.Identifier(schema)
+        schema_created = False
+        local_settings = Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "local",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_READ_ONLY": "false",
+            "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+            "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+            "DATABASE_URL": url,
+            "DATABASE_URL_UNPOOLED": url,
+            "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
+        })
+
+        @asynccontextmanager
+        async def local_context():
+            async with postgres_live_composition(
+                runtime_scope="LOCAL",
+                user_agent=local_settings.wikimedia_user_agent,
+                google_settings=GoogleLiveSettings(),
+                credential_provider=_NeverReadCredentials(),
+                postgres_environment=environment,
+                postgres_schema=schema,
+            ) as facade:
+                yield facade
+
+        safe_provider_environment = {
+            "SERPAPI_API_KEY": "",
+            "YOUTUBE_API_KEY": "",
+            "OPENROUTER_API_KEY": "",
+            "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
+            "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
+            "TREND_SCOUT_GOOGLE_SERP_APPROVED": "false",
+            "TREND_SCOUT_BING_SERP_APPROVED": "false",
+            "TREND_SCOUT_SERPAPI_BING_POLICY_MIGRATION_APPROVED": "false",
+            "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "false",
+            "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "false",
+            "TREND_SCOUT_SCHEDULER_ENABLED": "false",
+            "TREND_SCOUT_POSTGRES_SCHEMA": schema,
+        }
+
+        with postgres_connection(environment, direct=True) as connection:
+            connection.autocommit = True
+            self.assertFalse(connection.execute(
+                "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+            ).fetchone()[0])
+            try:
+                schema_created = True
+                apply_migrations(connection, schema=schema)
+                with patch.dict(os.environ, safe_provider_environment, clear=False):
+                    local_app = create_app(
+                        settings=local_settings,
+                        local_live_opt_in=True,
+                        local_live_context_factory=local_context,
+                        postgres_environment=environment,
+                        postgres_schema=schema,
+                    )
+                    with patch(
+                        "app.collections.store.CollectionStore.local",
+                        side_effect=AssertionError("PostgreSQL runtime must not open SQLite"),
+                    ), patch(
+                        "app.orchestration.normal_google_live_composition."
+                        "LocalSQLiteAtomicStateStore.for_local_live",
+                        side_effect=AssertionError("PostgreSQL runtime must not open SQLite"),
+                    ):
+                        with TestClient(
+                            local_app.app, base_url="http://127.0.0.1:8000"
+                        ) as local_client:
+                            self.assertEqual(
+                                local_app.app.state.distributed_public_fetch.runtime_persistence_backend,
+                                "POSTGRESQL",
+                            )
+                            self.assertIsInstance(
+                                local_app.app.state.collection_service.store,
+                                PostgresCollectionStore,
+                            )
+                            self.assertIsInstance(
+                                local_app.app.state.ai_service.state_store,
+                                PostgresAtomicStateStore,
+                            )
+                            self.assertIsInstance(
+                                local_app.app.state.postgres_analysis_storage,
+                                PostgresAnalysisStorage,
+                            )
+                            self.assertIsInstance(
+                                local_app.app.state.scheduler_store,
+                                PostgresScheduleStore,
+                            )
+                            for table in ("keywords", "dataset_snapshots", "fetch_jobs"):
+                                self.assertEqual(connection.execute(
+                                    sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                                        namespace, sql.Identifier(table),
+                                    )
+                                ).fetchone()[0], 0)
+                            latest = local_client.get("/api/v1/datasets/latest")
+                            self.assertEqual(latest.status_code, 200, latest.text)
+                            self.assertIsNone(latest.json()["item"])
+                            keywords = local_client.get("/api/v1/datasets/latest/keywords")
+                            self.assertEqual(keywords.status_code, 200, keywords.text)
+                            self.assertEqual(keywords.json()["items"], [])
+                            for path in (
+                                "/api/v1/algorithms/results",
+                                "/api/v1/analytics/overview",
+                                "/api/v1/ai/capabilities",
+                                "/api/v1/research/bootstrap",
+                                "/api/v1/runs/history?limit=20",
+                                "/api/v1/scheduler",
+                            ):
+                                read_response = local_client.get(path)
+                                self.assertEqual(
+                                    read_response.status_code, 200,
+                                    f"{path}: {read_response.text}",
+                                )
+                            self.assertEqual(
+                                local_client.get("/api/v1/collections").json()["items"],
+                                [],
+                            )
+                            blocked_fetch = local_client.post(
+                                "/api/v1/fetches",
+                                json={"sources": [GOOGLE_SOURCE_ID]},
+                                headers={
+                                    "Origin": "http://127.0.0.1:8000",
+                                    "Idempotency-Key": "db04-unknown-quota-blocked-001",
+                                },
+                            )
+                            self.assertEqual(blocked_fetch.status_code, 503)
+                            self.assertEqual(
+                                blocked_fetch.json()["detail"]["code"], "QUOTA_UNKNOWN"
+                            )
+                            first = local_client.post(
+                                "/api/v1/collections",
+                                json={"name": "Local PostgreSQL write"},
+                                headers={"Origin": "http://127.0.0.1:8000"},
+                            )
+                            self.assertEqual(first.status_code, 201, first.text)
+                            local_store = local_app.app.state.collection_service.store
+
+                vercel_settings = Settings.from_environment({
+                    "VERCEL": "1",
+                    "TREND_SCOUT_RUN_MODE": "live",
+                    "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+                    "DATABASE_URL": url,
+                    "DATABASE_URL_UNPOOLED": url,
+                    "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
+                })
+                with patch.dict(os.environ, {"VERCEL": "1", **safe_provider_environment}, clear=False):
+                    vercel_app = create_app(
+                        settings=vercel_settings,
+                        vercel_postgres_environment=environment,
+                        vercel_postgres_schema=schema,
+                    )
+                    base_url = "https://trend-scout-mu.vercel.app"
+                    with TestClient(vercel_app, base_url=base_url) as vercel_client:
+                        names = [item["name"] for item in vercel_client.get(
+                            "/api/v1/collections"
+                        ).json()["items"]]
+                        self.assertIn("Local PostgreSQL write", names)
+                        second = vercel_client.post(
+                            "/api/v1/collections",
+                            json={"name": "Vercel PostgreSQL write"},
+                            headers={"Origin": base_url},
+                        )
+                        self.assertEqual(second.status_code, 201, second.text)
+                self.assertIn(
+                    "Vercel PostgreSQL write",
+                    [item["name"] for item in local_store.list_collections()],
+                )
+                with patch.dict(os.environ, safe_provider_environment, clear=False):
+                    with TestClient(
+                        local_app.app, base_url="http://127.0.0.1:8000"
+                    ) as local_client:
+                        local_names = [item["name"] for item in local_client.get(
+                            "/api/v1/collections"
+                        ).json()["items"]]
+                self.assertIn("Vercel PostgreSQL write", local_names)
+            finally:
+                if schema_created:
+                    connection.execute(
+                        sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(namespace)
+                    )
+
     async def test_unknown_serpapi_cycle_is_reconciled_by_account_api_without_search(self):
         url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
         if not url:
@@ -486,7 +727,8 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
 
                 @asynccontextmanager
                 async def runtime_context():
-                    async with normal_google_live_composition(
+                    async with postgres_live_composition(
+                        runtime_scope="LOCAL",
                         user_agent="TrendScoutTest/1.0 (https://example.invalid)",
                         google_settings=GoogleLiveSettings(),
                         credential_provider=_NeverReadCredentials(),
@@ -496,38 +738,80 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                     ) as facade:
                         yield facade
 
-                settings = Settings.from_environment({
+                local_settings_environment = {
                     "TREND_SCOUT_ENVIRONMENT": "local",
                     "TREND_SCOUT_RUN_MODE": "live",
                     "TREND_SCOUT_READ_ONLY": "false",
                     "TREND_SCOUT_PUBLIC_FETCH_ENABLED": "false",
+                    "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+                    "DATABASE_URL": url,
+                    "DATABASE_URL_UNPOOLED": url,
                     "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
-                })
-                guarded_app = create_app(
-                    settings=settings,
-                    local_live_opt_in=True,
-                    local_live_context_factory=runtime_context,
-                )
-                app = guarded_app.app
-                local_store = None
-                with TestClient(app, base_url="http://127.0.0.1:8000") as local_client:
-                    self.assertIsInstance(
-                        app.state.collection_service.store, PostgresCollectionStore
+                }
+                local_settings = Settings.from_environment(local_settings_environment)
+                local_provider_environment = {
+                    "SERPAPI_API_KEY": "",
+                    "YOUTUBE_API_KEY": "",
+                    "OPENROUTER_API_KEY": "",
+                    "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
+                    "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
+                    "TREND_SCOUT_GOOGLE_SERP_APPROVED": "false",
+                    "TREND_SCOUT_BING_SERP_APPROVED": "false",
+                    "TREND_SCOUT_SERPAPI_BING_POLICY_MIGRATION_APPROVED": "false",
+                    "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "false",
+                    "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "false",
+                    "TREND_SCOUT_SCHEDULER_ENABLED": "false",
+                    "TREND_SCOUT_POSTGRES_SCHEMA": schema,
+                }
+                with patch.dict(os.environ, local_provider_environment, clear=False):
+                    guarded_app = create_app(
+                        settings=local_settings,
+                        local_live_opt_in=True,
+                        local_live_context_factory=runtime_context,
+                        postgres_environment=environment,
+                        postgres_schema=schema,
                     )
-                    local_store = app.state.collection_service.store
-                    self.assertIsInstance(
-                        app.state.postgres_analysis_storage, PostgresAnalysisStorage
-                    )
-                    self.assertIsInstance(app.state.scheduler_store, PostgresScheduleStore)
-                    local_created = local_client.post(
-                        "/api/v1/collections",
-                        json={"name": "Created by Local PostgreSQL runtime"},
-                        headers={"Origin": "http://127.0.0.1:8000"},
-                    )
-                    self.assertEqual(local_created.status_code, 201, local_created.text)
-                    request = SimpleNamespace(app=app, headers={})
-                    self.assertIs(read_storage(request), app.state.postgres_analysis_storage)
-                    self.assertIs(_history_storage(request), app.state.postgres_analysis_storage)
+                    app = guarded_app.app
+                    local_store = None
+                    with patch(
+                        "app.collections.store.CollectionStore.local",
+                        side_effect=AssertionError("PostgreSQL runtime must not open SQLite"),
+                    ), patch(
+                        "app.orchestration.normal_google_live_composition."
+                        "LocalSQLiteAtomicStateStore.for_local_live",
+                        side_effect=AssertionError("PostgreSQL runtime must not open SQLite"),
+                    ):
+                        with TestClient(
+                            app, base_url="http://127.0.0.1:8000"
+                        ) as local_client:
+                            self.assertIsInstance(
+                                app.state.collection_service.store, PostgresCollectionStore
+                            )
+                            local_store = app.state.collection_service.store
+                            self.assertEqual(
+                                app.state.distributed_public_fetch.runtime_persistence_backend,
+                                "POSTGRESQL",
+                            )
+                            self.assertEqual(
+                                app.state.distributed_public_fetch.postgres_runtime_scope,
+                                "LOCAL",
+                            )
+                            self.assertIsInstance(
+                                app.state.postgres_analysis_storage, PostgresAnalysisStorage
+                            )
+                            self.assertIsInstance(app.state.scheduler_store, PostgresScheduleStore)
+                            self.assertIsInstance(
+                                app.state.ai_service.state_store, PostgresAtomicStateStore
+                            )
+                            local_created = local_client.post(
+                                "/api/v1/collections",
+                                json={"name": "Created by Local PostgreSQL runtime"},
+                                headers={"Origin": "http://127.0.0.1:8000"},
+                            )
+                            self.assertEqual(local_created.status_code, 201, local_created.text)
+                            request = SimpleNamespace(app=app, headers={})
+                            self.assertIs(read_storage(request), app.state.postgres_analysis_storage)
+                            self.assertIs(_history_storage(request), app.state.postgres_analysis_storage)
 
                 google = GoogleLiveSettings()
                 policy = normal_google_live_policy(
