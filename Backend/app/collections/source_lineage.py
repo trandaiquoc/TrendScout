@@ -19,7 +19,9 @@ from app.retention.source_policy import (
 )
 from app.sources.catalog import (
     BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
     WIKIMEDIA_CONTEXT_SOURCE_ID,
+    WIKIMEDIA_SOURCE_ID,
     source_capability,
 )
 
@@ -49,6 +51,17 @@ _GEOGRAPHY_FIELDS = {
     "regionCode": "provider_region_filter",
     "market": "provider_market_localization",
 }
+_GOOGLE_KEYWORD_FIELDS = frozenset({
+    "data_source", "discovery_mode", "provider_id", "transport_id",
+    "canonical_keyword_identity", "region", "language", "time_window_hours",
+    "provider_data_at", "provider_created_at", "fetched_at", "source_url",
+    "delivery_state", "trend_clusters", "serp_verification", "quality_flags",
+})
+_WIKIMEDIA_KEYWORD_FIELDS = frozenset({
+    "article_original", "article_display", "provider_rank", "views_ceil",
+    "country_scope", "access", "observation_date", "fetched_at", "source_url",
+    "quality_flags",
+})
 
 
 def _json_value(value):
@@ -73,6 +86,39 @@ def _json_value(value):
 def _canonical_json(value):
     return json.dumps(_json_value(value), ensure_ascii=False, sort_keys=True,
                       allow_nan=False, separators=(",", ":"))
+
+
+def _keyword_field_lineage(source_id, keyword_id, content, *, evidence_kind):
+    """Describe exact provider-derived keyword fields without copying their values."""
+    if not isinstance(keyword_id, str) or not keyword_id or not isinstance(content, dict):
+        return []
+    if source_id == GOOGLE_SOURCE_ID and evidence_kind == "provider_record":
+        fields = _GOOGLE_KEYWORD_FIELDS
+        values = content
+    elif source_id == WIKIMEDIA_SOURCE_ID and evidence_kind == "provider_record":
+        fields = _WIKIMEDIA_KEYWORD_FIELDS
+        values = content
+    elif source_id == BING_SOURCE_ID and evidence_kind == "search_verification":
+        fields = frozenset({"bing_verification"})
+        values = {"bing_verification": content}
+    else:
+        return []
+    result = []
+    for field in sorted(fields):
+        if field not in values:
+            continue
+        try:
+            value_digest = hashlib.sha256(
+                _canonical_json(values[field]).encode("utf-8")
+            ).hexdigest()
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            return []
+        result.append({
+            "keyword_id": keyword_id,
+            "path": [field],
+            "value_sha256": value_digest,
+        })
+    return result
 
 
 def _aware_timestamp(value):
@@ -183,7 +229,7 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
     untracked_records = 0
 
     def add(source_id, content, *, data_mode, snapshot_status, evidence_kind,
-            keyword_id=None):
+            keyword_id=None, keyword_field_lineage=()):
         nonlocal untracked_records
         if not isinstance(content, dict):
             untracked_records += 1
@@ -218,6 +264,10 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
             collected_at.isoformat(),
         ))
         evidence_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        field_lineage = [
+            item for item in keyword_field_lineage
+            if isinstance(item, dict)
+        ]
         row = evidence_by_id.get(evidence_id)
         if row is None:
             row = {
@@ -231,6 +281,7 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 "observed_at": observed_at,
                 "collected_at": collected_at,
                 "payload": None,
+                "keyword_field_lineage": [],
                 "expires_at": expires_at,
                 "retention_policy": policy.metadata(),
                 "keyword_ids": set(),
@@ -238,6 +289,17 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
             evidence_by_id[evidence_id] = row
         if isinstance(keyword_id, str) and keyword_id:
             row["keyword_ids"].add(keyword_id)
+        if field_lineage:
+            existing_lineage = {
+                _canonical_json(item): item
+                for item in row["keyword_field_lineage"]
+            }
+            existing_lineage.update({
+                _canonical_json(item): item for item in field_lineage
+            })
+            row["keyword_field_lineage"] = [
+                existing_lineage[key] for key in sorted(existing_lineage)
+            ]
 
     source_list = list(sources) if isinstance(sources, (list, tuple)) else []
     context_records = _context_source_records(entity_context_rows)
@@ -273,10 +335,15 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 verification = record.get("bing_verification")
                 add(BING_SOURCE_ID, verification, data_mode=data_mode,
                     snapshot_status=snapshot_status, evidence_kind="search_verification",
-                    keyword_id=record.get("candidate_keyword_id"))
+                    keyword_id=record.get("candidate_keyword_id"),
+                    keyword_field_lineage=_keyword_field_lineage(
+                        BING_SOURCE_ID, record.get("candidate_keyword_id"),
+                        verification, evidence_kind="search_verification",
+                    ))
                 continue
 
             keyword_id = record.get("keyword_id") if source_id == WIKIMEDIA_CONTEXT_SOURCE_ID else None
+            cleaned = None
             if source_id != WIKIMEDIA_CONTEXT_SOURCE_ID:
                 try:
                     cleaned = keyword_record(record, source_id, data_mode or "",
@@ -287,7 +354,10 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                     pass
             add(source_id, record, data_mode=data_mode,
                 snapshot_status=snapshot_status, evidence_kind="provider_record",
-                keyword_id=keyword_id)
+                keyword_id=keyword_id,
+                keyword_field_lineage=_keyword_field_lineage(
+                    source_id, keyword_id, record, evidence_kind="provider_record",
+                ))
 
             # Google keyword evidence can contain several attached Bing checks.
             # Index those separately so provider-specific expiry can be applied.
@@ -300,7 +370,13 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 for verification in verifications:
                     add(BING_SOURCE_ID, verification, data_mode=data_mode,
                         snapshot_status=snapshot_status,
-                        evidence_kind="search_verification", keyword_id=keyword_id)
+                        evidence_kind="search_verification", keyword_id=keyword_id,
+                        keyword_field_lineage=(
+                            _keyword_field_lineage(
+                                BING_SOURCE_ID, keyword_id, verification,
+                                evidence_kind="search_verification",
+                            ) if verification is current else ()
+                        ))
 
     for update in bing_updates if isinstance(bing_updates, (list, tuple)) else ():
         if not isinstance(update, dict):
@@ -308,11 +384,23 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
             continue
         add(BING_SOURCE_ID, update.get("verification"), data_mode="LIVE",
             snapshot_status="SUCCESS", evidence_kind="search_verification",
-            keyword_id=update.get("candidate_id"))
+            keyword_id=update.get("candidate_id"),
+            keyword_field_lineage=_keyword_field_lineage(
+                BING_SOURCE_ID, update.get("candidate_id"), update.get("verification"),
+                evidence_kind="search_verification",
+            ))
 
     rows = []
     for row in evidence_by_id.values():
         row["keyword_ids"] = tuple(sorted(row["keyword_ids"]))
+        if row["keyword_field_lineage"]:
+            row["payload"] = {
+                "retention_lineage": {
+                    "version": 1,
+                    "keyword_fields": row["keyword_field_lineage"],
+                },
+            }
+        del row["keyword_field_lineage"]
         rows.append(row)
     rows.sort(key=lambda row: (row["source_id"], row["id"]))
     return {"rows": rows, "untracked_record_count": untracked_records}

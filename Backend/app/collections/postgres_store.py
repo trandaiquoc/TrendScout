@@ -856,7 +856,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 query_scope,geography,observed_at,collected_at,payload,expires_at)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(id) DO UPDATE SET
-                    expires_at=LEAST(stored_evidence.expires_at,EXCLUDED.expires_at)""").format(
+                    expires_at=LEAST(stored_evidence.expires_at,EXCLUDED.expires_at),
+                    payload=COALESCE(stored_evidence.payload,EXCLUDED.payload)""").format(
                         self._table("source_evidence"))
             for offset in range(0, len(rows), 500):
                 batch = rows[offset:offset + 500]
@@ -864,7 +865,9 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     row["id"], row["source_id"], row.get("external_id"), row["content_digest"],
                     Jsonb(row["query_scope"]),
                     Jsonb(row["geography"]) if row.get("geography") is not None else None,
-                    row.get("observed_at"), row["collected_at"], None, row["expires_at"],
+                    row.get("observed_at"), row["collected_at"],
+                    Jsonb(row["payload"]) if row.get("payload") is not None else None,
+                    row["expires_at"],
                 ) for row in batch])
 
             if dataset_id is not None:

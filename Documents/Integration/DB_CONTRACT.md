@@ -49,6 +49,13 @@ storage, and runtime composition. The other goals own their domain behavior:
   `sources.configuration.retention_policy`. Unknown source IDs must fail
   lineage closed; a `partial` policy review is not evidence that provider terms
   have been fully mapped.
+- New Google, Wikimedia Pageviews, and current Bing verification lineage may
+  store a versioned list of `keywords.evidence` top-level field paths and hashes
+  in `source_evidence.payload.retention_lineage`. The list contains no field
+  values; a consumer must compare the current field digest before redacting it.
+  This is forward lineage only: it does not certify historical rows or permit
+  deleting source evidence while classification, algorithm, entity-context, or
+  saved-research copies remain untracked.
 
 ## Existing schema ownership map
 
