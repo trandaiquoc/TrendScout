@@ -6,8 +6,8 @@ import hashlib
 import json
 import os
 import sqlite3
-import uuid
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1651,7 +1651,9 @@ class CollectionStore:
         with self.connect() as db:
             return db.execute(query, parameters).fetchone()[0]
 
-    def complete_fetch_dataset_snapshot(self, fetch_id):
+    def complete_fetch_dataset_snapshot(self, fetch_id, *,
+                                        algorithm_processing_status="COMPLETED",
+                                        ai_classification_status="COMPLETED"):
         scope = " AND k.data_mode=?" if self.data_mode_scope else ""
         keyword_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
         membership_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
@@ -1714,7 +1716,8 @@ class CollectionStore:
         return snapshot["eligible_keyword_count"] if snapshot else 0
 
     def mark_fetch_model_unavailable(self, fetch_id, *, available, skipped, eligible,
-                                     cached_embeddings, inferred_embeddings, error_code):
+                                     cached_embeddings, inferred_embeddings, error_code,
+                                     algorithm_processing_status="UNKNOWN"):
         with self.connect() as db:
             db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
                        (fetch_id,))
@@ -1728,7 +1731,11 @@ class CollectionStore:
                                  provider_record_count, received_record_count,
                                  retained_keyword_count, rejected_record_count,
                                  observation_start, observation_end, fetched_at, quality_flags,
-                                 processing_status, created_at):
+                                 processing_status, created_at,
+                                 source_ingestion_status="UNKNOWN",
+                                 materialization_status="COMPLETED",
+                                 algorithm_processing_status="PENDING",
+                                 ai_classification_status="PENDING"):
         with self.connect() as db:
             mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
             eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "

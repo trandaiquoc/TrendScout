@@ -1,5 +1,6 @@
 """Policy and provenance checks against the one-host local SQLite store."""
 
+import hashlib
 import multiprocessing
 import tempfile
 import unittest
@@ -65,6 +66,46 @@ class SharedCacheTests(unittest.TestCase):
         self.assertEqual(cached["status"], "CACHED")
         self.assertEqual(cached["origin"], "LIVE")
         self.assertEqual(cached["payload"]["data_mode"], "LIVE")
+
+    def test_compact_manifest_checks_blob_metadata_without_loading_source_records(self):
+        class PayloadBlobs:
+            def __init__(self):
+                self.payload = None
+                self.inspect_calls = 0
+                self.get_calls = 0
+
+            def put(self, records, *, now, retain_until):
+                self.payload = records
+                return {"digest": hashlib.sha256(b"cache-blob").hexdigest(),
+                        "raw_bytes": 10, "item_count": len(records)}
+
+            def inspect(self, reference, *, now):
+                self.inspect_calls += 1
+                return {"raw_bytes": reference["raw_bytes"],
+                        "item_count": reference["item_count"], "retain_until": NOW + timedelta(days=1)}
+
+            def get(self, reference, *, now):
+                self.get_calls += 1
+                return self.payload
+
+        blobs = PayloadBlobs()
+        cache = SharedCache(self.cache.store, payload_blobs=blobs, max_inline_bytes=32)
+        payload = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+            "record_count": 1, "records": [{"keyword": "linen shirt", "padding": "x" * 200}],
+            "quality_flags": [], "coverage": {"query": "trending now"},
+        }
+        cache.put(SCOPE, grant=GRANT, origin="LIVE", payload=payload,
+                  fetched_at=NOW, now=NOW)
+
+        result = cache.get(SCOPE, grant=GRANT, now=NOW + timedelta(seconds=1),
+                           include_payload=False)
+
+        self.assertEqual(result["status"], "CACHED")
+        self.assertEqual(result["source_input_manifest"]["record_count"], 1)
+        self.assertEqual(blobs.inspect_calls, 1)
+        self.assertEqual(blobs.get_calls, 0)
+        self.assertNotIn("payload", result)
 
     def test_new_policy_cannot_extend_old_retention(self):
         self.put()

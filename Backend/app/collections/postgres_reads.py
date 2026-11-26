@@ -181,7 +181,9 @@ class PostgresCollectionReader:
         params = (self.data_mode_scope,) if self.data_mode_scope else ()
 
         def read(db):
-            row = db.execute(sql.SQL("""SELECT dataset_id,processing_status,source_manifest
+            row = db.execute(sql.SQL("""SELECT dataset_id,processing_status,
+                source_ingestion_status,materialization_status,algorithm_processing_status,
+                ai_classification_status,source_manifest
                 FROM {} {} ORDER BY created_at DESC LIMIT 1""").format(
                     self._table("dataset_snapshots"), mode_filter), params).fetchone()
             if row is None:

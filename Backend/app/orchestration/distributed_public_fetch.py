@@ -62,6 +62,45 @@ def _terminal_missing_source_result(job_state, source_id, terminal_reason=None):
     }
 
 
+def _compact_terminal_discovery(discovery: dict) -> dict:
+    """Keep poll-time discovery useful without duplicating large source metrics."""
+    candidates = discovery.get("candidates")
+    if not isinstance(candidates, list):
+        return discovery
+    compact_candidates = []
+    for candidate in candidates[:100]:
+        if not isinstance(candidate, dict):
+            continue
+        compact_candidate = {key: value for key, value in candidate.items()
+                             if key != "evidence"}
+        evidence = candidate.get("evidence")
+        evidence = evidence if isinstance(evidence, list) else []
+        compact_evidence = []
+        for item in evidence[:5]:
+            if not isinstance(item, dict):
+                continue
+            compact_item = dict(item)
+            metrics = compact_item.get("source_metrics")
+            if isinstance(metrics, dict):
+                clusters = metrics.get("trend_clusters")
+                compact_metrics = {
+                    key: value for key, value in metrics.items()
+                    if key not in {"trend_clusters", "serp_verification"}
+                }
+                if isinstance(clusters, list):
+                    compact_metrics["trend_cluster_count"] = len(clusters)
+                compact_item["source_metrics"] = compact_metrics
+            compact_evidence.append(compact_item)
+        compact_candidate["evidence"] = compact_evidence
+        compact_candidate["evidence_count"] = len(evidence)
+        compact_candidate["evidence_omitted_count"] = max(0, len(evidence) - len(compact_evidence))
+        compact_candidates.append(compact_candidate)
+    result = {key: value for key, value in discovery.items() if key != "candidates"}
+    result["candidates"] = compact_candidates
+    result["receipt_compacted"] = True
+    return result
+
+
 def _public_youtube_record(record):
     """Project a validated video into the fields the Fetch UI displays."""
     if not isinstance(record, dict):
@@ -397,6 +436,12 @@ class DistributedPublicFetch:
             "terminal": True,
             "recovery_available": job.get("recovery_available") is True,
             "collection_input_unchanged": True,
+            **({"dataset_id": reuse_check["dataset_id"]}
+               if isinstance(reuse_check.get("dataset_id"), str) else {}),
+            **({key: reuse_check[key] for key in (
+                "source_ingestion_status", "materialization_status",
+                "algorithm_processing_status", "ai_classification_status",
+            ) if key in reuse_check}),
         }
 
     def status(self, job_id: str, *, include_records: bool = False,
@@ -410,7 +455,16 @@ class DistributedPublicFetch:
         source_results = []
         modes = set()
         terminal = job["state"] in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
-        summary = self._latest_reuse_summary() if terminal else None
+        summary = None
+        if terminal and not include_records and (self.firestore_shared_live or self.postgres_live):
+            receipt = job.get("terminal_status_receipt")
+            if (isinstance(receipt, dict)
+                    and receipt.get("fetch_id") == job_id
+                    and receipt.get("terminal") is True
+                    and isinstance(receipt.get("sources"), list)):
+                return receipt
+        if terminal:
+            summary = self._latest_reuse_summary()
         if terminal and not include_records:
             reuse_check = self.collection_reuse_for_fetch(
                 job_id, job=job, _summary=summary, _summary_loaded=True,
@@ -538,10 +592,12 @@ class DistributedPublicFetch:
         collection_input_unchanged = bool(
             terminal and (self.firestore_shared_live or self.postgres_live)
             and isinstance(summary, dict)
+            and summary.get("dataset_id") != job_id
             and reusable_collection_input(
                 source_results,
                 summary.get("source_manifest"),
                 processing_status=summary.get("processing_status"),
+                materialization_status=summary.get("materialization_status"),
             )
         )
         discovery = None
@@ -669,14 +725,41 @@ class DistributedPublicFetch:
                    if "transport_diagnostic" in result else {}),
             })
         summary = self._latest_reuse_summary()
-        collection_input_unchanged = bool(
-            (self.firestore_shared_live or self.postgres_live)
-            and isinstance(summary, dict)
-            and reusable_collection_input(
-                source_results, summary.get("source_manifest"),
-                processing_status=summary.get("processing_status"),
+        if worker_result.get("dataset_reused") is True:
+            compact_manifest = [{
+                "source_id": source_id,
+                "status": source.get("status"),
+                "data_mode": source.get("data_mode"),
+                "delivery_state": source.get("delivery_state"),
+                "record_count": source.get("record_count"),
+                "provider_request_count": source.get("provider_request_count"),
+                "coverage": source.get("coverage"),
+                "quality_flags": source.get("quality_flags", []),
+                "source_input_digest": source.get("source_input_digest"),
+                "source_input_digest_version": source.get("source_input_digest_version"),
+            } for source_id, source in sorted(outcomes.items())]
+            collection_input_unchanged = bool(
+                (self.firestore_shared_live or self.postgres_live)
+                and isinstance(summary, dict)
+                and summary.get("dataset_id") != worker_result.get("job_id")
+                and worker_result.get("dataset_id") == summary.get("dataset_id")
+                and reusable_collection_manifest(
+                    compact_manifest, summary.get("source_manifest"),
+                    processing_status=summary.get("processing_status"),
+                    materialization_status=summary.get("materialization_status"),
+                )
             )
-        )
+        else:
+            collection_input_unchanged = bool(
+                (self.firestore_shared_live or self.postgres_live)
+                and isinstance(summary, dict)
+                and summary.get("dataset_id") != worker_result.get("job_id")
+                and reusable_collection_input(
+                    source_results, summary.get("source_manifest"),
+                    processing_status=summary.get("processing_status"),
+                    materialization_status=summary.get("materialization_status"),
+                )
+            )
         discovery = None
         if not collection_input_unchanged:
             now = self.utcnow()
@@ -732,7 +815,36 @@ class DistributedPublicFetch:
             "recovery_available": False,
         }
         result["collection_input_unchanged"] = collection_input_unchanged
+        if worker_result.get("dataset_reused") is True:
+            result["dataset_reused"] = True
+            result["dataset_id"] = worker_result.get("dataset_id")
+        elif (collection_input_unchanged and isinstance(summary, dict)
+              and isinstance(summary.get("dataset_id"), str)):
+            # The worker may have loaded a full cache result before Collections
+            # confirms that its input matches the latest materialized dataset.
+            # In that case this Fetch still points at the prior dataset; expose
+            # its ID so terminal readers do not look for a snapshot keyed by the
+            # Fetch job ID that was intentionally never materialized.
+            result["dataset_reused"] = True
+            result["dataset_id"] = summary["dataset_id"]
         return result
+
+    def persist_terminal_status_receipt(self, worker_result: dict) -> dict | None:
+        """Save the public projection while this worker still has source results in memory."""
+        if not ((self.firestore_shared_live or self.postgres_live)
+                and self.data_mode == "LIVE"):
+            return None
+        store_receipt = getattr(self.admission, "store_terminal_status_receipt", None)
+        if not callable(store_receipt):
+            return None
+        receipt = self.terminal_status_from_worker_result(worker_result)
+        if not isinstance(receipt, dict):
+            return None
+        discovery = receipt.get("discovery")
+        if isinstance(discovery, dict):
+            receipt["discovery"] = _compact_terminal_discovery(discovery)
+        store_receipt(receipt["fetch_id"], receipt)
+        return receipt
 
     def collection_reuse_for_fetch(self, job_id: str, *, job=None,
                                    _summary=None, _summary_loaded=False) -> dict | None:
@@ -778,8 +890,22 @@ class DistributedPublicFetch:
             record_count = source.get("record_count")
             if type(record_count) is not int or record_count < 0:
                 return None
+            compact_reuse = (
+                snapshot.get("dataset_reused") is True
+                and source.get("dataset_reused") is True
+                and snapshot.get("dataset_id") == summary.get("dataset_id")
+                and metadata.get("cache_only") is True
+                and source.get("records") == []
+                and isinstance(snapshot.get("source_input_digest"), str)
+                and snapshot.get("source_input_digest") == source.get("source_input_digest")
+                and type(snapshot.get("source_input_digest_version")) is int
+                and snapshot.get("source_input_digest_version")
+                == source.get("source_input_digest_version")
+            )
             storage = entry.get("snapshot_storage", "INLINE")
-            if storage == "EXTERNAL_RECORDS":
+            if compact_reuse:
+                pass
+            elif storage == "EXTERNAL_RECORDS":
                 reference = entry.get("snapshot_ref")
                 if (not isinstance(reference, dict)
                         or reference.get("path") != ["result", "records"]
@@ -834,7 +960,8 @@ class DistributedPublicFetch:
         unchanged = reusable_collection_manifest(
             manifest, summary.get("source_manifest"),
             processing_status=summary.get("processing_status"),
-        )
+            materialization_status=summary.get("materialization_status"),
+        ) and summary.get("dataset_id") != job_id
         return {
             "fetch_id": job_id,
             "status": job["state"],
@@ -843,6 +970,12 @@ class DistributedPublicFetch:
             "source_manifest": manifest,
             **({"dataset_id": summary.get("dataset_id")}
                if unchanged and isinstance(summary.get("dataset_id"), str) else {}),
+            **({
+                "source_ingestion_status": summary.get("source_ingestion_status"),
+                "materialization_status": summary.get("materialization_status"),
+                "algorithm_processing_status": summary.get("algorithm_processing_status"),
+                "ai_classification_status": summary.get("ai_classification_status"),
+            } if unchanged else {}),
         }
 
     def history(self, *, limit: int = 20) -> list[dict]:
@@ -934,6 +1067,7 @@ class DistributedPublicFetch:
                     manifest,
                     summary.get("source_manifest"),
                     processing_status=summary.get("processing_status"),
+                    materialization_status=summary.get("materialization_status"),
                 )
             )
             for source in manifest:
@@ -974,7 +1108,22 @@ class DistributedPublicFetch:
 
     async def run_once(self, owner: str):
         self.ensure_postgres_live_state_ready()
-        return await self.worker.run_once(owner)
+        previous_manifest = None
+        summary = None
+        if self.firestore_shared_live or self.postgres_live:
+            summary = await asyncio.to_thread(self._latest_reuse_summary)
+            if isinstance(summary, dict):
+                candidate = summary.get("source_manifest")
+                if isinstance(candidate, list):
+                    previous_manifest = candidate
+        return await self.worker.run_once(
+            owner,
+            reuse_unchanged_dataset=(self.firestore_shared_live or self.postgres_live),
+            previous_source_manifest=previous_manifest,
+            previous_dataset_summary=(
+                summary if isinstance(summary, dict) and self.postgres_live else None
+            ),
+        )
 
     async def run_slice(self, owner: str, fetch_id: str, *, max_sources: int = 1):
         """Continue one requested shared Fetch through a bounded source slice."""
@@ -990,4 +1139,7 @@ class DistributedPublicFetch:
             owner, job_id=fetch_id, max_sources=max_sources,
             continue_cached=(self.firestore_shared_live or self.postgres_live),
             previous_source_manifest=previous_manifest,
+            previous_dataset_summary=(
+                summary if isinstance(summary, dict) and self.postgres_live else None
+            ),
         )

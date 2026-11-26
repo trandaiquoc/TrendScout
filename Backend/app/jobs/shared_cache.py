@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
+from app.collections.source_digest import compact_source_input_manifest
 from app.ports.atomic_state import AtomicStateStore
 from app.sources.catalog import source_capability
 
@@ -179,6 +180,14 @@ class SharedCache:
                   "fresh_until": min(fresh_until, retain_until).isoformat(),
                   "stale_until": min(stale_until, retain_until).isoformat(),
                   "retain_until": retain_until.isoformat(), "last_checked_at": now.isoformat()}
+        try:
+            record["source_input_manifest"] = compact_source_input_manifest(
+                scope.source_id, payload,
+            )
+        except (KeyError, TypeError, ValueError, UnicodeError, OverflowError):
+            # Cache entries that are not complete normalized source results
+            # remain usable through the existing full-payload path.
+            pass
         if external:
             record.update(payload_storage="EXTERNAL_RECORDS", payload_ref=payload_ref)
         else:
@@ -213,9 +222,10 @@ class SharedCache:
             return record, None
         self.store.transact(scope.key, op)
 
-    def get(self, scope: CacheScope, *, grant: CacheGrant | None, now: datetime) -> dict:
+    def get(self, scope: CacheScope, *, grant: CacheGrant | None, now: datetime,
+            include_payload: bool = True) -> dict:
         now = _utc(now)
-        if not isinstance(scope, CacheScope):
+        if not isinstance(scope, CacheScope) or type(include_payload) is not bool:
             raise ValueError("cache scope required")
         def op(record):
             if not record:
@@ -240,6 +250,9 @@ class SharedCache:
                       or "payload" in record or not self._valid_payload_reference(
                           record.get("payload_ref"))):
                     raise ValueError("invalid external cached payload")
+                input_manifest = record.get("source_input_manifest")
+                if input_manifest is not None and not self._valid_source_input_manifest(input_manifest):
+                    raise ValueError("invalid cached source input manifest")
             except (KeyError, TypeError, ValueError):
                 return record, {"status": "REJECTED", "reason": "INVALID_CACHE_RECORD"}
             if not fetched <= fresh <= stale <= retention or fetched > now or now < checked:
@@ -270,8 +283,12 @@ class SharedCache:
             result = {"status": "CACHED" if now < restricted_fresh else "STALE",
                       "origin": record["origin"], "fetched_at": record["fetched_at"],
                       "retain_until": restricted_retention.isoformat()}
+            if (not include_payload
+                    and isinstance(record.get("source_input_manifest"), dict)):
+                result["source_input_manifest"] = record["source_input_manifest"]
             if record["schema"] == 1:
-                result["payload"] = record["payload"]
+                if include_payload:
+                    result["payload"] = record["payload"]
             else:
                 result["_payload_ref"] = record["payload_ref"]
             return record, result
@@ -305,14 +322,35 @@ class SharedCache:
         payload_ref = result.pop("_payload_ref", None)
         if payload_ref is not None:
             try:
-                records = self.payload_blobs.get(payload_ref, now=now)
-                if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
-                    raise ValueError("cache payload blob shape is invalid")
-                _safe_payload(records[0])
+                if not include_payload and callable(getattr(self.payload_blobs, "inspect", None)):
+                    self.payload_blobs.inspect(payload_ref, now=now)
+                else:
+                    records = self.payload_blobs.get(payload_ref, now=now)
+                    if (not isinstance(records, list) or len(records) != 1
+                            or not isinstance(records[0], dict)):
+                        raise ValueError("cache payload blob shape is invalid")
+                    _safe_payload(records[0])
             except (KeyError, TypeError, ValueError, UnicodeError):
                 return {"status": "UNAVAILABLE", "reason": "CACHE_BLOB_UNAVAILABLE"}
-            result["payload"] = records[0]
+            if include_payload:
+                result["payload"] = records[0]
         return result
+
+    @staticmethod
+    def _valid_source_input_manifest(value) -> bool:
+        return bool(
+            isinstance(value, dict)
+            and value.get("status") in {"SUCCESS", "PARTIAL"}
+            and value.get("data_mode") in {"LIVE", "SYNTHETIC"}
+            and type(value.get("record_count")) is int
+            and 0 <= value["record_count"] <= 5000
+            and isinstance(value.get("coverage"), dict)
+            and isinstance(value.get("quality_flags"), list)
+            and type(value.get("source_input_digest_version")) is int
+            and value["source_input_digest_version"] > 0
+            and isinstance(value.get("source_input_digest"), str)
+            and _HASH.fullmatch(value["source_input_digest"]) is not None
+        )
 
     @staticmethod
     def _valid_payload_reference(reference) -> bool:

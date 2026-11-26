@@ -2146,6 +2146,116 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PostgresFetchCollectionsReuseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_worker_results_feed_collections_without_payload_reread(self):
+        from app.api.fetches import _run_fetch_and_collections
+
+        fetch_id = "a" * 32
+        source_record = {"keyword": "cached trend", "volume": 42}
+        worker_result = {
+            "job_id": fetch_id,
+            "state": "COMPLETED",
+            "sources": {
+                GOOGLE_SOURCE_ID: {
+                    "status": "SUCCESS",
+                    "data_mode": "LIVE",
+                    "delivery_state": "CACHED",
+                    "record_count": 1,
+                    "records": [source_record],
+                    "coverage": {},
+                },
+            },
+        }
+        processed = []
+
+        class CollectionServiceProbe:
+            async def process_fetch(self, current_fetch_id, sources, *,
+                                    cached_context_only=False):
+                processed.append((current_fetch_id, sources, cached_context_only))
+                return {"status": "COMPLETED"}
+
+        class Distributed:
+            postgres_live = True
+            firestore_shared_live = False
+            collection_service = CollectionServiceProbe()
+
+            async def run_once(self, _owner):
+                return worker_result
+
+            def collection_reuse_for_fetch(self, current_fetch_id):
+                self.asserted_reuse_id = current_fetch_id
+                return {"terminal": True, "collection_input_unchanged": False}
+
+            def status(self, *_args, **_kwargs):
+                raise AssertionError("completed worker results should avoid reloading payloads")
+
+        request = SimpleNamespace(
+            state=SimpleNamespace(collection_service=None),
+            app=SimpleNamespace(state=SimpleNamespace(collection_service=None)),
+        )
+        distributed = Distributed()
+
+        result = await _run_fetch_and_collections(
+            request, distributed, fetch_id, "worker-owner", cached_context_only=True,
+        )
+
+        self.assertIs(result, worker_result)
+        self.assertEqual(distributed.asserted_reuse_id, fetch_id)
+        self.assertEqual(processed, [(
+            fetch_id,
+            [{**worker_result["sources"][GOOGLE_SOURCE_ID],
+              "source_id": GOOGLE_SOURCE_ID}],
+            True,
+        )])
+
+    async def test_recovery_without_worker_result_reads_durable_terminal_payload(self):
+        from app.api.fetches import _run_fetch_and_collections
+
+        fetch_id = "c" * 32
+        source = {
+            "source_id": GOOGLE_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "record_count": 1,
+            "records": [{"keyword": "recovered trend", "volume": 21}],
+            "coverage": {},
+        }
+        processed = []
+
+        class CollectionServiceProbe:
+            async def process_fetch(self, current_fetch_id, sources, *,
+                                    cached_context_only=False):
+                processed.append((current_fetch_id, sources, cached_context_only))
+                return {"status": "COMPLETED"}
+
+        class Distributed:
+            postgres_live = True
+            firestore_shared_live = False
+            collection_service = CollectionServiceProbe()
+
+            def collection_reuse_for_fetch(self, _fetch_id):
+                return {"terminal": True, "collection_input_unchanged": False}
+
+            def status(self, current_fetch_id, *, include_records, include_discovery):
+                self.asserted_status_call = (
+                    current_fetch_id, include_records, include_discovery
+                )
+                return {"terminal": True, "fetch_mode": "CACHE_ONLY", "sources": [source]}
+
+        request = SimpleNamespace(
+            state=SimpleNamespace(collection_service=None),
+            app=SimpleNamespace(state=SimpleNamespace(collection_service=None)),
+        )
+        distributed = Distributed()
+
+        result = await _run_fetch_and_collections(
+            request, distributed, fetch_id, "recovery-owner", run_worker=False,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(distributed.asserted_status_call, (fetch_id, True, False))
+        self.assertEqual(processed, [(fetch_id, [source], True)])
+
     async def test_unchanged_postgres_input_skips_collection_processing_without_snapshot_flags(self):
         from app.api.fetches import _process_fetch_collections
 

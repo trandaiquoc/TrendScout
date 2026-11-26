@@ -235,12 +235,36 @@ class SourceCheckpointJournal:
                 raise ValueError("invalid completed result metadata")
             snapshot = self._resolve_snapshot(entry, source_id=source_id,
                                               data_mode=grant.data_mode, now=now)
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            compact_reuse = (
+                isinstance(snapshot, dict)
+                and snapshot.get("dataset_reused") is True
+                and isinstance(result, dict)
+                and result.get("dataset_reused") is True
+                and result.get("status") in {"SUCCESS", "PARTIAL"}
+                and result.get("data_mode") == grant.data_mode
+                and result.get("records") == []
+                and type(result.get("record_count")) is int
+                and result["record_count"] >= 0
+                and isinstance(snapshot.get("dataset_id"), str)
+                and bool(snapshot.get("dataset_id"))
+                and isinstance(snapshot.get("source_input_digest"), str)
+                and len(snapshot["source_input_digest"]) == 64
+                and all(character in "0123456789abcdef"
+                        for character in snapshot["source_input_digest"])
+                and type(snapshot.get("source_input_digest_version")) is int
+                and snapshot["source_input_digest_version"] > 0
+                and result.get("source_input_digest") == snapshot.get("source_input_digest")
+                and result.get("source_input_digest_version")
+                == snapshot.get("source_input_digest_version")
+            )
             if (snapshot.get("phase") != "COMPLETE"
-                    or not isinstance(snapshot.get("result"), dict)
-                    or snapshot["result"].get("data_mode") != grant.data_mode
-                    or not isinstance(snapshot["result"].get("records"), list)
-                    or type(snapshot["result"].get("record_count")) is not int
-                    or snapshot["result"]["record_count"] != len(snapshot["result"]["records"])):
+                    or not isinstance(result, dict)
+                    or result.get("data_mode") != grant.data_mode
+                    or not isinstance(result.get("records"), list)
+                    or type(result.get("record_count")) is not int
+                    or (not compact_reuse
+                        and result["record_count"] != len(result["records"]))):
                 raise ValueError("invalid completed result scope")
             created_at = _utc(datetime.fromisoformat(entry["created_at"]))
             expiry = min(_utc(datetime.fromisoformat(entry["retain_until"])),
@@ -250,7 +274,7 @@ class SourceCheckpointJournal:
             raise AdmissionDenied("CHECKPOINT_INVALID") from None
         if now >= expiry:
             return None
-        return deepcopy(snapshot["result"])
+        return deepcopy(result)
 
     def save(self, job_id, owner, fence, *, source_id, grant, now,
              expected_revision, snapshot):

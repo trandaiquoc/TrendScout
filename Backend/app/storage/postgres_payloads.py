@@ -213,3 +213,21 @@ class PostgresSourcePayloads:
         if not isinstance(records, list) or len(records) != row[2]:
             raise ValueError("source payload record count is invalid")
         return records
+
+    def inspect(self, reference, *, now):
+        """Validate a retained content-addressed blob without transferring its bytes."""
+        now = _utc(now)
+        if not _valid_reference(reference):
+            raise ValueError("invalid source payload reference")
+        try:
+            with postgres_connection(self._environment) as connection:
+                row = connection.execute(sql.SQL("""SELECT raw_bytes,item_count,retain_until
+                    FROM {} WHERE digest=%s""").format(self._table),
+                    (reference["digest"],)).fetchone()
+        except psycopg.Error:
+            raise RuntimeError("source payload storage unavailable") from None
+        if (row is None or row[2] <= now or row[0] != reference["raw_bytes"]
+                or row[1] != reference["item_count"]):
+            raise ValueError("source payload unavailable, expired or mismatched")
+        return {"raw_bytes": row[0], "item_count": row[1],
+                "retain_until": row[2]}

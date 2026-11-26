@@ -105,6 +105,10 @@ class CollectionService:
             eligible=eligible, error_code=error_code,
             cached_embeddings=0,
             inferred_embeddings=0,
+            algorithm_processing_status=(
+                algorithms.get("analysis_status", "UNKNOWN")
+                if isinstance(algorithms, dict) else "UNKNOWN"
+            ),
         )
         return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
                 "processed": 0, "assigned": 0, "unassigned": unassigned,
@@ -460,7 +464,11 @@ class CollectionService:
             eligible=eligible, processed=outcome["processed"], assigned=assigned,
             unassigned=outcome["unassigned"], created_collections=0,
             suggestions=outcome["suggestions"], skipped=skipped + policy_excluded)
-        self.store.complete_fetch_dataset_snapshot(fetch_id)
+        self.store.complete_fetch_dataset_snapshot(
+            fetch_id,
+            algorithm_processing_status=analysis.get("analysis_status", "UNKNOWN"),
+            ai_classification_status="COMPLETED",
+        )
         return outcome
 
     def _update_job(self, fetch_id, **values):
@@ -563,6 +571,16 @@ class CollectionService:
             "fetched_at": max(fetched) if fetched else None,
             "quality_flags": sorted(set(flags)),
             "processing_status": "PROCESSING",
+            "source_ingestion_status": (
+                "COMPLETED" if sources and all(
+                    source.get("status") == "SUCCESS" for source in sources
+                ) else "PARTIAL" if any(
+                    source.get("status") in {"SUCCESS", "PARTIAL"} for source in sources
+                ) else "FAILED"
+            ),
+            "materialization_status": "COMPLETED",
+            "algorithm_processing_status": "PENDING",
+            "ai_classification_status": "PENDING",
             "created_at": now(),
         }
         if source_evidence_rows is not None:

@@ -216,6 +216,14 @@ class D5SourceHandlers:
 
             setattr(cache_only, "__trendscout_data_mode__",
                     getattr(live_handler, "__trendscout_data_mode__", None))
+            manifest_reader = getattr(self.google_trends_handler, "cached_input_manifest", None)
+            if source_id == GOOGLE_SOURCE_ID and callable(manifest_reader):
+                def read_cache_manifest(context, reader=manifest_reader):
+                    metadata = dict(context.request_metadata)
+                    metadata["cache_only"] = True
+                    return reader(replace(context, request_metadata=metadata))
+
+                setattr(cache_only, "__trendscout_cache_manifest_reader__", read_cache_manifest)
             handlers[source_id] = cache_only
         return handlers
 

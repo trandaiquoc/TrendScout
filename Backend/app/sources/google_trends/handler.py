@@ -244,6 +244,45 @@ class GoogleTrendsDiscoveryHandler:
         except Exception:
             return None
 
+    def cached_input_manifest(self, context):
+        """Read only validated cache metadata for an unchanged-dataset fast path."""
+        if (self.cache is None or context.source_id != GOOGLE_SOURCE_ID
+                or not isinstance(context.request_metadata, dict)
+                or context.request_metadata.get("cache_only") is not True):
+            return None
+        try:
+            cache_scope, cache_grant = self._cache_scope(context)
+            cached = self.cache.get(
+                cache_scope, grant=cache_grant, now=self.utcnow(), include_payload=False,
+            )
+            if not isinstance(cached, dict):
+                return None
+            manifest = cached.get("source_input_manifest")
+            if (cached.get("status") not in {"CACHED", "STALE"}
+                    or not isinstance(manifest, dict)
+                    or manifest.get("data_mode") != self.data_mode
+                    or manifest.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or not isinstance(manifest.get("coverage"), dict)):
+                return None
+            coverage = dict(manifest["coverage"])
+            coverage.update(provider_request_count=0, attempted_calls=0,
+                            serp_verification_attempted=0)
+            delivery_state = "CACHED" if cached["status"] == "CACHED" else "STALE_CACHE"
+            return {
+                "status": manifest["status"],
+                "data_mode": manifest["data_mode"],
+                "delivery_state": delivery_state,
+                "record_count": manifest["record_count"],
+                "records": [],
+                "coverage": coverage,
+                "quality_flags": manifest["quality_flags"],
+                "provider_request_count": 0,
+                "source_input_digest": manifest["source_input_digest"],
+                "source_input_digest_version": manifest["source_input_digest_version"],
+            }
+        except Exception:
+            return None
+
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:
             raise ValueError("Google Trends handler received a different source")

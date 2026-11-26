@@ -41,6 +41,7 @@ _NO_STATE_SNAPSHOT = object()
 _KEY = re.compile(r"^[A-Za-z0-9._~-]{16,128}$")
 _OWNER = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _JOB_ID = re.compile(r"^[a-f0-9]{32}$")
+_MAX_TERMINAL_STATUS_RECEIPT_BYTES = 1_000_000
 OWNER_FRESH_ACCEPTANCE_MARKER = "D6_FOUR_SOURCE_FRESH_V1"
 MANUAL_SOURCE_REFRESH_MARKER = "VERCEL_OPERATOR_AUTHENTICATED_MANUAL_REFRESH_V1"
 _CLOCK_REGRESSION_TOLERANCE = timedelta(seconds=5)
@@ -1953,6 +1954,59 @@ class PublicAdmission:
             _updated, job = operation(deepcopy(state))
             return job
         return self.store.transact(self.state_key, operation)
+
+    def store_terminal_status_receipt(self, job_id: str, receipt: dict) -> bool:
+        """Persist a bounded public projection so terminal polls need no payload blobs."""
+        allowed_fields = {
+            "fetch_id", "status", "stage", "request_kind", "selected_sources",
+            "data_mode", "sources", "progress", "discovery", "created_at",
+            "updated_at", "finished_at", "terminal", "recovery_available",
+            "collection_input_unchanged", "dataset_reused", "dataset_id",
+        }
+        if (not isinstance(job_id, str) or not _JOB_ID.fullmatch(job_id)
+                or not isinstance(receipt, dict)
+                or receipt.get("fetch_id") != job_id
+                or receipt.get("terminal") is not True
+                or not set(receipt) <= allowed_fields
+                or not isinstance(receipt.get("sources"), list)
+                or len(receipt["sources"]) > len(SOURCE_POOLS)):
+            raise ValueError("bounded terminal status receipt required")
+        for source in receipt["sources"]:
+            if not isinstance(source, dict):
+                raise ValueError("invalid terminal status source receipt")
+            if "records" in source and source.get("source_id") != YOUTUBE_SOURCE_ID:
+                raise ValueError("terminal status receipt cannot include source record blobs")
+            records = source.get("records")
+            if records is not None and (
+                not isinstance(records, list) or len(records) > 512
+                or any(not isinstance(record, dict) for record in records)
+            ):
+                raise ValueError("invalid terminal status source projection")
+        try:
+            encoded = json.dumps(receipt, ensure_ascii=False, allow_nan=False,
+                                 separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            raise ValueError("terminal status receipt must be finite UTF-8 JSON") from None
+        if len(encoded) > _MAX_TERMINAL_STATUS_RECEIPT_BYTES:
+            raise ValueError("terminal status receipt exceeds its storage budget")
+
+        def operation(state):
+            job = state.get("jobs", {}).get(job_id)
+            if not isinstance(job, dict) or job.get("job_id") != job_id:
+                raise AdmissionDenied("JOB_NOT_FOUND")
+            if job.get("state") not in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}:
+                raise AdmissionDenied("JOB_NOT_TERMINAL")
+            existing = job.get("terminal_status_receipt")
+            if existing is not None:
+                if (not isinstance(existing, dict)
+                        or existing.get("fetch_id") != job_id
+                        or existing.get("terminal") is not True):
+                    raise AdmissionDenied("JOB_STATE_INVALID")
+                return False
+            job["terminal_status_receipt"] = deepcopy(receipt)
+            return True
+
+        return self._transaction(operation)
 
     def list_jobs(self, *, limit: int, now: datetime) -> list[dict]:
         """Return a bounded newest-first job snapshot without charging status polls."""

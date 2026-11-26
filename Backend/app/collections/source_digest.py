@@ -185,6 +185,31 @@ def source_input_digest(source_id: str, source: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def compact_source_input_manifest(source_id: str, source: dict) -> dict:
+    """Build the bounded evidence needed to compare source input without its records."""
+    if (not isinstance(source, dict)
+            or source.get("status") not in {"SUCCESS", "PARTIAL"}
+            or source.get("data_mode") not in {"LIVE", "SYNTHETIC"}
+            or type(source.get("record_count")) is not int
+            or source["record_count"] < 0
+            or not isinstance(source.get("records"), list)
+            or source["record_count"] != len(source["records"])):
+        raise ValueError("complete source result required")
+    coverage = source.get("coverage")
+    quality_flags = source.get("quality_flags", [])
+    if not isinstance(coverage, dict) or not isinstance(quality_flags, list):
+        raise ValueError("source coverage metadata required")
+    return {
+        "status": source["status"],
+        "data_mode": source["data_mode"],
+        "record_count": source["record_count"],
+        "quality_flags": _stable_quality_flags(quality_flags),
+        "coverage": _stable_coverage(coverage),
+        "source_input_digest": source_input_digest(source_id, source),
+        "source_input_digest_version": COLLECTION_INPUT_DIGEST_VERSION,
+    }
+
+
 def legacy_source_input_digest(source_id: str, source: dict, previous_manifest_item: dict):
     """Rebuild a v1 digest with the saved delivery metadata and current records.
 
@@ -262,9 +287,10 @@ def legacy_source_input_digest_candidates(source_id: str, source: dict,
     return [exact] if normalized == exact else [exact, normalized]
 
 
-def reusable_collection_input(current_sources, previous_manifest, *, processing_status):
+def reusable_collection_input(current_sources, previous_manifest, *, processing_status,
+                              materialization_status=None):
     """Return whether a cache-only result exactly matches a saved dataset input."""
-    if (processing_status != "COMPLETED"
+    if (not _dataset_materialized(processing_status, materialization_status)
             or not isinstance(current_sources, list) or not current_sources
             or not isinstance(previous_manifest, list)):
         return False
@@ -308,12 +334,22 @@ def reusable_collection_input(current_sources, previous_manifest, *, processing_
         })
     return reusable_collection_manifest(
         current, previous_manifest, processing_status=processing_status,
+        materialization_status=materialization_status,
     )
 
 
-def reusable_collection_manifest(current_manifest, previous_manifest, *, processing_status):
+def _dataset_materialized(processing_status, materialization_status):
+    if materialization_status is not None:
+        return materialization_status == "COMPLETED"
+    # Compatibility for older callers and SQLite test stores without the additive
+    # PostgreSQL materialization field.
+    return processing_status == "COMPLETED"
+
+
+def reusable_collection_manifest(current_manifest, previous_manifest, *, processing_status,
+                                 materialization_status=None):
     """Match compact Fetch history manifests against a saved dataset manifest."""
-    if (processing_status != "COMPLETED"
+    if (not _dataset_materialized(processing_status, materialization_status)
             or not isinstance(current_manifest, list) or not current_manifest
             or not isinstance(previous_manifest, list)):
         return False

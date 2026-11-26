@@ -193,6 +193,85 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider_calls, [])
         self.assertCountEqual(cache_calls, [(source, True) for source in SOURCES])
 
+    async def test_unchanged_cache_manifest_finishes_from_compact_fenced_receipt(self):
+        from app.collections.source_digest import source_input_digest
+
+        source_id = GOOGLE_SOURCE_ID
+        records = [{"keyword": f"cached keyword {index}"} for index in range(1500)]
+        cached_source = {
+            "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "FRESH",
+            "provider_request_count": 1, "record_count": len(records), "records": records,
+            "quality_flags": [], "coverage": {"query": "trending now",
+                                                 "provider_request_count": 1},
+        }
+        digest = source_input_digest(source_id, cached_source)
+        previous_manifest = [{
+            "source_id": source_id, "status": "SUCCESS", "data_mode": "LIVE",
+            "delivery_state": "CACHED", "record_count": len(records),
+            "provider_request_count": 0, "quality_flags": [],
+            "coverage": {"query": "trending now", "provider_request_count": 0},
+            "source_input_digest": digest, "source_input_digest_version": 2,
+        }]
+        summary = {
+            "dataset_id": "d" * 32,
+            "processing_status": "MODEL_UNAVAILABLE",
+            "materialization_status": "COMPLETED",
+            "source_manifest": previous_manifest,
+        }
+        job_id = self.admission.admit(
+            "unchanged-compact-cache-request", now=self.clock(),
+            request_metadata={"sources": [source_id], "cache_only": True},
+        )["job_id"]
+        provider_calls = []
+
+        def live_handler(_context):
+            provider_calls.append("live")
+            raise AssertionError("unchanged cache path reached a live handler")
+
+        def cache_handler(_context):
+            provider_calls.append("payload")
+            raise AssertionError("unchanged cache path loaded source records")
+
+        def read_manifest(_context):
+            return {
+                "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "CACHED",
+                "record_count": len(records), "records": [],
+                "coverage": {"query": "trending now", "provider_request_count": 0,
+                             "attempted_calls": 0, "serp_verification_attempted": 0},
+                "quality_flags": [], "provider_request_count": 0,
+                "source_input_digest": digest, "source_input_digest_version": 2,
+            }
+
+        live_handler.__trendscout_data_mode__ = "LIVE"
+        cache_handler.__trendscout_data_mode__ = "LIVE"
+        cache_handler.__trendscout_cache_manifest_reader__ = read_manifest
+        worker = DistributedFetchWorker(
+            self.admission,
+            handlers={source: live_handler for source in SOURCES},
+            cache_only_handlers={source: cache_handler for source in SOURCES},
+            resolve_grant=lambda selected, now: CheckpointGrant(
+                selected, "LIVE", "fixture-policy-v1", now + timedelta(minutes=10), 300, True,
+            ),
+            utcnow=self.clock,
+        )
+
+        outcome = await worker.run_once(
+            "unchanged-cache-worker", job_id=job_id, reuse_unchanged_dataset=True,
+            previous_source_manifest=previous_manifest,
+            previous_dataset_summary=summary,
+        )
+
+        self.assertEqual(outcome["state"], "COMPLETED")
+        self.assertTrue(outcome["dataset_reused"])
+        self.assertEqual(outcome["dataset_id"], summary["dataset_id"])
+        self.assertEqual(provider_calls, [])
+        job = self.admission.read_job_unmetered(job_id)
+        entry = job["source_checkpoints"][source_id]
+        self.assertEqual(entry["snapshot_storage"], "INLINE")
+        self.assertTrue(entry["snapshot"]["dataset_reused"])
+        self.assertEqual(entry["snapshot"]["result"]["record_count"], 1500)
+        self.assertEqual(entry["snapshot"]["result"]["records"], [])
+
     async def test_cache_only_handler_renews_lease_around_slow_cached_work(self):
         source = GOOGLE_SOURCE_ID
         job_id = self.admission.admit(
@@ -297,6 +376,147 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
             "collection_input_unchanged",
         ):
             self.assertEqual(actual[key], expected[key], key)
+
+    async def test_terminal_worker_projection_exposes_reused_dataset_id(self):
+        from app.collections.source_digest import compact_source_input_manifest
+
+        def handler(_context):
+            return self.source_result(0)
+
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = self.worker({source: handler for source in SOURCES})
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        source = {
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "record_count": 1,
+            "records": [{"keyword": "unchanged trend", "volume": 42}],
+            "coverage": {"provider_request_count": 0},
+            "quality_flags": [],
+            "provider_request_count": 0,
+        }
+        saved_manifest = compact_source_input_manifest(GOOGLE_SOURCE_ID, source)
+        saved_manifest.update({
+            "source_id": GOOGLE_SOURCE_ID,
+            "delivery_state": "CACHED",
+            "provider_request_count": 0,
+        })
+
+        class CollectionStoreProbe:
+            def latest_dataset_reuse_summary(self):
+                return {
+                    "dataset_id": "b" * 32,
+                    "processing_status": "MODEL_UNAVAILABLE",
+                    "materialization_status": "COMPLETED",
+                    "source_manifest": [saved_manifest],
+                }
+
+        service.postgres_live = True
+        service.collection_store = CollectionStoreProbe()
+        service.data_mode = "LIVE"
+        terminal = service.terminal_status_from_worker_result({
+            "job_id": "a" * 32,
+            "state": "COMPLETED",
+            "sources": {GOOGLE_SOURCE_ID: source},
+        })
+
+        self.assertTrue(terminal["collection_input_unchanged"])
+        self.assertTrue(terminal["dataset_reused"])
+        self.assertEqual(terminal["dataset_id"], "b" * 32)
+
+    async def test_terminal_status_receipt_avoids_checkpoint_blob_reads(self):
+        job_id = self.admit()
+
+        def handler(_context):
+            return self.source_result(1)
+
+        handler.__trendscout_data_mode__ = "SYNTHETIC"
+        worker = self.worker({source: handler for source in SOURCES})
+        await worker.run_once("terminal-receipt-worker")
+        service = DistributedPublicFetch(
+            self.admission, worker, resolve_grant=self.grant, utcnow=self.clock,
+        )
+        service.postgres_live = True
+        receipt = {
+            "fetch_id": job_id,
+            "status": "COMPLETED",
+            "stage": "COMPLETED",
+            "request_kind": "LATEST",
+            "selected_sources": [GOOGLE_SOURCE_ID],
+            "data_mode": "LIVE",
+            "sources": [{
+                "source_id": GOOGLE_SOURCE_ID,
+                "status": "SUCCESS",
+                "record_count": 1,
+                "delivery_state": "CACHED",
+                "coverage": {"provider_request_count": 0},
+                "provider_request_count": 0,
+            }],
+            "progress": {"completed_sources": 1, "total_sources": 1, "percent": 100},
+            "discovery": {"status": "SUCCESS", "candidate_count": 0,
+                           "shown_count": 0, "candidates": []},
+            "created_at": "2026-11-26T00:00:00+00:00",
+            "updated_at": "2026-11-26T00:00:01+00:00",
+            "finished_at": "2026-11-26T00:00:01+00:00",
+            "terminal": True,
+            "recovery_available": False,
+            "collection_input_unchanged": False,
+        }
+        self.assertTrue(self.admission.store_terminal_status_receipt(job_id, receipt))
+        self.assertFalse(self.admission.store_terminal_status_receipt(job_id, receipt))
+        with self.assertRaises(ValueError):
+            self.admission.store_terminal_status_receipt(
+                job_id, {**receipt, "sources": [
+                    {**receipt["sources"][0], "records": [{"private": "source blob"}]}
+                ]},
+            )
+
+        with patch.object(
+            service.journal, "completed_result",
+            side_effect=AssertionError("status poll loaded a source payload"),
+        ):
+            result = service.status(job_id)
+
+        self.assertEqual(result, receipt)
+
+    def test_terminal_discovery_receipt_bounds_evidence_without_losing_counts(self):
+        from app.orchestration.distributed_public_fetch import _compact_terminal_discovery
+
+        discovery = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "data_mode": "LIVE",
+            "candidate_count": 1,
+            "shown_count": 1,
+            "candidates": [{
+                "keyword_id": "a" * 64,
+                "keyword": "portable solar generator",
+                "categories": ["home_living"],
+                "assessments": [],
+                "evidence": [{
+                    "source_id": GOOGLE_SOURCE_ID,
+                    "observed_at": "2026-11-26T00:00:00+00:00",
+                    "source_metrics": {
+                        "region": "US",
+                        "trend_clusters": [{"cluster": index} for index in range(500)],
+                        "serp_verification": {"results": ["large"] * 500},
+                    },
+                } for _ in range(8)],
+            }],
+        }
+
+        compact = _compact_terminal_discovery(discovery)
+        candidate = compact["candidates"][0]
+
+        self.assertTrue(compact["receipt_compacted"])
+        self.assertEqual(candidate["evidence_count"], 8)
+        self.assertEqual(candidate["evidence_omitted_count"], 3)
+        self.assertEqual(len(candidate["evidence"]), 5)
+        self.assertEqual(candidate["evidence"][0]["source_metrics"], {
+            "region": "US", "trend_cluster_count": 500,
+        })
 
     def test_compact_external_stale_receipt_reuses_without_losing_provenance(self):
         from types import SimpleNamespace
@@ -447,6 +667,42 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(facade.worker.arguments[1]["continue_cached"])
         self.assertEqual(facade.worker.arguments[1]["previous_source_manifest"], manifest)
 
+    async def test_postgres_fetch_run_once_forwards_manifest_for_cache_only_reuse(self):
+        manifest = [{"source_id": GOOGLE_SOURCE_ID, "source_input_digest": "b" * 64}]
+        summary = {
+            "dataset_id": "e" * 32,
+            "materialization_status": "COMPLETED",
+            "processing_status": "MODEL_UNAVAILABLE",
+            "source_manifest": manifest,
+        }
+        reads = []
+
+        class Store:
+            def latest_dataset_reuse_summary(self):
+                reads.append(True)
+                return summary
+
+        class Worker:
+            async def run_once(self, owner, **kwargs):
+                self.arguments = (owner, kwargs)
+                return {"state": "COMPLETED"}
+
+        facade = object.__new__(DistributedPublicFetch)
+        facade.firestore_shared_live = False
+        facade.postgres_live = True
+        facade.postgres_live_state_ready = True
+        facade.collection_store = Store()
+        facade.worker = Worker()
+
+        result = await facade.run_once("postgres-worker")
+
+        self.assertEqual(result, {"state": "COMPLETED"})
+        self.assertEqual(reads, [True])
+        self.assertEqual(facade.worker.arguments[0], "postgres-worker")
+        self.assertTrue(facade.worker.arguments[1]["reuse_unchanged_dataset"])
+        self.assertEqual(facade.worker.arguments[1]["previous_source_manifest"], manifest)
+        self.assertEqual(facade.worker.arguments[1]["previous_dataset_summary"], summary)
+
     def test_postgres_collection_reuse_reads_fresh_compact_summary(self):
         from types import SimpleNamespace
 
@@ -522,7 +778,11 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first["collection_input_unchanged"])
         self.assertEqual(first["dataset_id"], summary["dataset_id"])
         self.assertEqual(second, first)
-        self.assertEqual(len(reads), 2)
+        summary = {**summary, "dataset_id": job["job_id"]}
+        already_materialized = facade.collection_reuse_for_fetch(job["job_id"], job=job)
+
+        self.assertFalse(already_materialized["collection_input_unchanged"])
+        self.assertEqual(len(reads), 3)
 
     async def test_claimed_checkpoint_snapshot_avoids_second_owned_transaction(self):
         job_id = self.admit()

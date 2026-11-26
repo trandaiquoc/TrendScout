@@ -17,6 +17,7 @@ from typing import Awaitable, Callable, Mapping
 from app.collections.source_digest import (
     COLLECTION_INPUT_DIGEST_VERSION,
     legacy_source_input_digest_candidates,
+    reusable_collection_manifest,
     source_input_digest,
 )
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
@@ -134,11 +135,16 @@ class DistributedFetchWorker:
     async def run_once(self, owner: str, *, job_id: str | None = None,
                        max_sources: int | None = None,
                        continue_cached: bool = False,
-                       previous_source_manifest: list[dict] | None = None) -> dict | None:
+                       reuse_unchanged_dataset: bool = False,
+                       previous_source_manifest: list[dict] | None = None,
+                       previous_dataset_summary: dict | None = None) -> dict | None:
         if (job_id is not None and (not isinstance(job_id, str) or not job_id)
                 or type(continue_cached) is not bool
+                or type(reuse_unchanged_dataset) is not bool
                 or previous_source_manifest is not None
                 and not isinstance(previous_source_manifest, list)
+                or previous_dataset_summary is not None
+                and not isinstance(previous_dataset_summary, dict)
                 or continue_cached and max_sources is None
                 or max_sources is not None and (
                     type(max_sources) is not int or not 1 <= max_sources <= len(self.handlers)
@@ -212,6 +218,17 @@ class DistributedFetchWorker:
                 or not set(selected_sources) <= set(self.handlers)):
             raise AdmissionDenied("REQUEST_SCOPE_INVALID")
         selected = set(selected_sources)
+        if ((continue_cached or reuse_unchanged_dataset)
+                and request_metadata.get("cache_only") is True
+                and isinstance(previous_dataset_summary, dict)):
+            reused = self._reuse_unchanged_dataset(
+                claim, job_id=job_id, owner=owner, fence=fence,
+                job_expires_at=job_expires_at, selected_sources=selected_sources,
+                previous_source_manifest=previous_source_manifest,
+                previous_dataset_summary=previous_dataset_summary,
+            )
+            if reused is not None:
+                return reused
         for source_id in self.source_order:
             if source_id not in selected:
                 continue
@@ -436,6 +453,128 @@ class DistributedFetchWorker:
                 "sources": outcomes,
                 "created_at": claim.get("created_at"),
                 "finished_at": finished.get("finished_at") if isinstance(finished, dict) else None}
+
+    def _reuse_unchanged_dataset(self, claim, *, job_id, owner, fence, job_expires_at,
+                                 selected_sources, previous_source_manifest,
+                                 previous_dataset_summary):
+        """Finish an exact cache-only replay from compact digests under the job fence."""
+        if (previous_dataset_summary.get("materialization_status") != "COMPLETED"
+                or not isinstance(previous_source_manifest, list)
+                or not isinstance(previous_dataset_summary.get("dataset_id"), str)
+                or claim.get("source_checkpoints")):
+            return None
+        grants, compact_results = {}, {}
+        request_metadata = claim.get("request_metadata", {})
+        for source_id in selected_sources:
+            handler = (self.cache_only_handlers or {}).get(source_id)
+            reader = getattr(handler, "__trendscout_cache_manifest_reader__", None)
+            if not callable(reader):
+                return None
+            now = self.utcnow()
+            try:
+                grant = self.resolve_grant(source_id, now)
+            except Exception:
+                return None
+            if (not isinstance(grant, CheckpointGrant) or grant.source_id != source_id
+                    or self.source_modes[source_id] not in {None, grant.data_mode}):
+                return None
+
+            def heartbeat():
+                return self.admission.heartbeat(job_id, owner, fence, now=self.utcnow())
+
+            context = SourceWorkContext(
+                job_id, owner, fence, source_id,
+                self.admission.policy.plan_fingerprint, job_expires_at, None,
+                lambda _progress: 0, heartbeat,
+                request_metadata=request_metadata, completed_sources={},
+            )
+            try:
+                context.heartbeat()
+                result = reader(context)
+            except Exception:
+                return None
+            if (not isinstance(result, dict)
+                    or result.get("status") not in {"SUCCESS", "PARTIAL"}
+                    or result.get("data_mode") != grant.data_mode
+                    or result.get("delivery_state") not in _CACHE_DELIVERY_STATES
+                    or type(result.get("record_count")) is not int
+                    or result["record_count"] < 0
+                    or result.get("records") != []
+                    or type(result.get("provider_request_count")) is not int
+                    or result["provider_request_count"] != 0
+                    or not isinstance(result.get("coverage"), dict)
+                    or not isinstance(result.get("source_input_digest"), str)
+                    or type(result.get("source_input_digest_version")) is not int):
+                return None
+            compact_results[source_id] = result
+            grants[source_id] = grant
+
+        current_manifest = [{
+            "source_id": source_id,
+            "status": result["status"],
+            "data_mode": result["data_mode"],
+            "delivery_state": result["delivery_state"],
+            "record_count": result["record_count"],
+            "provider_request_count": result["provider_request_count"],
+            "coverage": result["coverage"],
+            "quality_flags": result.get("quality_flags", []),
+            "source_input_digest": result["source_input_digest"],
+            "source_input_digest_version": result["source_input_digest_version"],
+        } for source_id, result in sorted(compact_results.items())]
+        if not reusable_collection_manifest(
+                current_manifest, previous_source_manifest,
+                processing_status=previous_dataset_summary.get("processing_status"),
+                materialization_status=previous_dataset_summary.get("materialization_status")):
+            return None
+
+        now = self.utcnow()
+        checkpoints = []
+        outcomes = {}
+        for source_id, result in sorted(compact_results.items()):
+            compact_result = {
+                key: result[key] for key in (
+                    "status", "data_mode", "delivery_state", "record_count",
+                    "coverage", "quality_flags", "provider_request_count",
+                    "source_input_digest", "source_input_digest_version",
+                ) if key in result
+            }
+            compact_result.update(records=[], dataset_reused=True)
+            snapshot = {
+                "schema": 1,
+                "source_id": source_id,
+                "data_mode": grants[source_id].data_mode,
+                "plan_fingerprint": self.admission.policy.plan_fingerprint,
+                "phase": "COMPLETE",
+                "result": compact_result,
+                "source_input_digest": result["source_input_digest"],
+                "source_input_digest_version": result["source_input_digest_version"],
+                "dataset_reused": True,
+                "dataset_id": previous_dataset_summary["dataset_id"],
+            }
+            checkpoints.append({
+                "source_id": source_id,
+                "grant": grants[source_id],
+                "expected_revision": 0,
+                "snapshot": snapshot,
+            })
+            outcomes[source_id] = compact_result
+        self.journal.save_many(
+            job_id, owner, fence, now=now, checkpoints=checkpoints,
+        )
+        partial = any(result["status"] != "SUCCESS" for result in outcomes.values())
+        finished = self.admission.finish(
+            job_id, owner, fence, now=self.utcnow(), partial=partial,
+            require_source_results=True,
+        )
+        return {
+            "job_id": job_id,
+            "state": "PARTIAL" if partial else "COMPLETED",
+            "sources": outcomes,
+            "created_at": claim.get("created_at"),
+            "finished_at": finished.get("finished_at") if isinstance(finished, dict) else None,
+            "dataset_reused": True,
+            "dataset_id": previous_dataset_summary["dataset_id"],
+        }
 
     @staticmethod
     def _source_failure_result(source_id, data_mode, error, *, phase, reason):

@@ -57,7 +57,7 @@ from app.sources.google_trends.trending_now import (
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_config import postgres_environment as read_postgres_environment
-from app.storage.postgres_connection import postgres_connection
+from app.storage.postgres_connection import postgres_connection, postgres_pool_stats
 from app.storage.postgres_migrations import apply_migrations
 from app.storage.postgres_payloads import PostgresSourcePayloads
 
@@ -74,6 +74,9 @@ class Measurement:
         self.query_max_seconds: dict[str, float] = defaultdict(float)
         self.connection_count = 0
         self.connection_seconds = 0.0
+        self.pool_stats_before = postgres_pool_stats()
+        self.pooled_checkouts = 0
+        self.pooled_wait_ms = 0
         self.transaction_count = 0
         self.transaction_seconds = 0.0
         self.network_block_count = 0
@@ -98,7 +101,16 @@ class Instrumentation:
 
     def stop(self) -> Measurement | None:
         self.enabled = False
-        return self.current
+        measurement = self.current
+        if measurement is not None:
+            after = postgres_pool_stats()
+            delta = {key: after.get(key, 0) - measurement.pool_stats_before.get(key, 0)
+                     for key in measurement.pool_stats_before}
+            measurement.connection_count += delta.get("connections_num", 0)
+            measurement.connection_seconds += delta.get("connections_ms", 0) / 1000
+            measurement.pooled_checkouts = delta.get("requests_num", 0)
+            measurement.pooled_wait_ms = delta.get("requests_wait_ms", 0)
+        return measurement
 
     @property
     def current_stage(self) -> str:
@@ -222,6 +234,8 @@ class Instrumentation:
             "connections": {
                 "opened": measurement.connection_count,
                 "establishment_ms": round(measurement.connection_seconds * 1000, 2),
+                "pooled_checkouts": measurement.pooled_checkouts,
+                "pool_wait_ms": measurement.pooled_wait_ms,
             },
             "transactions": {
                 "count": measurement.transaction_count,
@@ -420,13 +434,27 @@ def _argument_count(function, args, kwargs, key: str) -> int:
 
 def install_instrumentation():
     psycopg.connect = _observed_connect
+    from psycopg_pool import ConnectionPool
     from starlette.responses import JSONResponse
+
+    if not getattr(ConnectionPool.connection, "_db06_instrumented", False):
+        original_pool_connection = ConnectionPool.connection
+
+        @contextmanager
+        @wraps(original_pool_connection)
+        def observed_pool_connection(self, *args, **kwargs):
+            with original_pool_connection(self, *args, **kwargs) as connection:
+                yield _ObservedConnection(connection)
+
+        observed_pool_connection._db06_instrumented = True
+        ConnectionPool.connection = observed_pool_connection
 
     import app.storage.postgres_runtime as postgres_runtime_module
     from app.ai.openrouter import OpenRouterAdapter
     from app.collections.service import CollectionService
     from app.jobs.shared_cache import SharedCache
     from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+    from app.storage.postgres_payloads import PostgresSourcePayloads
 
     _instrument_method(PublicAdmission, "initialize_operational_state", "operational_state_initialization")
     _instrument_method(PublicAdmission, "lookup_idempotency", "job_lease_checkpoint_coordination")
@@ -465,6 +493,40 @@ def install_instrumentation():
     _instrument_method(postgres_runtime_module, "initialize_postgres_runtime_defaults",
                        "runtime_schema_readiness")
     _instrument_method(collection_service_module, "build_source_evidence", "source_evidence_preparation")
+
+    if not getattr(PostgresSourcePayloads.get, "_db06_instrumented", False):
+        original_payload_get = PostgresSourcePayloads.get
+
+        @wraps(original_payload_get)
+        def observed_payload_get(self, reference, *args, **kwargs):
+            with tracker.span("payload_blob_read"):
+                tracker.count("payload_blob_read_attempts")
+                try:
+                    result = original_payload_get(self, reference, *args, **kwargs)
+                except Exception:
+                    tracker.count("payload_blob_read_failures")
+                    raise
+                tracker.count("payload_blob_reads")
+                raw_bytes = reference.get("raw_bytes") if isinstance(reference, dict) else None
+                if type(raw_bytes) is int and raw_bytes >= 0:
+                    tracker.count("payload_blob_read_bytes", raw_bytes)
+                tracker.count("payload_blob_read_items", len(result))
+                return result
+
+        observed_payload_get._db06_instrumented = True
+        PostgresSourcePayloads.get = observed_payload_get
+
+    if not getattr(PostgresSourcePayloads.inspect, "_db06_instrumented", False):
+        original_payload_inspect = PostgresSourcePayloads.inspect
+
+        @wraps(original_payload_inspect)
+        def observed_payload_inspect(self, reference, *args, **kwargs):
+            with tracker.span("payload_blob_inspect"):
+                tracker.count("payload_blob_inspections")
+                return original_payload_inspect(self, reference, *args, **kwargs)
+
+        observed_payload_inspect._db06_instrumented = True
+        PostgresSourcePayloads.inspect = observed_payload_inspect
 
     original_keyword_record = collection_service_module.keyword_record
 
@@ -839,6 +901,11 @@ def _assert_result(measurement_result: dict, expected_count: int,
     if (measurement_result["label"].startswith("case2-warm-changed-")
             and measurement_result["collection_input_unchanged"] is True):
         raise RuntimeError("changed CACHE_ONLY input was incorrectly treated as unchanged")
+    if measurement_result["label"].startswith("case3-warm-unchanged-"):
+        if (measurement_result["collection_input_unchanged"] is not True
+                or measurement_result["dataset_reused"] is not True
+                or measurement_result["dataset_id"] == measurement_result["fetch_id"]):
+            raise RuntimeError("unchanged CACHE_ONLY input did not reuse its durable dataset")
     if measurement_result["provider_network_requests_blocked"] != 0:
         raise RuntimeError("a provider network request was attempted")
     if measurement_result["openrouter_requests_blocked"] != 0:
@@ -885,7 +952,10 @@ def _run_fetch(client: TestClient, schema: str, expected_count: int, *, label: s
             dataset_response = client.get("/api/v1/datasets/latest")
             if dataset_response.status_code != 200:
                 raise RuntimeError("dataset latest API did not expose the completed data")
-            data_ready = _ready_data(schema, fetch_id)
+            dataset_id = status_payload.get("dataset_id") or fetch_id
+            if not isinstance(dataset_id, str) or not dataset_id:
+                raise RuntimeError("terminal Fetch status did not identify its dataset")
+            data_ready = _ready_data(schema, dataset_id)
         end_to_end_ms = round((time.perf_counter() - started) * 1000, 2)
 
     source_rows = status_payload.get("sources")
@@ -905,6 +975,8 @@ def _run_fetch(client: TestClient, schema: str, expected_count: int, *, label: s
         "terminal_status": status_payload.get("status"),
         "terminal": status_payload.get("terminal"),
         "collection_input_unchanged": status_payload.get("collection_input_unchanged"),
+        "dataset_id": dataset_id,
+        "dataset_reused": status_payload.get("dataset_reused") is True,
         "source_record_count": source_count,
         "source_provider_requests": provider_requests,
         "status_poll_count": poll_count,
@@ -915,9 +987,9 @@ def _run_fetch(client: TestClient, schema: str, expected_count: int, *, label: s
         "openrouter_requests_blocked": measurement.openrouter_count,
         "fixture_input_digest": fixture_input_digest,
     }
+    tracker.stop()
     if not warmup:
         result["instrumentation"] = tracker.snapshot(measurement)
-    tracker.stop()
     result["source_input_digest"] = _read_source_input_digest(schema, fetch_id)
     _assert_result(result, expected_count, fixture_input_digest)
     if not warmup:
@@ -963,7 +1035,7 @@ def _instrumented_app(schema: str, *, label: str, include_startup: bool):
     return application, client
 
 
-def _profile_mode() -> dict:
+def _profile_mode(record_counts=(10, 100, 500)) -> dict:
     schema, setup_seconds = create_isolated_schema()
     emit({"event": "profile_schema_ready", "schema": schema,
           "migration_and_readiness_setup_ms": round(setup_seconds * 1000, 2)})
@@ -974,12 +1046,13 @@ def _profile_mode() -> dict:
     heartbeat.start()
     rows = []
     try:
-        for count in (10, 100, 500):
+        for count in record_counts:
             seed_cache(schema, count, tag=f"profile-{count}", revision=0)
             result = _run_fetch(client, schema, count, label=f"profile-{count}")
             rows.append(result)
         summary = {
             "mode": "profile",
+            "profile_record_counts": list(record_counts),
             "schema": schema,
             "baseline_commit": "45c1f2f74bd31d08eb3fe700a2804bfec5eeb0e6",
             "migration_and_fixture_setup_excluded": True,
@@ -1221,6 +1294,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("profile", "acceptance"), default="profile")
     parser.add_argument(
+        "--profile-count", type=int, choices=(10, 100, 500),
+        help="run one existing profile fixture size as a smoke measurement",
+    )
+    parser.add_argument(
         "--skip-cold", action="store_true",
         help="resume acceptance warm cases after the three cold samples completed",
     )
@@ -1233,6 +1310,8 @@ def main() -> int:
         parser.error("--skip-cold is only valid with --mode acceptance")
     if arguments.skip_changed and (arguments.mode != "acceptance" or not arguments.skip_cold):
         parser.error("--skip-changed requires --mode acceptance and --skip-cold")
+    if arguments.profile_count is not None and arguments.mode != "profile":
+        parser.error("--profile-count is only valid with --mode profile")
     if os.environ.get("VERCEL"):
         raise RuntimeError("DB06 local benchmark refuses a Vercel process")
     explicit_test_url = bool(os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL"))
@@ -1254,7 +1333,7 @@ def main() -> int:
           "provider_network": "blocked",
           "openrouter": "blocked"})
     if arguments.mode == "profile":
-        _profile_mode()
+        _profile_mode((arguments.profile_count,) if arguments.profile_count else (10, 100, 500))
     else:
         _acceptance_mode(skip_cold=arguments.skip_cold,
                          skip_changed=arguments.skip_changed)

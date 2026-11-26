@@ -258,8 +258,30 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
     return recovered
 
 
+def _terminal_worker_sources(worker_result: dict | None, fetch_id: str) -> list[dict] | None:
+    """Use validated in-memory outcomes only for the worker that just finished this job."""
+    if (not isinstance(worker_result, dict)
+            or worker_result.get("job_id") != fetch_id
+            or worker_result.get("state") not in {"COMPLETED", "PARTIAL"}
+            or worker_result.get("dataset_reused") is True
+            or not isinstance(worker_result.get("sources"), dict)
+            or not worker_result["sources"]):
+        return None
+    sources = []
+    for source_id, outcome in sorted(worker_result["sources"].items()):
+        if (not isinstance(source_id, str) or not source_id
+                or not isinstance(outcome, dict)
+                or not isinstance(outcome.get("records"), list)
+                or type(outcome.get("record_count")) is not int
+                or outcome["record_count"] != len(outcome["records"])):
+            return None
+        sources.append({**outcome, "source_id": source_id})
+    return sources
+
+
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
-                                     cached_context_only: bool = False):
+                                     cached_context_only: bool = False,
+                                     worker_result: dict | None = None):
     firestore_shared_live = getattr(distributed, "firestore_shared_live", False)
     shared_store_live = firestore_shared_live or getattr(distributed, "postgres_live", False)
     if shared_store_live:
@@ -276,9 +298,18 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
             )
             return
 
-    result = await asyncio.to_thread(
-        distributed.status, fetch_id, include_records=True, include_discovery=False
-    )
+    worker_sources = (_terminal_worker_sources(worker_result, fetch_id)
+                      if shared_store_live else None)
+    if worker_sources is not None:
+        result = {
+            "terminal": True,
+            "fetch_mode": "CACHE_ONLY" if cached_context_only else "LIVE",
+            "sources": worker_sources,
+        }
+    else:
+        result = await asyncio.to_thread(
+            distributed.status, fetch_id, include_records=True, include_discovery=False
+        )
     if result and result.get("terminal"):
         if firestore_shared_live:
             load_snapshot = getattr(distributed, "load_collection_snapshot", None)
@@ -305,7 +336,8 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
 
 async def _run_fetch_and_collections(request: Request, distributed, fetch_id: str,
                                      owner: str, *, run_worker: bool = True,
-                                     process_collections: bool = True):
+                                     process_collections: bool = True,
+                                     cached_context_only: bool = False):
     """Run or resume a durable Fetch, then classify retained records."""
     result = None
     shared_live = bool(getattr(distributed, "firestore_shared_live", False))
@@ -337,9 +369,33 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
         elif (result and result.get("job_id") != fetch_id
               and result.get("state") in {"COMPLETED", "PARTIAL"}):
             await distributed.run_once(owner)
+    if (run_worker and isinstance(result, dict)
+            and result.get("job_id") == fetch_id
+            and result.get("state") in {"COMPLETED", "PARTIAL"}):
+        persist_receipt = getattr(distributed, "persist_terminal_status_receipt", None)
+        if callable(persist_receipt):
+            try:
+                await asyncio.to_thread(persist_receipt, result)
+            except Exception as exc:
+                receipt_error = str(exc)
+                safe_receipt_errors = {
+                    "bounded terminal status receipt required",
+                    "invalid terminal status source receipt",
+                    "terminal status receipt cannot include source record blobs",
+                    "invalid terminal status source projection",
+                    "terminal status receipt must be finite UTF-8 JSON",
+                    "terminal status receipt exceeds its storage budget",
+                }
+                if receipt_error not in safe_receipt_errors:
+                    receipt_error = type(exc).__name__
+                _logger.warning(
+                    "terminal Fetch status receipt unavailable error=%s", receipt_error,
+                )
     if process_collections:
         await _process_fetch_collections(
-            request, distributed, fetch_id, cached_context_only=shared_live
+            request, distributed, fetch_id,
+            cached_context_only=shared_live or cached_context_only,
+            worker_result=result if run_worker else None,
         )
     return result
 
@@ -464,11 +520,13 @@ async def create_fetch(
                         request, distributed, accepted["job_id"],
                         f"api-{secrets.token_hex(12)}",
                         process_collections=not vercel_shared_live,
+                        cached_context_only=fetch_mode == "CACHE_ONLY",
                     )
             else:
                 background_tasks.add_task(
                     _run_fetch_and_collections, request, distributed, accepted["job_id"],
-                    f"api-{secrets.token_hex(12)}"
+                    f"api-{secrets.token_hex(12)}",
+                    cached_context_only=fetch_mode == "CACHE_ONLY",
                 )
         elif (accepted.get("result") == "REPLAY"
               and accepted["status"] in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED", "EXPIRED"}
@@ -482,11 +540,13 @@ async def create_fetch(
                     request, distributed, accepted["job_id"],
                     f"api-{secrets.token_hex(12)}", run_worker=False,
                     process_collections=not vercel_shared_live,
+                    cached_context_only=fetch_mode == "CACHE_ONLY",
                 )
             else:
                 background_tasks.add_task(
                     _run_fetch_and_collections, request, distributed, accepted["job_id"],
                     f"api-{secrets.token_hex(12)}", run_worker=False,
+                    cached_context_only=fetch_mode == "CACHE_ONLY",
                 )
         fetch_id = accepted["job_id"]
         terminal_fetch = None

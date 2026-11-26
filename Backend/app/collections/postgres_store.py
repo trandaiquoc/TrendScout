@@ -640,6 +640,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
             replay_available = replay_skipped = 0
             if prior and self.data_mode_scope:
                 snapshot = db.execute(sql.SQL("""SELECT data_mode,processing_status,
+                    materialization_status,
                     received_record_count,rejected_record_count FROM {} WHERE dataset_id=%s FOR UPDATE""")
                     .format(self._table("dataset_snapshots")), (fetch_id,)).fetchone()
                 if snapshot and snapshot["data_mode"] != self.data_mode_scope:
@@ -647,6 +648,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                         "fetch_id": fetch_id, "status": "FAILED", "error_code": "FETCH_ID_MODE_CONFLICT",
                     }}
                 if (snapshot and prior["status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
+                        and snapshot["materialization_status"] == "COMPLETED"
                         and snapshot["processing_status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
                         and (not sources or resume_model_unavailable)):
                     retry_existing_snapshot = True
@@ -673,6 +675,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 return {"action": "RETURN", "result": result}
             if not prior and cached_context_only and self.data_mode_scope == "LIVE":
                 latest = db.execute(sql.SQL("""SELECT dataset_id,source_manifest,processing_status,
+                    materialization_status,
                     received_record_count,rejected_record_count,eligible_keyword_count,
                     unassigned_keyword_count FROM {} WHERE data_mode='LIVE'
                     ORDER BY created_at DESC,dataset_id DESC LIMIT 1""")
@@ -686,7 +689,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
                             previous_manifest = None
                     if reusable_collection_input(
                             sources, previous_manifest,
-                            processing_status=latest["processing_status"]):
+                            processing_status=latest["processing_status"],
+                            materialization_status=latest["materialization_status"]):
                         return {"action": "RETURN", "result": {
                             "fetch_id": fetch_id, "status": "REUSED", "dataset_reused": True,
                             "dataset_id": latest["dataset_id"],
@@ -835,7 +839,9 @@ class PostgresCollectionStore(PostgresCollectionReader):
 
         return self._write(operation)
 
-    def complete_fetch_dataset_snapshot(self, fetch_id):
+    def complete_fetch_dataset_snapshot(self, fetch_id, *,
+                                        algorithm_processing_status="COMPLETED",
+                                        ai_classification_status="COMPLETED"):
         keyword_filter = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
         membership_filter = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
         keyword_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
@@ -855,9 +861,13 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 "(SELECT 1 FROM {} m WHERE m.keyword_id=k.id)").format(
                     self._table("keywords"), self._table("classification_results"),
                     membership_filter, self._table("memberships")), keyword_parameters).fetchone()["total"]
-            db.execute(sql.SQL("UPDATE {} SET processing_status='COMPLETED',eligible_keyword_count=%s,"
-                "assigned_keyword_count=%s,unassigned_keyword_count=%s WHERE dataset_id=%s")
-                .format(self._table("dataset_snapshots")), (eligible, assigned, unassigned, fetch_id))
+            db.execute(sql.SQL("UPDATE {} SET processing_status='COMPLETED',"
+                "algorithm_processing_status=%s,ai_classification_status=%s,"
+                "eligible_keyword_count=%s,assigned_keyword_count=%s,unassigned_keyword_count=%s "
+                "WHERE dataset_id=%s")
+                .format(self._table("dataset_snapshots")),
+                (algorithm_processing_status, ai_classification_status,
+                 eligible, assigned, unassigned, fetch_id))
             return {"eligible": eligible, "assigned": assigned, "unassigned": unassigned}
 
         return self._write(operation)
@@ -904,7 +914,9 @@ class PostgresCollectionStore(PostgresCollectionReader):
         def operation(db):
             snapshot = db.execute(sql.SQL("SELECT eligible_keyword_count FROM {} WHERE dataset_id=%s FOR UPDATE")
                                   .format(self._table("dataset_snapshots")), (fetch_id,)).fetchone()
-            db.execute(sql.SQL("UPDATE {} SET processing_status='COMPLETED' WHERE dataset_id=%s")
+            db.execute(sql.SQL("UPDATE {} SET processing_status='COMPLETED',"
+                "algorithm_processing_status='SKIPPED',ai_classification_status='NOT_REQUIRED' "
+                "WHERE dataset_id=%s")
                        .format(self._table("dataset_snapshots")), (fetch_id,))
             changes["eligible"] = snapshot["eligible_keyword_count"] if snapshot else 0
             assignments = sql.SQL(",").join(
@@ -921,10 +933,14 @@ class PostgresCollectionStore(PostgresCollectionReader):
         return self._write(operation)
 
     def mark_fetch_model_unavailable(self, fetch_id, *, available, skipped, eligible,
-                                     cached_embeddings, inferred_embeddings, error_code):
+                                     cached_embeddings, inferred_embeddings, error_code,
+                                     algorithm_processing_status="UNKNOWN"):
         def operation(db):
-            db.execute(sql.SQL("UPDATE {} SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=%s")
-                       .format(self._table("dataset_snapshots")), (fetch_id,))
+            db.execute(sql.SQL("UPDATE {} SET processing_status='MODEL_UNAVAILABLE',"
+                "ai_classification_status='MODEL_UNAVAILABLE',algorithm_processing_status=%s "
+                "WHERE dataset_id=%s")
+                .format(self._table("dataset_snapshots")),
+                (algorithm_processing_status, fetch_id))
             db.execute(sql.SQL("""INSERT INTO {}(fetch_id,status,available,processed,assigned,unassigned,
                 created_collections,suggestions,skipped,error_code,updated_at,stage,eligible,
                 cached_embeddings,inferred_embeddings,membership_reconciliation_id)
@@ -947,7 +963,12 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                  provider_record_count, received_record_count,
                                  retained_keyword_count, rejected_record_count,
                                  observation_start, observation_end, fetched_at, quality_flags,
-                                 processing_status, created_at, source_evidence_rows=None,
+                                 processing_status, created_at,
+                                 source_ingestion_status="UNKNOWN",
+                                 materialization_status="COMPLETED",
+                                 algorithm_processing_status="PENDING",
+                                 ai_classification_status="PENDING",
+                                 source_evidence_rows=None,
                                  source_evidence_ids_already_persisted=()):
         if (not isinstance(source_evidence_ids_already_persisted, (tuple, list, set, frozenset))
                 or any(not isinstance(identifier, str) or not identifier
@@ -974,8 +995,10 @@ class PostgresCollectionStore(PostgresCollectionReader):
             db.execute(sql.SQL("""INSERT INTO {}(dataset_id,status,data_mode,source_manifest,
                 provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
                 observation_start,observation_end,fetched_at,quality_flags,processing_status,
-                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at,
+                source_ingestion_status,materialization_status,algorithm_processing_status,
+                ai_classification_status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(dataset_id) DO UPDATE SET status=EXCLUDED.status,data_mode=EXCLUDED.data_mode,
                 source_manifest=EXCLUDED.source_manifest,provider_record_count=EXCLUDED.provider_record_count,
                 received_record_count=EXCLUDED.received_record_count,
@@ -985,12 +1008,18 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 fetched_at=EXCLUDED.fetched_at,quality_flags=EXCLUDED.quality_flags,
                 processing_status=EXCLUDED.processing_status,eligible_keyword_count=EXCLUDED.eligible_keyword_count,
                 assigned_keyword_count=EXCLUDED.assigned_keyword_count,
-                unassigned_keyword_count=EXCLUDED.unassigned_keyword_count,created_at=EXCLUDED.created_at""")
+                unassigned_keyword_count=EXCLUDED.unassigned_keyword_count,created_at=EXCLUDED.created_at,
+                source_ingestion_status=EXCLUDED.source_ingestion_status,
+                materialization_status=EXCLUDED.materialization_status,
+                algorithm_processing_status=EXCLUDED.algorithm_processing_status,
+                ai_classification_status=EXCLUDED.ai_classification_status""")
                 .format(self._table("dataset_snapshots")),
                 (dataset_id, status, data_mode, Jsonb(source_manifest), provider_record_count,
                  received_record_count, retained_keyword_count, rejected_record_count, observation_start,
                  observation_end, fetched_at, Jsonb(quality_flags), processing_status,
-                 counts["eligible"], counts["assigned"], counts["unassigned"], created_at))
+                 counts["eligible"], counts["assigned"], counts["unassigned"], created_at,
+                 source_ingestion_status, materialization_status, algorithm_processing_status,
+                 ai_classification_status))
             if source_evidence_rows:
                 rows = [row for row in source_evidence_rows if isinstance(row, dict)]
                 if already_persisted:
