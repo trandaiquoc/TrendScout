@@ -1,5 +1,6 @@
 """Concurrent collection mutations on an isolated PostgreSQL schema."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -420,6 +421,103 @@ def test_incremental_source_persistence_remaps_lineage_to_live_keyword_id():
             legacy_evidence = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
                 .format(keyword_table), (live["id"],)).fetchone()[0]
             assert legacy_evidence == json.loads(synthetic["evidence"])
+            replay = store.persist_cleaned_keywords(
+                [live], source_evidence_rows=source_evidence_rows,
+            )
+            assert replay["id_remap"] == {live["id"]: expected_live_id}
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")),
+                (evidence_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "source_evidence")),
+                (evidence_id,)).fetchone()[0] == 1
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_failed_source_batch_retry_reuses_committed_postgres_evidence():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            created = True
+            apply_migrations(connection, schema=schema)
+
+            class InterruptOnceStore(PostgresCollectionStore):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.persistence_calls = 0
+                    self.interrupt_second_source = True
+
+                def persist_cleaned_keywords(self, *args, **kwargs):
+                    self.persistence_calls += 1
+                    if self.interrupt_second_source and self.persistence_calls == 2:
+                        self.interrupt_second_source = False
+                        raise RuntimeError("simulated interruption after first source commit")
+                    return super().persist_cleaned_keywords(*args, **kwargs)
+
+            store = InterruptOnceStore(environment, schema=schema, data_mode_scope="LIVE")
+            service = CollectionService(store, fetch_model_inference_enabled=False)
+            fetch_id = "retry-" + uuid.uuid4().hex
+            raw = {
+                "article_display": "Portable Solar Generator",
+                "article_original": "Portable_Solar_Generator",
+                "project": "en.wikipedia",
+                "observation_date": "2026-11-25",
+                "fetched_at": "2026-11-26T12:00:00Z",
+                "provider_rank": 1,
+                "views_ceil": 8400,
+                "country_scope": "US",
+                "access": "all-access",
+            }
+            sources = [
+                {
+                    "source_id": WIKIMEDIA_SOURCE_ID,
+                    "data_mode": "LIVE",
+                    "status": "SUCCESS",
+                    "records": [raw],
+                },
+                {
+                    "source_id": "google_web_serp",
+                    "data_mode": "LIVE",
+                    "status": "SUCCESS",
+                    "records": [],
+                },
+            ]
+
+            interrupted = asyncio.run(service.process_fetch(fetch_id, sources))
+            keyword_id = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "LIVE")["id"]
+            assert interrupted["status"] == "FAILED"
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(sql.Identifier(schema, "source_evidence"))).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE dataset_id=%s")
+                .format(sql.Identifier(schema, "dataset_snapshots")), (fetch_id,)).fetchone()[0] == 0
+
+            recovered = asyncio.run(service.process_fetch(fetch_id, sources))
+
+            assert recovered["status"] == "MODEL_UNAVAILABLE"
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "keywords")), (keyword_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(sql.Identifier(schema, "source_evidence"))).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")), (keyword_id,)).fetchone()[0] == 1
+            snapshot = connection.execute(sql.SQL("SELECT processing_status FROM {} WHERE dataset_id=%s")
+                .format(sql.Identifier(schema, "dataset_snapshots")), (fetch_id,)).fetchone()
+            assert snapshot == ("MODEL_UNAVAILABLE",)
         finally:
             if created:
                 connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
