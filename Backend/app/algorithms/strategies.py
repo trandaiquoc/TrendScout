@@ -23,7 +23,10 @@ def applicability(item, *, needs_current):
         return 'INVALID_WINDOW'
     if type(item.minimum_samples) is not int or not 3 <= item.minimum_samples <= item.window_days:
         return 'INVALID_CONFIG'
-    if needs_current and not count_ok(item.current_value): return 'INVALID_CURRENT'
+    if needs_current and not count_ok(item.current_value):
+        if item.current_snapshot_status in ('SUCCESS', 'PARTIAL'):
+            return 'CURRENT_OBSERVATION_MISSING'
+        return 'CURRENT_COVERAGE_UNCONFIRMED'
     dates = set()
     for point in item.history:
         if point.scope != item.scope: return 'INCOMPATIBLE_OBSERVATION'
@@ -42,7 +45,8 @@ def applicability(item, *, needs_current):
 
 
 def result(item, meta, value, baseline, samples):
-    history = tuple((p.date.isoformat(), p.value) for p in sorted(item.history, key=lambda x: x.date, reverse=True) if p.status == 'OBSERVED')
+    history = tuple(p.date.isoformat() for p in sorted(item.history, key=lambda x: x.date, reverse=True)
+                    if p.status == 'OBSERVED')
     missing = tuple((p.date.isoformat(), p.status) for p in sorted(item.history, key=lambda x: x.date, reverse=True) if p.status != 'OBSERVED')
     covered = {p.date for p in item.history}
     missing += tuple(((item.analysis_date - timedelta(days=i)).isoformat(), 'SNAPSHOT_MISSING')
@@ -53,7 +57,8 @@ def result(item, meta, value, baseline, samples):
         flags += ('HISTORY_SNAPSHOT_PARTIAL',)
     return AlgorithmResult(item.keyword_id, meta.algorithm_id, meta.version, 'COMPLETED', value,
         meta.metric, meta.unit, item.current_value, baseline, item.window_days, len(samples),
-        (('observations', history), ('missing', missing), ('evidence_url', item.evidence_url)), flags,
+        (('observation_dates', history), ('observed_day_count', len(samples)),
+         ('missing', missing), ('evidence_url', item.evidence_url)), flags,
         minimum_samples=item.minimum_samples)
 
 
@@ -116,5 +121,7 @@ class WikimediaLegacy:
             'COMPLETED', legacy.score, self.metadata.metric, self.metadata.unit, legacy.current_views_ceil,
             legacy.baseline, item.window_days, legacy.observed_baseline_days,
             (('legacy_status', legacy.status), ('evidence_url', legacy.evidence_url),
-             ('baseline_observations', legacy.baseline_observations), ('missing', legacy.missing_baseline_dates)),
+             ('baseline_observation_dates', tuple(day.isoformat() for day, _ in legacy.baseline_observations)),
+             ('missing', tuple((day.isoformat(), reason)
+                               for day, reason in legacy.missing_baseline_dates))),
             legacy.quality_flags, minimum_samples=item.minimum_samples)

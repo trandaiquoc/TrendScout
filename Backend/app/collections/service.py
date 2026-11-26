@@ -279,7 +279,9 @@ class CollectionService:
                 "created_collections": 0, "suggestions": 0,
                 "skipped": skipped + policy_excluded,
             }
-        analysis = self._analyze_persisted_keywords(records)
+        analysis = self._analyze_persisted_keywords(
+            records, sources=sources, cache_only=cached_context_only,
+        )
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.
         loaded_keywords = self.store.load_keywords_for_fetch(
@@ -547,162 +549,372 @@ class CollectionService:
             snapshot["source_evidence_rows"] = source_evidence_rows
         self.store.persist_dataset_snapshot(fetch_id, **snapshot)
 
-    def _analyze_persisted_keywords(self, changed_records):
-        """Persist observation facts and execute the registry across every eligible keyword."""
-        from app.algorithms.contracts import AlgorithmInput, Observation, Scope
+    def _analyze_persisted_keywords(self, changed_records, *, sources=(), cache_only=False):
+        """Persist bounded Wikimedia observations and analyze only compatible inputs."""
+        from datetime import timedelta
+
+        from app.algorithms.catalog import persisted_keys_for_source
+        from app.algorithms.contracts import (
+            RESULT_CONTRACT_VERSION,
+            AlgorithmInput,
+            Observation,
+            Scope,
+        )
         from app.composition import algorithm_engine
+        from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+
+        def collected_instant(value):
+            if not isinstance(value, str) or len(value) > 64:
+                return None
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            return parsed.astimezone(timezone.utc).isoformat()
+
+        engine = algorithm_engine()
+        registered_count = len(engine.registry.keys())
+        if cache_only:
+            return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                    "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                    "persisted_algorithms": 0, "analysis_status": "CACHE_ONLY"}
+        for source in sources:
+            if source.get("source_id") != WIKIMEDIA_SOURCE_ID:
+                continue
+            coverage = source.get("coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            if (coverage.get("cache_only") is True
+                    or source.get("delivery_state") in {"CACHE_REPLAY", "CACHE_ONLY"}
+                    or (coverage.get("cache_fetched_at")
+                        and coverage.get("provider_request_count") == 0)):
+                return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                        "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                        "persisted_algorithms": 0, "analysis_status": "CACHE_ONLY"}
+        source_records = [record for record in changed_records
+                          if record.get("source") == WIKIMEDIA_SOURCE_ID]
+        if not source_records:
+            return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                    "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                    "persisted_algorithms": 0, "analysis_status": "NO_COMPATIBLE_SOURCE_INPUT"}
+
+        metric, unit = "views_ceil", "approx_pageviews_upper_bound"
+        source_collection_time = None
+        for source in sources:
+            if source.get("source_id") != WIKIMEDIA_SOURCE_ID:
+                continue
+            coverage = source.get("coverage")
+            coverage = coverage if isinstance(coverage, dict) else {}
+            source_collection_time = collected_instant(
+                coverage.get("fetched_at") or source.get("fetched_at")
+            )
+            if source_collection_time:
+                break
+        prepared_by_id = {}
+        for record in source_records:
+            try:
+                evidence = json.loads(record.get("evidence") or "{}")
+                if not isinstance(evidence, dict):
+                    continue
+                date_value = evidence.get("observation_date") or record.get("observed_at", "")[:10]
+                analysis_date = date.fromisoformat(date_value[:10])
+                value, rank = evidence.get("views_ceil"), evidence.get("provider_rank")
+                snapshot_status = evidence.get("snapshot_status", "SUCCESS")
+                if (type(value) is not int or value < 0 or type(rank) is not int or rank < 1
+                        or snapshot_status not in {"SUCCESS", "PARTIAL"}):
+                    continue
+                prepared_by_id[record["id"]] = {
+                    "id": record["id"], "date": analysis_date,
+                    "country": evidence.get("country_scope") or "US",
+                    "access": evidence.get("access") or "all-access",
+                    "project": record.get("project") or "",
+                    "article": evidence.get("article_original") or record.get("keyword") or "",
+                    "value": value, "rank": rank, "snapshot_status": snapshot_status,
+                    "evidence_url": evidence.get("source_url"),
+                    "collected_at": collected_instant(evidence.get("fetched_at")) or source_collection_time,
+                }
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+        if not prepared_by_id:
+            return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                    "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                    "persisted_algorithms": 0, "analysis_status": "NO_VALID_OBSERVATIONS"}
+
+        keys = persisted_keys_for_source(engine.registry, WIKIMEDIA_SOURCE_ID)
+        metadata_by_key = {key: engine.registry.get(key).metadata for key in keys}
+        metadata_prefix_by_key = {
+            key: _algorithm_digest_prefix({
+                "metadata": asdict(value),
+                "result_contract_version": RESULT_CONTRACT_VERSION,
+            })
+            for key, value in metadata_by_key.items()
+        }
 
         def analyze(session):
-            records = session.eligible_keywords()
+            eligible_current = {}
+            identifiers = list(prepared_by_id)
+            for offset in range(0, len(identifiers), 500):
+                rows = session.eligible_keywords(
+                    source=WIKIMEDIA_SOURCE_ID, ids=identifiers[offset:offset + 500],
+                )
+                eligible_current.update({row["id"]: row for row in rows})
+            prepared = {key: value for key, value in prepared_by_id.items()
+                        if key in eligible_current}
+            if not prepared:
+                return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                        "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                        "persisted_algorithms": len(keys), "analysis_status": "NO_ELIGIBLE_OBSERVATIONS"}
+
+            snapshot_groups = defaultdict(list)
+            for value in prepared.values():
+                group = (value["date"], value["country"], value["access"], value["project"])
+                snapshot_groups[group].append(value)
+
             observations = []
-            for record in changed_records:
-                evidence = json.loads(record["evidence"])
-                try:
-                    observed = date.fromisoformat(evidence.get("observation_date") or record["observed_at"][:10])
-                except (TypeError, ValueError):
-                    continue
-                metric, unit = "views_ceil", "approx_pageviews_upper_bound"
-                snapshot_status = evidence.get("snapshot_status", "SUCCESS")
-                value, rank = evidence.get("views_ceil"), evidence.get("provider_rank")
-                if type(value) is not int or value < 0:
-                    continue
-                digest = hashlib.sha256(json.dumps([record["id"], observed.isoformat(), value, rank,
-                    snapshot_status, record["source"], record["project"]], separators=(",", ":")).encode()).hexdigest()
-                observations.append((record["id"], record["source"], observed.isoformat(),
-                    evidence.get("country_scope") or "US", evidence.get("access") or "all-access",
-                    record["project"], metric, unit, "OBSERVED", value, rank, snapshot_status, digest))
-            session.upsert_observations(observations)
-            records = session.eligible_keywords()
-            engine = algorithm_engine()
-            keys = engine.registry.keys()
-            metadata_by_key = {key: engine.registry.get(key).metadata for key in keys}
-            cache_key = "algorithm_analysis_state_v1:" + (self.store.data_mode_scope or "ALL")
-            state_digest = session.state_digest(records, metadata_by_key)
-            previous_state = session.setting(cache_key)
-            if state_digest is not None and previous_state == state_digest:
-                return {"eligible_keywords": len(records), "executed_keywords": 0,
-                        "unchanged_keywords": len(records), "recomputed_algorithms": 0,
-                        "registered_algorithms": len(keys)}
-            metadata_prefix_by_key = {
-                key: _algorithm_digest_prefix(asdict(value))
-                for key, value in metadata_by_key.items()
+            for value in prepared.values():
+                digest = hashlib.sha256(json.dumps([
+                    value["id"], value["date"].isoformat(), value["value"], value["rank"],
+                    value["snapshot_status"], WIKIMEDIA_SOURCE_ID, value["project"],
+                    value["collected_at"],
+                ], separators=(",", ":")).encode()).hexdigest()
+                value["observation_digest"] = digest
+                observations.append((
+                    value["id"], WIKIMEDIA_SOURCE_ID, value["date"].isoformat(),
+                    value["country"], value["access"], value["project"], metric, unit,
+                    "OBSERVED", value["value"], value["rank"], value["snapshot_status"], digest,
+                ))
+
+            # A confirmed complete top-list snapshot records absence as censored
+            # NOT_IN_TOP. A partial snapshot records uncertainty, never a zero.
+            missing_current = {}
+            for group, current_values in snapshot_groups.items():
+                analysis_date, country, access, project = group
+                status = "SUCCESS" if all(
+                    item["snapshot_status"] == "SUCCESS" for item in current_values
+                ) else "PARTIAL"
+                current_ids = {item["id"] for item in current_values}
+                prior_rows = session.eligible_keywords(
+                    source=WIKIMEDIA_SOURCE_ID,
+                    observed_from=(analysis_date - timedelta(days=6)).isoformat(),
+                    observed_to=(analysis_date - timedelta(days=1)).isoformat(),
+                )
+                for prior in prior_rows:
+                    if prior["id"] in current_ids:
+                        continue
+                    try:
+                        prior_evidence = json.loads(prior.get("evidence") or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(prior_evidence, dict):
+                        continue
+                    if ((prior.get("project") or "") != project
+                            or (prior_evidence.get("country_scope") or "US") != country
+                            or (prior_evidence.get("access") or "all-access") != access):
+                        continue
+                    missing_status = "NOT_IN_TOP" if status == "SUCCESS" else "PARTIAL_SNAPSHOT"
+                    digest = hashlib.sha256(json.dumps([
+                        prior["id"], analysis_date.isoformat(), missing_status, status,
+                        WIKIMEDIA_SOURCE_ID, project, country, access, source_collection_time,
+                    ], separators=(",", ":")).encode()).hexdigest()
+                    observations.append((
+                        prior["id"], WIKIMEDIA_SOURCE_ID, analysis_date.isoformat(),
+                        country, access, project, metric, unit, missing_status, None, None,
+                        status, digest,
+                    ))
+                    missing_current[prior["id"]] = {
+                        "date": analysis_date, "country": country, "access": access,
+                        "project": project,
+                        "article": prior_evidence.get("article_original") or prior.get("keyword") or "",
+                        "value": None, "rank": None, "snapshot_status": status,
+                        "collected_at": source_collection_time,
+                        "observation_digest": digest,
+                        "evidence_url": prior_evidence.get("source_url"),
+                        "observation_status": missing_status,
+                    }
+            observation_digest_by_id_date = {
+                (value["id"], value["date"].isoformat()): value["observation_digest"]
+                for value in prepared.values()
             }
+            observation_digest_by_id_date.update({
+                (keyword_id, value["date"].isoformat()): value["observation_digest"]
+                for keyword_id, value in missing_current.items()
+            })
+            session.upsert_observations(observations)
+
+            analysis_rows = dict(eligible_current)
+            missing_ids = list(missing_current)
+            for offset in range(0, len(missing_ids), 500):
+                rows = session.eligible_keywords(
+                    source=WIKIMEDIA_SOURCE_ID, ids=missing_ids[offset:offset + 500],
+                )
+                analysis_rows.update({row["id"]: row for row in rows})
+
             snapshot_cohorts = defaultdict(list)
-            for peer in records:
-                try:
-                    peer_evidence = json.loads(peer["evidence"])
-                    peer_date = peer_evidence.get("observation_date") or peer["observed_at"][:10]
-                    peer_key = (peer["source"], peer_evidence.get("country_scope") or "US",
-                        peer_evidence.get("access") or "all-access", peer_date, "views_ceil",
-                        "approx_pageviews_upper_bound", peer["project"])
-                    peer_value = peer_evidence.get("views_ceil")
-                    if type(peer_value) is int and peer_value >= 0:
-                        peer_scope = Scope(peer["source"], peer_key[1], peer_key[2], peer["project"],
-                            peer_evidence.get("article_original") or peer["keyword"], peer_key[4], peer_key[5])
-                        snapshot_cohorts[peer_key].append((peer["id"], Observation(
-                            date.fromisoformat(peer_date), peer_scope, "OBSERVED", peer_value,
-                        peer_evidence.get("snapshot_status", "SUCCESS"), peer_evidence.get("provider_rank"))))
-                except (TypeError, ValueError):
-                    continue
+            for keyword_id, value in prepared.items():
+                scope = Scope(WIKIMEDIA_SOURCE_ID, value["country"], value["access"],
+                              value["project"], value["article"], metric, unit)
+                point = Observation(value["date"], scope, "OBSERVED", value["value"],
+                                    value["snapshot_status"], value["rank"])
+                group = (value["date"], value["country"], value["access"],
+                         value["project"], metric, unit)
+                snapshot_cohorts[group].append((keyword_id, point))
             serialized_cohorts = {}
             cohort_indexes = {}
-            for cohort_key, cohort in snapshot_cohorts.items():
-                try:
-                    serialized_cohorts[cohort_key] = _serialized_cohort(cohort)
-                    cohort_indexes[cohort_key] = _cohort_json_index(serialized_cohorts[cohort_key])
-                except TypeError:
-                    # Preserve the old per-record sort behavior for unusual
-                    # mixed values that cannot be globally ordered.
-                    pass
+            for group, cohort in snapshot_cohorts.items():
+                serialized = _serialized_cohort(cohort)
+                serialized_cohorts[group] = serialized
+                cohort_indexes[group] = _cohort_json_index(serialized)
+
+            history_rows_by_keyword = defaultdict(list)
+            history_groups = defaultdict(list)
+            for keyword_id, value in missing_current.items():
+                history_groups[(value["date"], value["country"], value["access"],
+                                value["project"])].append(keyword_id)
+            for keyword_id, value in prepared.items():
+                history_groups[(value["date"], value["country"], value["access"],
+                                value["project"])].append(keyword_id)
+            for (history_date, country, access, project), keyword_ids in history_groups.items():
+                for offset in range(0, len(keyword_ids), 500):
+                    rows = session.histories(
+                        keyword_ids[offset:offset + 500], WIKIMEDIA_SOURCE_ID,
+                        history_date.isoformat(), metric, unit,
+                        after_date=(history_date - timedelta(days=6)).isoformat(),
+                        country=country, access=access, project=project,
+                    )
+                    for point in rows:
+                        history_rows_by_keyword[point["keyword_id"]].append(point)
+
+            existing_results_by_keyword = {}
+            analysis_ids = list(analysis_rows)
+            for offset in range(0, len(analysis_ids), 500):
+                existing_results_by_keyword.update(
+                    session.result_digests_for(analysis_ids[offset:offset + 500])
+                )
+
             executed = unchanged = recomputed_algorithms = 0
             cacheable = True
-            for record in records:
-                try:
-                    evidence = json.loads(record["evidence"])
-                    analysis_date = date.fromisoformat(evidence.get("observation_date") or record["observed_at"][:10])
-                    metric, unit = "views_ceil", "approx_pageviews_upper_bound"
-                    scope = Scope(record["source"], evidence.get("country_scope") or "US",
-                        evidence.get("access") or "all-access", record["project"],
-                        evidence.get("article_original") or record["keyword"], metric, unit)
-                    history_rows = session.history(
-                        record["id"], record["source"], analysis_date.isoformat(), metric, unit
-                    )
-                    history = tuple(Observation(date.fromisoformat(point["observation_date"]), scope,
-                        point["status"], point["value"], point["snapshot_status"]) for point in history_rows)
-                    current = evidence.get("views_ceil")
-                    cohort_key = (record["source"], scope.country, scope.access,
-                        analysis_date.isoformat(), metric, unit, record["project"])
-                    peers = snapshot_cohorts.get(cohort_key, ())
-                    serialized = serialized_cohorts.get(cohort_key)
-                    if serialized is None:
-                        cohort = tuple(point for keyword_id, point in peers if keyword_id != record["id"])
-                        cohort_input = sorted((point.scope.project, point.scope.article, point.value, point.rank)
-                                              for point in cohort)
-                        cohort_bytes = None
-                    else:
-                        cohort = None
-                        cohort_input = _COHORT_MARKER
-                        cohort_bytes = _cohort_json_without(
-                            serialized, record["id"], cohort_indexes[cohort_key]
-                        )
-                    input_data = {"scope": asdict(scope),
-                        "date": analysis_date.isoformat(), "current": current,
-                        "current_snapshot_status": evidence.get("snapshot_status", "SUCCESS"),
-                        "history": [(str(point.date), point.status, point.value, point.snapshot_status) for point in history],
-                        "cohort": cohort_input}
-                    existing = session.result_digests(record["id"])
-                    digest_by_key = {}
-                    missing_keys = []
-                    encoded_inputs = {}
-                    for key in keys:
-                        metadata = metadata_by_key[key]
-                        popularity = metadata.family == "popularity"
-                        if popularity not in encoded_inputs:
-                            encoded_inputs[popularity] = _algorithm_digest_input(
-                                input_data, popularity=popularity, cohort_bytes=cohort_bytes
-                            )
-                        encoded = metadata_prefix_by_key[key] + encoded_inputs[popularity] + b"}"
-                        digest = hashlib.sha256(encoded).hexdigest()
-                        digest_by_key[key] = digest
-                        if existing.get(metadata.algorithm_id) != digest:
-                            missing_keys.append(key)
-                    if not missing_keys:
-                        unchanged += 1
-                        continue
-                    if cohort is None:
-                        cohort = tuple(point for keyword_id, point in peers if keyword_id != record["id"])
-                    item = AlgorithmInput(record["id"], scope, analysis_date, current, history,
-                        window_days=7, minimum_samples=3, evidence_url=evidence.get("source_url"),
-                        current_snapshot_status=evidence.get("snapshot_status", "SUCCESS"), cohort=cohort)
-                    produced_keys = []
-                    persisted_results = []
-                    for result in engine.run(item, missing_keys):
-                        payload = json.dumps(asdict(result), ensure_ascii=False, sort_keys=True)
-                        result_key = f"{result.algorithm_id}@{result.algorithm_version}"
-                        result_digest = digest_by_key[result_key]
-                        produced_keys.append(result_key)
-                        persisted_results.append((record["id"], result.algorithm_id,
-                            result.algorithm_version, result.status, result.reason_code, result.value,
-                            result.metric_name, result.metric_unit, payload, result_digest, now()))
-                    session.upsert_results(persisted_results)
-                    executed += 1
-                    recomputed_algorithms += len(missing_keys)
-                    if len(produced_keys) != len(missing_keys) or set(produced_keys) != set(missing_keys):
-                        cacheable = False
-                except (TypeError, ValueError, KeyError, json.JSONDecodeError):
-                    cacheable = False
+            for record in analysis_rows.values():
+                keyword_id = record["id"]
+                value = prepared.get(keyword_id) or missing_current.get(keyword_id)
+                if value is None:
                     continue
-            if cacheable:
-                # Results may have been inserted above, so fingerprint the final
-                # state before this store transaction is committed.
-                final_digest = session.state_digest(records, metadata_by_key)
-                if final_digest is not None:
-                    session.set_setting(cache_key, final_digest)
-            elif previous_state is not None:
-                session.delete_setting(cache_key)
-            return {"eligible_keywords": len(records), "executed_keywords": executed,
-                    "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
-                    "registered_algorithms": len(keys)}
+                analysis_date = value["date"]
+                scope = Scope(WIKIMEDIA_SOURCE_ID, value["country"], value["access"],
+                              value["project"], value["article"], metric, unit)
+                history_rows = history_rows_by_keyword.get(keyword_id, [])
+                history = tuple(Observation(
+                    date.fromisoformat(str(point["observation_date"])[:10]), scope,
+                    point["status"], point["value"], point["snapshot_status"],
+                ) for point in history_rows)
+                current = value["value"]
+                cohort_key = (analysis_date, scope.country, scope.access, scope.project, metric, unit)
+                peers = snapshot_cohorts.get(cohort_key, ())
+                cohort_index = cohort_indexes.get(cohort_key)
+                if cohort_key in serialized_cohorts:
+                    cohort = None
+                    cohort_input = _COHORT_MARKER
+                    cohort_bytes = _cohort_json_without(
+                        serialized_cohorts[cohort_key], keyword_id, cohort_index
+                    )
+                else:
+                    cohort = ()
+                    cohort_input = []
+                    cohort_bytes = None
+                input_data = {
+                    "scope": asdict(scope), "date": analysis_date.isoformat(), "current": current,
+                    "collected_at": value.get("collected_at"),
+                    "current_snapshot_status": value["snapshot_status"],
+                    "current_observation_status": value.get("observation_status", "OBSERVED"),
+                    "history": [(str(point.date), point.status, point.value, point.snapshot_status)
+                                for point in history],
+                    "cohort": cohort_input,
+                }
+                existing = existing_results_by_keyword.get(keyword_id, {})
+                digest_by_key, missing_keys, encoded_inputs = {}, [], {}
+                for key in keys:
+                    metadata = metadata_by_key[key]
+                    popularity = metadata.family == "popularity"
+                    if popularity not in encoded_inputs:
+                        encoded_inputs[popularity] = _algorithm_digest_input(
+                            input_data, popularity=popularity, cohort_bytes=cohort_bytes,
+                        )
+                    encoded = metadata_prefix_by_key[key] + encoded_inputs[popularity] + b"}"
+                    digest = hashlib.sha256(encoded).hexdigest()
+                    digest_by_key[key] = digest
+                    if existing.get(metadata.algorithm_id) != digest:
+                        missing_keys.append(key)
+                if not missing_keys:
+                    unchanged += 1
+                    continue
+                if cohort is None:
+                    cohort = tuple(point for peer_id, point in peers if peer_id != keyword_id)
+                item = AlgorithmInput(
+                    keyword_id, scope, analysis_date, current, history,
+                    window_days=6, minimum_samples=3, evidence_url=value["evidence_url"],
+                    current_snapshot_status=value["snapshot_status"], cohort=cohort,
+                )
+                produced_keys, persisted_results = [], []
+                for result in engine.run(item, missing_keys):
+                    result_key = f"{result.algorithm_id}@{result.algorithm_version}"
+                    result_digest = digest_by_key[result_key]
+                    evidence_references = [{
+                        "source_id": WIKIMEDIA_SOURCE_ID,
+                        "keyword_id": keyword_id,
+                        "observation_date": point["observation_date"],
+                        "metric": metric,
+                        "unit": unit,
+                        "input_digest": point.get("input_digest"),
+                    } for point in history_rows]
+                    current_observation_digest = observation_digest_by_id_date.get(
+                        (keyword_id, analysis_date.isoformat())
+                    )
+                    evidence_references.append({
+                        "source_id": WIKIMEDIA_SOURCE_ID,
+                        "keyword_id": keyword_id,
+                        "observation_date": analysis_date.isoformat(),
+                        "metric": metric,
+                        "unit": unit,
+                        "input_digest": current_observation_digest,
+                    })
+                    result_payload = asdict(result)
+                    result_payload.update({
+                        "source_id": WIKIMEDIA_SOURCE_ID,
+                        "observation_date": analysis_date.isoformat(),
+                        "collected_at": value.get("collected_at"),
+                        "input_scope": asdict(scope),
+                        "input_metric": metric,
+                        "input_unit": unit,
+                        "result_contract_version": RESULT_CONTRACT_VERSION,
+                        "input_digest": result_digest,
+                        "evidence_references": evidence_references,
+                        "cohort_input_digest": (
+                            hashlib.sha256(cohort_bytes).hexdigest()
+                            if result.algorithm_id in {"observed-volume-rank", "observed-percentile-rank"}
+                            and cohort_bytes is not None else None
+                        ),
+                    })
+                    payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True,
+                                         allow_nan=False)
+                    produced_keys.append(result_key)
+                    persisted_results.append((
+                        keyword_id, result.algorithm_id, result.algorithm_version, result.status,
+                        result.reason_code, result.value, result.metric_name, result.metric_unit,
+                        payload, result_digest, now(),
+                    ))
+                session.upsert_results(persisted_results)
+                executed += 1
+                recomputed_algorithms += len(missing_keys)
+                if len(produced_keys) != len(missing_keys) or set(produced_keys) != set(missing_keys):
+                    cacheable = False
+            return {
+                "eligible_keywords": len(analysis_rows), "executed_keywords": executed,
+                "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
+                "registered_algorithms": registered_count, "persisted_algorithms": len(keys),
+                "analysis_status": "COMPLETED" if cacheable else "PARTIAL",
+                "source_id": WIKIMEDIA_SOURCE_ID, "window_days": 6,
+                "retention_calendar_days": 7,
+            }
 
         return self.store.run_algorithm_analysis(analyze)
 

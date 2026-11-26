@@ -45,6 +45,9 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
                     state: str = Query(default='all', pattern='^(all|unassigned|ai|manual|mixed|needs_review|excluded|non_topic)$'),
                     classification: Literal['all', 'CLASSIFIED', 'AMBIGUOUS', 'UNKNOWN', 'INELIGIBLE'] = 'all',
                     evidence: Literal['all', 'metric', 'algorithm', 'missing'] = 'all',
+                    evidence_source: Literal['', 'wikimedia_pageviews_top_per_country',
+                        'google_trends', 'google_web_serp', 'bing_web_serp',
+                        'youtube_video_search'] = '',
                     collection_ids: list[str] = Query(default=[]), source: str = Query(default='', max_length=100),
                     sort: str = Query(default='recent', pattern='^(recent|keyword|views|rank)$'),
                     date_from: date | None = None, date_to: date | None = None,
@@ -53,6 +56,7 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
     service = _service(request)
     return latest_keywords_for_service(
         service, q=q, state=state, classification=classification, evidence=evidence,
+        evidence_source=evidence_source,
         collection_ids=collection_ids, source=source, sort=sort,
         date_from=date_from.isoformat() if date_from else "",
         date_to=date_to.isoformat() if date_to else "",
@@ -62,7 +66,7 @@ def latest_keywords(request: Request, q: str = Query(default='', max_length=100)
 
 
 def latest_keywords_for_service(service, *, q="", state="all", classification="all",
-                                evidence="all", collection_ids=(), source="", sort="recent",
+                                evidence="all", evidence_source="", collection_ids=(), source="", sort="recent",
                                 date_from="", date_to="", limit=50, offset=0,
                                 include_algorithm_results=True):
     """Run the validated keyword query for an already-authorized service."""
@@ -74,6 +78,7 @@ def latest_keywords_for_service(service, *, q="", state="all", classification="a
         result = service.store.search_keywords(query=q, state=state, collection_ids=collection_ids,
                                                source=source, sort=sort, limit=limit, offset=offset,
                                                classification=classification, evidence=evidence,
+                                               evidence_source=evidence_source,
                                                include_algorithm_results=include_algorithm_results,
                                                date_from=date_from, date_to=date_to)
     except ValueError:

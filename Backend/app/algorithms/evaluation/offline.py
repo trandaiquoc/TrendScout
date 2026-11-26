@@ -11,7 +11,6 @@ POLICIES = {
     'wikimedia-trend@v0.1': ('trend_score', 'points_0_100'),
     'growth-ratio@v0.1': ('growth_ratio', 'dimensionless'),
 }
-NONCOMPARABLE = {'median-baseline@v0.1', 'ewma@v0.1', 'robust-z-mad@v0.1'}
 SCOPE_KEYS = ('source', 'country', 'access', 'project', 'metric', 'unit')
 
 
@@ -130,7 +129,7 @@ def _validate_prediction(p, dataset, entities, algorithm):
     if not set(parsed) <= allowed:
         raise ValueError('feature date not present in dataset')
     status, value = p.get('status'), p.get('value')
-    if status not in ('COMPLETED', 'SKIPPED', 'FAILED'):
+    if status not in ('COMPLETED', 'INSUFFICIENT_DATA', 'SKIPPED', 'FAILED'):
         raise ValueError('invalid result status')
     if status == 'COMPLETED':
         if type(value) not in (int, float) or not math.isfinite(value):
@@ -157,7 +156,7 @@ def evaluate(dataset, predictions, k, evaluation_id):
         raise ValueError('no algorithms')
     prepared, reports = {}, {}
     for algorithm, values in sorted(predictions.items()):
-        if algorithm in NONCOMPARABLE or algorithm not in POLICIES:
+        if algorithm not in POLICIES:
             reports[algorithm] = {'status': 'NOT_COMPARABLE', 'reason': 'No approved trend ranking policy for this output'}
             continue
         by_id = {}
@@ -186,8 +185,11 @@ def evaluate(dataset, predictions, k, evaluation_id):
             'status': reason or 'EVALUATED', 'ranking_metric': by_id[next(iter(by_id))]['metric'] if by_id else POLICIES[algorithm][0],
             'ranking_unit': POLICIES[algorithm][1], 'direction': 'descending', 'tie_break': 'entity_id_ascending',
             'eligible_count': len(common), 'ranked_entity_ids': ranked, 'top_k_entity_ids': top,
-            'considered': len(entities), 'completed': counts['COMPLETED'], 'skipped': counts['SKIPPED'], 'failed': counts['FAILED'],
+            'considered': len(entities), 'completed': counts['COMPLETED'],
+            'insufficient_data': counts['INSUFFICIENT_DATA'],
+            'skipped': counts['SKIPPED'], 'failed': counts['FAILED'],
             'coverage': counts['COMPLETED'] / len(entities) if entities else None,
+            'insufficient_data_rate': counts['INSUFFICIENT_DATA'] / len(entities) if entities else None,
             'skip_rate': counts['SKIPPED'] / len(entities) if entities else None,
             'failed_rate': counts['FAILED'] / len(entities) if entities else None,
             'exclusion_reasons': dict(sorted(reasons.items())),

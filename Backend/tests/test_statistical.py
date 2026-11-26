@@ -51,7 +51,7 @@ class RobustTests(unittest.TestCase):
 
     def test_mad_zero_and_sample_and_censor_gates(self):
         constant = run(self.strategy,series([10]*14, 20))
-        self.assertEqual((constant.status,constant.reason_code,constant.value),('SKIPPED','ZERO_MAD',None))
+        self.assertEqual((constant.status,constant.reason_code,constant.value),('INSUFFICIENT_DATA','ZERO_MAD',None))
         self.assertEqual(dict(constant.evidence)['mad'],0)
         self.assertEqual(run(self.strategy,series(list(range(7)), 10)).reason_code,'INSUFFICIENT_SAMPLES')
         full = series(list(range(14)), 10)
@@ -66,9 +66,12 @@ class RobustTests(unittest.TestCase):
 
     def test_scope_time_duplicates_and_invalid(self):
         data = series(list(range(14)), 10)
-        for attr,value,reason in [('source','other','UNSUPPORTED_SOURCE'),('metric','likes','UNSUPPORTED_METRIC'),('unit','unknown','UNSUPPORTED_UNIT')]:
-            with self.subTest(attr=attr):
-                self.assertEqual(run(self.strategy,replace(data,scope=replace(SCOPE,**{attr:value}))).reason_code,reason)
+        generic_scope = Scope('provider_daily_series','US','public','search','robot vacuum',
+                             'observed_count','items')
+        generic = series(list(range(14)), 10, scope=generic_scope)
+        self.assertEqual(run(self.strategy,generic).status,'COMPLETED')
+        self.assertEqual(run(self.strategy,replace(data,scope=replace(SCOPE,source=''))).reason_code,
+                         'INVALID_SCOPE')
         point = data.history[0]
         cases = [replace(point,scope=replace(SCOPE,project='fr.wikipedia')),
                  replace(point,scope=replace(SCOPE,unit='count'))]
@@ -125,7 +128,7 @@ class RegistryTests(unittest.TestCase):
         registry.register(RobustZMad())
         registry.register(EWMA(EWMAConfig(alpha=.5, allow_top_censored=True)))
         data = series(list(range(1,15)), 15)
-        results = AlgorithmRunner(registry).run(data,['robust-z-mad@v0.1','ewma@v0.1'])
+        results = AlgorithmRunner(registry).run(data,['robust-z-mad@v0.2','ewma@v0.2'])
         self.assertEqual([x.algorithm_id for x in results], ['ewma','robust-z-mad'])
         self.assertEqual([x.status for x in results], ['COMPLETED','SKIPPED'])
         self.assertEqual(dict(results[0].evidence)['total_sample_count'], 15)
@@ -133,8 +136,8 @@ class RegistryTests(unittest.TestCase):
 
     def test_registered_disabled_isolation_and_unknown(self):
         engine = algorithm_engine()
-        self.assertIn('robust-z-mad@v0.1',engine.registry.keys())
-        self.assertIn('ewma@v0.1',engine.registry.keys())
+        self.assertIn('robust-z-mad@v0.2',engine.registry.keys())
+        self.assertIn('ewma@v0.2',engine.registry.keys())
         self.assertEqual(engine.run(series([1]*7,1),[]),())
         with self.assertRaises(ValueError): engine.run(series([1]*7,1),['unknown@v1'])
         registry = AlgorithmRegistry()
@@ -144,6 +147,6 @@ class RegistryTests(unittest.TestCase):
         broken.metadata = AlgorithmMetadata('broken','v1','Broken',SOURCE,METRIC,UNIT,3,90)
         broken.applicable.side_effect = RuntimeError('sensitive synthetic')
         registry.register(broken)
-        result = AlgorithmRunner(registry).run(series([1]*7,1),['ewma@v0.1','broken@v1'])
+        result = AlgorithmRunner(registry).run(series([1]*7,1),['ewma@v0.2','broken@v1'])
         self.assertEqual([r.status for r in result],['FAILED','SKIPPED'])
         self.assertNotIn('sensitive',repr(result))

@@ -46,6 +46,12 @@ def test_summary_and_tree_match_legacy_on_isolated_postgres(tmp_path):
                 data_mode,evidence,eligible) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (key, key, key, "synthetic", project, "2026-11-26T10:00:00+00:00", mode,
                  json.dumps({"candidate": key}), eligible))
+        db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+            data_mode,evidence,eligible) VALUES(?,?,?,?,?,?,?,?,1)""",
+            ("candidate-with-verification", "Candidate with verification", "candidate with verification",
+             "google_web_serp", "google_trends:US:en", timestamp, "LIVE",
+             json.dumps({"data_source": "GOOGLE_TRENDS", "serp_verification": {"source_id": "google_web_serp"},
+                         "bing_verification": {"source_id": "bing_web_serp"}})))
         for collection, key in [(item, "k1") for item in sorted((root, child), reverse=True)] + [(child, "k2")]:
             db.execute("""INSERT INTO memberships(collection_id,keyword_id,origin,pinned,created_at)
                 VALUES(?,?,'USER',1,?)""", (collection, key, timestamp))
@@ -97,11 +103,14 @@ def test_summary_and_tree_match_legacy_on_isolated_postgres(tmp_path):
             ) == {"status": "COMPLETED", "error_code": None}
             assert reader.fetch_collection_processing_result("fetch-only") is None
             assert reader.algorithm_results_overview() == legacy.algorithm_results_overview()
+            for options in ({"limit": 1, "offset": 0, "source": "synthetic"},
+                            {"source": "synthetic", "algorithm_id": "score", "status": "COMPLETED"}):
+                assert reader.algorithm_results_overview(**options) == legacy.algorithm_results_overview(**options)
             assert reader.analytics_overview_inputs() == legacy.analytics_overview_inputs()
             pg_metrics = reader.runtime_storage_metrics("unused-model")
             assert pg_metrics["engine"] == "POSTGRESQL"
             assert pg_metrics["integrity"] is None
-            assert pg_metrics["keyword_records"] == 8
+            assert pg_metrics["keyword_records"] == 9
             assert pg_metrics["cache_vectors"] == 0 and pg_metrics["database_size_bytes"] > 0
             def canonical_snapshots(rows):
                 for row in rows:
@@ -136,6 +145,10 @@ def test_summary_and_tree_match_legacy_on_isolated_postgres(tmp_path):
             for options in ({}, {"sort": "views"}, {"sort": "rank"}, {"sort": "keyword", "limit": 2},
                             {"state": "unassigned"}, {"state": "manual"}, {"state": "excluded"},
                             {"evidence": "metric"}, {"evidence": "missing"}, {"evidence": "algorithm"},
+                            {"evidence_source": "google_trends"},
+                            {"evidence_source": "google_web_serp"},
+                            {"evidence_source": "bing_web_serp"},
+                            {"evidence_source": "youtube_video_search"},
                             {"collection_ids": [root]}, {"query": "K1"}, {"keyword_id": "k1"},
                             {"ids_only": True, "state": "manual"}, {"include_algorithm_results": False}):
                 actual = reader.search_keywords(**options)

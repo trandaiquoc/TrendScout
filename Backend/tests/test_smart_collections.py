@@ -91,6 +91,132 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(manifest[0]["record_count"], 1)
         self.assertEqual(manifest[0]["received_record_count"], 1)
 
+    def test_keyword_identity_is_nfc_exact_and_keeps_source_evidence(self):
+        composed = {
+            "article_display": "Café Equipment",
+            "article_original": "Cafe\u0301_Equipment",
+            "project": "en.wikipedia",
+            "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z",
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }
+        decomposed = {**composed, "article_display": "Cafe\u0301 Equipment"}
+        first = keyword_record(composed, "wikimedia_pageviews_top_per_country", "LIVE")
+        second = keyword_record(decomposed, "wikimedia_pageviews_top_per_country", "LIVE")
+        distinct_title = keyword_record({**composed, "article_display": "Cafe Equipment"},
+                                        "wikimedia_pageviews_top_per_country", "LIVE")
+        case_distinct_title = keyword_record({**composed, "article_display": "CAFÉ Equipment"},
+                                             "wikimedia_pageviews_top_per_country", "LIVE")
+        other_project = keyword_record({**composed, "project": "fr.wikipedia"},
+                                       "wikimedia_pageviews_top_per_country", "LIVE")
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(first["keyword"], "Café Equipment")
+        self.assertEqual(first["normalized"], "café equipment")
+        self.assertNotEqual(first["id"], distinct_title["id"])
+        self.assertNotEqual(first["id"], case_distinct_title["id"])
+        self.assertNotEqual(first["id"], other_project["id"])
+        self.assertEqual(json.loads(first["evidence"])["article_original"], "Cafe\u0301_Equipment")
+        self.assertIn("keyword-identity-nfc-case-preserving-v2",
+                      json.loads(first["evidence"])["normalization_provenance"])
+
+    def test_evidence_source_filters_tolerate_malformed_legacy_json_and_return_zero_counts(self):
+        with self.store.connect() as db:
+            db.execute("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                data_mode,evidence) VALUES(?,?,?,?,?,?,?,?)""",
+                ("legacy-malformed", "Legacy candidate", "legacy candidate", "google_web_serp",
+                 "google_trends:US:en", "2026-11-12T00:00:00Z", "LIVE", "not-json"))
+
+        results = self.store.search_keywords(evidence_source="google_trends")
+        overview = self.store.analytics_overview_inputs()
+        self.assertEqual(results["total"], 0)
+        self.assertEqual(overview["verification_rows"], {
+            "google_trends_candidates": 0,
+            "google_search_candidates": 0,
+            "bing_search_candidates": 0,
+        })
+
+    def test_wikimedia_only_algorithms_and_nested_verification_roles(self):
+        wiki_row = {
+            "article_display": "Portable Solar Generator",
+            "article_original": "Portable_Solar_Generator",
+            "project": "en.wikipedia", "observation_date": "2026-11-14",
+            "fetched_at": "2026-11-15T12:00:00Z", "provider_rank": 1,
+            "views_ceil": 8400, "country_scope": "US", "source_url": "https://wikimedia.org/",
+        }
+        google_record = {
+            "data_source": "GOOGLE_TRENDS", "provider_id": "google_trends_rss",
+            "transport_id": "google_trends_rss_http", "discovery_mode": "RSS_LIMITED_DISCOVERY",
+            "canonical_keyword": "Portable Solar Generator",
+            "canonical_keyword_identity": hashlib.sha256(
+                normalize_keyword("Portable Solar Generator")[1].encode("utf-8")
+            ).hexdigest(),
+            "region": "US", "language": "en", "time_window_hours": None,
+            "provider_data_at": "2026-11-15T11:55:00+00:00", "provider_created_at": None,
+            "fetched_at": "2026-11-15T12:01:00+00:00",
+            "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
+            "delivery_state": "FRESH", "quality_flags": [],
+            "serp_verification": {"source_id": "google_web_serp", "query_scope": "candidate"},
+            "bing_verification": {"source_id": "bing_web_serp", "query_scope": "candidate"},
+            "trend_clusters": [{"trend_cluster_id": "cluster-1", "started_at": None,
+                "ended_at": None, "active": None, "search_volume": None,
+                "search_volume_display": "20K+", "increase_percentage": None,
+                "categories": None, "related_queries": None}],
+        }
+        google_source = [{"source_id": "google_web_serp", "data_mode": "LIVE",
+            "status": "SUCCESS", "record_count": 1, "records": [google_record]}]
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("source-role-mix", [*live_source([wiki_row]), *google_source])
+
+        with self.store.connect() as db:
+            rows = db.execute("SELECT id,source,evidence FROM keywords ORDER BY source").fetchall()
+            results = db.execute("SELECT keyword_id,algorithm_id,result_json FROM algorithm_results").fetchall()
+        self.assertEqual({row["source"] for row in rows}, {
+            "wikimedia_pageviews_top_per_country", "google_web_serp",
+        })
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(row["keyword_id"] != next(item["id"] for item in rows
+                                                        if item["source"] == "google_web_serp")
+                            for row in results))
+        rank_payload = json.loads(next(row["result_json"] for row in results
+                                       if row["algorithm_id"] == "observed-volume-rank"))
+        self.assertEqual(rank_payload["source_id"], "wikimedia_pageviews_top_per_country")
+        self.assertEqual(rank_payload["algorithm_version"], "v4")
+        self.assertEqual(rank_payload["result_contract_version"], "algorithm-result-v2")
+        self.assertEqual(rank_payload["input_metric"], "views_ceil")
+        self.assertTrue(rank_payload["evidence_references"])
+        self.assertTrue(all(reference["input_digest"] for reference in rank_payload["evidence_references"]))
+        wikimedia_id = next(row["id"] for row in rows
+                           if row["source"] == "wikimedia_pageviews_top_per_country")
+        result_digests = self.store.run_algorithm_analysis(
+            lambda session: session.result_digests_for([wikimedia_id])
+        )
+        self.assertEqual(set(result_digests[wikimedia_id]), {
+            "growth-ratio", "median-baseline", "observed-volume-rank",
+            "observed-percentile-rank",
+        })
+
+        app = create_app(read_only=True, settings=Settings.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true"}))
+        app.state.collection_service = self.service
+
+        async def source_views():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                overview = await client.get("/api/v1/analytics/overview")
+                attached = await client.get("/api/v1/datasets/latest/keywords", params={
+                    "source": "google_web_serp", "evidence_source": "bing_web_serp",
+                })
+                return overview, attached
+        overview, attached = __import__("asyncio").run(source_views())
+        profiles = {profile["source_id"]: profile for profile in overview.json()["source_roles"]}
+        self.assertEqual(profiles["google_web_serp"]["keyword_records"], 1)
+        self.assertEqual(profiles["google_web_serp"]["verification_candidate_records"], 1)
+        self.assertEqual(profiles["bing_web_serp"]["keyword_records"], 0)
+        self.assertEqual(overview.json()["multi_source_coverage"]["composite_score"], None)
+        self.assertEqual(overview.json()["multi_source_coverage"]["shared_keyword_overlap"], None)
+        self.assertEqual(attached.json()["total"], 1)
+        self.assertEqual(attached.json()["items"][0]["source"], "google_web_serp")
+
     def test_cache_only_collection_reuse_requires_completed_matching_source_evidence(self):
         from app.collections.source_digest import reusable_collection_input
 
@@ -405,6 +531,20 @@ class SmartCollectionsTests(unittest.TestCase):
         summaries = {row["algorithm_id"]: row for row in results_response.json()["summary"]}
         self.assertEqual(summaries["observed-volume-rank"]["completed"], 2)
         self.assertIn("NOT_YET_EVALUATED", results_response.json()["evaluation_status"])
+
+        async def filtered_results():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                return await client.get("/api/v1/algorithms/results", params={
+                    "limit": 1, "offset": 0,
+                    "source": "wikimedia_pageviews_top_per_country",
+                    "algorithm_id": "observed-volume-rank", "status": "COMPLETED",
+                })
+        filtered = __import__("asyncio").run(filtered_results())
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual(filtered.json()["total"], 2)
+        self.assertEqual(len(filtered.json()["items"]), 1)
+        self.assertEqual(filtered.json()["items"][0]["algorithm_id"], "observed-volume-rank")
+        self.assertTrue(filtered.json()["items"][0]["input_digest"])
         async def read_dataset():
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
                 summary = await client.get("/api/v1/datasets/latest")
@@ -516,6 +656,103 @@ class SmartCollectionsTests(unittest.TestCase):
                 self.assertTrue({"CENSORED_TOP_LIST", "PARTIAL_SAMPLE", "VIEWS_APPROXIMATE"} <= set(flags))
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations WHERE snapshot_status='PARTIAL'").fetchone()[0], 2)
         self.assertEqual(self.store.latest_dataset()["status"], "PARTIAL")
+
+    def test_complete_and_partial_snapshots_store_absence_as_missing_not_zero(self):
+        first_rows = [
+            {"article_display": "Robot vacuum", "article_original": "Robot_vacuum",
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-11T12:00:00Z", "views_ceil": 1000},
+            {"article_display": "Mars Rover", "article_original": "Mars_Rover",
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-11T12:00:00Z", "views_ceil": 500},
+        ]
+        second_source = live_source([{
+            "article_display": "Mars Rover", "article_original": "Mars_Rover",
+            "project": "en.wikipedia", "observation_date": "2026-11-11",
+            "fetched_at": "2026-11-12T12:00:00Z", "views_ceil": 700,
+        }])
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            self.service._process_fetch("absence-first", live_source(first_rows))
+            self.service._process_fetch("absence-complete", second_source)
+        robot = self.store.search_keywords(query="Robot vacuum")["items"][0]
+        with self.store.connect() as db:
+            observation = db.execute("SELECT status,value,snapshot_status FROM algorithm_observations "
+                "WHERE keyword_id=? AND observation_date='2026-11-11'", (robot["id"],)).fetchone()
+            results = db.execute("SELECT status,reason_code,value FROM algorithm_results WHERE keyword_id=?",
+                                 (robot["id"],)).fetchall()
+        self.assertEqual(tuple(observation), ("NOT_IN_TOP", None, "SUCCESS"))
+        self.assertTrue(results)
+        self.assertTrue(all(row["status"] == "INSUFFICIENT_DATA" and row["value"] is None
+                            for row in results))
+
+        partial_store = CollectionStore(Path(self.temp.name) / "partial-absence.sqlite")
+        partial_service = CollectionService(partial_store, fetch_model_inference_enabled=False)
+        partial_second = live_source([{
+            "article_display": "Mars Rover", "article_original": "Mars_Rover",
+            "project": "en.wikipedia", "observation_date": "2026-11-11",
+            "fetched_at": "2026-11-12T12:00:00Z", "views_ceil": 700,
+        }])
+        partial_second[0]["status"] = "PARTIAL"
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            partial_service._process_fetch("partial-absence-first", live_source([dict(row) for row in first_rows]))
+            partial_service._process_fetch("partial-absence-second", partial_second)
+        partial_robot = partial_store.search_keywords(query="Robot vacuum")["items"][0]
+        with partial_store.connect() as db:
+            partial_observation = db.execute("SELECT status,value,snapshot_status FROM algorithm_observations "
+                "WHERE keyword_id=? AND observation_date='2026-11-11'", (partial_robot["id"],)).fetchone()
+        self.assertEqual(tuple(partial_observation), ("PARTIAL_SNAPSHOT", None, "PARTIAL"))
+
+    def test_cache_only_analysis_does_not_open_analysis_transaction(self):
+        record = {"source": "wikimedia_pageviews_top_per_country"}
+        with patch.object(self.store, "run_algorithm_analysis",
+                          side_effect=AssertionError("cache-only replay must not scan or write")):
+            result = self.service._analyze_persisted_keywords(
+                [record],
+                sources=[{"source_id": "wikimedia_pageviews_top_per_country",
+                          "coverage": {"cache_only": True}}],
+                cache_only=True,
+            )
+        self.assertEqual(result["analysis_status"], "CACHE_ONLY")
+        self.assertEqual(result["recomputed_algorithms"], 0)
+
+    def test_observation_history_is_bounded_to_the_full_source_scope(self):
+        row = keyword_record({
+            "article_display": "Scope Example", "article_original": "Scope_Example",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-11T00:00:00Z", "provider_rank": 1, "views_ceil": 1000,
+        }, "wikimedia_pageviews_top_per_country", "LIVE")
+        keyword_id = self.store.persist_cleaned_keywords([row])["records"][0]["id"]
+        source = "wikimedia_pageviews_top_per_country"
+        metric, unit = "views_ceil", "approx_pageviews_upper_bound"
+
+        def observation(day, country, access, project, value):
+            return (keyword_id, source, day, country, access, project, metric, unit,
+                    "OBSERVED", value, 1, "SUCCESS", f"digest-{day}-{country}-{access}-{project}")
+
+        self.store.run_algorithm_analysis(lambda session: session.upsert_observations([
+            observation("2026-11-09", "US", "all-access", "en.wikipedia", 100),
+        ]))
+        self.store.run_algorithm_analysis(lambda session: session.upsert_observations([
+            observation("2026-11-09", "CA", "desktop", "fr.wikipedia", 200),
+            observation("2026-11-10", "US", "all-access", "en.wikipedia", 300),
+        ]))
+        def read(session):
+            old_us = session.history(keyword_id, source, "2026-11-11", metric, unit,
+                country="US", access="all-access", project="en.wikipedia")
+            old_ca = session.history(keyword_id, source, "2026-11-10", metric, unit,
+                country="CA", access="desktop", project="fr.wikipedia")
+            batch_us = session.histories([keyword_id, keyword_id], source, "2026-11-11", metric, unit,
+                after_date="2026-11-01", country="US", access="all-access", project="en.wikipedia")
+            batch_ca = session.histories([keyword_id], source, "2026-11-10", metric, unit,
+                country="CA", access="desktop", project="fr.wikipedia")
+            return old_us, old_ca, batch_us, batch_ca
+        us_rows, ca_rows, batch_us, batch_ca = self.store.run_algorithm_analysis(read)
+        self.assertEqual([row["observation_date"] for row in us_rows], ["2026-11-10"])
+        self.assertEqual([row["value"] for row in us_rows], [300])
+        self.assertEqual([row["observation_date"] for row in ca_rows], ["2026-11-09"])
+        self.assertEqual([row["value"] for row in ca_rows], [200])
+        self.assertEqual([row["observation_date"] for row in batch_us], ["2026-11-10"])
+        self.assertEqual([row["observation_date"] for row in batch_ca], ["2026-11-09"])
 
     def test_user_exclusion_survives_repeated_fetch_and_can_be_restored(self):
         import asyncio
@@ -883,7 +1120,7 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
         self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
         with self.store.connect() as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 4)
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
             self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
@@ -909,16 +1146,21 @@ class SmartCollectionsTests(unittest.TestCase):
                    side_effect=AssertionError("expected cache hit")):
             cached = service._analyze_persisted_keywords([record])
         self.assertEqual((cached["unchanged_keywords"], cached["executed_keywords"]), (1, 0))
-        with self.store.connect() as db:
-            db.execute("UPDATE algorithm_observations SET value=value+1")
+        changed_record = keyword_record({
+            "article_display": "Mars Rover", "article_original": "Mars_Rover",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z", "provider_rank": 1, "views_ceil": 1200,
+        }, "wikimedia_pageviews_top_per_country", "LIVE")
+        changed = self.store.persist_cleaned_keywords([changed_record])["records"]
         with patch("app.collections.service._algorithm_digest_input", wraps=__import__(
                 "app.collections.service", fromlist=["_algorithm_digest_input"])._algorithm_digest_input) as encode:
-            service._analyze_persisted_keywords([])
+            recomputed = service._analyze_persisted_keywords(changed)
         self.assertGreater(encode.call_count, 0)
+        self.assertEqual(recomputed["recomputed_algorithms"], 4)
         with self.store.connect() as db:
             db.execute("DELETE FROM algorithm_results WHERE algorithm_id=(SELECT algorithm_id FROM algorithm_results LIMIT 1)")
-        result = service._analyze_persisted_keywords([])
-        self.assertGreater(result["recomputed_algorithms"], 0)
+        result = service._analyze_persisted_keywords(changed)
+        self.assertEqual(result["recomputed_algorithms"], 1)
         registry = algorithm_engine().registry
         metadata = {key: registry.get(key).metadata for key in registry.keys()}
         first_key = next(iter(metadata))

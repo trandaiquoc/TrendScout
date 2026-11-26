@@ -4,6 +4,9 @@ from datetime import date
 from typing import Protocol
 
 
+RESULT_CONTRACT_VERSION = 'algorithm-result-v2'
+
+
 @dataclass(frozen=True)
 class Scope:
     source: str
@@ -62,6 +65,7 @@ class AlgorithmMetadata:
     runtime_limit: str = 'Linear in observation count.'
     interpretation: str = ''
     limitations: tuple[str, ...] = ()
+    excluded_sources: tuple[str, ...] = ()
 
     @property
     def key(self):

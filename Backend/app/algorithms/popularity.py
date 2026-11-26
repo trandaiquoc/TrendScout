@@ -6,7 +6,7 @@ from app.algorithms.strategies import METRIC, SOURCE, UNIT, count_ok
 
 
 class ObservedVolumeRanking:
-    metadata = AlgorithmMetadata('observed-volume-rank', 'v3', 'Observed volume rank', SOURCE,
+    metadata = AlgorithmMetadata('observed-volume-rank', 'v4', 'Observed volume rank', SOURCE,
         'observed_volume_rank', 'ordinal_rank', 2, 1, METRIC, UNIT,
         'Rank a keyword by approximate volume within its persisted observed snapshot sample.',
         'popularity', ('daily_snapshot', 'top_list_censored'), (1,),
@@ -29,7 +29,9 @@ class ObservedVolumeRanking:
         if item.current_snapshot_status not in {'SUCCESS', 'PARTIAL'}:
             return 'CURRENT_COVERAGE_UNCONFIRMED'
         if not count_ok(item.current_value):
-            return 'INVALID_CURRENT'
+            return ('CURRENT_OBSERVATION_MISSING'
+                    if item.current_snapshot_status in {'SUCCESS', 'PARTIAL'}
+                    else 'CURRENT_COVERAGE_UNCONFIRMED')
         values = self._values(item)
         if len(values) < 2:
             return 'INSUFFICIENT_COHORT'
@@ -39,7 +41,7 @@ class ObservedVolumeRanking:
     def _values(item):
         # Cohorts are intended to contain peers, but still reject self-inclusion,
         # duplicate pages, incompatible scopes, and observations from other dates.
-        current_article = item.scope.article.casefold()
+        current_article = item.scope.article
         candidates = {}
         for point in item.cohort:
             if (point.status != 'OBSERVED'
@@ -54,7 +56,7 @@ class ObservedVolumeRanking:
                     or not point.scope.article
                     or not count_ok(point.value)):
                 continue
-            article = point.scope.article.casefold()
+            article = point.scope.article
             if article == current_article:
                 continue
             candidates.setdefault(article, set()).add(point.value)
@@ -69,7 +71,7 @@ class ObservedVolumeRanking:
     def execute(self, item):
         values = self._values(item)
         rank = 1 + sum(value > item.current_value for value in values)
-        evidence = (('cohort_size', len(values)), ('observed_values', tuple(sorted(values, reverse=True))),
+        evidence = (('cohort_size', len(values)),
                     ('observation_date', item.analysis_date.isoformat()),
                     ('scope', (item.scope.source, item.scope.country, item.scope.access,
                                item.scope.project, item.scope.metric, item.scope.unit)),
@@ -78,12 +80,11 @@ class ObservedVolumeRanking:
             'COMPLETED', rank, self.metadata.metric, self.metadata.unit, item.current_value,
             None, 1, len(values), evidence,
             ('CENSORED_TOP_LIST', 'PARTIAL_SAMPLE', 'VIEWS_APPROXIMATE'),
-            minimum_samples=2, config_version='observed-volume-rank-v3')
+            minimum_samples=2, config_version='observed-volume-rank-v4')
 
     def skip_details(self, item, reason):
         values = self._values(item) if count_ok(item.current_value) else []
         evidence = (('cohort_size', len(values)),
-                    ('observed_values', tuple(sorted(values, reverse=True))),
                     ('observation_date', item.analysis_date.isoformat()),
                     ('scope', (item.scope.source, item.scope.country, item.scope.access,
                                item.scope.project, item.scope.metric, item.scope.unit)),
@@ -93,7 +94,7 @@ class ObservedVolumeRanking:
 
 
 class ObservedPercentileRank(ObservedVolumeRanking):
-    metadata = AlgorithmMetadata('observed-percentile-rank', 'v3', 'Observed percentile rank', SOURCE,
+    metadata = AlgorithmMetadata('observed-percentile-rank', 'v4', 'Observed percentile rank', SOURCE,
         'observed_percentile_rank', 'percentile_0_100', 2, 1, METRIC, UNIT,
         'Place approximate volume within this persisted snapshot’s observed sample.',
         'popularity', ('daily_snapshot', 'top_list_censored'), (1,),
@@ -116,43 +117,74 @@ class ObservedPercentileRank(ObservedVolumeRanking):
             'COMPLETED', percentile, self.metadata.metric, self.metadata.unit, item.current_value,
             None, 1, len(values), evidence,
             ('CENSORED_TOP_LIST', 'PARTIAL_SAMPLE', 'VIEWS_APPROXIMATE'),
-            minimum_samples=2, config_version='observed-percentile-rank-v3')
+            minimum_samples=2, config_version='observed-percentile-rank-v4')
 
 
 class RelativeSourceRank:
-    metadata = AlgorithmMetadata('relative-source-rank', 'v1', 'Relative source rank', '*',
+    metadata = AlgorithmMetadata('relative-source-rank', 'v2', 'Relative source rank', '*',
         'relative_source_rank', 'percentile_0_100', 2, 1, 'result_rank',
         'ordinal result position',
         'Convert a provider’s query-scoped ordinal result position into a within-sample percentile.',
         'popularity', ('query_search',), (1,),
         'Requires at least two ranked records with matching provider and query scope.', False, (),
         'O(n log n) per source sample.', '100 is the best observed provider rank.',
-        ('Only meaningful within a single provider query/sample.', 'Not search volume or demand.'))
+        ('Only meaningful within a single provider query/sample.', 'Not search volume or demand.'),
+        excluded_sources=('youtube_video_search',))
 
     def applicable(self, item):
+        if item.scope.source == 'youtube_video_search':
+            return 'POLICY_RESTRICTED'
         if item.scope.metric != 'result_rank' or item.scope.unit != 'ordinal result position':
             return 'UNSUPPORTED_METRIC_OR_UNIT'
         if item.scope.source == SOURCE:
             return 'UNSUPPORTED_SOURCE'
+        if (type(item.analysis_date) is not date
+                or not all(isinstance(value, str) and value for value in
+                           (item.scope.source, item.scope.country, item.scope.access,
+                            item.scope.project, item.scope.article))):
+            return 'INVALID_SCOPE'
         if any((point.scope.source, point.scope.country, point.scope.access, point.scope.project,
                 point.scope.metric, point.scope.unit) !=
                (item.scope.source, item.scope.country, item.scope.access, item.scope.project,
                 item.scope.metric, item.scope.unit) for point in item.cohort):
             return 'INCOMPATIBLE_COHORT'
-        ranks = [point.rank for point in item.cohort if type(point.rank) is int and point.rank > 0]
+        if any(point.date != item.analysis_date for point in item.cohort):
+            return 'INCOMPATIBLE_COHORT'
+        if any(point.status != 'OBSERVED' or point.snapshot_status != 'SUCCESS'
+               for point in item.cohort):
+            return 'INCOMPATIBLE_COHORT'
         if type(item.current_value) is not int or item.current_value < 1:
             return 'INVALID_CURRENT_RANK'
-        if len(ranks) + 1 < 2:
+        if len(self._peer_ranks(item)) + 1 < 2:
             return 'INSUFFICIENT_COHORT'
         return None
 
+    @staticmethod
+    def _peer_ranks(item):
+        # Keep this method dormant until a persisted, provider/query-scoped
+        # cohort exists. When called with a fixture, require stable item IDs,
+        # exclude self-inclusion and collapse exact duplicate rows.
+        peers = {}
+        for point in item.cohort:
+            article = point.scope.article
+            if not isinstance(article, str) or not article or article == item.scope.article:
+                continue
+            if type(point.rank) is not int or point.rank < 1:
+                continue
+            peers.setdefault(article, set()).add(point.rank)
+        return [next(iter(peers[key])) for key in sorted(peers)
+                if len(peers[key]) == 1]
+
     def execute(self, item):
-        ranks = [point.rank for point in item.cohort if type(point.rank) is int and point.rank > 0]
-        ranks.append(item.current_value)
+        ranks = self._peer_ranks(item) + [item.current_value]
         better = sum(rank > item.current_value for rank in ranks)
         tied = sum(rank == item.current_value for rank in ranks)
         value = 100 * (better + (tied - 1) / 2) / (len(ranks) - 1)
         return AlgorithmResult(item.keyword_id, self.metadata.algorithm_id, self.metadata.version,
             'COMPLETED', value, self.metadata.metric, self.metadata.unit, item.current_value,
-            None, 1, len(ranks), (('cohort_size', len(ranks)), ('evidence_url', item.evidence_url)),
-            ('QUERY_SCOPED_SAMPLE',), minimum_samples=2, config_version='relative-source-rank-v1')
+            None, 1, len(ranks), (('cohort_size', len(ranks)),
+                ('observation_date', item.analysis_date.isoformat()),
+                ('query_scope', (item.scope.source, item.scope.country, item.scope.access,
+                                 item.scope.project)),
+                ('evidence_url', item.evidence_url)),
+            ('QUERY_SCOPED_SAMPLE',), minimum_samples=2, config_version='relative-source-rank-v2')

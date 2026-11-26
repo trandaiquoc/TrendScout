@@ -39,13 +39,29 @@ class SQLiteAlgorithmAnalysisSession:
         self._db = db
         self._data_mode_scope = data_mode_scope
 
-    def eligible_keywords(self):
-        query = "SELECT * FROM keywords WHERE eligible=1 "
-        parameters = ()
+    def eligible_keywords(self, *, source=None, observed_from=None, observed_to=None, ids=None):
+        clauses = ["eligible=1"]
+        parameters = []
         if self._data_mode_scope:
-            query += "AND data_mode=? "
-            parameters = (self._data_mode_scope,)
-        rows = self._db.execute(query + "ORDER BY id", parameters).fetchall()
+            clauses.append("data_mode=?")
+            parameters.append(self._data_mode_scope)
+        if source:
+            clauses.append("source=?")
+            parameters.append(source)
+        if observed_from:
+            clauses.append("substr(observed_at,1,10)>=?")
+            parameters.append(observed_from)
+        if observed_to:
+            clauses.append("substr(observed_at,1,10)<=?")
+            parameters.append(observed_to)
+        if ids is not None:
+            identifiers = tuple(dict.fromkeys(ids))
+            if not identifiers:
+                return []
+            clauses.append("id IN (" + ",".join("?" for _ in identifiers) + ")")
+            parameters.extend(identifiers)
+        rows = self._db.execute("SELECT * FROM keywords WHERE " + " AND ".join(clauses)
+                                + " ORDER BY id", parameters).fetchall()
         return [dict(row) for row in rows]
 
     def upsert_observations(self, observations):
@@ -53,10 +69,14 @@ class SQLiteAlgorithmAnalysisSession:
             country,access,project,metric,unit,status,value,rank,snapshot_status,input_digest)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id,source,observation_date,metric,unit)
             DO UPDATE SET value=excluded.value,rank=excluded.rank,status=excluded.status,
+            country=excluded.country,access=excluded.access,project=excluded.project,
             snapshot_status=excluded.snapshot_status,input_digest=excluded.input_digest
             WHERE algorithm_observations.value IS NOT excluded.value
                OR algorithm_observations.rank IS NOT excluded.rank
                OR algorithm_observations.status IS NOT excluded.status
+               OR algorithm_observations.country IS NOT excluded.country
+               OR algorithm_observations.access IS NOT excluded.access
+               OR algorithm_observations.project IS NOT excluded.project
                OR algorithm_observations.snapshot_status IS NOT excluded.snapshot_status
                OR algorithm_observations.input_digest IS NOT excluded.input_digest""", observations)
 
@@ -79,16 +99,58 @@ class SQLiteAlgorithmAnalysisSession:
         row = self._db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
-    def history(self, keyword_id, source, before_date, metric, unit):
-        return [dict(row) for row in self._db.execute("""SELECT observation_date,status,value,snapshot_status
-            FROM algorithm_observations WHERE keyword_id=? AND source=? AND observation_date<?
-            AND metric=? AND unit=? ORDER BY observation_date""",
-            (keyword_id, source, before_date, metric, unit)).fetchall()]
+    def history(self, keyword_id, source, before_date, metric, unit, *, after_date=None,
+                country=None, access=None, project=None):
+        clauses = ["keyword_id=?", "source=?", "observation_date<?", "metric=?", "unit=?"]
+        parameters = [keyword_id, source, before_date, metric, unit]
+        if after_date:
+            clauses.append("observation_date>=?")
+            parameters.append(after_date)
+        for column, value in (("country", country), ("access", access), ("project", project)):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                parameters.append(value)
+        return [dict(row) for row in self._db.execute("""SELECT observation_date,status,value,snapshot_status,input_digest
+            FROM algorithm_observations WHERE """ + " AND ".join(clauses) + " ORDER BY observation_date",
+            parameters).fetchall()]
+
+    def histories(self, keyword_ids, source, before_date, metric, unit, *, after_date=None,
+                  country=None, access=None, project=None):
+        identifiers = tuple(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return []
+        clauses = ["keyword_id IN (" + ",".join("?" for _ in identifiers) + ")",
+                   "source=?", "observation_date<?", "metric=?", "unit=?"]
+        parameters = [*identifiers, source, before_date, metric, unit]
+        if after_date:
+            clauses.append("observation_date>=?")
+            parameters.append(after_date)
+        for column, value in (("country", country), ("access", access), ("project", project)):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                parameters.append(value)
+        return [dict(row) for row in self._db.execute("""SELECT keyword_id,observation_date,status,value,
+            snapshot_status,input_digest FROM algorithm_observations WHERE """ + " AND ".join(clauses)
+            + " ORDER BY keyword_id,observation_date", parameters).fetchall()]
 
     def result_digests(self, keyword_id):
         return {row["algorithm_id"]: row["input_digest"] for row in self._db.execute(
             "SELECT algorithm_id,input_digest FROM algorithm_results WHERE keyword_id=?",
             (keyword_id,)).fetchall()}
+
+    def result_digests_for(self, keyword_ids):
+        identifiers = tuple(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" for _ in identifiers)
+        rows = self._db.execute(
+            "SELECT keyword_id,algorithm_id,input_digest FROM algorithm_results WHERE keyword_id IN ("
+            + placeholders + ")", identifiers,
+        ).fetchall()
+        result = {}
+        for row in rows:
+            result.setdefault(row["keyword_id"], {})[row["algorithm_id"]] = row["input_digest"]
+        return result
 
     def upsert_results(self, results):
         self._db.executemany("""INSERT INTO algorithm_results(keyword_id,algorithm_id,version,status,

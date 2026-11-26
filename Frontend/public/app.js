@@ -242,6 +242,24 @@ async function loadAnalytics(preloadedData = null) {
     renderDataTable($('#analysis-source-volume'), [t('analysis.source'), t('analysis.keyword-count'), t('analysis.period')],
       (data.source_volume || []).map(row => [localizedSourceName(row.source), number(row.keywords), `${row.first_seen || '—'} – ${row.last_seen || '—'}`]), t('analysis.source-volume-note'));
     renderCountChart($('#analysis-source-volume-chart'), data.source_volume || [], 'source', 'keywords', 'analysis.source-volume-title');
+    renderDataTable($('#analysis-source-roles'), [t('analysis.source'), t('analysis.source-role'),
+      t('analysis.measurement'), t('analysis.keyword-count'), t('analysis.verification-count'),
+      t('analysis.persisted-methods'), t('analysis.scope-limits')], (data.source_roles || []).map(profile => [
+      profile.source_id === 'google_web_serp'
+        ? t('analysis.source-role-name.google') : localizedSourceName(profile.source_id),
+      t(`analysis.source-role.${profile.role}`),
+      t(`analysis.measurement.${profile.measurement}`),
+      profile.keyword_records == null ? t('common.unavailable') : number(profile.keyword_records),
+      profile.verification_candidate_records == null ? t('common.unavailable') : number(profile.verification_candidate_records),
+      profile.persisted_algorithm_ids?.length
+        ? profile.persisted_algorithm_ids.map(localizedAlgorithmName).join(', ')
+        : t('analysis.no-persisted-methods'),
+      [profile.market_scope, ...(profile.limitations || []).map(code => {
+        const key = `analysis.source-limit.${code}`;
+        const translated = t(key);
+        return translated === key ? code.replaceAll('_', ' ').toLowerCase() : translated;
+      })].filter(Boolean).join(' · '),
+    ]), t('analysis.source-role-note'));
     renderDataTable($('#analysis-algorithms'), [t('analysis.algorithm'), t('analysis.result-state'), t('analysis.count')],
       (data.algorithm_distribution || []).map(row => [localizedAlgorithmName(row.algorithm_id), translatedAlgorithmCode('result', row.status), number(row.count)]), t('analysis.algorithm-distribution-note'));
     renderAlgorithmDistributionChart(data.algorithm_distribution || []);
@@ -281,7 +299,7 @@ async function loadAnalytics(preloadedData = null) {
     }
     const qualitySnapshot=$('#quality-snapshot');
     if (qualitySnapshot) qualitySnapshot.replaceChildren(element('p',getErrorMessage(error,'analysis.error')));
-    for (const id of ['analysis-source-volume','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history','quality-observations','quality-algorithms']) {
+    for (const id of ['analysis-source-volume','analysis-source-roles','analysis-algorithms','analysis-effectiveness','analysis-source-operations','analysis-coverage','analysis-history','quality-observations','quality-algorithms']) {
       const root = $('#' + id); if (root) root.replaceChildren(element('p', getErrorMessage(error, 'analysis.error')));
     }
     for (const id of ['analysis-source-volume-chart','analysis-algorithm-chart','analysis-operations-chart','analysis-coverage-chart','analysis-history-chart']) {
@@ -501,13 +519,13 @@ function renderAlgorithmDistributionChart(rows) {
   const methods = new Map();
   for (const item of rows) {
     if (typeof item.algorithm_id !== 'string' || !Number.isFinite(item.count) || item.count < 0) continue;
-    const counts = methods.get(item.algorithm_id) || { COMPLETED: 0, SKIPPED: 0, FAILED: 0 };
+    const counts = methods.get(item.algorithm_id) || { COMPLETED: 0, INSUFFICIENT_DATA: 0, SKIPPED: 0, FAILED: 0 };
     if (Object.hasOwn(counts, item.status)) counts[item.status] += item.count;
     methods.set(item.algorithm_id, counts);
   }
   const values = [...methods.entries()];
   if (!values.length) { chart.append(element('li', t('analysis.no-data'), 'chart-empty')); return; }
-  for (const status of ['COMPLETED', 'SKIPPED', 'FAILED']) {
+  for (const status of ['COMPLETED', 'INSUFFICIENT_DATA', 'SKIPPED', 'FAILED']) {
     const legend = element('span', operationStatusLabel(status), 'chart-legend-item');
     legend.prepend(element('i', null, `chart-legend-swatch chart-segment--${status.toLowerCase()}`));
     $('[data-chart-legend="algorithms"]')?.append(legend);
@@ -517,7 +535,7 @@ function renderAlgorithmDistributionChart(rows) {
     const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
     const row = element('li', null, 'chart-row chart-row--stacked');
     const track = element('span', null, 'chart-track chart-track--stacked');
-    for (const status of ['COMPLETED', 'SKIPPED', 'FAILED']) {
+    for (const status of ['COMPLETED', 'INSUFFICIENT_DATA', 'SKIPPED', 'FAILED']) {
       const segment = element('span', null, `chart-bar chart-segment--${status.toLowerCase()}`);
       segment.style.width = `${(counts[status] / maximum) * 100}%`;
       segment.setAttribute('aria-hidden', 'true');
@@ -525,7 +543,7 @@ function renderAlgorithmDistributionChart(rows) {
       track.append(segment);
     }
     row.append(element('span', localizedAlgorithmName(id), 'chart-label'), track, element('strong', number(total), 'chart-value'));
-    row.setAttribute('aria-label', `${localizedAlgorithmName(id)}: ${['COMPLETED','SKIPPED','FAILED'].map(status => `${operationStatusLabel(status)} ${number(counts[status])}`).join(', ')}`);
+    row.setAttribute('aria-label', `${localizedAlgorithmName(id)}: ${['COMPLETED','INSUFFICIENT_DATA','SKIPPED','FAILED'].map(status => `${operationStatusLabel(status)} ${number(counts[status])}`).join(', ')}`);
     chart.append(row);
   }
 }
@@ -575,6 +593,7 @@ function renderSourceOperationsChart(runs) {
 function operationStatusLabel(status) {
   const labels = {
     COMPLETED: t('analysis.ops.completed'),
+    INSUFFICIENT_DATA: t('analysis.ops.insufficient'),
     SKIPPED: t('analysis.ops.skipped'),
     PARTIAL: t('analysis.ops.partial'),
     FAILED: t('analysis.ops.failed'),
@@ -3039,7 +3058,10 @@ function renderAlgorithmCatalog() {
     card.append(element('p', localizedAlgorithmMetadata(item,'description')));
     const counts = (state.algorithmResults?.summary || []).find((entry) => entry.algorithm_id === item.algorithm_id);
     card.append(element('p', counts
-      ? t('algorithms.execution-summary', { completed: number(counts.completed), skipped: number(counts.skipped), failed: number(counts.failed) })
+      ? t('algorithms.execution-summary', {
+        completed: number(counts.completed), insufficient: number(counts.insufficient_data || 0),
+        skipped: number(counts.skipped), failed: number(counts.failed),
+      })
       : t(state.algorithmResults ? 'algorithms.no-results' : 'phoenix.algorithm-results-unavailable'), 'algorithm-execution-summary'));
     const examples = (state.algorithmResults?.items || []).filter((entry) => entry.algorithm_id === item.algorithm_id).slice(0, 3);
     if (examples.length) {
@@ -3089,6 +3111,7 @@ function renderAlgorithmCatalog() {
     addAlgorithmDetail(list, t('algorithms.output'), `${localizedAlgorithmMetric(item.metric)} (${localizedAlgorithmUnit(item.unit)})`);
     addAlgorithmDetail(list, t('algorithms.minimum-samples'), item.minimum_samples);
     addAlgorithmDetail(list, t('algorithms.windows'), formatWindowRanges(item.supported_windows));
+      addAlgorithmDetail(list, t('algorithms.execution-path'), localizedAlgorithmExecution(item.execution));
     addAlgorithmDetail(list, t('algorithms.missing-data'), localizedAlgorithmMetadata(item,'missing_data'));
     addAlgorithmDetail(list, t('algorithms.runtime'), localizedAlgorithmMetadata(item,'runtime_limit'));
     addAlgorithmDetail(list, t('algorithms.interpretation'), localizedAlgorithmMetadata(item,'interpretation'));
@@ -3104,6 +3127,16 @@ function translatedAlgorithmCode(kind, code) {
   const key = `algorithms.${kind}.${String(code).toLowerCase()}`;
   const translated = t(key);
   return translated === key ? String(code).toLowerCase().replaceAll('_', ' ') : translated;
+}
+
+function localizedAlgorithmExecution(execution) {
+  if (!execution || typeof execution.status !== 'string') return t('common.unavailable');
+  const code = execution.status.toLowerCase();
+  const label = translatedAlgorithmCode('execution', execution.status);
+  const reasonKey = `algorithms.execution-reason.${code}`;
+  const translatedReason = t(reasonKey);
+  const reason = translatedReason === reasonKey ? execution.reason : translatedReason;
+  return reason ? `${label} · ${reason}` : label;
 }
 
 function localizedAlgorithmUnit(unit) {
@@ -3131,21 +3164,24 @@ function renderAlgorithmSignalStatus(algorithms) {
       const result = summaries.get(item.algorithm_id);
       return {
         completed: sum.completed + (result?.completed || 0),
+        insufficient: sum.insufficient + (result?.insufficient_data || 0),
         skipped: sum.skipped + (result?.skipped || 0),
         failed: sum.failed + (result?.failed || 0),
       };
-    }, { completed: 0, skipped: 0, failed: 0 });
-    const status = !methods.length || (!totals.completed && totals.skipped)
+    }, { completed: 0, insufficient: 0, skipped: 0, failed: 0 });
+    const status = !methods.length || (!totals.completed && (totals.insufficient || totals.skipped))
       ? 'INSUFFICIENT_DATA' : totals.completed ? 'OBSERVED' : 'NOT_RUN';
     const card = element('article', null, 'algorithm-signal-card');
     card.append(element('h2', t(`algorithms.signal.${key}`)));
     card.append(element('strong', translatedAlgorithmCode('evaluation',status), `algorithm-signal-status algorithm-signal-status--${status.toLowerCase()}`));
     card.append(element('p', t(`algorithms.signal-counts.${key}`, {
-      methods: methods.length, completed: totals.completed, skipped: totals.skipped,
+      methods: methods.length, completed: totals.completed,
+      insufficient: totals.insufficient, skipped: totals.skipped,
     })));
     return card;
   });
-  const skipped = [...summaries.values()].reduce((total, item) => total + (item.skipped || 0), 0);
+  const skipped = [...summaries.values()].reduce((total, item) =>
+    total + (item.skipped || 0) + (item.insufficient_data || 0), 0);
   const insufficient = element('article', null, 'algorithm-signal-card algorithm-signal-card--wide');
   insufficient.append(element('h2', t('algorithms.signal.insufficient')));
   insufficient.append(element('strong', translatedAlgorithmCode('evaluation', 'INSUFFICIENT_DATA'), 'algorithm-signal-status algorithm-signal-status--insufficient_data'));
