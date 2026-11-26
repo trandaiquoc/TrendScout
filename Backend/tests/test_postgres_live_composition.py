@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.types.json import Jsonb
@@ -23,6 +24,7 @@ from app.orchestration.normal_google_live_composition import normal_google_live_
 from app.scheduling.postgres import PostgresScheduleStore
 from app.settings import Settings
 from app.sources.catalog import GOOGLE_SOURCE_ID, SOURCE_CAPABILITIES
+from app.sources.serpapi.account import SerpApiAccountClient
 from app.storage.postgres_analysis import PostgresAnalysisStorage
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_connection import postgres_connection
@@ -68,6 +70,9 @@ def _seed_cutover_readiness(connection, environment, schema, *, now):
         store, policy, state_key=GOOGLE_STATE_KEY, require_quota_evidence=True
     )
     admission.initialize_operational_state(now=now)
+    admission.set_serpapi_billing_cycle(
+        (now.date() + timedelta(days=15)).isoformat(), now=now
+    )
     for pool_name in policy.pools:
         for period in ("daily", "monthly"):
             admission.record_quota_window_evidence(
@@ -81,6 +86,90 @@ def _seed_cutover_readiness(connection, environment, schema, *, now):
 
 
 class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_serpapi_cycle_is_reconciled_by_account_api_without_search(self):
+        url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+        if not url:
+            self.skipTest("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+        environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+        schema = "ts_test_" + uuid.uuid4().hex
+        created = False
+        account_requests = []
+
+        async def account_handler(request):
+            account_requests.append(request.url.path)
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                json={
+                    "account_status": "Active",
+                    "searches_per_month": 250,
+                    "plan_searches_left": 208,
+                    "total_searches_left": 208,
+                    "this_month_usage": 42,
+                    "this_hour_searches": 0,
+                    "account_rate_limit_per_hour": 250,
+                    "plan_renewal_date": "2026-12-11",
+                },
+            )
+
+        account_client = SerpApiAccountClient.offline_fixture(
+            "offline-account-key", transport=httpx.MockTransport(account_handler),
+            clock=lambda: datetime(2026, 11, 26, 8, 5, tzinfo=timezone.utc),
+        )
+
+        async def fake_controlled_network(_cls, _key, **_kwargs):
+            return account_client
+
+        with postgres_connection(environment, direct=True) as connection:
+            connection.autocommit = True
+            try:
+                apply_migrations(connection, schema=schema)
+                created = True
+                with patch.object(
+                    SerpApiAccountClient,
+                    "controlled_network",
+                    classmethod(fake_controlled_network),
+                ):
+                    async with normal_google_live_composition(
+                        user_agent="TrendScoutTest/1.0 (https://example.invalid)",
+                        google_settings=GoogleLiveSettings(account_api_approved=True),
+                        credential_provider=type(
+                            "OfflineCredentials", (),
+                            {"resolve": lambda self, reference:
+                             "offline-serpapi-key" if reference == "SERPAPI_API_KEY" else None},
+                        )(),
+                        postgres_environment=environment,
+                        postgres_schema=schema,
+                        utcnow=lambda: datetime(2026, 11, 26, 8, 5, tzinfo=timezone.utc),
+                    ) as facade:
+                        state = facade.admission.store.read_many(
+                            [GOOGLE_STATE_KEY]
+                        )[GOOGLE_STATE_KEY]
+                        self.assertEqual(facade.google_account_quota_state["status"], "AVAILABLE")
+                        self.assertEqual(
+                            state["quota"]["serpapi:cycle:2026-12-11"],
+                            {"requests": 42, "cost": 42},
+                        )
+                        self.assertEqual(
+                            state["quota_verification"]["serpapi"]["monthly"]["status"],
+                            "VERIFIED",
+                        )
+                        self.assertEqual(
+                            state["quota_verification"]["serpapi"]["daily"]["status"],
+                            "UNKNOWN",
+                        )
+                        self.assertFalse(facade.normal_bing_live)
+                        self.assertFalse(facade.normal_youtube_live)
+                await_account_close = account_client.aclose()
+                if hasattr(await_account_close, "__await__"):
+                    await await_account_close
+                self.assertEqual(account_requests, ["/account.json"])
+            finally:
+                if created:
+                    connection.execute(
+                        sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                    )
+
     async def test_empty_postgres_fresh_start_serves_empty_reads_and_blocks_live_fetch(self):
         url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
         if not url:

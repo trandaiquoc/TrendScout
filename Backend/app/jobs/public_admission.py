@@ -585,7 +585,8 @@ class PublicAdmission:
         daily_key = f"{pool_name}:day:{day}"
         uses_provider_cycle = (
             pool_name == "serpapi" or pool_name in self.policy.source_allocations.values()
-        ) and (bool(self.policy.source_allocations) or state.get("serpapi_cycle_ends_at") is not None)
+        ) and (self.require_quota_evidence or bool(self.policy.source_allocations)
+               or state.get("serpapi_cycle_ends_at") is not None)
         if uses_provider_cycle:
             cycle_end = state.get("serpapi_cycle_ends_at")
             try:
@@ -599,6 +600,79 @@ class PublicAdmission:
         else:
             monthly_key = f"{pool_name}:month:{now.strftime('%Y-%m')}"
         return daily_key, monthly_key
+
+    @staticmethod
+    def _quota_window_start(pool_name: str, period: str, window_key: str):
+        """Parse the start of a known daily or calendar-month quota window."""
+        if period == "daily":
+            prefix = f"{pool_name}:day:"
+            if not window_key.startswith(prefix):
+                return None
+            value = window_key.removeprefix(prefix)
+            try:
+                day = date.fromisoformat(value)
+            except ValueError:
+                return None
+            if day.isoformat() != value:
+                return None
+            zone = (YOUTUBE_PROVIDER_TIMEZONE
+                    if pool_name in {SOURCE_POOLS[YOUTUBE_SOURCE_ID], YOUTUBE_OTHER_POOL}
+                    else timezone.utc)
+            return datetime.combine(day, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
+        if period == "monthly":
+            prefix = f"{pool_name}:month:"
+            if not window_key.startswith(prefix):
+                return None
+            value = window_key.removeprefix(prefix)
+            try:
+                month = date.fromisoformat(f"{value}-01")
+            except ValueError:
+                return None
+            if month.strftime("%Y-%m") != value:
+                return None
+            return datetime.combine(month, datetime.min.time(), tzinfo=timezone.utc)
+        return None
+
+    def _can_rollover_quota_window(self, state, pool_name: str, period: str,
+                                   previous: Mapping, window_key: str,
+                                   now: datetime) -> bool:
+        """Prove an empty new internal window after the PostgreSQL quota cutover.
+
+        LIVE attempts are fail-closed while their window is UNKNOWN and all
+        PostgreSQL attempts reserve the same key transactionally. Therefore a
+        window that starts after this ledger became authoritative has exact zero
+        application usage until its first reservation. Provider billing cycles
+        are excluded: those require provider evidence, not a calendar inference.
+        """
+        if (period == "monthly"
+                and (pool_name == "serpapi"
+                     or pool_name in self.policy.source_allocations.values())):
+            return False
+        started = state.get("quota_management_started_at")
+        try:
+            started_at = _parse(started)
+        except (TypeError, ValueError):
+            return False
+        window_start = self._quota_window_start(pool_name, period, window_key)
+        previous_key = previous.get("window")
+        previous_start = (self._quota_window_start(pool_name, period, previous_key)
+                          if isinstance(previous_key, str) else None)
+        quota = state.get("quota")
+        return (
+            window_start is not None
+            and window_start > started_at
+            and window_start <= now
+            and previous_start is not None
+            and previous_start < window_start
+            and isinstance(quota, dict)
+            and window_key not in quota
+        )
+
+    def serpapi_account_evidence_needed(self, *, now: datetime) -> bool:
+        """Whether PostgreSQL still needs a provider Account API observation."""
+        snapshot = self.quota_snapshot("serpapi", now=_utc(now))
+        return (snapshot["monthly"].get("status") != "VERIFIED"
+                or snapshot.get("billing_cycle_status") == "UNKNOWN")
 
     @staticmethod
     def _quota_window_status(state, pool_name: str, period: str, window_key: str | None):
@@ -681,6 +755,7 @@ class PublicAdmission:
                     "quota": {},
                     "inflight": {},
                     "quota_verification": {},
+                    "quota_management_started_at": now.isoformat(),
                 }
             elif (state.get("schema") != 1
                   or state.get("policy_digest") != self.policy_digest):
@@ -698,6 +773,16 @@ class PublicAdmission:
                 state["quota_verification"] = verifications
             if not isinstance(verifications, dict):
                 raise AdmissionDenied("STATE_INVALID")
+            management_started = state.get("quota_management_started_at")
+            if management_started is None:
+                # Existing DB03 state predates this marker. This first
+                # PostgreSQL initialization is the operational cutover point.
+                state["quota_management_started_at"] = now.isoformat()
+            else:
+                try:
+                    _parse(management_started)
+                except (TypeError, ValueError):
+                    raise AdmissionDenied("STATE_INVALID") from None
 
             for pool_name in self._pools:
                 daily_key = f"{pool_name}:day:{self._quota_day(pool_name, now).isoformat()}"
@@ -716,10 +801,19 @@ class PublicAdmission:
                         pool_state[period] = {"window": key, "status": "UNKNOWN"}
                     elif not isinstance(current, dict):
                         raise AdmissionDenied("STATE_INVALID")
-                    elif current.get("window") != key:
-                        pool_state[period] = {"window": key, "status": "UNKNOWN"}
                     elif current.get("status") not in {"UNKNOWN", "VERIFIED"}:
                         raise AdmissionDenied("STATE_INVALID")
+                    elif current.get("window") != key:
+                        if (key is not None
+                                and self._can_rollover_quota_window(
+                                    state, pool_name, period, current, key, now
+                                )):
+                            self._store_quota_window_evidence(
+                                state, pool_name, period, key, 0, 0,
+                                "postgres_period_rollover", now,
+                            )
+                        else:
+                            pool_state[period] = {"window": key, "status": "UNKNOWN"}
                     elif current.get("status") == "VERIFIED":
                         evidence_at = current.get("verified_at")
                         evidence_source = current.get("evidence_source")
@@ -785,6 +879,11 @@ class PublicAdmission:
             allocation = self.policy.source_allocations.get(source_id)
             if allocation:
                 required.add(allocation)
+            if (source_id == YOUTUBE_SOURCE_ID
+                    and YOUTUBE_OTHER_POOL in self._pools):
+                # This source composes search.list and videos.list requests;
+                # require evidence for both provider quota buckets up front.
+                required.add(YOUTUBE_OTHER_POOL)
         unknown = []
         for pool_name in sorted(required):
             try:
@@ -928,7 +1027,7 @@ class PublicAdmission:
             uses_provider_cycle = (
                 pool_name == "serpapi"
                 or pool_name in self.policy.source_allocations.values()
-            ) and (bool(self.policy.source_allocations)
+            ) and (self.require_quota_evidence or bool(self.policy.source_allocations)
                    or state.get("serpapi_cycle_ends_at") is not None)
 
             def usage(key, status):
@@ -1252,6 +1351,9 @@ class PublicAdmission:
                     or google["cost"] + bing["cost"] + external["cost"]
                     != shared["cost"]):
                 raise AdmissionDenied("QUOTA_ALLOCATION_STATE_MISMATCH")
+            if (monthly_used < shared["requests"]
+                    or monthly_used < shared["cost"]):
+                raise AdmissionDenied("QUOTA_EXTERNAL_USAGE_UNRECONCILED")
 
             baseline_key = "serpapi_account_usage_baseline_cycle"
             last_used_key = "serpapi_account_usage_last_observed"
@@ -1270,15 +1372,27 @@ class PublicAdmission:
             if baseline_cycle != cycle_ends_at:
                 delta = max(0, monthly_used - shared["requests"])
                 if baseline_cycle is None:
-                    limit = self._pools[google_pool]
-                    if (google["requests"] + delta > limit.monthly_requests
-                            or google["cost"] + delta > limit.monthly_cost_units):
-                        raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
-                    google = dict(google)
-                    google["requests"] += delta
-                    google["cost"] += delta
-                    quota[google_key] = google
-                    external = {"requests": 0, "cost": 0}
+                    if self.require_quota_evidence:
+                        # The Account API reports one shared SerpApi account
+                        # total; it cannot prove whether Google or Bing made
+                        # pre-baseline requests. Reserve the exact difference
+                        # against the shared pool and keep source allocations
+                        # UNKNOWN instead of assigning it to either source.
+                        external = {
+                            "requests": external["requests"] + delta,
+                            "cost": external["cost"] + delta,
+                        }
+                    else:
+                        # Preserve the legacy local-only migration behavior.
+                        limit = self._pools[google_pool]
+                        if (google["requests"] + delta > limit.monthly_requests
+                                or google["cost"] + delta > limit.monthly_cost_units):
+                            raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_EXCEEDS_ALLOCATION")
+                        google = dict(google)
+                        google["requests"] += delta
+                        google["cost"] += delta
+                        quota[google_key] = google
+                        external = {"requests": 0, "cost": 0}
                 else:
                     external = {"requests": delta, "cost": delta}
                 limit = self._pools["serpapi"]
@@ -2088,7 +2202,7 @@ class PublicAdmission:
             if not isinstance(quota, dict):
                 raise AdmissionDenied("STATE_INVALID")
             cycle_end = state.get("serpapi_cycle_ends_at")
-            if self.policy.source_allocations and pool == "serpapi":
+            if (self.require_quota_evidence or self.policy.source_allocations) and pool == "serpapi":
                 try:
                     cycle_date = date.fromisoformat(cycle_end) if cycle_end else None
                 except (TypeError, ValueError):

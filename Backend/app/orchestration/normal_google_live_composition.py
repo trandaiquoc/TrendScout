@@ -688,7 +688,11 @@ async def normal_google_live_composition(*, user_agent,
             config.paid_discovery_approved or config.paid_serp_approved
             or config.paid_bing_approved
         ))
-        if paid_requested:
+        account_check_requested = (
+            paid_requested
+            or uses_postgres and config.account_api_approved and not youtube_manual_live
+        )
+        if account_check_requested:
             try:
                 key = credential_provider.resolve("SERPAPI_API_KEY")
                 if (not isinstance(key, str) or not 8 <= len(key) <= 256
@@ -719,7 +723,8 @@ async def normal_google_live_composition(*, user_agent,
                             renewal = snapshot.get("plan_renewal_date")
                             monthly_limit = snapshot.get("monthly_limit")
                             monthly_remaining = snapshot.get("monthly_remaining")
-                            if (not renewal or monthly_limit != 250
+                            if (not renewal or type(monthly_limit) is not int
+                                    or monthly_limit < 1
                                     or type(monthly_remaining) is not int
                                     or not 0 <= monthly_remaining <= monthly_limit):
                                 raise SerpApiError("QUOTA_ACCOUNT_PLAN_MISMATCH")
@@ -747,6 +752,16 @@ async def normal_google_live_composition(*, user_agent,
                 quota_state["status"] = "CREDENTIAL_UNAVAILABLE"
             else:
                 quota_state["status"] = "ACCOUNT_API_NOT_APPROVED"
+
+        if (uses_postgres and config.account_api_approved and budget is not None
+                and admission.serpapi_account_evidence_needed(now=utcnow())):
+            # A free Account API read can establish the shared provider cycle
+            # before LIVE admission. It never calls the SerpApi search endpoint.
+            try:
+                await budget.ensure_attempt_allowed()
+            except SerpApiError as exc:
+                if exc.code != "QUOTA_BUDGET_EXHAUSTED":
+                    quota_state["status"] = "UNAVAILABLE"
 
         trends_gateway = None
         serp_gateway = None

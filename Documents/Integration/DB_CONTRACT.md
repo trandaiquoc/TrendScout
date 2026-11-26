@@ -185,6 +185,28 @@ PostgreSQL admission ledger:
   Production scheduler. Historical trend, keyword, cache, and analysis data
   remain outside this operational-state initialization.
 
+## DB03B quota-verification amendment (26 November 2026)
+
+- PostgreSQL is the sole quota ledger after cutover. A new internal daily or
+  calendar-month window may be initialized to zero only when that window starts
+  after the PostgreSQL cutover marker and has no reservation row. Existing
+  counters, starts, and cooldowns are preserved. Provider billing cycles are
+  never inferred from calendar boundaries.
+- SerpApi Account API observations verify the shared account total and its
+  returned renewal date. The Account API is documented as free and excluded
+  from search quota ([SerpApi Account API](https://serpapi.com/account-api),
+  checked 26 November 2026). Aggregate usage that cannot be attributed to
+  Google or Bing remains reserved as shared, unattributed usage; source
+  allocations remain `UNKNOWN` until exact evidence exists.
+- YouTube admission requires evidence for both `search.list` and
+  `videos.list` quota pools. Their project-specific limits and current usage
+  must be verified in Google Cloud Console; daily provider windows follow
+  midnight Pacific Time ([YouTube quota calculator](https://developers.google.com/youtube/data/determine_quota_cost),
+  checked 26 November 2026). An unknown pool blocks only requests that need it.
+- Wikimedia's PostgreSQL daily/monthly counters remain `UNKNOWN` until a
+  verified ledger window or a post-cutover rollover establishes the current
+  window. Its request pacing and provider `Retry-After` cooldown stay active.
+
 ## Current coordination status
 
 At this contract's creation, only `origin/main` and the existing
