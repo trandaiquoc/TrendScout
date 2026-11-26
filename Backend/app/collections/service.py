@@ -200,6 +200,7 @@ class CollectionService:
                 source_batches.append((source, source_records))
 
         keyword_id_map = {}
+        persisted_source_evidence_ids = set()
         if incremental_persistence:
             # Preserve the legacy precedence: rejection updates happen before any
             # valid keyword upsert, while each source's records and lineage commit
@@ -217,6 +218,9 @@ class CollectionService:
                 persisted = self.store.persist_cleaned_keywords(
                     source_records, source_evidence_rows=evidence_rows,
                 )
+                persisted_source_evidence_ids.update(
+                    persisted.get("source_evidence_ids", ())
+                )
                 persisted_records.extend(persisted["records"])
                 keyword_id_map.update(persisted.get("id_remap", {}))
                 skipped += persisted["skipped_bing_updates"]
@@ -231,6 +235,9 @@ class CollectionService:
                 bing_result = self.store.persist_cleaned_keywords(
                     [], bing_updates=bing_updates,
                     source_evidence_rows=bing_evidence_rows,
+                )
+                persisted_source_evidence_ids.update(
+                    bing_result.get("source_evidence_ids", ())
                 )
                 keyword_id_map.update(bing_result.get("id_remap", {}))
                 skipped += bing_result["skipped_bing_updates"]
@@ -262,6 +269,7 @@ class CollectionService:
                 fetch_id, sources, records, available, skipped, policy_excluded,
                 bing_updates=bing_updates, entity_context_rows=entity_context_rows,
                 keyword_id_map=keyword_id_map,
+                persisted_source_evidence_ids=persisted_source_evidence_ids,
             )
         if sources and not records and not fetch_id.startswith("organize-"):
             # A failed or empty source response is still an auditable snapshot,
@@ -353,8 +361,13 @@ class CollectionService:
                 record["entity_category_ids"] = tuple(result["topic_category_ids"])
         eligible = self.store.persist_classifications(classification_records)
         category_collection_ids = {}
-        for category_id in INITIAL_TOPIC_ROOTS:
-            self.store.ensure_category_collection(resolve_category(category_id))
+        initial_roots = [resolve_category(category_id) for category_id in INITIAL_TOPIC_ROOTS]
+        ensure_roots = getattr(self.store, "ensure_category_collections", None)
+        if callable(ensure_roots):
+            ensure_roots(initial_roots)
+        else:
+            for category in initial_roots:
+                self.store.ensure_category_collection(category)
         for category_id in sorted({category for record in records
                                    for category in record.get("entity_category_ids", ())}):
             category = resolve_category(category_id)
@@ -459,7 +472,7 @@ class CollectionService:
 
     def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped,
                                   policy_excluded=0, *, bing_updates=(), entity_context_rows=(),
-                                  keyword_id_map=None):
+                                  keyword_id_map=None, persisted_source_evidence_ids=()):
         manifests, flags, modes = [], [], set()
         provider_count = 0
         for source_index, source in enumerate(sources):
@@ -554,6 +567,12 @@ class CollectionService:
         }
         if source_evidence_rows is not None:
             snapshot["source_evidence_rows"] = source_evidence_rows
+            if persisted_source_evidence_ids and not entity_context_rows:
+                snapshot["source_evidence_ids_already_persisted"] = frozenset(
+                    row["id"] for row in source_evidence_rows
+                    if isinstance(row, dict)
+                    and row.get("id") in persisted_source_evidence_ids
+                )
         self.store.persist_dataset_snapshot(fetch_id, **snapshot)
 
     def _analyze_persisted_keywords(self, changed_records, *, sources=(), cache_only=False):

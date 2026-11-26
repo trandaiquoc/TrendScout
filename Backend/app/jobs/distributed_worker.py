@@ -276,6 +276,7 @@ class DistributedFetchWorker:
                                         checkpoint, heartbeat,
                                         request_metadata=claim.get("request_metadata", {}),
                                         completed_sources=dict(outcomes))
+            cache_only_work = context.request_metadata.get("cache_only") is True
             try:
                 handler_started = perf_counter()
                 request_metadata = context.request_metadata
@@ -286,6 +287,8 @@ class DistributedFetchWorker:
                     handler = self.cache_only_handlers[source_id]
                 else:
                     handler = self.handlers[source_id]
+                if cache_only_work:
+                    context.heartbeat()
                 result = handler(context)
                 if inspect.isawaitable(result):
                     result = await result
@@ -320,6 +323,12 @@ class DistributedFetchWorker:
                         reason=("RESULT_NOT_SERIALIZABLE" if serialization_error
                                 else "INVALID_SOURCE_RESULT"),
                     )
+
+            if cache_only_work:
+                # Cached PostgreSQL payload reads can exceed the initial lease
+                # while performing no provider work. Renew after the read so
+                # its durable checkpoint and job completion remain fenced.
+                context.heartbeat()
 
             if result["status"] == "DEFERRED":
                 retry_at = result["retry_at"]

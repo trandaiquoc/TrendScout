@@ -137,6 +137,42 @@ def test_collection_mutations_are_serialized_and_preserve_legacy_rules():
                 connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_ensure_category_collections_batches_and_is_idempotent():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            apply_migrations(connection, schema=schema)
+            created = True
+            store = PostgresCollectionStore(environment, schema=schema)
+            existing = store.create({"name": "Existing category name"})
+            categories = [
+                SimpleNamespace(id="batch.category", display_name="Batch Category"),
+                SimpleNamespace(id="existing.category", display_name="Existing category name"),
+            ]
+            expected = {
+                "batch.category": "topic-" + fingerprint("batch.category")[:32],
+                "existing.category": existing,
+            }
+            assert store.ensure_category_collections(categories) == expected
+            assert store.ensure_category_collections(categories) == expected
+            assert store.ensure_category_collection(categories[0]) == expected["batch.category"]
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE category_id=ANY(%s)")
+                .format(sql.Identifier(schema, "collections")),
+                ([category.id for category in categories],)).fetchone()[0] == 1
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:
@@ -430,6 +466,38 @@ def test_incremental_source_persistence_remaps_lineage_to_live_keyword_id():
                 (evidence_id,)).fetchone()[0] == 1
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
                 .format(sql.Identifier(schema, "source_evidence")),
+                (evidence_id,)).fetchone()[0] == 1
+
+            assert persisted["source_evidence_ids"] == (evidence_id,)
+            source_evidence_writer = store._persist_source_evidence
+            duplicate_source_writes = []
+
+            def record_source_write(db, dataset_id, rows):
+                duplicate_source_writes.extend(rows)
+                return source_evidence_writer(db, dataset_id, rows)
+
+            store._persist_source_evidence = record_source_write
+            try:
+                store.persist_dataset_snapshot(
+                    "lineage-snapshot", status="SUCCESS", data_mode="LIVE",
+                    source_manifest=[{"source_id": WIKIMEDIA_SOURCE_ID, "status": "SUCCESS"}],
+                    provider_record_count=1, received_record_count=1,
+                    retained_keyword_count=1, rejected_record_count=0,
+                    observation_start="2026-11-25", observation_end="2026-11-25",
+                    fetched_at="2026-11-26T12:00:00+00:00", quality_flags=[],
+                    processing_status="PROCESSING", created_at="2026-11-26T12:01:00+00:00",
+                    source_evidence_rows=source_evidence_rows,
+                    source_evidence_ids_already_persisted=persisted["source_evidence_ids"],
+                )
+            finally:
+                store._persist_source_evidence = source_evidence_writer
+
+            assert duplicate_source_writes == []
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE dataset_id=%s")
+                .format(sql.Identifier(schema, "dataset_evidence")),
+                ("lineage-snapshot",)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")
+                .format(sql.Identifier(schema, "evidence_keywords")),
                 (evidence_id,)).fetchone()[0] == 1
         finally:
             if created:

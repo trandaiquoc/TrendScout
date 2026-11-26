@@ -143,30 +143,39 @@ class PostgresAtomicStateStore:
 
     def _load(self, connection, keys):
         state = {key: {} for key in keys}
-        query = sql.SQL("SELECT scope, field, is_mapping, value FROM {} WHERE scope=ANY(%s)")
-        for scope, field, mapping, value in connection.execute(
-            query.format(self._table("coordination_fields")), (keys,)
-        ):
-            state[scope][field] = {} if mapping else value
-        query = sql.SQL("SELECT scope, field, item_key, value, has_checkpoints FROM {} WHERE scope=ANY(%s)")
-        for scope, field, item_key, value, has_checkpoints in connection.execute(
-            query.format(self._table("coordination_entries")), (keys,)
-        ):
-            if (not isinstance(state[scope].get(field), dict)
-                    or has_checkpoints and (field != "jobs" or not isinstance(value, dict))):
-                raise PostgresCoordinationError("stored coordination structure is invalid")
-            if has_checkpoints:
-                value["source_checkpoints"] = {}
-            state[scope][field][item_key] = value
-        query = sql.SQL("SELECT scope, job_id, source_id, value FROM {} WHERE scope=ANY(%s)")
-        for scope, job_id, source_id, value in connection.execute(
-            query.format(self._table("coordination_checkpoints")), (keys,)
-        ):
-            jobs = state[scope].get("jobs")
-            job = jobs.get(job_id) if isinstance(jobs, dict) else None
-            if not isinstance(job, dict) or not isinstance(job.get("source_checkpoints"), dict):
-                raise PostgresCoordinationError("stored checkpoint structure is invalid")
-            job["source_checkpoints"][source_id] = value
+        query = sql.SQL("""SELECT 'FIELD'::text AS row_type,scope,field,
+                NULL::text AS item_key,NULL::text AS job_id,NULL::text AS source_id,
+                is_mapping,value,NULL::boolean AS has_checkpoints
+            FROM {} WHERE scope=ANY(%s)
+            UNION ALL
+            SELECT 'ENTRY',scope,field,item_key,NULL::text,NULL::text,
+                NULL::boolean,value,has_checkpoints
+            FROM {} WHERE scope=ANY(%s)
+            UNION ALL
+            SELECT 'CHECKPOINT',scope,NULL::text,NULL::text,job_id,source_id,
+                NULL::boolean,value,NULL::boolean
+            FROM {} WHERE scope=ANY(%s)""").format(
+                self._table("coordination_fields"),
+                self._table("coordination_entries"),
+                self._table("coordination_checkpoints"),
+            )
+        for (row_type, scope, field, item_key, job_id, source_id,
+             mapping, value, has_checkpoints) in connection.execute(query, (keys, keys, keys)):
+            if row_type == "FIELD":
+                state[scope][field] = {} if mapping else value
+            elif row_type == "ENTRY":
+                if (not isinstance(state[scope].get(field), dict)
+                        or has_checkpoints and (field != "jobs" or not isinstance(value, dict))):
+                    raise PostgresCoordinationError("stored coordination structure is invalid")
+                if has_checkpoints:
+                    value["source_checkpoints"] = {}
+                state[scope][field][item_key] = value
+            else:
+                jobs = state[scope].get("jobs")
+                job = jobs.get(job_id) if isinstance(jobs, dict) else None
+                if not isinstance(job, dict) or not isinstance(job.get("source_checkpoints"), dict):
+                    raise PostgresCoordinationError("stored checkpoint structure is invalid")
+                job["source_checkpoints"][source_id] = value
         return state
 
     def _write(self, connection, scope, previous, updated):
@@ -236,9 +245,9 @@ class PostgresAtomicStateStore:
         try:
             with postgres_connection(self._environment) as connection:
                 with connection.transaction():
-                    connection.execute("SELECT set_config('lock_timeout', '10s', true)")
-                    connection.execute("SELECT set_config('statement_timeout', '30s', true)")
-                    connection.execute("SELECT set_config('idle_in_transaction_session_timeout', '30s', true)")
+                    connection.execute("""SELECT set_config('lock_timeout', '10s', true),
+                        set_config('statement_timeout', '30s', true),
+                        set_config('idle_in_transaction_session_timeout', '30s', true)""")
                     connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                                        ("trendscout-coordination:" + self._schema + ":" + key,))
                     current = self._load(connection, [key])[key]

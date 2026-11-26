@@ -193,6 +193,58 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider_calls, [])
         self.assertCountEqual(cache_calls, [(source, True) for source in SOURCES])
 
+    async def test_cache_only_handler_renews_lease_around_slow_cached_work(self):
+        source = GOOGLE_SOURCE_ID
+        job_id = self.admission.admit(
+            "cache-only-slow-read-request", now=self.clock(),
+            request_metadata={"sources": [source], "cache_only": True},
+        )["job_id"]
+
+        def live_handler(_context):
+            raise AssertionError("cache-only dispatch reached a provider-capable handler")
+
+        live_handler.__trendscout_data_mode__ = "LIVE"
+
+        def cache_handler(_context):
+            self.clock.value += timedelta(seconds=8)
+            return {
+                "status": "SUCCESS", "data_mode": "LIVE",
+                "records": [{"keyword": "cached"}], "record_count": 1,
+                "delivery_state": "CACHED", "provider_request_count": 0,
+                "coverage": {"provider_request_count": 0},
+            }
+
+        cache_handler.__trendscout_data_mode__ = "LIVE"
+        worker = DistributedFetchWorker(
+            self.admission, handlers={key: live_handler for key in SOURCES},
+            cache_only_handlers={key: cache_handler for key in SOURCES},
+            resolve_grant=lambda source_id, now: CheckpointGrant(
+                source_id, "LIVE", "cache-only-policy-v1",
+                now + timedelta(minutes=10), 300, True,
+            ),
+            utcnow=self.clock,
+        )
+        original_load = worker.journal.load
+
+        def delayed_load(*args, **kwargs):
+            result = original_load(*args, **kwargs)
+            self.clock.value += timedelta(seconds=3)
+            return result
+
+        worker.journal.load = delayed_load
+        heartbeats = []
+        original_heartbeat = self.admission.heartbeat
+
+        def recording_heartbeat(*args, **kwargs):
+            heartbeats.append(self.clock())
+            return original_heartbeat(*args, **kwargs)
+
+        self.admission.heartbeat = recording_heartbeat
+        outcome = await worker.run_once("cache-only-slow-worker", job_id=job_id)
+
+        self.assertEqual(outcome["state"], "COMPLETED")
+        self.assertEqual(heartbeats, [NOW + timedelta(seconds=3), NOW + timedelta(seconds=11)])
+
     async def test_shared_terminal_status_reads_independent_sources_concurrently(self):
         job_id = self.admit()
         def handler(context):
@@ -382,6 +434,7 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         facade = object.__new__(DistributedPublicFetch)
         facade.firestore_shared_live = False
         facade.postgres_live = True
+        facade.postgres_live_state_ready = True
         facade.latest_dataset_summary_available = False
         facade.latest_dataset_summary = None
         facade.collection_store = Store()

@@ -1608,7 +1608,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["storage"]["status"], "AVAILABLE")
         self.assertEqual(response.json()["storage"]["keyword_records"], 0)
-        self.assertEqual(response.json()["embedding"]["model_load_status"], "DISABLED_FOR_FETCH")
+        self.assertEqual(response.json()["embedding"]["model_load_status"], "LEGACY_CACHE_ONLY")
         self.assertIn("context_entered", events)
         self.assertIn("context_exited", events)
 

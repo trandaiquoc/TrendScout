@@ -208,9 +208,9 @@ class PostgresCollectionStore(PostgresCollectionReader):
             with postgres_connection(self._environment) as db:
                 db.row_factory = dict_row
                 with db.transaction():
-                    db.execute("SELECT set_config('lock_timeout', '10s', true)")
-                    db.execute("SELECT set_config('statement_timeout', '30s', true)")
-                    db.execute("SELECT set_config('idle_in_transaction_session_timeout', '30s', true)")
+                    db.execute("""SELECT set_config('lock_timeout', '10s', true),
+                        set_config('statement_timeout', '30s', true),
+                        set_config('idle_in_transaction_session_timeout', '30s', true)""")
                     if serialize:
                         # Collection-wide reads and mutations use one lock until
                         # their narrower ownership boundaries are fully audited.
@@ -353,6 +353,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
             raise ValueError("cleaned keyword record is outside the store's data mode scope")
 
         def operation(db):
+            persisted_source_evidence_ids = ()
             identifiers = list(dict.fromkeys(record["id"] for record in records))
             existing_modes = {}
             id_remap = {}
@@ -531,14 +532,21 @@ class PostgresCollectionStore(PostgresCollectionReader):
                       AND k.source='google_web_serp' AND k.data_mode='LIVE'""").format(
                           self._table("keywords"), values), params)
             if source_evidence_rows:
+                remapped_evidence_rows = remap_source_evidence_keyword_ids(
+                    source_evidence_rows, id_remap,
+                )
                 self._persist_source_evidence(
-                    db, None,
-                    remap_source_evidence_keyword_ids(source_evidence_rows, id_remap),
+                    db, None, remapped_evidence_rows,
+                )
+                persisted_source_evidence_ids = tuple(
+                    row["id"] for row in remapped_evidence_rows
+                    if isinstance(row, dict) and isinstance(row.get("id"), str)
                 )
             return {
                 "records": records,
                 "skipped_bing_updates": skipped_bing,
                 "id_remap": id_remap,
+                "source_evidence_ids": persisted_source_evidence_ids,
             }
 
         return self._write(operation)
@@ -939,7 +947,15 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                  provider_record_count, received_record_count,
                                  retained_keyword_count, rejected_record_count,
                                  observation_start, observation_end, fetched_at, quality_flags,
-                                 processing_status, created_at, source_evidence_rows=None):
+                                 processing_status, created_at, source_evidence_rows=None,
+                                 source_evidence_ids_already_persisted=()):
+        if (not isinstance(source_evidence_ids_already_persisted, (tuple, list, set, frozenset))
+                or any(not isinstance(identifier, str) or not identifier
+                       or len(identifier) > 256
+                       for identifier in source_evidence_ids_already_persisted)):
+            raise ValueError("persisted source evidence ids must be bounded strings")
+        already_persisted = frozenset(source_evidence_ids_already_persisted)
+
         def operation(db):
             mode_scope = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
             keyword_scope = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
@@ -976,13 +992,20 @@ class PostgresCollectionStore(PostgresCollectionReader):
                  observation_end, fetched_at, Jsonb(quality_flags), processing_status,
                  counts["eligible"], counts["assigned"], counts["unassigned"], created_at))
             if source_evidence_rows:
-                self._persist_source_evidence(db, dataset_id, source_evidence_rows)
+                rows = [row for row in source_evidence_rows if isinstance(row, dict)]
+                if already_persisted:
+                    pending_rows = [row for row in rows if row.get("id") not in already_persisted]
+                    if pending_rows:
+                        self._persist_source_evidence(db, None, pending_rows)
+                    self._link_dataset_evidence(db, dataset_id, rows)
+                else:
+                    self._persist_source_evidence(db, dataset_id, rows)
             return counts
 
         return self._write(operation)
 
     def _persist_source_evidence(self, db, dataset_id, evidence_rows):
-        """Write lineage and both relationship sets in the snapshot transaction."""
+        """Write source lineage and keyword links, optionally associating a snapshot."""
         rows = [row for row in evidence_rows if isinstance(row, dict)]
         if not rows:
             return
@@ -1038,11 +1061,6 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     row["expires_at"],
                 ) for row in batch])
 
-            if dataset_id is not None:
-                cursor.executemany(sql.SQL("""INSERT INTO {}(dataset_id,evidence_id)
-                    VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("dataset_evidence")),
-                    [(dataset_id, row["id"]) for row in rows])
-
             requested_keyword_ids = sorted({keyword_id for row in rows
                                             for keyword_id in row.get("keyword_ids", ())})
             existing_keyword_ids = set()
@@ -1059,6 +1077,19 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 cursor.executemany(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
                     VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("evidence_keywords")),
                     links[offset:offset + 500])
+
+        if dataset_id is not None:
+            self._link_dataset_evidence(db, dataset_id, rows)
+
+    def _link_dataset_evidence(self, db, dataset_id, evidence_rows):
+        rows = [row for row in evidence_rows
+                if isinstance(row, dict) and isinstance(row.get("id"), str)]
+        if not rows:
+            return
+        with db.cursor() as cursor:
+            cursor.executemany(sql.SQL("""INSERT INTO {}(dataset_id,evidence_id)
+                VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("dataset_evidence")),
+                [(dataset_id, row["id"]) for row in rows])
 
     def create(self, data, *, created_by="USER", reason=""):
         identifier = str(uuid.uuid4())
@@ -1107,6 +1138,92 @@ class PostgresCollectionStore(PostgresCollectionReader):
             row = db.execute(sql.SQL("SELECT id FROM {} WHERE category_id=%s AND status='ACTIVE'")
                              .format(self._table("collections")), (category.id,)).fetchone()
             return row["id"] if row else None
+        return self._write(operation)
+
+    def ensure_category_collections(self, categories):
+        """Ensure a bounded group of taxonomy roots with one database transaction."""
+        categories = tuple(categories)
+        if (len(categories) > 1000
+                or any(not isinstance(getattr(category, "id", None), str)
+                       or not category.id
+                       or not isinstance(getattr(category, "display_name", None), str)
+                       or not category.display_name
+                       for category in categories)):
+            raise ValueError("bounded taxonomy categories with string identities required")
+        if not categories:
+            return {}
+
+        by_id = {category.id: category for category in categories}
+        category_ids = list(by_id)
+        ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+        name_fingerprints = {
+            category.id: fingerprint(category.display_name) for category in by_id.values()
+        }
+        folded_names = sorted({category.display_name.translate(ascii_lower)
+                               for category in by_id.values()})
+        suppressed_fingerprints = sorted(set(name_fingerprints.values()))
+
+        def operation(db):
+            result = {
+                row["category_id"]: row["id"]
+                for row in db.execute(sql.SQL("""SELECT id,category_id FROM {}
+                    WHERE category_id=ANY(%s) AND status='ACTIVE'""").format(
+                        self._table("collections")), (category_ids,)).fetchall()
+            }
+            missing = [category for category_id, category in by_id.items()
+                       if category_id not in result]
+            if not missing:
+                return result
+
+            suppressed = {
+                row["fingerprint"]
+                for row in db.execute(sql.SQL("SELECT fingerprint FROM {} WHERE fingerprint=ANY(%s) "
+                                               "AND kind='DELETED_COLLECTION'").format(
+                    self._table("suppression")), (suppressed_fingerprints,)).fetchall()
+            }
+            existing_names = {}
+            for row in db.execute(sql.SQL("""SELECT id,name FROM {} WHERE status='ACTIVE'
+                AND translate(name,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')=ANY(%s)
+                ORDER BY created_at,id""").format(self._table("collections")),
+                    (folded_names,)).fetchall():
+                existing_names.setdefault(row["name"].translate(ascii_lower), row["id"])
+
+            stamp = datetime.now(timezone.utc)
+            inserts = []
+            for category in missing:
+                if name_fingerprints[category.id] in suppressed:
+                    continue
+                folded_name = category.display_name.translate(ascii_lower)
+                existing_id = existing_names.get(folded_name)
+                if existing_id:
+                    result[category.id] = existing_id
+                    continue
+                category_collection_id = "topic-" + fingerprint(category.id)[:32]
+                inserts.append((
+                    category_collection_id,
+                    category.display_name,
+                    f"Keywords and entities about {category.display_name.casefold()}.",
+                    category.id,
+                    stamp,
+                    stamp,
+                ))
+                existing_names[folded_name] = category_collection_id
+
+            if inserts:
+                with db.cursor() as cursor:
+                    cursor.executemany(sql.SQL("""INSERT INTO {}(id,name,description,category_id,
+                        parent_id,examples,exclusions,created_by,auto_match,reason,created_at,updated_at)
+                        VALUES (%s,%s,%s,%s,NULL,'[]'::jsonb,'[]'::jsonb,'AI',1,
+                            'taxonomy-backed entity classification',%s,%s) ON CONFLICT DO NOTHING""")
+                        .format(self._table("collections")), inserts)
+                result.update({
+                    row["category_id"]: row["id"]
+                    for row in db.execute(sql.SQL("""SELECT id,category_id FROM {}
+                        WHERE category_id=ANY(%s) AND status='ACTIVE'""").format(
+                            self._table("collections")), (category_ids,)).fetchall()
+                })
+            return result
+
         return self._write(operation)
 
     def update(self, identifier, data):
