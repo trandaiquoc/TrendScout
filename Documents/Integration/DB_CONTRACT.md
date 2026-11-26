@@ -58,6 +58,10 @@ storage, and runtime composition. The other goals own their domain behavior:
   forward lineage only: it does not certify historical rows or permit deleting
   source evidence while classification, algorithm, or saved-research copies
   remain untracked.
+- When a data-mode collision maps a provider keyword to a mode-scoped ID, the
+  persistence result carries that mapping. Source-evidence joins, their redaction
+  descriptors, and Bing candidate updates must use the resolved ID so a LIVE
+  observation cannot attach to the colliding SYNTHETIC row.
 
 ## Existing schema ownership map
 

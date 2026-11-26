@@ -18,7 +18,10 @@ from app.collections.source_digest import (
     COLLECTION_INPUT_DIGEST_VERSION,
     source_input_digest,
 )
-from app.collections.source_lineage import build_source_evidence
+from app.collections.source_lineage import (
+    build_source_evidence,
+    remap_source_evidence_keyword_ids,
+)
 from app.collections.store import (
     CollectionStore,
     bing_verification_update,
@@ -234,6 +237,7 @@ class CollectionService:
             self._persist_dataset_snapshot(
                 fetch_id, sources, records, available, skipped, policy_excluded,
                 bing_updates=bing_updates, entity_context_rows=entity_context_rows,
+                keyword_id_map=persisted.get("id_remap", {}),
             )
         if sources and not records and not fetch_id.startswith("organize-"):
             # A failed or empty source response is still an auditable snapshot,
@@ -483,7 +487,8 @@ class CollectionService:
         self.store.update_fetch_job(fetch_id, changes)
 
     def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped,
-                                  policy_excluded=0, *, bing_updates=(), entity_context_rows=()):
+                                  policy_excluded=0, *, bing_updates=(), entity_context_rows=(),
+                                  keyword_id_map=None):
         manifests, flags, modes = [], [], set()
         provider_count = 0
         for source_index, source in enumerate(sources):
@@ -527,7 +532,9 @@ class CollectionService:
             lineage = build_source_evidence(
                 sources, bing_updates=bing_updates, entity_context_rows=entity_context_rows,
             )
-            source_evidence_rows = lineage["rows"]
+            source_evidence_rows = remap_source_evidence_keyword_ids(
+                lineage["rows"], keyword_id_map,
+            )
             if lineage["untracked_record_count"]:
                 flags.append("SOURCE_EVIDENCE_LINEAGE_INCOMPLETE")
         dates, fetched = [], []

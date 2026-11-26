@@ -196,6 +196,15 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                             "status": "VERIFIED", "results": []}
             bing_update = {"candidate_id": bing_id, "identity": bing_identity,
                            "observed_at": "2026-11-25T12:00:00+00:00", "verification": verification}
+            collision_verification = {
+                "fetched_at": "2026-11-25T12:06:00Z",
+                "query_fingerprint": "fp-collision", "status": "VERIFIED", "results": [],
+            }
+            collision_bing_update = {
+                "candidate_id": collision_id, "identity": collision_id,
+                "observed_at": "2026-11-25T12:00:00+00:00",
+                "verification": collision_verification,
+            }
             bulk_ids = [hashlib.sha256(f"bulk:{index}".encode()).hexdigest()
                         for index in range(501)]
             bulk_records = [{"id": identifier, "keyword": f"Bulk topic {index}",
@@ -206,7 +215,7 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                             for index, identifier in enumerate(bulk_ids)]
             result = store.persist_cleaned_keywords(
                 [*records, *bulk_records], rejected=[(rejected_id, "INVALID_SOURCE_RECORD")],
-                bing_updates=[bing_update],
+                bing_updates=[bing_update, collision_bing_update],
             )
 
             mapped_id = hashlib.sha256(f"LIVE:{collision_id}".encode()).hexdigest()
@@ -226,6 +235,7 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
             assert len(result["records"]) == len(records) + len(bulk_records)
             assert result["records"][0]["id"] == excluded_id
             assert next(row["id"] for row in result["records"] if row["keyword"] == "Live topic") == mapped_id
+            assert result["id_remap"] == {collision_id: mapped_id}
             excluded = connection.execute(sql.SQL("SELECT eligible,rejection_reason FROM {} WHERE id=%s")
                                           .format(keyword_table), (excluded_id,)).fetchone()
             assert excluded == (0, "USER_EXCLUDED")
@@ -243,6 +253,12 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                                              .format(keyword_table), (bing_id,)).fetchone()[0]
             assert bing_saved["bing_verification"] == verification
             assert bing_saved["bing_verification_history"] == [verification]
+            collision_saved = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (mapped_id,)).fetchone()[0]
+            assert collision_saved["bing_verification"] == collision_verification
+            legacy_saved = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (collision_id,)).fetchone()[0]
+            assert legacy_saved == {"legacy": True}
 
             replay = store.persist_cleaned_keywords([records[-1]], bing_updates=[bing_update])
             assert replay["skipped_bing_updates"] == 0

@@ -11,7 +11,10 @@ from psycopg import sql
 
 from app.collections.postgres_store import PostgresCollectionStore
 from app.collections.service import CollectionService
-from app.collections.source_lineage import build_source_evidence
+from app.collections.source_lineage import (
+    build_source_evidence,
+    remap_source_evidence_keyword_ids,
+)
 from app.collections.store import keyword_record
 from app.retention.policy import effective_retention_deadline
 from app.retention.source_policy import (
@@ -107,6 +110,40 @@ def test_missing_collection_time_is_untracked_even_when_snapshot_time_exists():
     }])
 
     assert result == {"rows": [], "untracked_record_count": 1}
+
+
+def test_mode_scoped_keyword_remap_updates_every_lineage_reference_without_mutating_input():
+    raw = {
+        "article_display": "Portable Solar Generator",
+        "article_original": "Portable_Solar_Generator",
+        "project": "en.wikipedia",
+        "observation_date": "2026-11-25",
+        "fetched_at": "2026-11-26T12:00:00Z",
+        "provider_rank": 1,
+        "views_ceil": 8400,
+        "country_scope": "US",
+        "access": "all-access",
+    }
+    row = build_source_evidence([{
+        "source_id": WIKIMEDIA_SOURCE_ID,
+        "status": "SUCCESS",
+        "data_mode": "LIVE",
+        "records": [raw],
+    }])["rows"][0]
+    original_id = row["keyword_ids"][0]
+    remapped_id = "live-" + original_id
+
+    remapped = remap_source_evidence_keyword_ids([row], {original_id: remapped_id})[0]
+
+    assert row["keyword_ids"] == (original_id,)
+    assert remapped["keyword_ids"] == (remapped_id,)
+    assert all(entry["keyword_id"] == remapped_id for entry in
+               remapped["payload"]["retention_lineage"]["keyword_fields"])
+    assert [entry["value_sha256"] for entry in
+            remapped["payload"]["retention_lineage"]["keyword_fields"]] == [
+        entry["value_sha256"]
+        for entry in row["payload"]["retention_lineage"]["keyword_fields"]
+    ]
 
 
 def test_naive_collection_timestamp_is_not_accepted():

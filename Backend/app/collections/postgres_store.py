@@ -270,6 +270,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
         def operation(db):
             identifiers = list(dict.fromkeys(record["id"] for record in records))
             existing_modes = {}
+            id_remap = {}
             if self.data_mode_scope and identifiers:
                 rows = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
                                   .format(self._table("keywords")), (identifiers,)).fetchall()
@@ -277,9 +278,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 for record in records:
                     if (record["id"] in existing_modes
                             and existing_modes[record["id"]] != self.data_mode_scope):
+                        original_id = record["id"]
                         record["id"] = hashlib.sha256(
                             f"{self.data_mode_scope}:{record['id']}".encode("utf-8")
                         ).hexdigest()
+                        id_remap[original_id] = record["id"]
                 resolved_ids = list(dict.fromkeys(record["id"] for record in records))
                 collisions = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
                                         .format(self._table("keywords")),
@@ -352,6 +355,31 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                 self._table("keywords"), self._table("keyword_decisions")), params)
 
             skipped_bing = 0
+            original_candidate_ids = list(dict.fromkeys(
+                update.get("candidate_id") for update in bing_updates
+                if isinstance(update.get("candidate_id"), str)
+            ))
+            if self.data_mode_scope and original_candidate_ids:
+                mapped_candidates = {
+                    identifier: hashlib.sha256(
+                        f"{self.data_mode_scope}:{identifier}".encode("utf-8")
+                    ).hexdigest()
+                    for identifier in original_candidate_ids
+                }
+                lookup_ids = list(dict.fromkeys([
+                    *original_candidate_ids, *mapped_candidates.values(),
+                ]))
+                rows = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
+                                  .format(self._table("keywords")), (lookup_ids,)).fetchall()
+                modes_by_id = {row["id"]: row["data_mode"] for row in rows}
+                for identifier, mapped_id in mapped_candidates.items():
+                    if (modes_by_id.get(mapped_id) == self.data_mode_scope
+                            and modes_by_id.get(identifier) != self.data_mode_scope):
+                        id_remap[identifier] = mapped_id
+            for update in bing_updates:
+                candidate_id = update.get("candidate_id")
+                if isinstance(candidate_id, str):
+                    update["candidate_id"] = id_remap.get(candidate_id, candidate_id)
             candidate_ids = list(dict.fromkeys(
                 update.get("candidate_id") for update in bing_updates
                 if isinstance(update.get("candidate_id"), str)
@@ -417,7 +445,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     FROM (VALUES {}) AS v(id,evidence) WHERE k.id=v.id
                       AND k.source='google_web_serp' AND k.data_mode='LIVE'""").format(
                           self._table("keywords"), values), params)
-            return {"records": records, "skipped_bing_updates": skipped_bing}
+            return {
+                "records": records,
+                "skipped_bing_updates": skipped_bing,
+                "id_remap": id_remap,
+            }
 
         return self._write(operation)
 

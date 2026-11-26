@@ -140,6 +140,45 @@ def _entity_context_lineage(keyword_id, content):
     }
 
 
+def remap_source_evidence_keyword_ids(evidence_rows, keyword_id_map):
+    """Apply PostgreSQL's mode-scoped keyword IDs to every lineage reference."""
+    if not isinstance(keyword_id_map, dict):
+        keyword_id_map = {}
+    mapping = {
+        old: new for old, new in (keyword_id_map or {}).items()
+        if isinstance(old, str) and isinstance(new, str) and old and new
+    }
+    if not mapping:
+        return list(evidence_rows or ())
+    remapped_rows = []
+    for row in evidence_rows or ():
+        if not isinstance(row, dict):
+            continue
+        remapped = dict(row)
+        remapped["keyword_ids"] = tuple(sorted({
+            mapping.get(identifier, identifier)
+            for identifier in row.get("keyword_ids", ())
+            if isinstance(identifier, str)
+        }))
+        payload = row.get("payload")
+        if isinstance(payload, dict):
+            payload = json.loads(_canonical_json(payload))
+            retention = payload.get("retention_lineage")
+            if isinstance(retention, dict):
+                for group in ("keyword_fields", "entity_context_rows"):
+                    targets = retention.get(group)
+                    if not isinstance(targets, list):
+                        continue
+                    for target in targets:
+                        if isinstance(target, dict) and isinstance(target.get("keyword_id"), str):
+                            target["keyword_id"] = mapping.get(
+                                target["keyword_id"], target["keyword_id"]
+                            )
+            remapped["payload"] = payload
+        remapped_rows.append(remapped)
+    return remapped_rows
+
+
 def _aware_timestamp(value):
     if isinstance(value, datetime):
         parsed = value
