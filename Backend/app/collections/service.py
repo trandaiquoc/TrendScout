@@ -173,6 +173,10 @@ class CollectionService:
         replay_available = begin["replay_available"]
         replay_skipped = begin["replay_skipped"]
         records, rejected, bing_updates = [], [], []
+        source_batches, bing_sources = [], []
+        incremental_persistence = bool(getattr(
+            self.store, "supports_incremental_fetch_persistence", False,
+        ))
         entity_context_rows = []
         policy_excluded = 0
         skipped = replay_skipped if retry_existing_snapshot and not sources else 0
@@ -189,6 +193,7 @@ class CollectionService:
             snapshot_status = source.get("status", "SUCCESS")
             if snapshot_status not in {"SUCCESS", "PARTIAL"}:
                 continue
+            source_records = []
             for raw in source.get("records", []):
                 if source_id == BING_SOURCE_ID:
                     update = bing_verification_update(raw, mode)
@@ -212,13 +217,58 @@ class CollectionService:
                             reason = collection_technical_reason(raw.get("project", ""), title) or "INVALID_WIKIMEDIA_RECORD"
                         rejected.append((identifier, reason))
                 else:
-                    records.append(record)
-        # Keep cleaned source evidence available for manual work or an inference retry.
-        persisted = self.store.persist_cleaned_keywords(
-            records, rejected=rejected, bing_updates=bing_updates,
-        )
-        records = persisted["records"]
-        skipped += persisted["skipped_bing_updates"]
+                    source_records.append(record)
+            if source_id == BING_SOURCE_ID:
+                bing_sources.append(source)
+                continue
+            records.extend(source_records)
+            if incremental_persistence:
+                source_batches.append((source, source_records))
+
+        keyword_id_map = {}
+        if incremental_persistence:
+            # Preserve the legacy precedence: rejection updates happen before any
+            # valid keyword upsert, while each source's records and lineage commit
+            # together in a bounded, idempotent transaction.
+            if rejected:
+                rejection_result = self.store.persist_cleaned_keywords([], rejected=rejected)
+                keyword_id_map.update(rejection_result.get("id_remap", {}))
+                skipped += rejection_result["skipped_bing_updates"]
+            persisted_records = []
+            supports_lineage = getattr(self.store, "supports_source_evidence_lineage", False)
+            for source, source_records in source_batches:
+                evidence_rows = []
+                if supports_lineage:
+                    evidence_rows = build_source_evidence([source])["rows"]
+                persisted = self.store.persist_cleaned_keywords(
+                    source_records, source_evidence_rows=evidence_rows,
+                )
+                persisted_records.extend(persisted["records"])
+                keyword_id_map.update(persisted.get("id_remap", {}))
+                skipped += persisted["skipped_bing_updates"]
+            records = persisted_records
+
+            bing_evidence_rows = []
+            if supports_lineage and bing_sources:
+                bing_evidence_rows = build_source_evidence(
+                    bing_sources, bing_updates=bing_updates,
+                )["rows"]
+            if bing_updates or bing_evidence_rows:
+                bing_result = self.store.persist_cleaned_keywords(
+                    [], bing_updates=bing_updates,
+                    source_evidence_rows=bing_evidence_rows,
+                )
+                keyword_id_map.update(bing_result.get("id_remap", {}))
+                skipped += bing_result["skipped_bing_updates"]
+        else:
+            # The legacy SQLite path keeps its existing single-write behavior until
+            # the reconciled migration enables PostgreSQL as the default runtime.
+            persisted = self.store.persist_cleaned_keywords(
+                records, rejected=rejected, bing_updates=bing_updates,
+            )
+            records = persisted["records"]
+            keyword_id_map.update(persisted.get("id_remap", {}))
+            skipped += persisted["skipped_bing_updates"]
         source_keyword_ids = tuple(record["id"] for record in records)
         # Entity context is enriched only on a successful provider update. Organize/replay
         # operations consume persisted context and never trigger a new provider request.
@@ -237,7 +287,7 @@ class CollectionService:
             self._persist_dataset_snapshot(
                 fetch_id, sources, records, available, skipped, policy_excluded,
                 bing_updates=bing_updates, entity_context_rows=entity_context_rows,
-                keyword_id_map=persisted.get("id_remap", {}),
+                keyword_id_map=keyword_id_map,
             )
         if sources and not records and not fetch_id.startswith("organize-"):
             # A failed or empty source response is still an auditable snapshot,

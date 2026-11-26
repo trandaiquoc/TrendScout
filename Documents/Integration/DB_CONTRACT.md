@@ -62,6 +62,12 @@ storage, and runtime composition. The other goals own their domain behavior:
   persistence result carries that mapping. Source-evidence joins, their redaction
   descriptors, and Bing candidate updates must use the resolved ID so a LIVE
   observation cannot attach to the colliding SYNTHETIC row.
+- PostgreSQL Fetch processing persists each successful non-Bing source's
+  cleaned keyword batch and source-evidence links in one transaction. Bing
+  verification updates are applied after candidate rows have been persisted;
+  their lineage is written in that same transaction. The final dataset snapshot
+  links these evidence rows to the Fetch. This is source-result persistence;
+  provider page streaming remains a separate recovery requirement.
 
 ## Existing schema ownership map
 

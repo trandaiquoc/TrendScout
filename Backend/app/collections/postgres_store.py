@@ -19,7 +19,10 @@ from psycopg.types.json import Jsonb
 from app.collections.analysis_storage import analysis_state_digest
 from app.collections.identity import fingerprint
 from app.collections.postgres_reads import PostgresCollectionReader, _json_result
-from app.collections.source_lineage import build_source_evidence
+from app.collections.source_lineage import (
+    build_source_evidence,
+    remap_source_evidence_keyword_ids,
+)
 from app.storage.postgres_connection import PostgresConnectionError, postgres_connection
 
 
@@ -118,6 +121,7 @@ class PostgresAlgorithmAnalysisSession:
 
 class PostgresCollectionStore(PostgresCollectionReader):
     supports_source_evidence_lineage = True
+    supports_incremental_fetch_persistence = True
 
     def _write(self, operation, *, serialize=True):
         try:
@@ -249,7 +253,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
         return self._write(lambda db: operation(PostgresAlgorithmAnalysisSession(
             db, self._table, self.data_mode_scope)))
 
-    def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=()):
+    def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=(),
+                                 source_evidence_rows=None):
         """Persist a bounded Fetch ingestion batch with native set-based SQL.
 
         The caller supplies records already validated by the existing source
@@ -445,6 +450,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     FROM (VALUES {}) AS v(id,evidence) WHERE k.id=v.id
                       AND k.source='google_web_serp' AND k.data_mode='LIVE'""").format(
                           self._table("keywords"), values), params)
+            if source_evidence_rows:
+                self._persist_source_evidence(
+                    db, None,
+                    remap_source_evidence_keyword_ids(source_evidence_rows, id_remap),
+                )
             return {
                 "records": records,
                 "skipped_bing_updates": skipped_bing,

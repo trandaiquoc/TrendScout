@@ -15,6 +15,9 @@ from app.collections.entity_context import EntityContext, WikimediaEntityContext
 from app.collections.identity import fingerprint
 from app.collections.postgres_store import PostgresCollectionStore
 from app.collections.service import CollectionService
+from app.collections.source_lineage import build_source_evidence
+from app.collections.store import keyword_record
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import apply_migrations
 
@@ -344,6 +347,79 @@ def test_cleaned_keyword_ingestion_is_batched_idempotent_and_scope_safe():
                 (rejected_id, 0, "CLASSIFICATION_INELIGIBLE"),
                 (restore_id, 1, None),
             ]
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_incremental_source_persistence_remaps_lineage_to_live_keyword_id():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            created = True
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+            raw = {
+                "article_display": "Portable Solar Generator",
+                "article_original": "Portable_Solar_Generator",
+                "project": "en.wikipedia",
+                "observation_date": "2026-11-25",
+                "fetched_at": "2026-11-26T12:00:00Z",
+                "provider_rank": 1,
+                "views_ceil": 8400,
+                "country_scope": "US",
+                "access": "all-access",
+            }
+            synthetic = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "SYNTHETIC")
+            live = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "LIVE")
+            assert synthetic["id"] == live["id"]
+            keyword_table = sql.Identifier(schema, "keywords")
+            synthetic_values = [synthetic[key] for key in (
+                "id", "keyword", "normalized", "source", "project", "observed_at",
+                "data_mode", "evidence", "context",
+            )]
+            synthetic_values[7] = Jsonb(json.loads(synthetic_values[7]))
+            connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
+                .format(keyword_table), synthetic_values)
+            source_evidence_rows = build_source_evidence([{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "records": [raw],
+            }])["rows"]
+
+            persisted = store.persist_cleaned_keywords(
+                [live], source_evidence_rows=source_evidence_rows,
+            )
+
+            expected_live_id = hashlib.sha256(
+                f"LIVE:{live['id']}".encode("utf-8")
+            ).hexdigest()
+            assert persisted["id_remap"] == {live["id"]: expected_live_id}
+            assert persisted["records"][0]["id"] == expected_live_id
+            evidence_id = source_evidence_rows[0]["id"]
+            evidence_links = connection.execute(sql.SQL("SELECT keyword_id FROM {} "
+                "WHERE evidence_id=%s").format(sql.Identifier(schema, "evidence_keywords")),
+                (evidence_id,)).fetchall()
+            assert evidence_links == [(expected_live_id,)]
+            payload = connection.execute(sql.SQL("SELECT payload FROM {} WHERE id=%s")
+                .format(sql.Identifier(schema, "source_evidence")), (evidence_id,)).fetchone()[0]
+            field_ids = {entry["keyword_id"] for entry in
+                         payload["retention_lineage"]["keyword_fields"]}
+            assert field_ids == {expected_live_id}
+            legacy_evidence = connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (live["id"],)).fetchone()[0]
+            assert legacy_evidence == json.loads(synthetic["evidence"])
         finally:
             if created:
                 connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
