@@ -231,11 +231,18 @@ def checked_source_approval(approvals, source_id, plan_fingerprint, clock, *, ru
 
 
 def _is_approved_normal_google_state_store(store):
-    """Allow the local policy on SQLite or its explicitly pinned shared store."""
+    """Allow the local policy on SQLite, configured PostgreSQL, or pinned Firestore."""
     from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 
     if type(store) is LocalSQLiteAtomicStateStore:
         return store.data_mode == "LIVE"
+    try:
+        from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+
+        if type(store) is PostgresAtomicStateStore:
+            return isinstance(store._schema, str) and bool(store._schema)
+    except Exception:
+        return False
     try:
         from app.orchestration.firestore_shared_live_composition import (
             PRODUCTION_FIRESTORE_PROJECT_ID,
@@ -250,7 +257,19 @@ def _is_approved_normal_google_state_store(store):
 
 
 def _is_approved_vercel_shared_state_store(store):
-    """Permit only pinned Firestore state for the deployed or synthetic test runtime."""
+    """Permit the explicitly selected shared database runtime and legacy emulator."""
+    try:
+        from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+
+        if type(store) is PostgresAtomicStateStore:
+            return (
+                os.environ.get("VERCEL") == "1"
+                and getattr(store, "vercel_runtime_enabled", False) is True
+                and isinstance(store._schema, str)
+                and bool(store._schema)
+            )
+    except Exception:
+        return False
     try:
         from app.orchestration.firestore_shared_live_composition import (
             PRODUCTION_FIRESTORE_PROJECT_ID,

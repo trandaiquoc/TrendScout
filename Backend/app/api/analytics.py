@@ -46,21 +46,16 @@ def runtime_status(request: Request):
         fastembed_version = version("fastembed")
     except PackageNotFoundError:
         fastembed_version = None
-    with service.store.connect() as db:
-        cache = db.execute(
-            """SELECT count(*) AS vectors,coalesce(sum(dimension),0) AS dimensions,
-            group_concat(DISTINCT dimension) AS vector_dimensions FROM cache WHERE model_version=?""",
-            (embeddings.MODEL_VERSION,),
-        ).fetchone()
-        integrity = db.execute("PRAGMA quick_check(1)").fetchone()[0]
-        keyword_count = db.execute("SELECT count(*) FROM keywords "
-            + ("WHERE data_mode=?" if service.store.data_mode_scope else ""),
-            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchone()[0]
+    storage_metrics = service.store.runtime_storage_metrics(embeddings.MODEL_VERSION)
+    integrity = storage_metrics["integrity"]
     database_path = getattr(service.store, "path", None)
-    try:
-        database_size_bytes = int(database_path.stat().st_size) if database_path else None
-    except OSError:
-        database_size_bytes = None
+    database_size_bytes = storage_metrics.get("database_size_bytes")
+    if database_size_bytes is None:
+        try:
+            database_size_bytes = int(database_path.stat().st_size) if database_path else None
+        except OSError:
+            database_size_bytes = None
+    integrity_status = "OK" if integrity == "ok" else "NOT_CHECKED" if integrity is None else "CHECK_REQUIRED"
     return {
         "embedding": {
             "package": "fastembed",
@@ -69,9 +64,9 @@ def runtime_status(request: Request):
             "model_version": embeddings.MODEL_VERSION,
             "inference_device": "CPU",
             "adapter_installed": bool(fastembed_version),
-            "cache_vectors": cache["vectors"] or 0,
-            "cached_dimensions_total": cache["dimensions"] or 0,
-            "vector_dimensions": cache["vector_dimensions"],
+            "cache_vectors": storage_metrics["cache_vectors"],
+            "cached_dimensions_total": storage_metrics["cached_dimensions_total"],
+            "vector_dimensions": storage_metrics["vector_dimensions"],
             "model_load_status": (
                 "DISABLED_FOR_FETCH" if not service.fetch_model_inference_enabled
                 else "LAZY_ON_DEMAND"
@@ -89,10 +84,10 @@ def runtime_status(request: Request):
             "configured_sources": len(request.app.state.settings.enabled_source_ids),
         },
         "storage": {
-            "status": "AVAILABLE" if integrity == "ok" else "CHECK_REQUIRED",
-            "engine": "SQLITE",
-            "integrity": "OK" if integrity == "ok" else "CHECK_REQUIRED",
-            "keyword_records": keyword_count,
+            "status": "CHECK_REQUIRED" if integrity_status == "CHECK_REQUIRED" else "AVAILABLE",
+            "engine": storage_metrics["engine"],
+            "integrity": integrity_status,
+            "keyword_records": storage_metrics["keyword_records"],
             "database_size_bytes": database_size_bytes,
             "read_only": bool(request.app.state.read_only),
         },
@@ -193,61 +188,18 @@ def overview(request: Request):
                 },
             }
         raise HTTPException(503, {"code": "ANALYTICS_UNAVAILABLE"})
-    mode = service.store.data_mode_scope
-    parameters = (mode,) if mode else ()
-    keyword_filter = " AND k.data_mode=?" if mode else ""
-    dataset_filter = " WHERE data_mode=?" if mode else ""
-    with service.store.connect() as db:
-        totals = db.execute("""SELECT count(*) AS keywords,
-            sum(CASE WHEN k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' THEN 1 ELSE 0 END) AS eligible,
-            sum(CASE WHEN (k.eligible=0 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE')
-                OR EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')
-                THEN 1 ELSE 0 END) AS excluded
-            FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id"""
-            + (" WHERE k.data_mode=?" if mode else ""), parameters).fetchone()
-        classifications = db.execute("""SELECT cr.classification_status,count(*) AS count
-            FROM classification_results cr JOIN keywords k ON k.id=cr.keyword_id
-            WHERE (k.eligible=1 OR cr.classification_status='INELIGIBLE')
-            AND NOT EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')"""
-            + keyword_filter + " GROUP BY cr.classification_status", parameters).fetchall()
-        source_rows = db.execute("""SELECT source,count(DISTINCT id) AS keywords,
-            min(substr(observed_at,1,10)) AS first_seen,max(substr(observed_at,1,10)) AS last_seen
-            FROM keywords k WHERE 1=1""" + keyword_filter + " GROUP BY source ORDER BY keywords DESC,source", parameters).fetchall()
-        algorithm_rows = db.execute("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
-            FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
-            LEFT JOIN classification_results cr ON cr.keyword_id=k.id
-            WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'"""
-            + keyword_filter + " GROUP BY r.algorithm_id,r.version,r.status ORDER BY r.algorithm_id,r.status", parameters).fetchall()
-        observations = db.execute("""SELECT o.source,o.observation_date,count(DISTINCT o.keyword_id) AS keywords,
-            sum(o.status='OBSERVED') AS observed,sum(o.status<>'OBSERVED') AS unavailable
-            FROM algorithm_observations o JOIN keywords k ON k.id=o.keyword_id WHERE 1=1"""
-            + keyword_filter + " GROUP BY o.source,o.observation_date ORDER BY o.observation_date,o.source", parameters).fetchall()
-        top = db.execute("""SELECT k.id,k.keyword,k.source,k.project,k.observed_at,r.value,r.metric,r.unit,r.updated_at,r.result_json
-            FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
-            WHERE r.algorithm_id='observed-volume-rank' AND r.status='COMPLETED' AND r.value IS NOT NULL
-            AND k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
-                WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'""" + keyword_filter + " ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE LIMIT 1000",
-            parameters).fetchall()
-        latest = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
-            received_record_count,retained_keyword_count,rejected_record_count,observation_start,
-            observation_end,fetched_at,created_at,quality_flags,processing_status,eligible_keyword_count,
-            assigned_keyword_count,unassigned_keyword_count FROM dataset_snapshots
-            """ + dataset_filter + " ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
-        history = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
-            received_record_count,retained_keyword_count,rejected_record_count,observation_start,
-            observation_end,fetched_at,quality_flags,processing_status FROM dataset_snapshots
-            """ + dataset_filter + " ORDER BY created_at DESC LIMIT 30", parameters).fetchall()
-        successful = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,fetched_at,created_at,observation_start,
-            observation_end,quality_flags FROM dataset_snapshots WHERE status IN ('SUCCESS','PARTIAL')
-            """ + ("AND data_mode=? " if mode else "") + "ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
-        membership_count = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
-            "JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id "
-            "WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'" + keyword_filter, parameters).fetchone()[0]
-        unassigned_topic_count = db.execute("""SELECT count(*) FROM keywords k
-            WHERE k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
-                WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS(
-                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)"""
-            + keyword_filter, parameters).fetchone()[0]
+    overview_inputs = service.store.analytics_overview_inputs()
+    totals = overview_inputs["totals"]
+    classifications = overview_inputs["classifications"]
+    source_rows = overview_inputs["source_rows"]
+    algorithm_rows = overview_inputs["algorithm_rows"]
+    observations = overview_inputs["observations"]
+    top = overview_inputs["top"]
+    latest = overview_inputs["latest"]
+    history = overview_inputs["history"]
+    successful = overview_inputs["successful"]
+    membership_count = overview_inputs["membership_count"]
+    unassigned_topic_count = overview_inputs["unassigned_topic_count"]
     classified = sum(
         int(row["count"]) for row in classifications if row["classification_status"] == "CLASSIFIED"
     )
@@ -405,6 +357,9 @@ def overview(request: Request):
 
 
 def _history_storage(request):
+    postgres_storage = getattr(request.app.state, "postgres_analysis_storage", None)
+    if postgres_storage is not None:
+        return postgres_storage
     if (getattr(request.app.state, "read_only", False)
             or request.app.state.settings.environment_profile == "vercel"):
         if _request_distributed_fetch(request) is not None:
@@ -529,12 +484,7 @@ def build_local_run_history_projection(service, *, limit=20):
     """Build a bounded first-page projection; filtered and later pages still query SQLite."""
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("run history projection limit must be between 1 and 20")
-    with service.store.connect() as db:
-        rows = db.execute("""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
-            d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-            d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
-            FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
-            ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""", (limit + 1,)).fetchall()
+    rows = service.store.local_run_history_rows(limit=limit + 1)
     return {
         "items": [_history_item_from_job(row) for row in rows[:limit]],
         "has_more": len(rows) > limit,
@@ -643,33 +593,9 @@ async def _run_history_cursor_page(request, q, status, mode, limit, token):
         local_rows = []
         local_has_more = False
         if service:
-            with service.store.connect() as db:
-                cursor = positions["local"]
-                where_terms = []
-                parameters = []
-                if cursor:
-                    where_terms.append(
-                        "(COALESCE(j.updated_at,d.fetched_at)<? OR "
-                        "(COALESCE(j.updated_at,d.fetched_at)=? AND j.fetch_id<?))"
-                    )
-                    parameters.extend((cursor[0], cursor[0], cursor[1]))
-                if status:
-                    where_terms.append(
-                        "(CASE WHEN d.status='SUCCESS' THEN 'COMPLETED' "
-                        "WHEN d.status IN ('COMPLETED','PARTIAL','FAILED','ABORTED') "
-                        "THEN d.status ELSE j.status END)=?"
-                    )
-                    parameters.append(status)
-                if mode:
-                    where_terms.append("d.data_mode=?")
-                    parameters.append(mode)
-                where_sql = f"WHERE {' AND '.join(where_terms)}" if where_terms else ""
-                local_rows = db.execute(f"""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
-                    d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-                    d.quality_flags,d.processing_status,COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
-                    FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
-                    {where_sql} ORDER BY history_sort_at DESC,j.fetch_id DESC LIMIT ?""",
-                    (*parameters, limit + 1)).fetchall()
+            local_rows = service.store.local_run_history_rows(
+                cursor=positions["local"], status=status or None, mode=mode or None, limit=limit + 1,
+            )
             local_has_more = len(local_rows) > limit
             local_rows = local_rows[:limit]
         local_page = [_history_item_from_job(row) for row in local_rows]
@@ -832,12 +758,7 @@ async def run_history(
     service = (getattr(getattr(request, "state", None), "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
     if service:
-        with service.store.connect() as db:
-            rows = db.execute("""SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,d.provider_record_count,
-                d.received_record_count,d.rejected_record_count,d.observation_start,d.observation_end,d.fetched_at,
-                d.quality_flags,d.processing_status
-                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
-                ORDER BY j.updated_at DESC,j.fetch_id DESC""").fetchall()
+        rows = service.store.local_run_history_rows()
     else:
         rows = []
     items = []
@@ -979,14 +900,8 @@ async def run_history_detail(fetch_id: str, request: Request):
     service = (getattr(getattr(request, "state", None), "collection_service", None)
                or getattr(request.app.state, "collection_service", None))
     if service:
-        with service.store.connect() as db:
-            row = db.execute(
-                """SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,
-                d.provider_record_count,d.received_record_count,d.retained_keyword_count,d.rejected_record_count,
-                d.observation_start,d.observation_end,d.fetched_at,d.quality_flags,d.processing_status
-                FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id WHERE j.fetch_id=?""",
-                (fetch_id,),
-            ).fetchone()
+        rows = service.store.local_run_history_rows(fetch_id=fetch_id, limit=1)
+        row = rows[0] if rows else None
     else:
         row = None
     if row is None and shared_result is not None:

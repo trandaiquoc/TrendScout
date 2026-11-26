@@ -45,7 +45,7 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import HostRunLock, RunService
 from app.ports.storage import StorageError
-from app.scheduling.persistent import ScheduleWorker
+from app.scheduling.worker import ScheduleWorker
 from app.settings import Settings
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -105,7 +105,8 @@ async def _close_request_client(client):
 
 def _is_vercel_shared_live_request(settings, method, path, *, enabled):
     if (settings.environment_profile != "vercel" or not enabled
-            or not settings.vercel_shared_live_enabled):
+            or not (settings.vercel_shared_live_enabled
+                    or getattr(settings, "vercel_postgres_runtime_enabled", False))):
         return False
     method = method.upper()
     return (
@@ -455,14 +456,19 @@ def _persists_vercel_collections(method, path):
 
 
 class VercelSharedLiveMiddleware:
-    """Keep Vercel Firestore and provider resources alive for the full ASGI request."""
+    """Keep the selected shared storage and provider resources alive for a request."""
 
-    def __init__(self, app, *, settings, enabled, client_factory=None, context_factory=None):
+    def __init__(self, app, *, settings, enabled, client_factory=None, context_factory=None,
+                 postgres_environment=None, postgres_schema="trendscout",
+                 postgres_context_factory=None):
         self.app = app
         self.settings = settings
         self.enabled = enabled
         self.client_factory = client_factory
         self.context_factory = context_factory
+        self.postgres_environment = postgres_environment
+        self.postgres_schema = postgres_schema
+        self.postgres_context_factory = postgres_context_factory
 
     async def __call__(self, scope, receive, send):
         if (scope.get("type") != "http"
@@ -492,6 +498,10 @@ class VercelSharedLiveMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+
+        if getattr(self.settings, "vercel_postgres_runtime_enabled", False):
+            await self._serve_postgres(scope, receive, send)
+            return
 
         oidc_token = request.headers.get("x-vercel-oidc-token")
         if not oidc_token:
@@ -812,6 +822,100 @@ class VercelSharedLiveMiddleware:
                     _logger.error("Vercel shared LIVE cleanup failed")
             await _close_request_client(client)
 
+    async def _serve_postgres(self, scope, receive, send):
+        """Serve a request against PostgreSQL without Firestore identity or snapshots."""
+        request_started_at = perf_counter()
+        composition_started_at = None
+        composition_ready_at = None
+        context_manager = None
+        context_entered = False
+        try:
+            context_factory = self.postgres_context_factory
+            if context_factory is None:
+                from app.orchestration.vercel_postgres_live_composition import (
+                    vercel_postgres_live_composition,
+                )
+                context_factory = vercel_postgres_live_composition
+            capability_metadata_request = (
+                scope.get("method", "").upper() == "GET"
+                and scope.get("path") == "/api/v1/capabilities"
+            )
+            composition_started_at = perf_counter()
+            context_manager = context_factory(
+                user_agent=self.settings.wikimedia_user_agent,
+                postgres_environment=self.postgres_environment,
+                postgres_schema=self.postgres_schema,
+                capability_metadata_request=capability_metadata_request,
+            )
+            distributed = await context_manager.__aenter__()
+            context_entered = True
+            composition_ready_at = perf_counter()
+        except Exception as error:
+            _logger.error(
+                "Vercel PostgreSQL composition failed exception_class=%s",
+                _safe_exception_class(error),
+            )
+            if context_entered:
+                try:
+                    await context_manager.__aexit__(type(error), error, error.__traceback__)
+                except Exception:
+                    _logger.error("Vercel PostgreSQL cleanup failed")
+            response = JSONResponse(
+                {"detail": {"code": "POSTGRES_RUNTIME_UNAVAILABLE"}},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+            await response(scope, receive, send)
+            return
+
+        state = scope.setdefault("state", {})
+        state["distributed_public_fetch"] = distributed
+        state["collection_service"] = getattr(distributed, "collection_service", None)
+        state["postgres_analysis_storage"] = getattr(
+            distributed, "analysis_storage", None
+        )
+        state["scheduler_store"] = getattr(distributed, "scheduler_store", None)
+        state["public_fetch_source_ids"] = tuple(sorted(
+            getattr(distributed, "available_sources", ())
+        ))
+
+        async def send_no_store(message):
+            if message.get("type") == "http.response.start":
+                finished_at = perf_counter()
+                route = _vercel_timing_route(scope, self.app)
+                status_code = message.get("status")
+                if type(status_code) is not int:
+                    status_code = 0
+                _logger.info(
+                    "Vercel PostgreSQL request timing method=%s route=%s status_code=%d "
+                    "composition_ms=%d handler_ms=%d total_ms=%d",
+                    scope.get("method", "UNKNOWN"), route, status_code,
+                    _elapsed_milliseconds(composition_started_at, composition_ready_at),
+                    _elapsed_milliseconds(composition_ready_at, finished_at),
+                    _elapsed_milliseconds(request_started_at, finished_at),
+                )
+                headers = [
+                    (name, value) for name, value in message.get("headers", [])
+                    if name.lower() != b"cache-control"
+                ]
+                headers.append((b"cache-control", b"no-store"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_no_store)
+        except BaseException as error:
+            try:
+                await context_manager.__aexit__(type(error), error, error.__traceback__)
+            except Exception:
+                _logger.error("Vercel PostgreSQL cleanup failed")
+            raise
+        else:
+            try:
+                await context_manager.__aexit__(None, None, None)
+            except Exception:
+                _logger.error("Vercel PostgreSQL cleanup failed")
+
 
 def create_app(
     *,
@@ -830,6 +934,9 @@ def create_app(
     scheduler_store=None,
     vercel_firestore_client_factory=None,
     vercel_live_context_factory=None,
+    vercel_postgres_environment=None,
+    vercel_postgres_schema=None,
+    vercel_postgres_context_factory=None,
 ):
     settings = settings or Settings.from_environment()
     run_mode = settings.run_mode if run_mode is None else run_mode
@@ -910,6 +1017,25 @@ def create_app(
     ):
         raise ValueError("Synthetic supplement requires an enabled offline fixture runtime")
     effective_lock_path = lock_path or settings.lock_path
+    if settings.vercel_postgres_runtime_enabled:
+        if vercel_postgres_schema is None:
+            vercel_postgres_schema = os.environ.get(
+                "TREND_SCOUT_POSTGRES_SCHEMA", "trendscout"
+            )
+        if vercel_postgres_environment is None:
+            from app.storage.postgres_config import (
+                postgres_environment as read_postgres_environment,
+            )
+            vercel_postgres_environment = read_postgres_environment(os.environ)
+        if (not isinstance(vercel_postgres_environment, dict)
+                or not isinstance(vercel_postgres_schema, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", vercel_postgres_schema)
+                or vercel_firestore_client_factory is not None
+                or vercel_live_context_factory is not None):
+            raise ValueError("Vercel PostgreSQL runtime requires one validated PostgreSQL configuration")
+    elif (vercel_postgres_environment is not None
+          or vercel_postgres_context_factory is not None):
+        raise ValueError("Vercel PostgreSQL options require the PostgreSQL runtime setting")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -917,7 +1043,9 @@ def create_app(
         app.state.operator_token = (
             operator_token if operator_token is not None else settings.operator_token
         )
-        app.state.scheduler_store = scheduler_store
+        if not settings.vercel_postgres_runtime_enabled:
+            app.state.scheduler_store = scheduler_store
+            app.state.postgres_analysis_storage = None
         runtime_guard = None
         try:
             if local_live_opt_in:
@@ -935,8 +1063,12 @@ def create_app(
                         )
                     try:
                         from app.collections.service import CollectionService
-                        from app.collections.store import CollectionStore
-                        collection_store = CollectionStore.local()
+                        collection_store = getattr(
+                            local_live_fetch, "collection_store", None
+                        )
+                        if collection_store is None:
+                            from app.collections.store import CollectionStore
+                            collection_store = CollectionStore.local()
                         app.state.collection_service = CollectionService(
                             collection_store,
                             entity_context_resolver=WikimediaEntityContextResolver(
@@ -948,6 +1080,26 @@ def create_app(
                     except Exception:
                         _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")
                         app.state.collection_service = None
+                    postgres_environment = getattr(
+                        local_live_fetch, "postgres_environment", None
+                    )
+                    if postgres_environment is not None:
+                        postgres_schema = getattr(
+                            local_live_fetch, "postgres_schema", "trendscout"
+                        )
+                        from app.scheduling.postgres import PostgresScheduleStore
+                        from app.storage.postgres_analysis import PostgresAnalysisStorage
+
+                        app.state.postgres_analysis_storage = PostgresAnalysisStorage(
+                            postgres_environment, schema=postgres_schema
+                        )
+                        if scheduler_store is None:
+                            app.state.scheduler_store = PostgresScheduleStore(
+                                postgres_environment, schema=postgres_schema
+                            )
+                        app.state.read_storage_factory = (
+                            lambda _oidc_token: app.state.postgres_analysis_storage
+                        )
                     app.state.public_fetch_source_ids = tuple(sorted(
                         local_live_fetch.admission.policy.enabled_sources
                     ))
@@ -1040,6 +1192,7 @@ def create_app(
     application.state.public_fetch_block_reason = public_fetch_block_reason
     application.state.distributed_public_fetch = distributed_public_fetch
     application.state.collection_service = None
+    application.state.postgres_analysis_storage = None
     application.state.scheduler_store = scheduler_store
     application.state.scheduler_worker = None
     application.state.fetch_registry = PublicFetchRegistry()
@@ -1061,6 +1214,22 @@ def create_app(
     )
     application.state.vercel_firestore_client_factory = vercel_firestore_client_factory
     application.state.vercel_live_context_factory = vercel_live_context_factory
+    application.state.vercel_postgres_context_factory = vercel_postgres_context_factory
+    if settings.vercel_postgres_runtime_enabled:
+        from app.scheduling.postgres import PostgresScheduleStore
+        from app.storage.postgres_analysis import PostgresAnalysisStorage
+
+        if scheduler_store is not None:
+            raise ValueError("Vercel PostgreSQL runtime cannot use a second scheduler store")
+        application.state.postgres_analysis_storage = PostgresAnalysisStorage(
+            vercel_postgres_environment, schema=vercel_postgres_schema
+        )
+        application.state.scheduler_store = PostgresScheduleStore(
+            vercel_postgres_environment, schema=vercel_postgres_schema
+        )
+        application.state.read_storage_factory = (
+            lambda _oidc_token: application.state.postgres_analysis_storage
+        )
 
     @application.middleware("http")
     async def protect_read_only(request: Request, call_next):
@@ -1154,6 +1323,9 @@ def create_app(
             enabled=public_fetch_enabled and run_mode == "live" and not read_only,
             client_factory=vercel_firestore_client_factory,
             context_factory=vercel_live_context_factory,
+            postgres_environment=vercel_postgres_environment,
+            postgres_schema=vercel_postgres_schema,
+            postgres_context_factory=vercel_postgres_context_factory,
         )
     frontend_source = Path(__file__).resolve().parents[2] / "Frontend" / "public"
     vercel_frontend = Path(__file__).resolve().parents[1] / "public" / "dashboard"
@@ -1268,7 +1440,8 @@ def _validate_local_live_facade(facade):
 def _public_fetch_policy(settings, *, read_only, run_mode, storage, adapter_factory,
                          distributed_public_fetch=None):
     if settings.environment_profile == "vercel":
-        if settings.vercel_shared_live_enabled and not read_only and run_mode == "live":
+        if (settings.vercel_shared_live_enabled or settings.vercel_postgres_runtime_enabled) \
+                and not read_only and run_mode == "live":
             return True, None
         return False, "VERCEL_SHARED_LIVE_DISABLED"
     if not settings.public_fetch_enabled:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from app.collections.postgres_reads import CollectionReadError
 from app.ports.storage import StorageError
 from app.sources.catalog import (
     BING_SOURCE_ID,
@@ -178,17 +179,9 @@ def _saved_source_activity(request):
                or getattr(request.app.state, "collection_service", None))
     if service is None:
         return {}
-    data_mode_scope = getattr(service.store, "data_mode_scope", None)
     try:
-        with service.store.connect() as db:
-            rows = db.execute(
-                "SELECT status,data_mode,source_manifest,fetched_at,observation_start,observation_end "
-                "FROM dataset_snapshots "
-                + ("WHERE data_mode=? " if data_mode_scope else "")
-                + "ORDER BY created_at DESC LIMIT 100",
-                (data_mode_scope,) if data_mode_scope else (),
-            ).fetchall()
-    except (OSError, sqlite3.Error):
+        rows = service.store.recent_dataset_snapshots(limit=100)
+    except (OSError, sqlite3.Error, CollectionReadError):
         return {}
 
     latest = {}
@@ -483,6 +476,7 @@ async def capabilities(request: Request, response: Response):
                     vercel_live_runtime = bool(
                         getattr(distributed, "vercel_shared_live", False)
                         or getattr(distributed, "vercel_wikimedia_live", False)
+                        or getattr(distributed, "vercel_postgres_live", False)
                     )
                     if settings.environment_profile == "vercel" and vercel_live_runtime:
                         sync_status = getattr(
@@ -522,11 +516,13 @@ async def capabilities(request: Request, response: Response):
     )
     vercel_shared_live = bool(
         settings.environment_profile == "vercel"
-        and settings.vercel_shared_live_enabled
+        and (settings.vercel_shared_live_enabled
+             or settings.vercel_postgres_runtime_enabled)
         and not request.app.state.read_only
         and distributed is not None
         and (getattr(distributed, "vercel_shared_live", False)
-             or getattr(distributed, "vercel_wikimedia_live", False))
+             or getattr(distributed, "vercel_wikimedia_live", False)
+             or getattr(distributed, "vercel_postgres_live", False))
         and distributed.data_mode == "LIVE"
         and set(source_ids) == set(getattr(
             distributed, "available_sources", source_ids

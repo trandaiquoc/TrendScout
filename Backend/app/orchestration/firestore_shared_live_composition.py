@@ -55,8 +55,9 @@ def _client_project_id(client) -> str:
 
     if project_id not in _SUPPORTED_PROJECT_IDS:
         raise ValueError("unsupported Firestore project")
-    # google-cloud-firestore is pinned in pyproject.toml and exposes the
-    # selected database on this client field; fail closed for named databases.
+    # google-cloud-firestore is provided by the legacy-firestore extra and
+    # exposes the selected database on this client field; fail closed for
+    # named databases.
     if getattr(client, "_database", None) != "(default)":
         raise ValueError("Firestore client must target the existing (default) database")
     return project_id

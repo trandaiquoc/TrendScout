@@ -290,7 +290,7 @@ async def vercel_wikimedia_live_composition(
                 now + timedelta(minutes=15), GOOGLE_POLICY_VERSION,
             ),)
 
-        built_handlers = D5SourceHandlers(
+        source_handlers = D5SourceHandlers(
             query_collectors={
                 "google_web_serp": None,
                 "bing_web_serp": None,
@@ -314,9 +314,17 @@ async def vercel_wikimedia_live_composition(
             include_wikimedia_transport_metrics=True,
             unavailable_mode="LIVE",
             utcnow=utcnow,
-        ).build()
+        )
+        built_handlers = source_handlers.build()
+        built_cache_only_handlers = source_handlers.build_cache_only()
         handlers = {
             source_id: (built_handlers[source_id]
+                        if source_id == WIKIMEDIA_SOURCE_ID
+                        else _unavailable_handler(source_id))
+            for source_id in policy.enabled_sources
+        }
+        cache_only_handlers = {
+            source_id: (built_cache_only_handlers[source_id]
                         if source_id == WIKIMEDIA_SOURCE_ID
                         else _unavailable_handler(source_id))
             for source_id in policy.enabled_sources
@@ -324,6 +332,7 @@ async def vercel_wikimedia_live_composition(
         worker = DistributedFetchWorker(
             admission,
             handlers=handlers,
+            cache_only_handlers=cache_only_handlers,
             resolve_grant=resolve_checkpoint,
             utcnow=utcnow,
             snapshot_blobs=snapshot_blobs,

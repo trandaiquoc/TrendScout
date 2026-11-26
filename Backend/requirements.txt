@@ -1,3 +1,3 @@
-# Runtime pins live in pyproject.toml. Keep the Firebase Admin adapter for the
-# explicit local/legacy Firestore mode; Vercel uses its direct OIDC client.
--e .[local-firestore]
+# Runtime pins live in pyproject.toml. Keep legacy Firestore/migration support
+# and the Uvicorn launcher available for explicit local workflows.
+-e .[legacy-firestore,local-firestore,local-runtime]

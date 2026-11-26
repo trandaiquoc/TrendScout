@@ -63,6 +63,13 @@ class SourceCatalogTests(unittest.TestCase):
                     finally:
                         db.close()
 
+                def recent_dataset_snapshots(self, *, limit=100):
+                    with self.connect() as db:
+                        rows = db.execute("""SELECT status,data_mode,source_manifest,fetched_at,
+                            observation_start,observation_end FROM dataset_snapshots
+                            ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
+                    return [dict(row) for row in rows]
+
             request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
                 collection_service=SimpleNamespace(store=Store())
             )))

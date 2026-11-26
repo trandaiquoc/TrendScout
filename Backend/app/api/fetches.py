@@ -41,6 +41,10 @@ def _distributed_for_request(request):
             or getattr(request.app.state, "distributed_public_fetch", None))
 
 
+def _is_vercel_postgres_runtime(distributed) -> bool:
+    return bool(getattr(distributed, "vercel_postgres_live", False))
+
+
 def _require_youtube_policy_consent(request: Request, distributed) -> None:
     """Require reviewed policy and explicit browser acceptance for API Client use."""
     workflow = getattr(distributed, "youtube_capabilities", None)
@@ -256,17 +260,19 @@ async def _recover_expired_source_checkpoints(distributed, fetch_id: str, source
 
 async def _process_fetch_collections(request: Request, distributed, fetch_id: str, *,
                                      cached_context_only: bool = False):
-    shared_live = getattr(distributed, "firestore_shared_live", False)
-    if shared_live:
+    firestore_shared_live = getattr(distributed, "firestore_shared_live", False)
+    shared_store_live = firestore_shared_live or getattr(distributed, "postgres_live", False)
+    if shared_store_live:
         reuse_check = getattr(distributed, "collection_reuse_for_fetch", None)
         reusable = (await asyncio.to_thread(reuse_check, fetch_id)
                     if callable(reuse_check) else None)
         if (isinstance(reusable, dict)
                 and reusable.get("terminal") is True
                 and reusable.get("collection_input_unchanged") is True):
-            request.state.vercel_fetch_snapshot_unchanged = True
+            if firestore_shared_live:
+                request.state.vercel_fetch_snapshot_unchanged = True
             _logger.info(
-                "Fetch Collections skipped reason=SOURCE_INPUT_UNCHANGED snapshot=SKIPPED"
+                "Fetch Collections skipped reason=SOURCE_INPUT_UNCHANGED"
             )
             return
 
@@ -274,7 +280,7 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
         distributed.status, fetch_id, include_records=True, include_discovery=False
     )
     if result and result.get("terminal"):
-        if shared_live:
+        if firestore_shared_live:
             load_snapshot = getattr(distributed, "load_collection_snapshot", None)
             if callable(load_snapshot):
                 await asyncio.to_thread(load_snapshot)
@@ -291,9 +297,9 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
             processed = await service.process_fetch(fetch_id, result.get("sources", []))
         if processed.get("status") == "FAILED":
             raise RuntimeError("Fetch Collections processing failed")
-        if shared_live and processed.get("dataset_reused") is True:
+        if firestore_shared_live and processed.get("dataset_reused") is True:
             request.state.vercel_fetch_snapshot_unchanged = True
-        elif shared_live:
+        elif firestore_shared_live:
             request.state.vercel_fetch_snapshot_required = True
 
 
@@ -304,7 +310,7 @@ async def _run_fetch_and_collections(request: Request, distributed, fetch_id: st
     result = None
     shared_live = bool(getattr(distributed, "firestore_shared_live", False))
     vercel_shared_live = (
-        shared_live
+        (shared_live or _is_vercel_postgres_runtime(distributed))
         and request.app.state.settings.environment_profile == "vercel"
     )
     if run_worker:
@@ -355,7 +361,11 @@ async def create_fetch(
         raise HTTPException(400, {"code": "IDEMPOTENCY_KEY_REQUIRED"})
     if not IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
         raise HTTPException(400, {"code": "INVALID_IDEMPOTENCY_KEY"})
-    body = await _read_small_json_object(request, allowed_fields={"sources"})
+    body = await _read_small_json_object(request, allowed_fields={"sources", "mode"})
+    fetch_mode = body.get("mode", "LIVE")
+    if not isinstance(fetch_mode, str) or fetch_mode not in {"LIVE", "CACHE_ONLY"}:
+        raise HTTPException(422, {"code": "INVALID_FETCH_MODE"})
+    cache_only = fetch_mode == "CACHE_ONLY"
     selected_sources = body.get("sources")
     if selected_sources is not None and (
         not isinstance(selected_sources, list)
@@ -366,6 +376,8 @@ async def create_fetch(
         raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
 
     distributed = _distributed_for_request(request)
+    if cache_only and (distributed is None or getattr(distributed, "data_mode", None) != "LIVE"):
+        raise HTTPException(409, {"code": "CACHE_ONLY_UNAVAILABLE"})
     if distributed is not None:
         available_sources = getattr(
             distributed, "available_sources", distributed.admission.policy.enabled_sources
@@ -385,11 +397,12 @@ async def create_fetch(
             effective_sources.add(GOOGLE_SOURCE_ID)
         request_sources = sorted(effective_sources)
         vercel_shared_live = (
-            getattr(distributed, "firestore_shared_live", False)
+            (getattr(distributed, "firestore_shared_live", False)
+             or _is_vercel_postgres_runtime(distributed))
             and request.app.state.settings.environment_profile == "vercel"
             and getattr(distributed, "data_mode", None) == "LIVE"
         )
-        manual_source_refresh = vercel_shared_live and bool(
+        manual_source_refresh = not cache_only and vercel_shared_live and bool(
             effective_sources & {GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID}
         )
         # Vercel SSO Deployment Protection is the authentication boundary for
@@ -401,6 +414,8 @@ async def create_fetch(
                        or getattr(distributed, "prepare_for_wikimedia_fetch", None))
         try:
             submit_options = {"source_ids": request_sources}
+            if cache_only:
+                submit_options["cache_only"] = True
             if manual_source_refresh:
                 submit_options["manual_source_refresh"] = True
             accepted = await asyncio.to_thread(distributed.submit, idempotency_key,
@@ -449,7 +464,8 @@ async def create_fetch(
                 )
         elif (accepted.get("result") == "REPLAY"
               and accepted["status"] in {"COMPLETED", "PARTIAL", "FAILED", "ABORTED", "EXPIRED"}
-              and getattr(distributed, "firestore_shared_live", False)):
+              and (getattr(distributed, "firestore_shared_live", False)
+                   or _is_vercel_postgres_runtime(distributed))):
             # A completed source job can still need Collections persistence
             # after a function was interrupted. Re-read its fenced checkpoints;
             # never start another source worker for a terminal Fetch.
@@ -483,6 +499,7 @@ async def create_fetch(
                     if (isinstance(status, dict) and status.get("fetch_id") == fetch_id
                             and status.get("terminal") is True
                             and status.get("status") in {"COMPLETED", "PARTIAL"}):
+                        status["fetch_mode"] = fetch_mode
                         terminal_fetch = status
                 except Exception as exc:
                     # The worker has already committed. The normal status GET
@@ -493,6 +510,7 @@ async def create_fetch(
             "fetch_id": fetch_id,
             "status": accepted["status"],
             "data_mode": distributed.data_mode,
+            "fetch_mode": fetch_mode,
             "requested_sources": sorted(set(requested_sources)),
             "sources": request_sources,
             "created_at": accepted.get("created_at"),
@@ -577,22 +595,26 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
         raise HTTPException(404, {"code": "FETCH_NOT_FOUND"})
     distributed = _distributed_for_request(request)
     if (distributed is None
-            or not getattr(distributed, "firestore_shared_live", False)
+            or not (getattr(distributed, "firestore_shared_live", False)
+                    or getattr(distributed, "postgres_live", False))
             or getattr(distributed, "data_mode", None) != "LIVE"):
         raise HTTPException(409, {"code": "LIVE_CHECKPOINT_RECOVERY_UNAVAILABLE"})
 
     # The compact Fetch receipt and latest dataset pointer are sufficient for
     # unchanged cache-only recovery. Avoid restoring the complete SQLite image
     # and downloading source record blobs unless Collections really needs work.
+    firestore_shared_live = getattr(distributed, "firestore_shared_live", False)
+    shared_store_live = firestore_shared_live or getattr(distributed, "postgres_live", False)
     reuse_check = getattr(distributed, "collection_reuse_for_fetch", None)
     reusable = (await asyncio.to_thread(reuse_check, fetch_id)
                 if callable(reuse_check) else None)
-    if (isinstance(reusable, dict)
+    if (shared_store_live and isinstance(reusable, dict)
             and reusable.get("terminal") is True
             and reusable.get("collection_input_unchanged") is True):
-        request.state.vercel_fetch_snapshot_unchanged = True
+        if firestore_shared_live:
+            request.state.vercel_fetch_snapshot_unchanged = True
         _logger.info(
-            "Fetch Collections recovery skipped reason=SOURCE_INPUT_UNCHANGED snapshot=SKIPPED"
+            "Fetch Collections recovery skipped reason=SOURCE_INPUT_UNCHANGED"
         )
         return {
             "fetch_id": fetch_id,
@@ -604,7 +626,7 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
         }
 
     load_snapshot = getattr(distributed, "load_collection_snapshot", None)
-    if callable(load_snapshot):
+    if firestore_shared_live and callable(load_snapshot):
         await asyncio.to_thread(load_snapshot)
     service = (getattr(getattr(request, "state", None), "collection_service", None)
                or getattr(distributed, "collection_service", None)
@@ -615,22 +637,12 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     # A completed, persisted Collections job is already the outcome that
     # process_fetch would return for these retained receipts. Avoid downloading
     # and rediscovering the same source records merely to replay that result.
-    connect = getattr(service.store, "connect", None)
+    read_collection_result = getattr(service.store, "fetch_collection_processing_result", None)
     read_job = getattr(getattr(distributed, "admission", None), "read_job", None)
     clock = getattr(distributed, "utcnow", None)
-    if callable(connect) and callable(read_job) and callable(clock):
-        def persisted_result():
-            with connect() as db:
-                return db.execute(
-                    "SELECT j.status,j.error_code FROM fetch_jobs j "
-                    "JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id "
-                    "WHERE j.fetch_id=? AND d.data_mode='LIVE' "
-                    "AND j.status IN ('COMPLETED','MODEL_UNAVAILABLE') "
-                    "AND d.processing_status IN ('COMPLETED','MODEL_UNAVAILABLE')",
-                    (fetch_id,),
-                ).fetchone()
-
-        prior = await asyncio.to_thread(persisted_result)
+    resume_model_processing = False
+    if callable(read_collection_result) and callable(read_job) and callable(clock):
+        prior = await asyncio.to_thread(read_collection_result, fetch_id)
         if prior is not None:
             try:
                 job = await asyncio.to_thread(read_job, fetch_id, now=clock())
@@ -644,9 +656,16 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                             and isinstance(entry.get("snapshot"), dict)
                             and entry["snapshot"].get("data_mode") == "LIVE"
                             for entry in checkpoints.values())):
-                request.state.vercel_fetch_snapshot_unchanged = True
-                return {"fetch_id": fetch_id, "status": prior["status"],
-                        "error_code": prior["error_code"]}
+                resume_model_processing = (
+                    prior.get("status") == "MODEL_UNAVAILABLE"
+                    and getattr(service, "fetch_model_inference_enabled", False) is True
+                    and bool(checkpoints)
+                )
+                if not resume_model_processing:
+                    if firestore_shared_live:
+                        request.state.vercel_fetch_snapshot_unchanged = True
+                    return {"fetch_id": fetch_id, "status": prior["status"],
+                            "error_code": prior["error_code"]}
     try:
         result = await asyncio.to_thread(
             distributed.status, fetch_id, include_records=True,
@@ -667,10 +686,26 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     sources = await _recover_expired_source_checkpoints(
         distributed, fetch_id, result.get("sources", [])
     )
-    recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
+    if resume_model_processing:
+        receipt, _created = await asyncio.to_thread(service.store.collection_job, fetch_id)
+        receipt = dict(receipt) if receipt is not None else None
+        expected_available = receipt.get("available") if isinstance(receipt, dict) else None
+        retained_available = sum(
+            len(source.get("records", []))
+            for source in sources
+            if isinstance(source, dict) and isinstance(source.get("records"), list)
+        )
+        if type(expected_available) is not int or retained_available != expected_available:
+            raise HTTPException(409, {"code": "MODEL_RESUME_EVIDENCE_INCOMPLETE"})
+        recovered = await service.process_fetch(
+            fetch_id, sources, cached_context_only=True,
+            resume_model_unavailable=True,
+        )
+    else:
+        recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
     if recovered.get("status") == "FAILED":
         raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
-    if recovered.get("dataset_reused") is True:
+    if firestore_shared_live and recovered.get("dataset_reused") is True:
         request.state.vercel_fetch_snapshot_unchanged = True
     return {"fetch_id": fetch_id, "status": recovered.get("status", "FAILED"),
             "error_code": recovered.get("error_code"),
@@ -802,6 +837,7 @@ def _raise_distributed_admission_error(code: str, service) -> None:
         raise HTTPException(429, {"code": code}, headers={"Retry-After": str(retry_after)}) from None
     if code in {"LEASE_BUSY", "FETCH_ALREADY_RUNNING", "POLICY_MIGRATION_BUSY"}:
         raise HTTPException(409, {"code": "FETCH_ALREADY_RUNNING"}) from None
-    if code in {"IDEMPOTENCY_KEY_CONFLICT", "HISTORICAL_FETCH_UNAVAILABLE"}:
+    if code in {"IDEMPOTENCY_KEY_CONFLICT", "HISTORICAL_FETCH_UNAVAILABLE",
+                "CACHE_ONLY_UNAVAILABLE"}:
         raise HTTPException(409, {"code": code}) from None
     raise HTTPException(503, {"code": code}) from None

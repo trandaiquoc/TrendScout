@@ -215,12 +215,10 @@ def _candidate_history(collection_store, *, now):
     """Read only persisted Google Trends identities and recent SERP evidence."""
     observed, verified, prior_verification = set(), set(), {}
     cutoff = now.astimezone(timezone.utc) - timedelta(days=7)
-    with collection_store.connect() as db:
-        rows = db.execute(
-            "SELECT normalized,evidence FROM keywords WHERE source=? AND data_mode='LIVE' "
-            "AND project LIKE 'google_trends:%' ORDER BY observed_at DESC LIMIT ?",
-            (GOOGLE_SOURCE_ID, _MAX_CANDIDATE_HISTORY),
-        ).fetchall()
+    rows = collection_store.keyword_evidence_rows(
+        source_id=GOOGLE_SOURCE_ID, project_prefix="google_trends:", data_mode="LIVE",
+        limit=_MAX_CANDIDATE_HISTORY,
+    )
     for row in rows:
         normalized = row["normalized"]
         if not isinstance(normalized, str) or not normalized:
@@ -300,7 +298,10 @@ async def normal_google_live_composition(*, user_agent,
                                          shared_firestore_client=None,
                                          vercel_shared_live: bool = False,
                                          capability_metadata_request: bool = False,
-                                         youtube_allow_initial_acceptance: bool = False):
+                                         youtube_allow_initial_acceptance: bool = False,
+                                         vercel_postgres_runtime: bool = False,
+                                         postgres_environment=None,
+                                         postgres_schema="trendscout"):
     """Compose the local or explicitly injected Vercel worker without startup fetches."""
     config = google_settings or GoogleLiveSettings.from_environment()
     vercel_environment = os.environ.get("VERCEL")
@@ -311,26 +312,44 @@ async def normal_google_live_composition(*, user_agent,
             or type(allow_initial_bing_acceptance) is not bool
             or type(preserve_expired_data) is not bool
             or type(vercel_shared_live) is not bool
+            or type(vercel_postgres_runtime) is not bool
             or type(capability_metadata_request) is not bool
-            or (capability_metadata_request and not vercel_shared_live)
+            or (capability_metadata_request
+                and not (vercel_shared_live or vercel_postgres_runtime))
             or type(youtube_allow_initial_acceptance) is not bool
             or type(youtube_manual_live) is not bool
             or type(youtube_force_fresh_test_once) is not bool
             or type(youtube_max_queries) is not int
             or not 1 <= youtube_max_queries <= 2
             or (youtube_force_fresh_test_once and not youtube_manual_live)
-            or (youtube_manual_live and youtube_max_queries != 1)):
+            or (youtube_manual_live and youtube_max_queries != 1)
+            or (postgres_environment is not None and not isinstance(postgres_environment, dict))
+            or not isinstance(postgres_schema, str)):
         raise ValueError("explicit Google LIVE runtime and valid configuration required")
+    uses_postgres = postgres_environment is not None
+    if uses_postgres and shared_firestore_client is not None:
+        raise ValueError("PostgreSQL state cannot be combined with the Firestore runtime")
+    if vercel_postgres_runtime and (
+        not uses_postgres or shared_firestore_client is not None
+        or vercel_environment != "1" or youtube_manual_live or youtube_force_fresh_test_once
+    ):
+        raise ValueError("Vercel PostgreSQL LIVE requires its explicit PostgreSQL runtime")
     if ((vercel_environment is not None and
-         (vercel_environment != "1" or not vercel_shared_live))
+         (vercel_environment != "1" or not (vercel_shared_live or vercel_postgres_runtime)))
             or (vercel_shared_live and
-                (vercel_environment != "1" or shared_firestore_client is None
+                (vercel_environment != "1"
+                 or shared_firestore_client is None and not vercel_postgres_runtime
                  or youtube_manual_live or youtube_force_fresh_test_once))):
         raise ValueError("Vercel Shared LIVE requires its request-scoped Firestore runtime")
     if credential_provider is None:
         from app.local_credentials import LocalCredentialProvider
         credential_provider = LocalCredentialProvider()
-    if collection_store is None and not vercel_shared_live:
+    if collection_store is None and uses_postgres:
+        from app.collections.postgres_store import PostgresCollectionStore
+        collection_store = PostgresCollectionStore(
+            postgres_environment, schema=postgres_schema, data_mode_scope="LIVE"
+        )
+    elif collection_store is None and not vercel_shared_live:
         from app.collections.store import CollectionStore
         collection_store = CollectionStore.local()
 
@@ -357,6 +376,20 @@ async def normal_google_live_composition(*, user_agent,
             shared_firestore_client,
             read_cache=_WARM_COLLECTION_SNAPSHOT_READ_CACHE,
         )
+    elif uses_postgres:
+        from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+        from app.storage.postgres_payloads import PostgresSourcePayloads
+        from app.storage.postgres_runtime import verify_postgres_runtime
+
+        verify_postgres_runtime(postgres_environment, schema=postgres_schema)
+        store = PostgresAtomicStateStore(postgres_environment, schema=postgres_schema)
+        store.vercel_runtime_enabled = vercel_postgres_runtime
+        snapshot_blobs = PostgresSourcePayloads(
+            postgres_environment, schema=postgres_schema,
+            preserve_expired=preserve_expired_data,
+        )
+        if not preserve_expired_data:
+            snapshot_blobs.purge_expired(now=utcnow())
     else:
         directory = Path(state_directory) if state_directory is not None else (
             Path.home() / ".local" / "state" / "trendscout" / GOOGLE_STATE_KEY
@@ -382,11 +415,16 @@ async def normal_google_live_composition(*, user_agent,
         store, policy, state_key=GOOGLE_STATE_KEY,
         owner_manual_youtube_live=youtube_manual_live,
     )
-    if uses_firestore:
+    if uses_firestore or uses_postgres:
         existing_state = (
-            {} if capability_metadata_request or vercel_shared_live
+            {} if capability_metadata_request
+            or vercel_shared_live and not vercel_postgres_runtime
             else store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
         )
+        if vercel_postgres_runtime and not capability_metadata_request and not existing_state:
+            raise ValueError(
+                "PostgreSQL operational state has not been reconciled"
+            )
     else:
         existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
     # First launch has no quota state to migrate; any populated ledger must
@@ -398,7 +436,13 @@ async def normal_google_live_composition(*, user_agent,
             "Firestore shared LIVE quota policy differs from stored state; "
             "refusing an implicit shared-state migration"
         )
-    if (not uses_firestore and existing_state
+    if (uses_postgres and existing_state
+            and existing_state.get("policy_digest") != admission.policy_digest):
+        raise ValueError(
+            "PostgreSQL LIVE quota policy differs from stored state; "
+            "refusing an implicit quota migration"
+        )
+    if (not uses_firestore and not uses_postgres and existing_state
             and existing_state.get("policy_digest") != admission.policy_digest):
         def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
             return normal_google_live_policy(
@@ -495,9 +539,9 @@ async def normal_google_live_composition(*, user_agent,
     runner = GuardedAttemptRunner(admission, clock=utcnow)
     cache = SharedCache(
         store,
-        payload_blobs=snapshot_blobs if uses_firestore else None,
-        max_inline_bytes=500_000 if uses_firestore else None,
-        monotonic_read_clock=vercel_shared_live,
+        payload_blobs=snapshot_blobs if uses_firestore or uses_postgres else None,
+        max_inline_bytes=500_000 if uses_firestore or uses_postgres else None,
+        monotonic_read_clock=vercel_shared_live or uses_postgres,
     )
     youtube_cache_scope = CacheScope(
         source_id=YOUTUBE_SOURCE_ID,
@@ -533,6 +577,12 @@ async def normal_google_live_composition(*, user_agent,
         checkpoint_counts = purge_expired_youtube_checkpoints(
             store, snapshot_blobs, now=now, state_key=GOOGLE_STATE_KEY
         )
+        if uses_postgres:
+            return {
+                "cache_entries": int(cache_deleted),
+                "expired_blobs": int(snapshot_blobs.purge_expired(now=now)),
+                **checkpoint_counts,
+            }
         return {"cache_entries": int(cache_deleted), **checkpoint_counts}
 
     if not preserve_expired_data and not uses_firestore:
@@ -993,9 +1043,12 @@ async def normal_google_live_composition(*, user_agent,
             utcnow=utcnow,
         )
         handlers = source_handlers.build()
+        cache_only_handlers = source_handlers.build_cache_only()
         worker = DistributedFetchWorker(
             admission,
             handlers={source: handlers[source] for source in policy.enabled_sources},
+            cache_only_handlers={source: cache_only_handlers[source]
+                                 for source in policy.enabled_sources},
             resolve_grant=resolve_checkpoint,
             utcnow=utcnow,
             snapshot_blobs=snapshot_blobs,
@@ -1019,7 +1072,15 @@ async def normal_google_live_composition(*, user_agent,
                 uses_firestore and vercel_shared_live
                 and os.environ.get("VERCEL_ENV") == "production"
             ),
+            vercel_postgres_live=vercel_postgres_runtime,
         )
+        # Expose the same business store that the source worker and cache use.
+        # Runtime assembly must not independently choose SQLite for Collections
+        # when this composition is backed by PostgreSQL.
+        facade.collection_store = collection_store
+        if uses_postgres:
+            facade.postgres_environment = dict(postgres_environment)
+            facade.postgres_schema = postgres_schema
         if uses_firestore:
             facade.normal_google_live_sources = frozenset(policy.enabled_sources)
         facade.entity_lookup_before_request = pace_request.wait_sync
@@ -1042,7 +1103,7 @@ async def normal_google_live_composition(*, user_agent,
             "cross_machine_reserve": config.cross_machine_reserve,
             "serp_max_queries_per_batch": 2,
             "serp_pages_per_query": 1,
-            "local_only": not uses_firestore,
+            "local_only": not (uses_firestore or uses_postgres),
             "live_verified": False,
         }
 

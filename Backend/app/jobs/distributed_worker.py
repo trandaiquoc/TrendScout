@@ -89,6 +89,7 @@ class DistributedFetchWorker:
 
     def __init__(self, admission: PublicAdmission, *,
                  handlers: Mapping[str, SourceHandler],
+                 cache_only_handlers: Mapping[str, SourceHandler] | None = None,
                  resolve_grant: GrantResolver,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  snapshot_blobs=None,
@@ -104,6 +105,13 @@ class DistributedFetchWorker:
             raise ValueError("complete server-owned handler and grant registries required")
         self.admission = admission
         self.handlers = dict(handlers)
+        if cache_only_handlers is not None and (
+                not isinstance(cache_only_handlers, Mapping)
+                or set(cache_only_handlers) != set(self.handlers)
+                or any(not callable(handler) for handler in cache_only_handlers.values())):
+            raise ValueError("complete server-owned cache-only handler registry required")
+        self.cache_only_handlers = (dict(cache_only_handlers)
+                                    if cache_only_handlers is not None else None)
         self.source_order = order
         self.source_modes = {
             source_id: getattr(handler, "__trendscout_data_mode__", None)
@@ -112,6 +120,13 @@ class DistributedFetchWorker:
         if any(mode is not None and mode not in {"SYNTHETIC", "LIVE"}
                for mode in self.source_modes.values()):
             raise ValueError("invalid server-owned source mode declaration")
+        if self.cache_only_handlers is not None:
+            cache_modes = {
+                source_id: getattr(handler, "__trendscout_data_mode__", None)
+                for source_id, handler in self.cache_only_handlers.items()
+            }
+            if cache_modes != self.source_modes:
+                raise ValueError("cache-only handlers must preserve source data-mode declarations")
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
         self.journal = SourceCheckpointJournal(admission, snapshot_blobs=snapshot_blobs)
@@ -263,7 +278,15 @@ class DistributedFetchWorker:
                                         completed_sources=dict(outcomes))
             try:
                 handler_started = perf_counter()
-                result = self.handlers[source_id](context)
+                request_metadata = context.request_metadata
+                if (isinstance(request_metadata, dict)
+                        and request_metadata.get("cache_only") is True):
+                    if self.cache_only_handlers is None:
+                        raise AdmissionDenied("CACHE_ONLY_UNAVAILABLE")
+                    handler = self.cache_only_handlers[source_id]
+                else:
+                    handler = self.handlers[source_id]
+                result = handler(context)
                 if inspect.isawaitable(result):
                     result = await result
             except AdmissionDenied as exc:

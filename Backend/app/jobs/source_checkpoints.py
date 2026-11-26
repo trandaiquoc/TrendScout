@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.jobs.shared_cache import _safe_payload
-from app.storage.firestore_atomic_state import CommitOutcomeUnknown
+from app.ports.atomic_state import CommitOutcomeUnknown
 
 _MAX_INLINE_CHECKPOINT_BYTES = 150_000
 _MAX_RESOLVED_CHECKPOINT_BYTES = 5_000_000

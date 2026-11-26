@@ -18,6 +18,9 @@ def service(request):
 
 
 def read_storage(request):
+    postgres_storage = getattr(request.app.state, "postgres_analysis_storage", None)
+    if postgres_storage is not None:
+        return postgres_storage
     if (not request.app.state.read_only
             and request.app.state.settings.environment_profile != "vercel"):
         return service(request).storage

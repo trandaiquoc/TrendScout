@@ -4,10 +4,6 @@ import asyncio
 from typing import Any, Mapping
 from uuid import uuid4
 
-from google.api_core.exceptions import AlreadyExists, GoogleAPICallError, NotFound
-from google.auth.exceptions import GoogleAuthError
-from google.cloud import firestore as google_firestore
-
 from app.ports.storage import Record, RecordAlreadyExists, RecordKind, RecordNotFound, StorageError
 from app.settings import Settings
 from app.storage.common import validate_fields, validate_id, validate_kind
@@ -47,6 +43,9 @@ class FirestoreStorage:
         return self._run(run_id).collection(kind).document(record_id)
 
     async def _call(self, function: Any, *args: Any) -> Any:
+        from google.api_core.exceptions import AlreadyExists, GoogleAPICallError, NotFound
+        from google.auth.exceptions import GoogleAuthError
+
         try:
             return await asyncio.to_thread(function, *args)
         except AlreadyExists as exc:
@@ -67,6 +66,8 @@ class FirestoreStorage:
     async def list_runs(self, *, limit: int = 100, offset: int = 0) -> list[Record]:
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 500:
             raise ValueError("Invalid run history page")
+        from google.cloud import firestore as google_firestore
+
         query = (
             self._client.collection("analysis_runs")
             .order_by("created_at", direction=google_firestore.Query.DESCENDING)
@@ -78,6 +79,8 @@ class FirestoreStorage:
     async def list_runs_after(self, *, limit: int = 100, after_run_id: str | None = None) -> list[Record]:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Invalid run history page")
+        from google.cloud import firestore as google_firestore
+
         collection = self._client.collection("analysis_runs")
         query = collection.order_by("created_at", direction=google_firestore.Query.DESCENDING).limit(limit)
         if after_run_id is not None:

@@ -282,6 +282,18 @@ class GoogleTrendsDiscoveryHandler:
             except Exception:
                 cache_scope, cache_grant = None, None
 
+        cache_only = (isinstance(context.request_metadata, dict)
+                      and context.request_metadata.get("cache_only") is True)
+        if cache_only and not has_saved_result and cached_result is None:
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.data_mode,
+                "records": [], "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                "delivery_state": "UNAVAILABLE", "provider_request_count": 0,
+                "coverage": {"discovery_mode": "SERPAPI_TRENDING_NOW",
+                             "cache_only": True, "cache_state": cache_state,
+                             "provider_request_count": 0},
+            }
+
         result = None
         account_quota = None
         resumed_receipt = False
@@ -295,7 +307,7 @@ class GoogleTrendsDiscoveryHandler:
                     or not isinstance(result.get("records"), list)):
                 raise ValueError("saved Google Trends result is invalid")
             resumed_receipt = True
-        elif cached_result is not None and cache_state == "CACHED":
+        elif cached_result is not None and (cache_state == "CACHED" or cache_only):
             result = cached_result
         elif self.trends_gateway is None:
             if cached_result is not None:

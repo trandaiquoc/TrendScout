@@ -13,40 +13,40 @@ dependencies = [
     "certifi==2026.10.23",
     "cffi==2.1.1",
     "charset-normalizer==3.5.2",
-    "click==8.5.1",
     "cryptography==50.0.2",
     "fastapi==0.162.2",
     "fastembed==0.9.1",
-    "google-api-core==2.44.0",
     "google-auth==2.62.1",
-    "google-cloud-core==2.8.0",
-    "google-cloud-firestore==2.34.1",
-    "googleapis-common-protos==1.76.0",
-    "grpcio==1.85.1",
-    "grpcio-status==1.85.1",
     "h11==0.16.0",
     "httpcore==1.0.9",
     "httpx==0.28.1",
     "idna==3.20",
     "opentelemetry-api==1.45.2",
-    "proto-plus==1.29.0",
-    "protobuf==7.36.2",
+    "psycopg[binary]==3.3.9",
     "pyasn1==0.6.5",
     "pyasn1_modules==0.4.2",
     "pycparser==3.12",
     "pydantic==2.14.3",
     "pydantic_core==2.50.4",
-    "PyJWT==2.15.1",
     "requests==2.34.2",
     "starlette==1.10.0",
     "typing-inspection==0.4.5",
     "typing_extensions==4.16.0",
     "tzdata==2026.6",
     "urllib3==2.8.0",
-    "uvicorn==0.54.0",
 ]
 
 [project.optional-dependencies]
+legacy-firestore = [
+    "google-api-core==2.44.0",
+    "google-cloud-core==2.8.0",
+    "google-cloud-firestore==2.34.1",
+    "googleapis-common-protos==1.76.0",
+    "grpcio==1.85.1",
+    "grpcio-status==1.85.1",
+    "proto-plus==1.29.0",
+    "protobuf==7.36.2",
+]
 local-firestore = [
     "CacheControl==0.14.4",
     "firebase_admin==7.7.0",
@@ -58,10 +58,17 @@ local-firestore = [
     "hyperframe==6.1.0",
     "msgpack==1.2.4",
 ]
+local-runtime = [
+    "click==8.5.1",
+    "uvicorn==0.54.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.storage.postgres_schema" = ["*.sql"]
 
 [tool.vercel]
 entrypoint = "app.main:app"

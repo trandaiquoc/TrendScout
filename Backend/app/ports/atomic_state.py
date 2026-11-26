@@ -11,6 +11,10 @@ T = TypeVar("T")
 State = dict[str, object]
 
 
+class CommitOutcomeUnknown(RuntimeError):
+    """A transaction may have committed; the guarded external action must not run."""
+
+
 class AtomicStateStore(Protocol):
     def transact(self, key: str, operation: Callable[[State], tuple[State, T]]) -> T:
         """Atomically read, transform and replace one state record."""

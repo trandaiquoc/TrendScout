@@ -153,6 +153,46 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({fence for _, fence in seen}), 1)
         self.assertIsNone(await worker.run_once("worker-two"))
 
+    async def test_cache_only_jobs_use_only_the_separate_handler_registry(self):
+        job_id = self.admission.admit(
+            "cache-only-worker-request", now=self.clock(),
+            request_metadata={"sources": list(SOURCES), "cache_only": True},
+        )["job_id"]
+        provider_calls = []
+        cache_calls = []
+
+        def live_handler(context):
+            provider_calls.append(context.source_id)
+            raise AssertionError("cache-only dispatch reached a provider-capable handler")
+
+        live_handler.__trendscout_data_mode__ = "LIVE"
+
+        def cache_handler(context):
+            cache_calls.append((context.source_id,
+                                context.request_metadata.get("cache_only")))
+            return {
+                "status": "UNAVAILABLE", "data_mode": "LIVE", "records": [],
+                "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                "provider_request_count": 0,
+            }
+
+        cache_handler.__trendscout_data_mode__ = "LIVE"
+
+        def live_grant(source_id, now):
+            return CheckpointGrant(source_id, "LIVE", "cache-only-policy-v1",
+                                   now + timedelta(minutes=10), 300, True)
+
+        worker = DistributedFetchWorker(
+            self.admission, handlers={source: live_handler for source in SOURCES},
+            cache_only_handlers={source: cache_handler for source in SOURCES},
+            resolve_grant=live_grant, utcnow=self.clock,
+        )
+        result = await worker.run_once("cache-only-worker", job_id=job_id)
+
+        self.assertEqual(result["job_id"], job_id)
+        self.assertEqual(provider_calls, [])
+        self.assertCountEqual(cache_calls, [(source, True) for source in SOURCES])
+
     async def test_shared_terminal_status_reads_independent_sources_concurrently(self):
         job_id = self.admit()
         def handler(context):
@@ -295,8 +335,10 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         }
         facade = SimpleNamespace(
             firestore_shared_live=True,
+            postgres_live=False,
             latest_dataset_summary_available=True,
             latest_dataset_summary=summary,
+            _latest_reuse_summary=lambda: summary,
             admission=SimpleNamespace(
                 policy=SimpleNamespace(enabled_sources=frozenset({source_id})),
             ),
@@ -322,6 +364,112 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["created_at"], job["created_at"])
         self.assertEqual(status["finished_at"], job["finished_at"])
         self.assertNotIn("source_input_digest", status["sources"][0])
+
+    async def test_postgres_fetch_slice_finishes_cached_sources_in_one_slice(self):
+        manifest = [{"source_id": GOOGLE_SOURCE_ID, "source_input_digest": "a" * 64}]
+        reads = []
+
+        class Store:
+            def latest_dataset_reuse_summary(self):
+                reads.append(True)
+                return {"source_manifest": manifest}
+
+        class Worker:
+            async def run_once(self, owner, **kwargs):
+                self.arguments = (owner, kwargs)
+                return {"state": "QUEUED"}
+
+        facade = object.__new__(DistributedPublicFetch)
+        facade.firestore_shared_live = False
+        facade.postgres_live = True
+        facade.latest_dataset_summary_available = False
+        facade.latest_dataset_summary = None
+        facade.collection_store = Store()
+        facade.worker = Worker()
+
+        await facade.run_slice("postgres-worker", "d" * 32, max_sources=1)
+        await facade.run_slice("postgres-worker", "d" * 32, max_sources=1)
+
+        self.assertEqual(len(reads), 2)
+        self.assertTrue(facade.worker.arguments[1]["continue_cached"])
+        self.assertEqual(facade.worker.arguments[1]["previous_source_manifest"], manifest)
+
+    def test_postgres_collection_reuse_reads_fresh_compact_summary(self):
+        from types import SimpleNamespace
+
+        from app.collections.source_digest import (
+            COLLECTION_INPUT_DIGEST_VERSION,
+            source_input_digest,
+        )
+
+        source_id = GOOGLE_SOURCE_ID
+        source = {
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "provider_request_count": 0,
+            "record_count": 1,
+            "records": [{"keyword": "portable solar generator"}],
+            "quality_flags": [],
+            "coverage": {"provider_request_count": 0},
+        }
+        digest = source_input_digest(source_id, source)
+        summary = {
+            "dataset_id": "b" * 32,
+            "processing_status": "COMPLETED",
+            "source_manifest": [{
+                "source_id": source_id,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "delivery_state": "CACHED",
+                "record_count": 1,
+                "quality_flags": [],
+                "provider_request_count": 0,
+                "coverage": source["coverage"],
+                "source_input_digest": digest,
+                "source_input_digest_version": COLLECTION_INPUT_DIGEST_VERSION,
+            }],
+        }
+        job = {
+            "job_id": "c" * 32,
+            "state": "COMPLETED",
+            "request_metadata": {"sources": [source_id]},
+            "source_checkpoints": {
+                source_id: {
+                    "snapshot_storage": "INLINE",
+                    "snapshot": {
+                        "phase": "COMPLETE",
+                        "result": source,
+                        "source_input_digest": digest,
+                        "source_input_digest_version": COLLECTION_INPUT_DIGEST_VERSION,
+                    },
+                },
+            },
+        }
+        reads = []
+
+        class Store:
+            def latest_dataset_reuse_summary(self):
+                reads.append(True)
+                return summary
+
+        facade = object.__new__(DistributedPublicFetch)
+        facade.firestore_shared_live = False
+        facade.postgres_live = True
+        facade.latest_dataset_summary_available = False
+        facade.latest_dataset_summary = None
+        facade.collection_store = Store()
+        facade.admission = SimpleNamespace(
+            policy=SimpleNamespace(enabled_sources=frozenset({source_id})),
+        )
+
+        first = facade.collection_reuse_for_fetch(job["job_id"], job=job)
+        second = facade.collection_reuse_for_fetch(job["job_id"], job=job)
+
+        self.assertTrue(first["collection_input_unchanged"])
+        self.assertEqual(first["dataset_id"], summary["dataset_id"])
+        self.assertEqual(second, first)
+        self.assertEqual(len(reads), 2)
 
     async def test_claimed_checkpoint_snapshot_avoids_second_owned_transaction(self):
         job_id = self.admit()

@@ -115,6 +115,17 @@ window.fetch = (path, options = {}) => {
       finished_at: '2026-11-19T12:21:00Z'};
   } else if (value === '/api/v1/runs/history') {
     body = {items: []};
+  } else if (value === '/api/v1/dashboard/bootstrap') {
+    body = {
+      item: window.collectionRecoveryPosts ? dataset : null,
+      analytics: {
+        keyword_totals: {unique: window.collectionRecoveryPosts ? 1 : 0,
+          classified: 0, unclassified: window.collectionRecoveryPosts ? 1 : 0},
+        active_sources: [], source_volume: [], algorithm_distribution: [],
+      },
+      keywords: {items: [], total: window.collectionRecoveryPosts ? 1 : 0,
+        limit: 20, offset: 0, next_offset: null},
+    };
   } else if (value === '/api/v1/datasets/latest') {
     body = {item: window.collectionRecoveryPosts ? dataset : null};
   } else if (value === '/api/v1/analytics/overview') {
@@ -201,8 +212,8 @@ window.fetch = (path, options = {}) => {
     request.path === '/api/v1/collections/jobs/' + fetchId),
   'terminal Fetch starts idempotent recovery without a preceding Collections job read');
   const recoveryRequests = window.fetchRequests.slice(recoveryIndex + 1);
-  check(recoveryRequests.filter((request) => request.path === '/api/v1/datasets/latest').length === 1,
-    'reused source evidence loads the existing dataset once');
+  check(recoveryRequests.filter((request) => request.path === '/api/v1/dashboard/bootstrap').length === 1,
+    'successful recovery refreshes the combined dashboard bootstrap once');
   check(!recoveryRequests.some((request) => request.path === '/api/v1/analytics/overview'),
     'unchanged source evidence does not refresh analytics');
   check(!recoveryRequests.some((request) => request.path === '/api/v1/collections/jobs/' + fetchId),

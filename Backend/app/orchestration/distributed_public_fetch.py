@@ -4,6 +4,7 @@ The facade has no provider configuration surface. Its admission and result reads
 are usable only when explicitly injected by backend composition.
 """
 
+import asyncio
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -27,8 +28,7 @@ from app.jobs.source_checkpoints import CheckpointGrant
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 
-def _terminal_missing_source_result(job_state, source_id, data_mode,
-                                   terminal_reason=None):
+def _terminal_missing_source_result(job_state, source_id, terminal_reason=None):
     failure = {
         "FAILED": ("RECOVERY_ATTEMPTS_EXHAUSTED", "RECOVERY_ATTEMPTS_EXHAUSTED"),
         "EXPIRED": ("JOB_DEADLINE_EXPIRED", "FETCH_DEADLINE_EXCEEDED"),
@@ -50,8 +50,8 @@ def _terminal_missing_source_result(job_state, source_id, data_mode,
     }
     return {
         "source_id": source_id,
-        "status": "FAILED",
-        "data_mode": data_mode,
+        "status": ("FAILED" if job_state in {"FAILED", "EXPIRED", "ABORTED", "PARTIAL"}
+                   else "UNAVAILABLE"),
         "delivery_state": None,
         "record_count": 0,
         "records": [],
@@ -112,7 +112,8 @@ class DistributedPublicFetch:
     def __init__(self, admission: PublicAdmission, worker: DistributedFetchWorker, *,
                  resolve_grant, utcnow=lambda: datetime.now(timezone.utc),
                  local_live=False, normal_wikimedia_live=False, normal_google_live=False,
-                 firestore_shared_live=False, resolve_processing_grants=None,
+                 firestore_shared_live=False, vercel_postgres_live=False,
+                 resolve_processing_grants=None,
                  provider_retry_after_seconds=None,
                  owner_fresh_acceptance_once: bool = False):
         if (not isinstance(admission, PublicAdmission)
@@ -122,10 +123,12 @@ class DistributedPublicFetch:
                 or type(local_live) is not bool or type(normal_wikimedia_live) is not bool
                 or type(normal_google_live) is not bool
                 or type(firestore_shared_live) is not bool
+                or type(vercel_postgres_live) is not bool
                 or type(owner_fresh_acceptance_once) is not bool
                 or owner_fresh_acceptance_once and not firestore_shared_live
                 or sum((local_live, normal_wikimedia_live, normal_google_live,
                         firestore_shared_live)) > 1
+                or vercel_postgres_live and (not normal_google_live or firestore_shared_live)
                 or (provider_retry_after_seconds is not None
                     and not callable(provider_retry_after_seconds))):
             raise ValueError("matching admission, worker and grant resolver required")
@@ -137,6 +140,8 @@ class DistributedPublicFetch:
         self.normal_wikimedia_live = normal_wikimedia_live
         self.normal_google_live = normal_google_live
         self.firestore_shared_live = firestore_shared_live
+        self.vercel_postgres_live = vercel_postgres_live
+        self.postgres_live = False
         # Results larger than the inline checkpoint budget are stored by the
         # worker's journal in its durable snapshot blob store. Reads must use
         # that same journal so terminal status can restore the full result.
@@ -164,6 +169,7 @@ class DistributedPublicFetch:
                 YOUTUBE_SOURCE_ID,
             )
             from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
+            from app.storage.postgres_atomic_state import PostgresAtomicStateStore
             pools = admission.policy.pools
             bing_enabled = BING_SOURCE_ID in admission.policy.enabled_sources
             google_pool = (pools.get("serpapi_google") if bing_enabled
@@ -185,10 +191,19 @@ class DistributedPublicFetch:
             expected_sources = {WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID}
             if bing_enabled:
                 expected_sources.add(BING_SOURCE_ID)
-            if (os.environ.get("VERCEL") or declared_modes != {"LIVE"}
+            local_state = type(admission.store) is LocalSQLiteAtomicStateStore
+            postgres_state = type(admission.store) is PostgresAtomicStateStore
+            self.postgres_live = postgres_state
+            vercel_postgres_state = (
+                self.vercel_postgres_live and os.environ.get("VERCEL") == "1"
+                and postgres_state
+            )
+            if ((os.environ.get("VERCEL") and not vercel_postgres_state)
+                    or declared_modes != {"LIVE"}
                     or worker.admission is not admission
-                    or type(admission.store) is not LocalSQLiteAtomicStateStore
-                    or admission.store.data_mode != "LIVE"
+                    or not (local_state or postgres_state)
+                    or local_state and admission.store.data_mode != "LIVE"
+                    or self.vercel_postgres_live and not vercel_postgres_state
                     or admission.policy != expected
                     or admission.policy.enabled_sources != frozenset(expected_sources)
                     or not callable(resolve_processing_grants)):
@@ -235,13 +250,34 @@ class DistributedPublicFetch:
         self.latest_dataset_summary_available = False
         self.latest_dataset_summary = None
 
+    def _latest_reuse_summary(self):
+        """Read the current compact PostgreSQL manifest or use a request-scoped Firestore summary."""
+        if getattr(self, "postgres_live", False):
+            store = getattr(self, "collection_store", None)
+            read_summary = getattr(store, "latest_dataset_reuse_summary", None)
+            if not callable(read_summary):
+                return None
+            summary = read_summary()
+            self.latest_dataset_summary_available = isinstance(summary, dict)
+            self.latest_dataset_summary = summary if isinstance(summary, dict) else None
+            return self.latest_dataset_summary
+        summary = getattr(self, "latest_dataset_summary", None)
+        if (getattr(self, "latest_dataset_summary_available", False)
+                and isinstance(summary, dict)):
+            return summary
+        return None
+
     def submit(self, idempotency_key: str, *, history_days: int | None = None,
                source_ids: list[str] | None = None,
-               manual_source_refresh: bool = False) -> dict:
-        if type(manual_source_refresh) is not bool:
-            raise ValueError("manual source refresh flag must be boolean")
+               manual_source_refresh: bool = False,
+               cache_only: bool = False) -> dict:
+        if type(manual_source_refresh) is not bool or type(cache_only) is not bool:
+            raise ValueError("Fetch mode flags must be boolean")
         if manual_source_refresh and (history_days is not None or source_ids is None):
             raise AdmissionDenied("MANUAL_REFRESH_NOT_ALLOWED")
+        if cache_only and (history_days is not None or source_ids is None
+                           or manual_source_refresh or self.data_mode != "LIVE"):
+            raise AdmissionDenied("CACHE_ONLY_UNAVAILABLE")
         if history_days is not None:
             if (source_ids is not None or not self.normal_wikimedia_live
                     or type(history_days) is not int or not 1 <= history_days <= 2):
@@ -249,8 +285,11 @@ class DistributedPublicFetch:
             request_metadata = {"kind": "WIKIMEDIA_HISTORY", "history_days": history_days}
         elif source_ids is not None:
             request_metadata = {"sources": source_ids}
+            if cache_only:
+                request_metadata["cache_only"] = True
             if manual_source_refresh:
-                if not self.firestore_shared_live or self.data_mode != "LIVE":
+                if (not (self.firestore_shared_live or self.vercel_postgres_live)
+                        or self.data_mode != "LIVE"):
                     raise AdmissionDenied("MANUAL_REFRESH_NOT_ALLOWED")
                 request_metadata["manual_source_refresh"] = MANUAL_SOURCE_REFRESH_MARKER
         else:
@@ -266,7 +305,7 @@ class DistributedPublicFetch:
                 raise AdmissionDenied("ADMISSION_STATE_UNAVAILABLE") from None
         else:
             existing = None
-        if self.provider_retry_after_seconds is not None and existing is None:
+        if self.provider_retry_after_seconds is not None and existing is None and not cache_only:
             try:
                 retry_after = self.provider_retry_after_seconds()
             except Exception:
@@ -281,10 +320,12 @@ class DistributedPublicFetch:
                                             self.owner_fresh_acceptance_once
                                             and history_days is None
                                             and source_ids is not None
+                                            and not cache_only
                                             and set(source_ids) == set(self.admission.policy.enabled_sources)
                                         ))
         return {"job_id": accepted["job_id"], "result": accepted["result"],
                 "status": accepted["status"], "created_at": accepted.get("created_at"),
+                "fetch_mode": "CACHE_ONLY" if cache_only else "LIVE",
                 "owner_fresh_acceptance": accepted.get("owner_fresh_acceptance", False)}
 
     def _reused_terminal_status(self, job, reuse_check):
@@ -322,6 +363,7 @@ class DistributedPublicFetch:
                if job.get("state") == "RUNNING"
                and isinstance(job.get("lease_until"), str) else {}),
             "request_kind": request_kind,
+            "fetch_mode": "CACHE_ONLY" if metadata.get("cache_only") is True else "LIVE",
             "selected_sources": selected_sources,
             **({"history_days": metadata["history_days"]}
                if request_kind == "WIKIMEDIA_HISTORY" else {}),
@@ -352,8 +394,11 @@ class DistributedPublicFetch:
         source_results = []
         modes = set()
         terminal = job["state"] in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
+        summary = self._latest_reuse_summary() if terminal else None
         if terminal and not include_records:
-            reuse_check = self.collection_reuse_for_fetch(job_id, job=job)
+            reuse_check = self.collection_reuse_for_fetch(
+                job_id, job=job, _summary=summary, _summary_loaded=True,
+            )
             if (isinstance(reuse_check, dict)
                     and reuse_check.get("collection_input_unchanged") is True):
                 return self._reused_terminal_status(job, reuse_check)
@@ -384,7 +429,7 @@ class DistributedPublicFetch:
                     return None
 
             source_ids = list(grants)
-            if self.firestore_shared_live and len(source_ids) > 1:
+            if (self.firestore_shared_live or self.postgres_live) and len(source_ids) > 1:
                 # Independent immutable checkpoint reads share no transaction.
                 # Keep source ordering deterministic while overlapping I/O.
                 with ThreadPoolExecutor(max_workers=min(4, len(source_ids))) as executor:
@@ -401,11 +446,9 @@ class DistributedPublicFetch:
                 )
                 if not checkpoint_complete:
                     missing = _terminal_missing_source_result(
-                        job["state"], source_id, self.data_mode,
-                        job.get("terminal_reason"),
+                        job["state"], source_id, job.get("terminal_reason"),
                     )
                     source_results.append(missing)
-                    modes.add(self.data_mode)
                     continue
                 if source_id not in grants:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
@@ -414,11 +457,9 @@ class DistributedPublicFetch:
                 result = resolved[source_id]
                 if result is None:
                     source_results.append({"source_id": source_id, "status": "UNAVAILABLE",
-                                          "data_mode": self.data_mode,
                                           "record_count": 0, "records": [],
                                           "error_code": "RESULT_UNAVAILABLE",
                                           "coverage": {"checkpoint_status": "RESULT_UNAVAILABLE"}})
-                    modes.add(self.data_mode)
                     continue
                 if result["status"] != "UNAVAILABLE":
                     modes.add(result["data_mode"])
@@ -479,13 +520,12 @@ class DistributedPublicFetch:
                 else:
                     progress_sources.append({"source_id": source_id, "status": job["state"]})
         collection_input_unchanged = bool(
-            terminal and self.firestore_shared_live
-            and self.latest_dataset_summary_available
-            and isinstance(self.latest_dataset_summary, dict)
+            terminal and (self.firestore_shared_live or self.postgres_live)
+            and isinstance(summary, dict)
             and reusable_collection_input(
                 source_results,
-                self.latest_dataset_summary.get("source_manifest"),
-                processing_status=self.latest_dataset_summary.get("processing_status"),
+                summary.get("source_manifest"),
+                processing_status=summary.get("processing_status"),
             )
         )
         discovery = None
@@ -541,6 +581,9 @@ class DistributedPublicFetch:
                if job.get("state") == "RUNNING"
                and isinstance(job.get("lease_until"), str) else {}),
             "request_kind": job.get("request_metadata", {}).get("kind", "LATEST"),
+            "fetch_mode": ("CACHE_ONLY"
+                           if job.get("request_metadata", {}).get("cache_only") is True
+                           else "LIVE"),
             "selected_sources": selected_sources,
             **({"history_days": job["request_metadata"]["history_days"]}
                if job.get("request_metadata", {}).get("kind") == "WIKIMEDIA_HISTORY" else {}),
@@ -609,9 +652,9 @@ class DistributedPublicFetch:
                 **({"transport_diagnostic": result["transport_diagnostic"]}
                    if "transport_diagnostic" in result else {}),
             })
-        summary = self.latest_dataset_summary
+        summary = self._latest_reuse_summary()
         collection_input_unchanged = bool(
-            self.firestore_shared_live and self.latest_dataset_summary_available
+            (self.firestore_shared_live or self.postgres_live)
             and isinstance(summary, dict)
             and reusable_collection_input(
                 source_results, summary.get("source_manifest"),
@@ -675,7 +718,8 @@ class DistributedPublicFetch:
         result["collection_input_unchanged"] = collection_input_unchanged
         return result
 
-    def collection_reuse_for_fetch(self, job_id: str, *, job=None) -> dict | None:
+    def collection_reuse_for_fetch(self, job_id: str, *, job=None,
+                                   _summary=None, _summary_loaded=False) -> dict | None:
         """Compare compact terminal receipts with the latest dataset manifest.
 
         The checkpoint shell contains counts, provenance, and the source input
@@ -683,9 +727,10 @@ class DistributedPublicFetch:
         avoids downloading those blobs or restoring the SQLite snapshot when a
         Fetch is an exact cache-only replay of the current dataset.
         """
-        if (not self.firestore_shared_live
-                or not self.latest_dataset_summary_available
-                or not isinstance(self.latest_dataset_summary, dict)):
+        if not (self.firestore_shared_live or self.postgres_live):
+            return None
+        summary = _summary if _summary_loaded else self._latest_reuse_summary()
+        if not isinstance(summary, dict):
             return None
         if job is None:
             read_receipt = getattr(self.admission, "read_job_unmetered", None)
@@ -770,7 +815,6 @@ class DistributedPublicFetch:
                     "legacy_source_input_digests"
                 ]
             manifest.append(item)
-        summary = self.latest_dataset_summary
         unchanged = reusable_collection_manifest(
             manifest, summary.get("source_manifest"),
             processing_status=summary.get("processing_status"),
@@ -788,6 +832,7 @@ class DistributedPublicFetch:
     def history(self, *, limit: int = 20) -> list[dict]:
         """Return shared job summaries without charging the per-job poll budget."""
         jobs = self.admission.list_jobs(limit=limit, now=self.utcnow())
+        summary = self._latest_reuse_summary()
         items = []
         for job in jobs:
             metadata = job.get("request_metadata", {})
@@ -867,13 +912,12 @@ class DistributedPublicFetch:
                     "coverage": coverage if isinstance(coverage, dict) else {},
                 })
             collection_input_unchanged = bool(
-                self.firestore_shared_live
-                and self.latest_dataset_summary_available
-                and isinstance(self.latest_dataset_summary, dict)
+                (self.firestore_shared_live or self.postgres_live)
+                and isinstance(summary, dict)
                 and reusable_collection_manifest(
                     manifest,
-                    self.latest_dataset_summary.get("source_manifest"),
-                    processing_status=self.latest_dataset_summary.get("processing_status"),
+                    summary.get("source_manifest"),
+                    processing_status=summary.get("processing_status"),
                 )
             )
             for source in manifest:
@@ -888,6 +932,7 @@ class DistributedPublicFetch:
                 "data_mode": "LIVE" if self.data_mode == "LIVE" else self.data_mode,
                 "sources": list(selected),
                 "request_kind": metadata.get("kind", "LATEST"),
+                "fetch_mode": "CACHE_ONLY" if metadata.get("cache_only") is True else "LIVE",
                 **({"history_days": metadata["history_days"]}
                    if metadata.get("kind") == "WIKIMEDIA_HISTORY" else {}),
                 "source_manifest": manifest,
@@ -917,13 +962,14 @@ class DistributedPublicFetch:
     async def run_slice(self, owner: str, fetch_id: str, *, max_sources: int = 1):
         """Continue one requested shared Fetch through a bounded source slice."""
         previous_manifest = None
-        if (self.firestore_shared_live and self.latest_dataset_summary_available
-                and isinstance(self.latest_dataset_summary, dict)):
-            candidate = self.latest_dataset_summary.get("source_manifest")
+        summary = await asyncio.to_thread(self._latest_reuse_summary)
+        if ((self.firestore_shared_live or self.postgres_live)
+                and isinstance(summary, dict)):
+            candidate = summary.get("source_manifest")
             if isinstance(candidate, list):
                 previous_manifest = candidate
         return await self.worker.run_once(
             owner, job_id=fetch_id, max_sources=max_sources,
-            continue_cached=self.firestore_shared_live,
+            continue_cached=(self.firestore_shared_live or self.postgres_live),
             previous_source_manifest=previous_manifest,
         )

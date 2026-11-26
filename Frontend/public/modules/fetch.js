@@ -102,7 +102,7 @@ const wait = (milliseconds) => new Promise((resolve) => {
 export class PublicFetchController {
   constructor({ onState, onTerminal, locale, historyDays = null, sourceIds = null,
     youtubeSelected = () => false, youtubePolicyVersion = () => null,
-    runtimeScope = () => 'LOCAL' }) {
+    runtimeScope = () => 'LOCAL', fetchMode = 'LIVE' }) {
     if (historyDays !== null && (!Number.isInteger(historyDays) || historyDays < 1 || historyDays > 2)) {
       throw new RangeError('Historical Fetch is limited to one or two days.');
     }
@@ -114,6 +114,10 @@ export class PublicFetchController {
     this.youtubeSelected = youtubeSelected;
     this.youtubePolicyVersion = youtubePolicyVersion;
     this.runtimeScope = runtimeScope;
+    if (!['LIVE', 'CACHE_ONLY'].includes(fetchMode)) {
+      throw new RangeError('Fetch mode must be LIVE or CACHE_ONLY.');
+    }
+    this.fetchMode = fetchMode;
     this.requestKind = historyDays === null ? 'latest' : 'history';
     this.key = null;
     this.fetchId = null;
@@ -179,6 +183,9 @@ export class PublicFetchController {
           ? { days: this.historyDays }
           : Array.isArray(selectedSources) && selectedSources.length
             ? { sources: selectedSources } : {};
+        if (this.requestKind === 'latest' && this.fetchMode === 'CACHE_ONLY') {
+          this.requestBody = { ...this.requestBody, mode: 'CACHE_ONLY' };
+        }
       }
       if (this.includesYouTube && !this.activeYoutubePolicyVersion) {
         const error = new Error('YouTube policy agreement is required before Fetch.');
@@ -300,6 +307,7 @@ export class PublicFetchController {
       this.historyDays = null;
       this.requestKind = 'latest';
       this.requestBody = { sources: [...sources] };
+      if (this.fetchMode === 'CACHE_ONLY') this.requestBody.mode = 'CACHE_ONLY';
       this.includesYouTube = sources.includes(YOUTUBE_SOURCE_ID);
       this.activeYoutubePolicyVersion = this.includesYouTube
         ? this.youtubePolicyVersion() : null;
@@ -481,11 +489,12 @@ export class PublicFetchController {
   }
 
   emit(presentation) {
-    this.onState({ ...presentation, requestKind: this.requestKind });
+    this.onState({ ...presentation, requestKind: this.requestKind, fetchMode: this.fetchMode });
   }
 
   kindForError(error) {
     const code = error?.code || error?.body?.detail?.code || error?.body?.code;
+    if (code === 'CACHE_ONLY_UNAVAILABLE') return 'cache-only-unavailable';
     if (code === 'YOUTUBE_POLICY_NOT_APPROVED') {
       this.fetchId = null;
       this.key = null;

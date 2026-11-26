@@ -21,8 +21,8 @@ from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollecto
 from app.sources.live_gateway import GatewayError, LivePageGateway
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.sources.wikimedia.live_gateway import WikimediaTopPageGateway
-from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_file_security import secure_private_directory
+from app.storage.local_smoke_store import LocalSmokeStore
 from app.storage.local_sqlite_atomic_state import LocalSQLiteAtomicStateStore
 from app.storage.local_volatile_checkpoints import LocalVolatileCheckpoints
 from app.workers.d5_source_handlers import D5SourceHandlers
@@ -84,13 +84,16 @@ async def local_live_composition(*, credentials, approvals, user_agent,
             wiki = None
         if wiki is not None:
             stack.push_async_callback(wiki.aclose)
-        handlers = D5SourceHandlers(query_collectors=collectors, wikimedia=wiki,
+        source_handlers = D5SourceHandlers(query_collectors=collectors, wikimedia=wiki,
             plan=DEFAULT_QUERY_PLAN, limits=CollectionLimits(max_queries=1,
                 max_pages_per_query=1, max_requests=1, max_retries_per_page=0,
                 deadline_seconds=60, max_results=10),
             observation_date=lambda: (utcnow() - timedelta(days=2)).date(),
-            unavailable_mode="LIVE", utcnow=utcnow).build()
+            unavailable_mode="LIVE", utcnow=utcnow)
+        handlers = source_handlers.build()
+        cache_only_handlers = source_handlers.build_cache_only()
         worker = DistributedFetchWorker(admission, handlers=handlers,
+            cache_only_handlers=cache_only_handlers,
             resolve_grant=checkpoint_grant, utcnow=utcnow)
         yield DistributedPublicFetch(admission, worker, resolve_grant=checkpoint_grant,
             utcnow=utcnow, local_live=True, resolve_processing_grants=resolve_processing_grants)

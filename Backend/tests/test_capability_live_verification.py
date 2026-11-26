@@ -152,9 +152,14 @@ class LocalLiveVerificationStatusTests(unittest.TestCase):
             ),
         )
 
+        def recent_dataset_snapshots(*, limit):
+            return db.execute(
+                "SELECT * FROM dataset_snapshots ORDER BY fetched_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
             collection_service=SimpleNamespace(store=SimpleNamespace(
-                data_mode_scope="LIVE", connect=lambda: db
+                data_mode_scope="LIVE", recent_dataset_snapshots=recent_dataset_snapshots,
             ))
         )))
 

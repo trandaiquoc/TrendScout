@@ -875,6 +875,62 @@ class VercelSharedLiveTimingTests(unittest.IsolatedAsyncioTestCase):
             "/api/v1/capabilities",
         )
 
+    async def test_postgres_request_timing_log_excludes_query_data(self):
+        settings = SimpleNamespace(
+            environment_profile="vercel",
+            vercel_shared_live_enabled=False,
+            vercel_postgres_runtime_enabled=True,
+            wikimedia_user_agent="TrendScoutTest/0.1",
+        )
+
+        @asynccontextmanager
+        async def context_factory(*, user_agent, postgres_environment, postgres_schema,
+                                  capability_metadata_request):
+            self.assertEqual(user_agent, settings.wikimedia_user_agent)
+            self.assertIsNone(postgres_environment)
+            self.assertEqual(postgres_schema, "trendscout")
+            self.assertFalse(capability_metadata_request)
+            yield SimpleNamespace(available_sources=frozenset())
+
+        async def endpoint(scope, _receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        middleware = VercelSharedLiveMiddleware(
+            endpoint,
+            settings=settings,
+            enabled=True,
+            postgres_context_factory=context_factory,
+        )
+        api = FastAPI()
+        api.add_api_route("/api/v1/datasets/latest", lambda: {}, methods=["GET"])
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/datasets/latest",
+            "query_string": b"token=secret-query-value",
+            "headers": [],
+            "app": api,
+        }
+        messages = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            messages.append(message)
+
+        with self.assertLogs("app.main", level="INFO") as captured:
+            await middleware(scope, receive, send)
+
+        self.assertEqual(messages[0]["status"], 200)
+        self.assertIn((b"cache-control", b"no-store"), messages[0]["headers"])
+        timing = next(message for message in captured.output
+                      if "Vercel PostgreSQL request timing" in message)
+        self.assertIn("route=/api/v1/datasets/latest status_code=200", timing)
+        self.assertRegex(timing, r"composition_ms=\d+ handler_ms=\d+ total_ms=\d+")
+        self.assertNotIn("secret-query-value", timing)
+
     async def test_collection_get_uses_read_composition_without_distributed_worker(self):
         events = []
         service = object()
@@ -1792,6 +1848,58 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facade.status_calls, 0)
             self.assertNotIn("snapshot_saved", events)
 
+    async def test_deferred_model_recovery_uses_saved_checkpoint_without_provider_work(self):
+        app, events, _client, facade, _client_factory = self.app(enabled=True)
+        facade.firestore_shared_live = False
+        facade.vercel_postgres_live = False
+        facade.postgres_live = True
+        service = SimpleNamespace(
+            store=SimpleNamespace(data_mode_scope="LIVE"),
+            fetch_model_inference_enabled=True,
+            process_fetch=AsyncMock(return_value={"status": "COMPLETED"}),
+        )
+        facade.collection_service = service
+        facade.utcnow = lambda: "unused-clock"
+        facade.admission.read_job = lambda fetch_id, now: {
+            "state": "PARTIAL", "source_checkpoints": {
+                WIKIMEDIA_SOURCE_ID: {"snapshot": {"data_mode": "LIVE"}}
+            },
+        }
+        with TemporaryDirectory() as directory:
+            store = CollectionStore(Path(directory) / "collections.sqlite", data_mode_scope="LIVE")
+            with store.connect() as db:
+                db.execute("INSERT INTO fetch_jobs(fetch_id,status,available,error_code,updated_at) "
+                           "VALUES(?,?,?,?,?)",
+                           (_JOB_ID, "MODEL_UNAVAILABLE", 1, "MODEL_INFERENCE_DEFERRED",
+                            "2026-11-24T00:00:00Z"))
+                db.execute("""INSERT INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
+                    provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
+                    quality_flags,processing_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (_JOB_ID, "PARTIAL", "LIVE", "[]", 1, 1, 1, 0, "[]",
+                     "MODEL_UNAVAILABLE", "2026-11-24T00:00:00Z"))
+            service.store = store
+            async with app.router.lifespan_context(app):
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app),
+                    base_url="https://trend-scout.example",
+                ) as browser:
+                    response = await browser.post(
+                        f"/api/v1/fetches/{_JOB_ID}/collections",
+                        headers={"Origin": "https://trend-scout.example",
+                                 "x-vercel-oidc-token": "synthetic-test-token"},
+                    )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "COMPLETED")
+        call_args, call_kwargs = service.process_fetch.await_args
+        self.assertEqual(call_args[0], _JOB_ID)
+        self.assertEqual(call_args[1][0]["records"], [{"title": "retained checkpoint record"}])
+        self.assertEqual(call_kwargs, {
+            "cached_context_only": True, "resume_model_unavailable": True,
+        })
+        self.assertEqual(facade.status_calls, 1)
+        self.assertNotIn("worker_finished", events)
+
     async def test_unchanged_collection_recovery_skips_sqlite_restore_and_snapshot_write(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         facade.collection_reuse_for_fetch = lambda fetch_id: {
@@ -2035,6 +2143,41 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.json()["vercel_shared_live"])
         self.assertFalse(response.json()["shared_policy_reconciliation_required"])
         self.assertEqual(response.json()["fetch_block_reason"], "POLICY_MISMATCH")
+
+
+class PostgresFetchCollectionsReuseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unchanged_postgres_input_skips_collection_processing_without_snapshot_flags(self):
+        from app.api.fetches import _process_fetch_collections
+
+        class Distributed:
+            firestore_shared_live = False
+            postgres_live = True
+
+            def __init__(self):
+                self.reuse_calls = []
+
+            def collection_reuse_for_fetch(self, fetch_id):
+                self.reuse_calls.append(fetch_id)
+                return {
+                    "terminal": True,
+                    "collection_input_unchanged": True,
+                    "dataset_id": "b" * 32,
+                }
+
+            def status(self, *args, **kwargs):
+                raise AssertionError("unchanged PostgreSQL input should skip status and processing")
+
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(state=SimpleNamespace()),
+        )
+        distributed = Distributed()
+
+        await _process_fetch_collections(request, distributed, "a" * 32)
+
+        self.assertEqual(distributed.reuse_calls, ["a" * 32])
+        self.assertFalse(hasattr(request.state, "vercel_fetch_snapshot_unchanged"))
+        self.assertFalse(hasattr(request.state, "vercel_fetch_snapshot_required"))
 
 
 if __name__ == "__main__":

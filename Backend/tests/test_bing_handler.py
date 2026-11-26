@@ -227,6 +227,66 @@ class BingSavedCandidateHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.gateway.calls), 1)
 
+    async def test_explicit_cache_only_bing_reuses_stale_candidate_without_provider_attempt(self):
+        evidence = json.loads(self.candidate["evidence"])
+        shared_candidate = {
+            "record_id": self.candidate["id"],
+            "canonical_keyword": self.candidate["keyword"],
+            "source_id": GOOGLE_SOURCE_ID,
+            "project": self.candidate["project"],
+            "observed_at": self.candidate["observed_at"],
+            "fetched_at": evidence["fetched_at"],
+            "data_mode": "LIVE",
+            "evidence": evidence,
+        }
+        cache = SharedCache(self.atomic)
+
+        def grant_for(source_id, now):
+            return CacheGrant(
+                source_id, "cache-only-bing-v1", now + timedelta(days=7),
+                max_fresh_seconds=3600, max_stale_seconds=7 * 24 * 3600,
+                max_retention_seconds=7 * 24 * 3600, allowed=True,
+            )
+
+        seed = BingSavedCandidateHandler(
+            gateway=self.gateway, collection_store=None, atomic_store=self.atomic,
+            policy_fingerprint=POLICY, utcnow=lambda: NOW,
+            candidate_loader=lambda _now: (shared_candidate,),
+            shared_cache=cache, resolve_cache_grant=grant_for,
+        )
+        fresh = await seed(work_context(NOW, job_id="cache-only-bing-seed"))
+        self.assertEqual(fresh["provider_request_count"], 1)
+        self.assertEqual(len(self.gateway.calls), 1)
+
+        class ForbiddenGateway:
+            data_mode = "LIVE"
+            calls = 0
+
+            async def fetch_page(self, **_kwargs):
+                self.calls += 1
+                raise AssertionError("cache-only mode must not call Bing")
+
+        forbidden = ForbiddenGateway()
+        cache_only = BingSavedCandidateHandler(
+            gateway=forbidden, collection_store=None, atomic_store=self.atomic,
+            policy_fingerprint=POLICY, utcnow=lambda: NOW + timedelta(hours=2),
+            candidate_loader=lambda _now: (shared_candidate,),
+            shared_cache=cache, resolve_cache_grant=grant_for,
+            ensure_paid_budget=lambda: self._budget(),
+        )
+        result = await cache_only(work_context(
+            NOW + timedelta(hours=2), job_id="cache-only-bing-replay",
+            request_metadata={"sources": [BING_SOURCE_ID], "cache_only": True},
+        ))
+
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertEqual(result["delivery_state"], "STALE_CACHE")
+        self.assertEqual(result["provider_request_count"], 0)
+        self.assertEqual(result["coverage"]["refresh_attempt_status"], "NOT_ATTEMPTED")
+        self.assertEqual(forbidden.calls, 0)
+        self.assertEqual(len(self.gateway.calls), 1)
+        self.assertEqual(self.budget_calls, [])
+
     async def test_no_persisted_google_candidates_is_not_an_empty_live_success(self):
         with self.collections.connect() as db:
             db.execute("DELETE FROM keywords WHERE id=?", (self.candidate["id"],))

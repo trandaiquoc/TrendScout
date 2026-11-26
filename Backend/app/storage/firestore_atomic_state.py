@@ -11,6 +11,8 @@ from copy import deepcopy
 from google.api_core import exceptions as google_exceptions
 from google.cloud import firestore
 
+from app.ports.atomic_state import CommitOutcomeUnknown
+
 _ID = re.compile(r"^[A-Za-z0-9._~-]{1,128}$")
 _MAX_BYTES = 700_000
 
@@ -25,10 +27,6 @@ def _validate_state_mapping(value):
         raise ValueError("coordination state must be finite JSON") from None
     if len(encoded) > _MAX_BYTES:
         raise ValueError("coordination state exceeds document budget")
-
-
-class CommitOutcomeUnknown(RuntimeError):
-    """The transaction could have committed; do not perform an external action."""
 
 
 class FirestoreAtomicStateStore:

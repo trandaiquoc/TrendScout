@@ -903,6 +903,7 @@ const FETCH_STATE_MESSAGES = {
   expired: 'fetch.expired',
   'policy-not-approved': 'fetch.youtube-policy-pending',
   'policy-consent-required': 'fetch.youtube-consent-required',
+  'cache-only-unavailable': 'fetch.cache-only-unavailable',
 };
 const FETCH_SOURCE_LABELS = {
   wikimedia_pageviews_top_per_country: 'fetch.source.wikimedia',
@@ -1009,6 +1010,7 @@ function renderFetchPresentation() {
   const capabilityRetryPending = state.capabilityRetryTimer !== null && !state.capabilities;
   const isActionState = Boolean(messageKey);
   const button = $('#open-fetch');
+  const cacheOnlyButton = $('#open-cache-only-fetch');
   const historyButton = $('#open-history-fetch');
   const badge = $('#fetch-badge');
   const readiness = $('#fetch-readiness');
@@ -1053,6 +1055,11 @@ function renderFetchPresentation() {
   const liveDemo = isLocalLiveDemo(state.capabilities);
   const sharedLiveDemo = isVercelSharedLive(state.capabilities);
   const liveFetch = liveDemo || sharedLiveDemo;
+  if (cacheOnlyButton) {
+    cacheOnlyButton.hidden = !liveFetch;
+    cacheOnlyButton.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited'
+      || youtubePolicyPending;
+  }
   historyButton.hidden = !liveDemo;
   historyButton.disabled = !state.fetchReady || busy || presentation.kind === 'rate-limited';
   const historyStateKey = presentation.requestKind === 'history'
@@ -1086,10 +1093,20 @@ function renderFetchPresentation() {
   status.replaceChildren();
   if (isActionState) {
     const message = document.createElement('p');
+    const cacheOnlyMessage = presentation.fetchMode === 'CACHE_ONLY'
+      ? ({
+        submitting: 'fetch.cache-only-submitting', queued: 'fetch.cache-only-queued',
+        running: 'fetch.cache-only-running', completed: 'fetch.cache-only-completed',
+        partial: 'fetch.cache-only-partial', failed: 'fetch.cache-only-failed',
+        'auto-resuming': 'fetch.cache-only-resuming',
+        'retry-wait': 'fetch.cache-only-resuming',
+        'poll-retrying': 'fetch.cache-only-running',
+      })[presentation.kind]
+      : null;
     message.textContent = presentation.kind === 'submission-rejected'
       ? presentation.error?.message || t(messageKey)
-      : t(liveFetch
-        ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey);
+      : t(cacheOnlyMessage || (liveFetch
+        ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey));
     status.append(message);
     const sourceOutcomes = renderFetchSourceOutcomes(presentation.fetch);
     if (sourceOutcomes) status.append(sourceOutcomes);
@@ -1597,13 +1614,25 @@ const fetchController = new PublicFetchController({
 const historyFetchController = new PublicFetchController({
   onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale, historyDays: 2,
 });
+const cacheOnlyFetchController = new PublicFetchController({
+  onState: handleFetchState, onTerminal: handleFetchTerminal, locale: getLocale,
+  fetchMode: 'CACHE_ONLY',
+  sourceIds: () => {
+    const selected = $('#fetch-source-select')?.value;
+    return selected ? [selected] : defaultFetchSourceIds(state.capabilities);
+  },
+  youtubeSelected: () => effectiveFetchSourceIds().includes(YOUTUBE_SOURCE_ID),
+  youtubePolicyVersion: acceptedYoutubePolicyVersion,
+  runtimeScope: () => isVercelSharedLive(state.capabilities)
+    ? 'VERCEL_SHARED_LIVE' : 'LOCAL',
+});
 
 async function resumeRecoveredFetch(run) {
-  if (fetchController.busy || historyFetchController.busy
+  if (fetchController.busy || cacheOnlyFetchController.busy || historyFetchController.busy
       || run?.recovery_available !== true) return;
   const requestKind = run.request_kind || 'LATEST';
-  const controller = requestKind === 'WIKIMEDIA_HISTORY'
-    ? historyFetchController : fetchController;
+  const controller = requestKind === 'WIKIMEDIA_HISTORY' ? historyFetchController
+    : run.fetch_mode === 'CACHE_ONLY' ? cacheOnlyFetchController : fetchController;
   showView('overview', { loadDashboard: false });
   window.location.hash = 'overview';
   if (!hasCurrentYoutubeConsent(run.sources)) return;
@@ -1611,6 +1640,7 @@ async function resumeRecoveredFetch(run) {
     sources: run.sources,
     requestKind,
     historyDays: run.history_days,
+      fetchMode: run.fetch_mode,
     fetchId: requestKind === 'WIKIMEDIA_HISTORY' ? null : run.fetch_id,
   });
 }
@@ -2972,6 +3002,9 @@ function bindEvents() {
   $('#settings-schedule-cancel').addEventListener('click',cancelScheduleEdit);
   $('#open-fetch').addEventListener('click', () => {
     activateFetchWithPolicyConsent(fetchController);
+  });
+  $('#open-cache-only-fetch').addEventListener('click', () => {
+    activateFetchWithPolicyConsent(cacheOnlyFetchController);
   });
   $('#open-history-fetch').addEventListener('click', () => {
     if (state.fetchReady) historyFetchController.activate();

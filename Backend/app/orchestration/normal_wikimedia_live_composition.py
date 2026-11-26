@@ -176,7 +176,7 @@ async def normal_wikimedia_live_composition(*, user_agent,
             return (ProcessingGrant(WIKIMEDIA_SOURCE_ID, True, False,
                                     now + timedelta(minutes=15), POLICY_VERSION),)
 
-        handlers = D5SourceHandlers(
+        source_handlers = D5SourceHandlers(
             query_collectors={
                 "google_web_serp": None,
                 "bing_web_serp": None,
@@ -193,9 +193,12 @@ async def normal_wikimedia_live_composition(*, user_agent,
             include_wikimedia_transport_metrics=True,
             unavailable_mode="LIVE",
             utcnow=utcnow,
-        ).build()[WIKIMEDIA_SOURCE_ID]
+        )
+        handlers = source_handlers.build()[WIKIMEDIA_SOURCE_ID]
+        cache_only_handlers = source_handlers.build_cache_only()[WIKIMEDIA_SOURCE_ID]
         worker = DistributedFetchWorker(
             admission, handlers={WIKIMEDIA_SOURCE_ID: handlers},
+            cache_only_handlers={WIKIMEDIA_SOURCE_ID: cache_only_handlers},
             resolve_grant=resolve_checkpoint, utcnow=utcnow,
             snapshot_blobs=snapshot_blobs,
         )

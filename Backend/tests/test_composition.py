@@ -1,19 +1,20 @@
 """Offline composition and dependency-boundary contracts."""
-import asyncio
 import ast
+import asyncio
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import httpx
+from test_runs import fixture
 
 from app import composition
 from app.main import create_app
 from app.orchestration.runs import HostRunLock, RunService
 from app.storage.fake import FakeStorage
-from test_runs import fixture
+from app.storage.firestore import FirestoreStorage
 
 
 class FakeSource:
@@ -35,7 +36,7 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(composition, 'clean_snapshot', clean), \
                  patch.object(composition, 'extract_keywords', extract), \
                  patch.object(composition, 'score_trends', score), \
-                 patch.object(composition.FirestoreStorage, 'from_environment', side_effect=AssertionError('ADC used')), \
+                 patch.object(FirestoreStorage, 'from_project', side_effect=AssertionError('ADC used')), \
                  patch.object(composition, 'WikimediaAdapter', side_effect=AssertionError('real adapter used')):
                 service = composition.build_run_service(
                     storage=store, adapter_factory=FakeSource, lock_path=str(Path(directory)/'lock'),
@@ -64,7 +65,7 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
         password = 'synthetic-password-' + 'x'*32
         with patch.dict('os.environ', {'VERCEL':'1', 'TREND_SCOUT_READ_PASSWORD':password}), \
              patch('app.main.build_run_service', side_effect=AssertionError('service initialized')), \
-             patch.object(composition.FirestoreStorage, 'from_environment', side_effect=AssertionError('ADC used')), \
+             patch.object(FirestoreStorage, 'from_project', side_effect=AssertionError('ADC used')), \
              patch.object(composition, 'WikimediaAdapter', side_effect=AssertionError('source created')):
             app = create_app(read_storage_factory=lambda _: store)
             async with app.router.lifespan_context(app):
@@ -74,7 +75,7 @@ class CompositionTests(unittest.IsolatedAsyncioTestCase):
                     path = '/api/runs/' + old_run + '/keywords'
                     self.assertEqual((await client.get(path)).json()['items'][0]['keyword_id'], row['keyword_id'])
                     self.assertEqual((await client.get(path + '/' + row['keyword_id'])).json()['score'], 100)
-                    self.assertEqual((await client.post('/api/runs')).status_code, 405)
+                    self.assertEqual((await client.post('/api/runs')).status_code, 503)
 
     async def test_shutdown_cancels_injected_source_and_records_aborted(self):
         started = asyncio.Event()

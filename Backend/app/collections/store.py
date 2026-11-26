@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.collections.analysis_storage import SQLiteAlgorithmAnalysisSession
+from app.collections.identity import fingerprint as fingerprint
 from app.storage.local_file_security import secure_private_directory
 
 SCHEMA = """
@@ -153,10 +155,6 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def fingerprint(value: str) -> str:
-    return hashlib.sha256(" ".join(value.casefold().split()).encode()).hexdigest()
-
-
 class CollectionStore:
     def __init__(self, path: Path, *, data_mode_scope: str | None = None):
         if data_mode_scope not in {None, "LIVE"}:
@@ -234,6 +232,131 @@ class CollectionStore:
         db.execute("PRAGMA busy_timeout=10000")
         return db
 
+    def run_algorithm_analysis(self, operation):
+        """Run algorithm reads and writes inside one serialized transaction."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return operation(SQLiteAlgorithmAnalysisSession(db, self.data_mode_scope))
+
+    def entity_context_rows(self, keyword_ids):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        rows = []
+        with self.connect() as db:
+            for offset in range(0, len(identifiers), 500):
+                batch = identifiers[offset:offset + 500]
+                if not batch:
+                    continue
+                marks = ",".join("?" for _ in batch)
+                rows.extend(dict(row) for row in db.execute(
+                    f"SELECT * FROM entity_context WHERE keyword_id IN ({marks})", batch
+                ).fetchall())
+        return rows
+
+    def entity_context_keyword_ids(self, keyword_ids, context_version):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        found = set()
+        with self.connect() as db:
+            for offset in range(0, len(identifiers), 500):
+                batch = identifiers[offset:offset + 500]
+                if not batch:
+                    continue
+                marks = ",".join("?" for _ in batch)
+                found.update(row[0] for row in db.execute(
+                    f"SELECT keyword_id FROM entity_context WHERE context_version=? "
+                    f"AND keyword_id IN ({marks})", (context_version, *batch),
+                ).fetchall())
+        return found
+
+    def keyword_evidence_rows(self, *, source_id, project_prefix=None, data_mode=None,
+                              eligible_only=False, limit=5000):
+        """Read bounded source candidates without exposing a database connection."""
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id is required")
+        if project_prefix is not None and (not isinstance(project_prefix, str) or not project_prefix):
+            raise ValueError("project_prefix must be non-empty when provided")
+        if data_mode is not None and (not isinstance(data_mode, str) or not data_mode.strip()):
+            raise ValueError("data_mode must be non-empty when provided")
+        if self.data_mode_scope and data_mode not in (None, self.data_mode_scope):
+            raise ValueError("data_mode conflicts with store scope")
+        if type(eligible_only) is not bool:
+            raise TypeError("eligible_only must be a boolean")
+        if type(limit) is not int or not 1 <= limit <= 5000:
+            raise ValueError("limit must be between 1 and 5000")
+
+        conditions = ["source=?"]
+        parameters = [source_id]
+        effective_mode = self.data_mode_scope or data_mode
+        if effective_mode:
+            conditions.append("data_mode=?")
+            parameters.append(effective_mode)
+        if project_prefix is not None:
+            conditions.append("substr(project,1,length(?))=?")
+            parameters.extend((project_prefix, project_prefix))
+        if eligible_only:
+            conditions.append("eligible=1")
+        parameters.append(limit)
+
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id,keyword,normalized,source,project,observed_at,data_mode,evidence,eligible "
+                "FROM keywords WHERE " + " AND ".join(conditions) +
+                " ORDER BY observed_at DESC,id LIMIT ?",
+                parameters,
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        for row in result:
+            try:
+                row["evidence"] = json.dumps(
+                    json.loads(row["evidence"]), ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                # Preserve malformed legacy evidence so consumers can report
+                # or skip it without turning a read into a write or failure.
+                pass
+        return result
+
+    def upsert_entity_context(self, rows):
+        if not rows:
+            return
+        with self.connect() as db:
+            db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
+                page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,is_main_page_known,
+                entity_type,occupations,category_ids,instance_types,source_url,method,status,context_version,captured_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
+                title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
+                description=excluded.description,page_namespace=excluded.page_namespace,
+                is_disambiguation=excluded.is_disambiguation,redirected_from=excluded.redirected_from,
+                page_language=excluded.page_language,is_main_page=excluded.is_main_page,
+                is_main_page_known=excluded.is_main_page_known,entity_type=excluded.entity_type,
+                occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
+                source_url=excluded.source_url,method=excluded.method,status=excluded.status,
+                context_version=excluded.context_version,captured_at=excluded.captured_at""", rows)
+
+    def runtime_storage_metrics(self, model_version):
+        mode = self.data_mode_scope
+        with self.connect() as db:
+            cache = db.execute("""SELECT count(*) AS vectors,coalesce(sum(dimension),0) AS dimensions,
+                group_concat(DISTINCT dimension) AS vector_dimensions FROM cache WHERE model_version=?""",
+                (model_version,)).fetchone()
+            integrity = db.execute("PRAGMA quick_check(1)").fetchone()[0]
+            keyword_count = db.execute("SELECT count(*) FROM keywords "
+                + ("WHERE data_mode=?" if mode else ""), (mode,) if mode else ()).fetchone()[0]
+        return {"engine": "SQLITE", "integrity": integrity, "keyword_records": keyword_count,
+                "cache_vectors": cache["vectors"] or 0,
+                "cached_dimensions_total": cache["dimensions"] or 0,
+                "vector_dimensions": cache["vector_dimensions"]}
+
+    def recent_dataset_snapshots(self, *, limit=100):
+        mode = self.data_mode_scope
+        with self.connect() as db:
+            rows = db.execute("""SELECT status,data_mode,source_manifest,fetched_at,
+                observation_start,observation_end FROM dataset_snapshots """
+                + ("WHERE data_mode=? " if mode else "")
+                + "ORDER BY created_at DESC LIMIT ?",
+                (mode, limit) if mode else (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
     def latest_dataset(self):
         """Return durable local dataset metadata, with an honest legacy fallback."""
         mode = self.data_mode_scope
@@ -306,6 +429,147 @@ class CollectionStore:
             item["unassigned_keyword_count"] = unassigned
             item["coverage_status"] = "PARTIAL" if item["status"] == "PARTIAL" else "RECORDED"
             return item
+
+    def algorithm_results_overview(self, *, limit=100):
+        mode = self.data_mode_scope
+        keyword_filter = " AND k.data_mode=?" if mode else ""
+        parameters = (mode,) if mode else ()
+        with self.connect() as db:
+            counts = db.execute('''SELECT r.algorithm_id,r.version,
+                sum(status='COMPLETED') AS completed,sum(status='SKIPPED') AS skipped,
+                sum(status='FAILED') AS failed,count(*) AS total,max(updated_at) AS updated_at
+                FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
+                + keyword_filter + ' GROUP BY r.algorithm_id,r.version ORDER BY r.algorithm_id',
+                parameters).fetchall()
+            rows = db.execute('''SELECT r.keyword_id,k.keyword,r.algorithm_id,r.version,r.status,r.reason_code,
+                r.value,r.metric,r.unit,r.result_json,r.updated_at FROM algorithm_results r
+                JOIN keywords k ON k.id=r.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
+                + keyword_filter + ' ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ?',
+                (*parameters, limit)).fetchall()
+        return {"summary": [dict(row) for row in counts], "items": [dict(row) for row in rows],
+                "limit": limit}
+
+    def analytics_overview_inputs(self):
+        mode = self.data_mode_scope
+        parameters = (mode,) if mode else ()
+        keyword_filter = " AND k.data_mode=?" if mode else ""
+        dataset_filter = " WHERE data_mode=?" if mode else ""
+        with self.connect() as db:
+            totals = db.execute("""SELECT count(*) AS keywords,
+                sum(CASE WHEN k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE'
+                    THEN 1 ELSE 0 END) AS eligible,
+                sum(CASE WHEN (k.eligible=0 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE')
+                    OR EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id
+                        AND kd.decision='EXCLUDED') THEN 1 ELSE 0 END) AS excluded
+                FROM keywords k LEFT JOIN classification_results cr ON cr.keyword_id=k.id"""
+                + (" WHERE k.data_mode=?" if mode else ""), parameters).fetchone()
+            classifications = db.execute("""SELECT cr.classification_status,count(*) AS count
+                FROM classification_results cr JOIN keywords k ON k.id=cr.keyword_id
+                WHERE (k.eligible=1 OR cr.classification_status='INELIGIBLE')
+                AND NOT EXISTS(SELECT 1 FROM keyword_decisions kd WHERE kd.keyword_id=k.id
+                    AND kd.decision='EXCLUDED')""" + keyword_filter
+                + " GROUP BY cr.classification_status", parameters).fetchall()
+            source_rows = db.execute("""SELECT source,count(DISTINCT id) AS keywords,
+                min(substr(observed_at,1,10)) AS first_seen,max(substr(observed_at,1,10)) AS last_seen
+                FROM keywords k WHERE 1=1""" + keyword_filter
+                + " GROUP BY source ORDER BY keywords DESC,source", parameters).fetchall()
+            algorithm_rows = db.execute("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
+                FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'""" + keyword_filter
+                + " GROUP BY r.algorithm_id,r.version,r.status ORDER BY r.algorithm_id,r.status",
+                parameters).fetchall()
+            observations = db.execute("""SELECT o.source,o.observation_date,
+                count(DISTINCT o.keyword_id) AS keywords,sum(o.status='OBSERVED') AS observed,
+                sum(o.status<>'OBSERVED') AS unavailable FROM algorithm_observations o
+                JOIN keywords k ON k.id=o.keyword_id WHERE 1=1""" + keyword_filter
+                + " GROUP BY o.source,o.observation_date ORDER BY o.observation_date,o.source",
+                parameters).fetchall()
+            top = db.execute("""SELECT k.id,k.keyword,k.source,k.project,k.observed_at,r.value,r.metric,
+                r.unit,r.updated_at,r.result_json FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+                WHERE r.algorithm_id='observed-volume-rank' AND r.status='COMPLETED' AND r.value IS NOT NULL
+                AND k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
+                    WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'""" + keyword_filter
+                + " ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE LIMIT 1000", parameters).fetchall()
+            latest = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
+                received_record_count,retained_keyword_count,rejected_record_count,observation_start,
+                observation_end,fetched_at,created_at,quality_flags,processing_status,eligible_keyword_count,
+                assigned_keyword_count,unassigned_keyword_count FROM dataset_snapshots"""
+                + dataset_filter + " ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
+            history = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,provider_record_count,
+                received_record_count,retained_keyword_count,rejected_record_count,observation_start,
+                observation_end,fetched_at,quality_flags,processing_status FROM dataset_snapshots"""
+                + dataset_filter + " ORDER BY created_at DESC LIMIT 30", parameters).fetchall()
+            successful = db.execute("""SELECT dataset_id,status,data_mode,source_manifest,fetched_at,created_at,
+                observation_start,observation_end,quality_flags FROM dataset_snapshots
+                WHERE status IN ('SUCCESS','PARTIAL') """ + ("AND data_mode=? " if mode else "")
+                + "ORDER BY created_at DESC LIMIT 1", parameters).fetchone()
+            membership_count = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'""" + keyword_filter,
+                parameters).fetchone()[0]
+            unassigned_topic_count = db.execute("""SELECT count(*) FROM keywords k
+                WHERE k.eligible=1 AND COALESCE((SELECT classification_status FROM classification_results cr
+                    WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' AND NOT EXISTS(
+                    SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""" + keyword_filter,
+                parameters).fetchone()[0]
+        return {
+            "totals": dict(totals),
+            "classifications": [dict(row) for row in classifications],
+            "source_rows": [dict(row) for row in source_rows],
+            "algorithm_rows": [dict(row) for row in algorithm_rows],
+            "observations": [dict(row) for row in observations],
+            "top": [dict(row) for row in top],
+            "latest": dict(latest) if latest else None,
+            "history": [dict(row) for row in history],
+            "successful": dict(successful) if successful else None,
+            "membership_count": membership_count,
+            "unassigned_topic_count": unassigned_topic_count,
+        }
+
+    def local_run_history_rows(self, *, limit=None, cursor=None, status=None, mode=None, fetch_id=None):
+        clauses, parameters = [], []
+        if cursor:
+            clauses.append("(COALESCE(j.updated_at,d.fetched_at)<? OR "
+                           "(COALESCE(j.updated_at,d.fetched_at)=? AND j.fetch_id<?))")
+            parameters.extend((cursor[0], cursor[0], cursor[1]))
+        if status:
+            clauses.append("(CASE WHEN d.status='SUCCESS' THEN 'COMPLETED' "
+                "WHEN d.status IN ('COMPLETED','PARTIAL','FAILED','ABORTED') "
+                "THEN d.status ELSE j.status END)=?")
+            parameters.append(status)
+        if mode:
+            clauses.append("d.data_mode=?")
+            parameters.append(mode)
+        if fetch_id:
+            clauses.append("j.fetch_id=?")
+            parameters.append(fetch_id)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        query = """SELECT j.*,d.dataset_id,d.status AS dataset_status,d.data_mode,d.source_manifest,
+            d.provider_record_count,d.received_record_count,d.rejected_record_count,d.observation_start,
+            d.observation_end,d.fetched_at,d.quality_flags,d.processing_status,
+            COALESCE(j.updated_at,d.fetched_at) AS history_sort_at
+            FROM fetch_jobs j LEFT JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id""" + where
+        query += " ORDER BY history_sort_at DESC,j.fetch_id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters.append(limit)
+        with self.connect() as db:
+            rows = db.execute(query, parameters).fetchall()
+        return [dict(row) for row in rows]
+
+    def fetch_collection_processing_result(self, fetch_id):
+        with self.connect() as db:
+            row = db.execute("""SELECT j.status,j.error_code FROM fetch_jobs j
+                JOIN dataset_snapshots d ON d.dataset_id=j.fetch_id
+                WHERE j.fetch_id=? AND d.data_mode='LIVE'
+                AND j.status IN ('COMPLETED','MODEL_UNAVAILABLE')
+                AND d.processing_status IN ('COMPLETED','MODEL_UNAVAILABLE')""",
+                (fetch_id,)).fetchone()
+        return dict(row) if row is not None else None
 
     def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
                         sort="recent", limit=50, offset=0, ids_only=False,
@@ -812,6 +1076,638 @@ class CollectionStore:
                            (collection_id, record["id"], int(pinned), now()))
             db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?", (now(), collection_id))
 
+    def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=()):
+        """Persist source-cleaned keyword records and verified candidate updates."""
+        records = [dict(record) for record in records]
+        if (self.data_mode_scope
+                and any(record.get("data_mode") != self.data_mode_scope for record in records)):
+            raise ValueError("cleaned keyword record is outside the store's data mode scope")
+        skipped_bing = 0
+        from app.sources.catalog import GOOGLE_SOURCE_ID
+
+        with self.connect() as db:
+            if self.data_mode_scope and records:
+                identifiers = list(dict.fromkeys(record["id"] for record in records))
+                existing_modes = {}
+                for offset in range(0, len(identifiers), 500):
+                    batch = identifiers[offset:offset + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = db.execute(
+                        f"SELECT id,data_mode FROM keywords WHERE id IN ({placeholders})", batch
+                    ).fetchall()
+                    existing_modes.update({row["id"]: row["data_mode"] for row in rows})
+                for record in records:
+                    if (record["id"] in existing_modes
+                            and existing_modes[record["id"]] != self.data_mode_scope):
+                        record["id"] = hashlib.sha256(
+                            f"{self.data_mode_scope}:{record['id']}".encode("utf-8")
+                        ).hexdigest()
+
+            if rejected:
+                statement = "UPDATE keywords SET eligible=0,rejection_reason=? WHERE id=? "
+                if self.data_mode_scope:
+                    statement += "AND data_mode=?"
+                rows = [(reason, identifier, self.data_mode_scope) if self.data_mode_scope
+                        else (reason, identifier) for identifier, reason in rejected]
+                db.executemany(statement, rows)
+
+            db.executemany("""INSERT INTO keywords(id,keyword,normalized,source,project,observed_at,
+                data_mode,evidence,context,eligible,rejection_reason) VALUES(?,?,?,?,?,?,?,?,?,1,NULL)
+                ON CONFLICT(id) DO UPDATE SET keyword=excluded.keyword,observed_at=excluded.observed_at,
+                evidence=excluded.evidence,
+                eligible=COALESCE((SELECT CASE decision WHEN 'EXCLUDED' THEN 0 ELSE 1 END
+                    FROM keyword_decisions WHERE keyword_id=excluded.id),1),
+                rejection_reason=CASE WHEN (SELECT decision FROM keyword_decisions
+                    WHERE keyword_id=excluded.id)='EXCLUDED' THEN 'USER_EXCLUDED' ELSE NULL END
+                WHERE keywords.keyword IS NOT excluded.keyword
+                   OR keywords.observed_at IS NOT excluded.observed_at
+                   OR keywords.evidence IS NOT excluded.evidence
+                   OR keywords.eligible IS NOT COALESCE((SELECT CASE decision
+                        WHEN 'EXCLUDED' THEN 0 ELSE 1 END FROM keyword_decisions
+                        WHERE keyword_id=excluded.id),1)
+                   OR keywords.rejection_reason IS NOT CASE WHEN (SELECT decision
+                        FROM keyword_decisions WHERE keyword_id=excluded.id)='EXCLUDED'
+                        THEN 'USER_EXCLUDED' ELSE NULL END""",
+                [tuple(record[key] for key in ("id", "keyword", "normalized", "source", "project",
+                    "observed_at", "data_mode", "evidence", "context")) for record in records])
+
+            for update in bing_updates:
+                existing = db.execute(
+                    "SELECT observed_at,evidence FROM keywords WHERE id=? AND source=? "
+                    "AND project LIKE 'google_trends:%' AND data_mode='LIVE' AND eligible=1",
+                    (update["candidate_id"], GOOGLE_SOURCE_ID),
+                ).fetchone()
+                if existing is None:
+                    skipped_bing += 1
+                    continue
+                try:
+                    observed = datetime.fromisoformat(
+                        existing["observed_at"].replace("Z", "+00:00")
+                    )
+                    evidence = json.loads(existing["evidence"])
+                except (TypeError, ValueError, AttributeError):
+                    skipped_bing += 1
+                    continue
+                if (observed.tzinfo is None or observed.utcoffset() is None
+                        or observed.astimezone(timezone.utc).isoformat() != update["observed_at"]
+                        or not isinstance(evidence, dict)
+                        or evidence.get("canonical_keyword_identity") != update["identity"]):
+                    skipped_bing += 1
+                    continue
+                history = evidence.get("bing_verification_history", [])
+                if not isinstance(history, list) or len(history) > 20:
+                    skipped_bing += 1
+                    continue
+                verification = update["verification"]
+                fetched_at = verification["fetched_at"]
+                query_fingerprint = verification.get("query_fingerprint")
+                duplicate = any(
+                    isinstance(item, dict)
+                    and item.get("fetched_at") == fetched_at
+                    and item.get("query_fingerprint") == query_fingerprint
+                    for item in history
+                )
+                if not duplicate:
+                    history = [*history, verification][-20:]
+                evidence["bing_verification_history"] = history
+                evidence["bing_verification"] = verification
+                db.execute("UPDATE keywords SET evidence=? WHERE id=? AND source=? AND data_mode='LIVE'",
+                           (json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                                       allow_nan=False, separators=(",", ":")),
+                            update["candidate_id"], GOOGLE_SOURCE_ID))
+
+        return {"records": records, "skipped_bing_updates": skipped_bing}
+
+    def begin_fetch_processing(self, fetch_id, sources, *, cached_context_only=False,
+                               resume_model_unavailable=False):
+        from app.collections.source_digest import reusable_collection_input
+
+        retry_missing_snapshot = False
+        retry_existing_snapshot = False
+        replay_available = replay_skipped = 0
+        with self.connect() as db:
+            if resume_model_unavailable:
+                db.execute("BEGIN IMMEDIATE")
+            prior = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+            if (resume_model_unavailable and prior
+                    and prior["status"] == "PROCESSING"):
+                return {"action": "RETURN", "result": dict(prior)}
+            if prior and self.data_mode_scope:
+                snapshot = db.execute(
+                    "SELECT data_mode,processing_status,received_record_count,rejected_record_count "
+                    "FROM dataset_snapshots WHERE dataset_id=?", (fetch_id,),
+                ).fetchone()
+                if snapshot and snapshot["data_mode"] != self.data_mode_scope:
+                    return {"action": "RETURN", "result": {
+                        "fetch_id": fetch_id, "status": "FAILED", "error_code": "FETCH_ID_MODE_CONFLICT",
+                    }}
+                if (snapshot and prior["status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
+                        and snapshot["processing_status"] in {"COMPLETED", "MODEL_UNAVAILABLE"}
+                        and (not sources or resume_model_unavailable)):
+                    retry_existing_snapshot = True
+                    replay_available = snapshot["received_record_count"]
+                    replay_skipped = snapshot["rejected_record_count"]
+                if not snapshot:
+                    replayable_sources = [source for source in sources
+                        if source.get("data_mode") == self.data_mode_scope
+                        and source.get("status") in {"SUCCESS", "PARTIAL", "FAILED", "UNAVAILABLE"}
+                        and isinstance(source.get("records"), list)]
+                    if (prior["status"] not in {"FAILED", "MODEL_UNAVAILABLE"}
+                            or not replayable_sources):
+                        return {"action": "RETURN", "result": {
+                            "fetch_id": fetch_id, "status": "FAILED",
+                            "error_code": "FETCH_ID_MODE_CONFLICT",
+                        }}
+                    retry_missing_snapshot = True
+            if ((prior and prior["status"] == "COMPLETED" and not retry_existing_snapshot)
+                    or (prior and prior["status"] == "MODEL_UNAVAILABLE"
+                        and not (retry_missing_snapshot or retry_existing_snapshot))):
+                return {"action": "RETURN", "result": dict(prior)}
+            if not prior and cached_context_only and self.data_mode_scope == "LIVE":
+                latest = db.execute("""SELECT dataset_id,source_manifest,processing_status,
+                    received_record_count,rejected_record_count,eligible_keyword_count,
+                    unassigned_keyword_count FROM dataset_snapshots WHERE data_mode='LIVE'
+                    ORDER BY created_at DESC,dataset_id DESC LIMIT 1""").fetchone()
+                if latest is not None:
+                    try:
+                        previous_manifest = json.loads(latest["source_manifest"])
+                    except (TypeError, ValueError):
+                        previous_manifest = None
+                    if reusable_collection_input(
+                            sources, previous_manifest,
+                            processing_status=latest["processing_status"]):
+                        return {"action": "RETURN", "result": {
+                            "fetch_id": fetch_id, "status": "REUSED", "dataset_reused": True,
+                            "dataset_id": latest["dataset_id"],
+                            "available": latest["received_record_count"],
+                            "skipped": latest["rejected_record_count"],
+                            "eligible": latest["eligible_keyword_count"],
+                            "unassigned": latest["unassigned_keyword_count"],
+                        }}
+            db.execute("INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,stage,updated_at) "
+                       "VALUES(?,'PROCESSING','CLEANING',?)", (fetch_id, now()))
+        return {"action": "PROCESS", "retry_missing_snapshot": retry_missing_snapshot,
+                "retry_existing_snapshot": retry_existing_snapshot,
+                "replay_available": replay_available, "replay_skipped": replay_skipped}
+
+    def load_keywords_for_fetch(self, source_ids=None):
+        with self.connect() as db:
+            mode_filter = " AND data_mode=?" if self.data_mode_scope else ""
+            mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+            source_filter, source_parameters = "", ()
+            if source_ids is not None:
+                identifiers = tuple(source_ids)
+                if identifiers:
+                    source_filter = " AND id IN (" + ",".join("?" for _ in identifiers) + ")"
+                    source_parameters = identifiers
+                else:
+                    source_filter = " AND 1=0"
+            records = [dict(row) for row in db.execute(
+                "SELECT * FROM keywords WHERE eligible=1" + mode_filter + source_filter
+                + " ORDER BY observed_at DESC,keyword COLLATE NOCASE",
+                (*mode_parameters, *source_parameters)).fetchall()]
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1" + mode_filter,
+                                  mode_parameters).fetchone()[0]
+            excluded = [dict(row) for row in db.execute(
+                "SELECT * FROM keywords WHERE eligible=0" + mode_filter + source_filter
+                + " ORDER BY observed_at DESC,keyword COLLATE NOCASE",
+                (*mode_parameters, *source_parameters)).fetchall()]
+        return {"records": records, "excluded_records": excluded, "eligible": eligible}
+
+    def load_keywords_for_collection_processing(self, *, include_invalid_google=False):
+        query = "SELECT * FROM keywords"
+        clauses, parameters = [], []
+        if include_invalid_google:
+            clauses.append("(eligible=1 OR (source='google_web_serp' "
+                            "AND rejection_reason='INVALID_GOOGLE_TRENDS_RECORD'))")
+        if self.data_mode_scope:
+            clauses.append("data_mode=?")
+            parameters.append(self.data_mode_scope)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self.connect() as db:
+            rows = db.execute(query + " ORDER BY observed_at DESC", parameters).fetchall()
+        return [dict(row) for row in rows]
+
+    def persist_classifications(self, classification_records, *, delete_unpinned_ai_for_ineligible=False):
+        result_columns = ("entity_type", "entity_id", "entity_description", "topic_category_ids",
+                          "subcategory_ids", "classification_status", "confidence_level",
+                          "commercial_relevance", "classification_method", "classification_version",
+                          "taxonomy_version", "rule_evidence", "source_evidence", "review_status",
+                          "classified_at", "classification_reason")
+        with self.connect() as db:
+            db.executemany("""INSERT INTO classification_results(keyword_id,entity_type,entity_id,
+                entity_description,topic_category_ids,subcategory_ids,classification_status,confidence_level,
+                commercial_relevance,classification_method,classification_version,taxonomy_version,rule_evidence,source_evidence,
+                review_status,classified_at,classification_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(keyword_id) DO UPDATE SET entity_type=excluded.entity_type,entity_id=excluded.entity_id,
+                entity_description=excluded.entity_description,topic_category_ids=excluded.topic_category_ids,
+                subcategory_ids=excluded.subcategory_ids,classification_status=excluded.classification_status,
+                confidence_level=excluded.confidence_level,commercial_relevance=excluded.commercial_relevance,
+                classification_method=excluded.classification_method,
+                classification_version=excluded.classification_version,taxonomy_version=excluded.taxonomy_version,
+                rule_evidence=excluded.rule_evidence,source_evidence=excluded.source_evidence,
+                review_status=excluded.review_status,classified_at=excluded.classified_at,
+                classification_reason=excluded.classification_reason""",
+                [(item["id"], *(json.dumps(item["classification_result"][key], ensure_ascii=False)
+                    if key in {"topic_category_ids", "subcategory_ids", "rule_evidence", "source_evidence"}
+                    else item["classification_result"][key] for key in result_columns))
+                 for item in classification_records])
+            decisions = {row["keyword_id"]: row["decision"] for row in
+                         db.execute("SELECT keyword_id,decision FROM keyword_decisions")}
+            for item in classification_records:
+                decision = decisions.get(item["id"])
+                result = item["classification_result"]
+                if decision == "EXCLUDED":
+                    item["eligible"] = 0
+                    db.execute("UPDATE keywords SET eligible=0,rejection_reason='USER_EXCLUDED' WHERE id=?",
+                               (item["id"],))
+                elif result["classification_status"] == "INELIGIBLE":
+                    item["eligible"] = 0
+                    item["entity_category_ids"] = ()
+                    db.execute("UPDATE keywords SET eligible=0,rejection_reason='CLASSIFICATION_INELIGIBLE' "
+                               "WHERE id=?", (item["id"],))
+                    if delete_unpinned_ai_for_ineligible:
+                        db.execute("DELETE FROM memberships WHERE keyword_id=? AND origin='LOCAL_AI' AND pinned=0",
+                                   (item["id"],))
+                elif item.get("rejection_reason") == "CLASSIFICATION_INELIGIBLE":
+                    item["eligible"] = 1
+                    item["entity_category_ids"] = tuple(result["topic_category_ids"])
+                    db.execute("UPDATE keywords SET eligible=1,rejection_reason=NULL WHERE id=?",
+                               (item["id"],))
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.data_mode_scope else ""),
+                (self.data_mode_scope,) if self.data_mode_scope else ()).fetchone()[0]
+        return eligible
+
+    def load_cached_keywords_for_reclassification(self, identifiers):
+        identifiers = tuple(dict.fromkeys(identifiers))
+        placeholders = ",".join("?" for _ in identifiers)
+        with self.connect() as db:
+            rows = db.execute(f"""SELECT k.*,e.entity_id,e.entity_type,e.description AS entity_description,
+                e.occupations AS entity_occupations,e.category_ids AS entity_category_ids,
+                e.instance_types AS entity_instance_types,e.source_url AS entity_source_url,
+                e.method AS entity_context_method,e.status AS entity_context_status,
+                e.page_namespace,e.is_disambiguation,e.is_main_page,e.is_main_page_known,
+                e.redirected_from,e.page_language FROM keywords k
+                LEFT JOIN entity_context e ON e.keyword_id=k.id WHERE k.id IN ({placeholders})"""
+                + (" AND k.data_mode=?" if self.data_mode_scope else ""),
+                (*identifiers, self.data_mode_scope) if self.data_mode_scope else identifiers).fetchall()
+        found = {row["id"] for row in rows}
+        if found != set(identifiers):
+            raise ValueError("CACHED_KEYWORD_NOT_FOUND")
+        return [dict(row) for row in rows]
+
+    def get_embedding_cache(self, keys):
+        requested = {key: (model_version, collection_version, text_hash)
+                     for key, model_version, collection_version, text_hash in keys}
+        found = {}
+        identifiers = list(requested)
+        with self.connect() as db:
+            for offset in range(0, len(identifiers), 500):
+                batch = identifiers[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    f"SELECT fingerprint,model_version,collection_version,text_hash,vector,dimension "
+                    f"FROM cache WHERE fingerprint IN ({placeholders})", batch,
+                ).fetchall()
+                for row in rows:
+                    if (row["model_version"], row["collection_version"], row["text_hash"]) == requested[row["fingerprint"]]:
+                        found[row["fingerprint"]] = {
+                            "vector": row["vector"], "dimension": row["dimension"],
+                        }
+        return found
+
+    def upsert_embedding_cache(self, entries):
+        entries = list(entries)
+        with self.connect() as db:
+            db.executemany("INSERT OR REPLACE INTO cache VALUES(?,?,?,?,?,?)", entries)
+
+    def unassigned_keyword_count(self):
+        with self.connect() as db:
+            return db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1
+                AND COALESCE((SELECT classification_status FROM classification_results cr
+                    WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
+                AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""").fetchone()[0]
+
+    def get_setting(self, key, default=None):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key, value):
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, value))
+
+    def collection_exists(self, identifier, *, active=True):
+        condition = " AND status='ACTIVE'" if active else ""
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM collections WHERE id=?" + condition,
+                              (identifier,)).fetchone() is not None
+
+    def has_membership(self, collection_id, keyword_id):
+        scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+        parameters = ((collection_id, keyword_id, self.data_mode_scope) if self.data_mode_scope
+                      else (collection_id, keyword_id))
+        with self.connect() as db:
+            return db.execute("""SELECT 1 FROM memberships m JOIN keywords k ON k.id=m.keyword_id
+                WHERE m.collection_id=? AND m.keyword_id=?""" + scope, parameters).fetchone() is not None
+
+    def collection_keyword_record(self, identifier):
+        scope = "AND data_mode=?" if self.data_mode_scope else ""
+        parameters = ((identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,))
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM keywords WHERE id=? " + scope, parameters).fetchone()
+        return row
+
+    def classification_for(self, identifier):
+        scope = "AND k.data_mode=?" if self.data_mode_scope else ""
+        parameters = ((identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,))
+        with self.connect() as db:
+            return db.execute("""SELECT cr.* FROM classification_results cr JOIN keywords k
+                ON k.id=cr.keyword_id WHERE cr.keyword_id=? """ + scope, parameters).fetchone()
+
+    def keyword_detail_metadata(self, identifier):
+        scope = "AND data_mode=?" if self.data_mode_scope else ""
+        parameters = ((identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,))
+        with self.connect() as db:
+            keyword = db.execute("SELECT 1 FROM keywords WHERE id=? " + scope, parameters).fetchone()
+            if keyword is None:
+                return None
+            decision = db.execute("SELECT decision,reason,updated_at FROM keyword_decisions WHERE keyword_id=?",
+                                  (identifier,)).fetchone()
+            feedback = db.execute("""SELECT f.collection_id,c.name,f.action,f.created_at
+                FROM feedback f LEFT JOIN collections c ON c.id=f.collection_id
+                WHERE f.keyword_id=? ORDER BY f.created_at DESC""", (identifier,)).fetchall()
+        return {"decision": decision, "feedback": feedback}
+
+    def collection_job(self, fetch_id):
+        with self.connect() as db:
+            if self.data_mode_scope:
+                row = db.execute("""SELECT f.* FROM fetch_jobs f JOIN dataset_snapshots d
+                    ON d.dataset_id=f.fetch_id AND d.data_mode=? WHERE f.fetch_id=?""",
+                    (self.data_mode_scope, fetch_id)).fetchone()
+            else:
+                row = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+            created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? "
+                                 "ORDER BY created_at", (f"%{fetch_id}%",)).fetchall()
+        return row, created
+
+    def add_local_ai_memberships(self, collection_id, keyword_ids, reason):
+        with self.connect() as db:
+            db.executemany("""INSERT OR IGNORE INTO memberships
+                (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                VALUES(?,?,'LOCAL_AI',0,NULL,?,?)""",
+                [(collection_id, keyword_id, reason, now()) for keyword_id in keyword_ids])
+
+    def add_taxonomy_memberships_if_allowed(self, assignments):
+        with self.connect() as db:
+            for collection_id, keyword_id, reason in assignments:
+                collection = db.execute("SELECT auto_match,status FROM collections WHERE id=?",
+                                        (collection_id,)).fetchone()
+                if not collection or collection["status"] != "ACTIVE" or not collection["auto_match"]:
+                    continue
+                removed = db.execute("SELECT 1 FROM feedback WHERE collection_id=? AND keyword_id=? "
+                                     "AND action='REMOVE'", (collection_id, keyword_id)).fetchone()
+                if removed:
+                    continue
+                db.execute("""INSERT OR IGNORE INTO memberships
+                    (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                    VALUES(?,?,'LOCAL_AI',0,NULL,?,?)""",
+                    (collection_id, keyword_id, reason, now()))
+
+    def membership_guardrails(self, keyword_ids, category_collection_ids):
+        keyword_ids = list(dict.fromkeys(keyword_ids))
+        category_collection_ids = list(dict.fromkeys(category_collection_ids))
+        removed_pairs, removed_keyword_ids, pinned_pairs = set(), set(), set()
+        active_category_ids = set()
+        with self.connect() as db:
+            for offset in range(0, len(keyword_ids), 500):
+                batch = keyword_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+                parameters = (*batch, self.data_mode_scope) if self.data_mode_scope else tuple(batch)
+                removed = db.execute("SELECT f.collection_id,f.keyword_id FROM feedback f "
+                    "JOIN keywords k ON k.id=f.keyword_id WHERE f.action='REMOVE' "
+                    f"AND f.keyword_id IN ({placeholders})" + scope, parameters).fetchall()
+                removed_pairs.update((row["collection_id"], row["keyword_id"]) for row in removed)
+                removed_keyword_ids.update(row["keyword_id"] for row in removed)
+                pinned = db.execute("SELECT m.collection_id,m.keyword_id FROM memberships m "
+                    "JOIN keywords k ON k.id=m.keyword_id WHERE m.pinned=1 "
+                    f"AND m.keyword_id IN ({placeholders})" + scope, parameters).fetchall()
+                pinned_pairs.update((row["collection_id"], row["keyword_id"]) for row in pinned)
+            for offset in range(0, len(category_collection_ids), 500):
+                batch = category_collection_ids[offset:offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                active_category_ids.update(row["id"] for row in db.execute(
+                    "SELECT id FROM collections WHERE status='ACTIVE' AND auto_match=1 "
+                    f"AND id IN ({placeholders})", batch))
+        return {"removed_pairs": removed_pairs, "removed_keyword_ids": removed_keyword_ids,
+                "pinned_pairs": pinned_pairs, "active_category_ids": active_category_ids}
+
+    def replace_local_ai_memberships(self, assignments, *, source_ids=None):
+        inserted = 0
+        with self.connect() as db:
+            conditions = ["origin='LOCAL_AI'", "pinned=0"]
+            parameters = []
+            if self.data_mode_scope:
+                conditions.append("keyword_id IN (SELECT id FROM keywords WHERE data_mode=?)")
+                parameters.append(self.data_mode_scope)
+            if source_ids is not None:
+                source_ids = tuple(source_ids)
+                if source_ids:
+                    conditions.append("keyword_id IN (" + ",".join("?" for _ in source_ids) + ")")
+                    parameters.extend(source_ids)
+                else:
+                    conditions.append("0")
+            db.execute("DELETE FROM memberships WHERE " + " AND ".join(conditions), parameters)
+            for collection_id, keyword_id, score, reason in assignments:
+                cursor = db.execute("""INSERT OR IGNORE INTO memberships
+                    (collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                    SELECT ?,?, 'LOCAL_AI',0,?,?,? WHERE EXISTS(SELECT 1 FROM collections
+                        WHERE id=? AND status='ACTIVE' AND auto_match=1)
+                        AND NOT EXISTS(SELECT 1 FROM feedback WHERE collection_id=? AND keyword_id=?
+                            AND action='REMOVE')
+                        AND NOT EXISTS(SELECT 1 FROM memberships WHERE collection_id=? AND keyword_id=? AND pinned=1)""",
+                    (collection_id, keyword_id, score, reason, now(), collection_id,
+                     collection_id, keyword_id, collection_id, keyword_id))
+                inserted += max(cursor.rowcount, 0)
+        return inserted
+
+    def collection_name_candidates(self, name_fingerprint):
+        with self.connect() as db:
+            suppressed = db.execute("SELECT 1 FROM suppression WHERE fingerprint=?",
+                                    (name_fingerprint,)).fetchone() is not None
+            pending = db.execute("SELECT p.name FROM proposals p WHERE p.status='PENDING' "
+                + ("AND EXISTS (SELECT 1 FROM json_each(p.support_ids) s JOIN keywords k ON k.id=s.value "
+                   "WHERE k.data_mode=?)" if self.data_mode_scope else ""),
+                (self.data_mode_scope,) if self.data_mode_scope else ()).fetchall()
+            labels = [row["name"] for row in pending]
+            labels.extend(row["label"] for row in db.execute(
+                "SELECT label FROM suppression WHERE label<>''"))
+            active = [dict(row) for row in db.execute(
+                "SELECT name,category_id FROM collections WHERE status='ACTIVE'")]
+            labels.extend(item["name"] for item in active
+                          if not item["category_id"] or fingerprint(item["name"]) == name_fingerprint)
+            return {"suppressed": suppressed, "labels": labels}
+
+    def user_member_examples(self, collection_ids):
+        result = {identifier: [] for identifier in collection_ids}
+        if not result:
+            return result
+        with self.connect() as db:
+            for identifier in result:
+                rows = db.execute("""SELECT k.keyword FROM memberships m
+                    JOIN keywords k ON k.id=m.keyword_id WHERE m.collection_id=? AND m.origin='USER' """
+                    + ("AND k.data_mode=? " if self.data_mode_scope else "")
+                    + "ORDER BY m.created_at DESC LIMIT 100",
+                    (identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,)).fetchall()
+                result[identifier] = [row["keyword"] for row in rows]
+        return result
+
+    def refresh_latest_topic_counts(self):
+        if not self.data_mode_scope:
+            return None
+        with self.connect() as db:
+            latest = db.execute("SELECT dataset_id FROM dataset_snapshots WHERE data_mode=? "
+                "ORDER BY created_at DESC LIMIT 1", (self.data_mode_scope,)).fetchone()
+            if latest is None:
+                return None
+            dataset_id = latest["dataset_id"]
+            topic_filter = "k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE'"
+            eligible = db.execute("""SELECT count(*) FROM keywords k
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE """ + topic_filter
+                + " AND k.data_mode=?", (self.data_mode_scope,)).fetchone()[0]
+            assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE """ + topic_filter + " AND k.data_mode=?",
+                (self.data_mode_scope,)).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE """ + topic_filter
+                + " AND k.data_mode=? AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)",
+                (self.data_mode_scope,)).fetchone()[0]
+            ai_assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE """ + topic_filter + " AND k.data_mode=? AND m.origin='LOCAL_AI'",
+                (self.data_mode_scope,)).fetchone()[0]
+            db.execute("""UPDATE dataset_snapshots SET eligible_keyword_count=?,assigned_keyword_count=?,
+                unassigned_keyword_count=? WHERE dataset_id=?""", (eligible, assigned, unassigned, dataset_id))
+            db.execute("UPDATE fetch_jobs SET eligible=?,assigned=?,unassigned=? WHERE fetch_id=?",
+                       (eligible, ai_assigned, unassigned, dataset_id))
+        return {"dataset_id": dataset_id, "eligible": eligible, "assigned": assigned,
+                "ai_assigned": ai_assigned, "unassigned": unassigned}
+
+    def count_ai_assigned_keywords(self):
+        query = """SELECT count(DISTINCT m.keyword_id) FROM memberships m
+            JOIN keywords k ON k.id=m.keyword_id WHERE m.origin='LOCAL_AI'"""
+        parameters = ()
+        if self.data_mode_scope:
+            query += " AND k.data_mode=?"
+            parameters = (self.data_mode_scope,)
+        with self.connect() as db:
+            return db.execute(query, parameters).fetchone()[0]
+
+    def complete_fetch_dataset_snapshot(self, fetch_id):
+        scope = " AND k.data_mode=?" if self.data_mode_scope else ""
+        keyword_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+        membership_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+        with self.connect() as db:
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.data_mode_scope else ""), keyword_parameters).fetchone()[0]
+            assigned = db.execute("""SELECT count(DISTINCT m.keyword_id) FROM memberships m
+                JOIN keywords k ON k.id=m.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
+                WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE'"""
+                + scope, membership_parameters).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1"""
+                + (" AND k.data_mode=?" if self.data_mode_scope else "") + """
+                AND COALESCE((SELECT classification_status FROM classification_results cr
+                    WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
+                AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""",
+                keyword_parameters).fetchone()[0]
+            db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
+                eligible_keyword_count=?,assigned_keyword_count=?,unassigned_keyword_count=?
+                WHERE dataset_id=?""", (eligible, assigned, unassigned, fetch_id))
+        return {"eligible": eligible, "assigned": assigned, "unassigned": unassigned}
+
+    def update_fetch_job(self, fetch_id, values):
+        allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
+                   "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
+                   "membership_reconciliation_id"}
+        changes = {key: value for key, value in values.items() if key in allowed}
+        assignments = [f"{key}=?" for key in changes]
+        parameters = list(changes.values())
+        assignments.append("updated_at=?")
+        parameters.extend([now(), fetch_id])
+        with self.connect() as db:
+            db.execute(f"UPDATE fetch_jobs SET {','.join(assignments)} WHERE fetch_id=?", parameters)
+
+    def mark_fetch_failed(self, fetch_id, error_code):
+        stamp = now()
+        with self.connect() as db:
+            db.execute("""INSERT INTO fetch_jobs(fetch_id,status,error_code,updated_at)
+                VALUES(?,'FAILED',?,?) ON CONFLICT(fetch_id) DO UPDATE SET
+                status='FAILED',error_code=excluded.error_code,updated_at=excluded.updated_at""",
+                (fetch_id, error_code, stamp))
+
+    def complete_empty_fetch(self, fetch_id, values):
+        allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
+                   "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
+                   "membership_reconciliation_id"}
+        changes = {key: value for key, value in values.items() if key in allowed}
+        with self.connect() as db:
+            snapshot = db.execute(
+                "SELECT eligible_keyword_count FROM dataset_snapshots WHERE dataset_id=?", (fetch_id,)
+            ).fetchone()
+            changes["eligible"] = snapshot["eligible_keyword_count"] if snapshot else 0
+            assignments = [f"{key}=?" for key in changes]
+            parameters = list(changes.values())
+            assignments.append("updated_at=?")
+            parameters.append(now())
+            parameters.append(fetch_id)
+            db.execute("UPDATE dataset_snapshots SET processing_status='COMPLETED' WHERE dataset_id=?",
+                       (fetch_id,))
+            db.execute(f"UPDATE fetch_jobs SET {','.join(assignments)} WHERE fetch_id=?", parameters)
+        return snapshot["eligible_keyword_count"] if snapshot else 0
+
+    def mark_fetch_model_unavailable(self, fetch_id, *, available, skipped, eligible,
+                                     cached_embeddings, inferred_embeddings, error_code):
+        with self.connect() as db:
+            db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
+                       (fetch_id,))
+            db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
+                error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
+                VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
+                (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped, error_code,
+                 now(), eligible, cached_embeddings, inferred_embeddings))
+
+    def persist_dataset_snapshot(self, dataset_id, *, status, data_mode, source_manifest,
+                                 provider_record_count, received_record_count,
+                                 retained_keyword_count, rejected_record_count,
+                                 observation_start, observation_end, fetched_at, quality_flags,
+                                 processing_status, created_at):
+        with self.connect() as db:
+            mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+            eligible = db.execute("SELECT count(*) FROM keywords WHERE eligible=1 "
+                + ("AND data_mode=?" if self.data_mode_scope else ""), mode_parameters).fetchone()[0]
+            assigned = db.execute("SELECT count(DISTINCT m.keyword_id) FROM memberships m "
+                "JOIN keywords k ON k.id=m.keyword_id "
+                + ("WHERE k.data_mode=?" if self.data_mode_scope else ""), mode_parameters).fetchone()[0]
+            unassigned = db.execute("""SELECT count(*) FROM keywords k WHERE k.eligible=1"""
+                + (" AND k.data_mode=?" if self.data_mode_scope else "") + """
+                AND COALESCE((SELECT classification_status FROM classification_results cr
+                    WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE'
+                AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""",
+                mode_parameters).fetchone()[0]
+            db.execute("""INSERT OR REPLACE INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
+                provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
+                observation_start,observation_end,fetched_at,quality_flags,processing_status,
+                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (dataset_id, status, data_mode, json.dumps(source_manifest, ensure_ascii=False, sort_keys=True),
+                 provider_record_count, received_record_count, retained_keyword_count, rejected_record_count,
+                 observation_start, observation_end, fetched_at, json.dumps(quality_flags), processing_status,
+                 eligible, assigned, unassigned, created_at))
+
     def bulk_membership_action(self, keyword_ids, action, *, collection_id=None, source_collection_id=None):
         """Apply a bounded user action atomically; return explicit updated/skipped counts."""
         ids = list(dict.fromkeys(keyword_ids))
@@ -906,6 +1802,71 @@ class CollectionStore:
                 db.execute("UPDATE collections SET version=version+1,updated_at=? WHERE id=?",
                            (stamp, source_collection_id))
         return {"updated": updated, "skipped": skipped, "failed": 0}
+
+    def create_proposal(self, proposal_id, name, description, support_ids, reason, created_at, updated_at):
+        with self.connect() as db:
+            db.execute("INSERT INTO proposals VALUES(?,?,?,?,?,'PENDING',?,?)",
+                (proposal_id, name, description, json.dumps(support_ids), reason, created_at, updated_at))
+
+    def list_research(self, *, q="", status=None, limit=50, offset=0):
+        query = " ".join(q.casefold().split())
+        where, parameters = [], []
+        if self.data_mode_scope:
+            where.append("(r.keyword_id IS NULL OR k.data_mode=?)")
+            parameters.append(self.data_mode_scope)
+        if status:
+            where.append("r.status=?")
+            parameters.append(status)
+        if query:
+            where.append('lower(r.subject || " " || r.hypothesis || " " || r.product_category || " " || r.niche) LIKE ?')
+            parameters.append("%" + query + "%")
+        clause = " WHERE " + " AND ".join(where) if where else ""
+        with self.connect() as db:
+            total = db.execute(
+                "SELECT count(*) FROM research_records r LEFT JOIN keywords k ON k.id=r.keyword_id" + clause,
+                parameters,
+            ).fetchone()[0]
+            rows = db.execute("""SELECT r.*,k.keyword,k.source,k.project,k.observed_at,k.data_mode
+                FROM research_records r LEFT JOIN keywords k ON k.id=r.keyword_id""" + clause
+                + " ORDER BY r.updated_at DESC,r.id LIMIT ? OFFSET ?",
+                (*parameters, limit, offset)).fetchall()
+        return {"items": [dict(row) for row in rows], "total": total, "limit": limit,
+                "offset": offset, "next_offset": offset + limit if offset + limit < total else None}
+
+    def create_research(self, record):
+        with self.connect() as db:
+            if record.get("keyword_id"):
+                keyword = db.execute("SELECT 1 FROM keywords WHERE id=? "
+                    + ("AND data_mode=?" if self.data_mode_scope else ""),
+                    (record["keyword_id"], self.data_mode_scope) if self.data_mode_scope
+                    else (record["keyword_id"],)).fetchone()
+                if keyword is None:
+                    raise ValueError("RESEARCH_KEYWORD_NOT_FOUND")
+            db.execute("""INSERT INTO research_records(id,keyword_id,subject,hypothesis,product_category,niche,
+                competitor_notes,market_evidence,ip_notes,risk_notes,findings,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                tuple(record[key] for key in (
+                    "id", "keyword_id", "subject", "hypothesis", "product_category", "niche",
+                    "competitor_notes", "market_evidence", "ip_notes", "risk_notes", "findings",
+                    "status", "created_at", "updated_at")))
+        return {key: record[key] for key in ("id", "status", "created_at", "updated_at")}
+
+    def update_research(self, identifier, updates, updated_at):
+        allowed = {"subject", "hypothesis", "product_category", "niche", "competitor_notes",
+                   "market_evidence", "ip_notes", "risk_notes", "findings", "status"}
+        values = {key: value for key, value in updates.items() if key in allowed}
+        if not values:
+            return None
+        with self.connect() as db:
+            exists = db.execute("SELECT 1 FROM research_records WHERE id=?", (identifier,)).fetchone()
+            if exists is None:
+                return None
+            assignments = [key + "=?" for key in values] + ["updated_at=?"]
+            db.execute("UPDATE research_records SET " + ",".join(assignments) + " WHERE id=?",
+                       (*values.values(), updated_at, identifier))
+            row = db.execute("SELECT id,status,updated_at FROM research_records WHERE id=?",
+                             (identifier,)).fetchone()
+        return dict(row)
 
     def suggestions(self):
         with self.connect() as db:

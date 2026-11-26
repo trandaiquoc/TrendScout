@@ -913,7 +913,6 @@ class SmartCollectionsTests(unittest.TestCase):
     def test_analysis_cache_invalidates_for_observation_result_and_registry_changes(self):
         from dataclasses import replace
 
-        from app.collections.service import _analysis_state_digest
         from app.composition import algorithm_engine
 
         service = CollectionService(self.store, fetch_model_inference_enabled=False)
@@ -944,8 +943,11 @@ class SmartCollectionsTests(unittest.TestCase):
         changed[first_key] = replace(metadata[first_key], version="future-test-version")
         with self.store.connect() as db:
             records = [dict(row) for row in db.execute("SELECT * FROM keywords WHERE eligible=1 ORDER BY id")]
-            self.assertNotEqual(_analysis_state_digest(db, records, None, metadata),
-                                _analysis_state_digest(db, records, None, changed))
+        original_digest, changed_digest = self.store.run_algorithm_analysis(
+            lambda session: (session.state_digest(records, metadata),
+                             session.state_digest(records, changed))
+        )
+        self.assertNotEqual(original_digest, changed_digest)
 
     def test_repeated_observation_avoids_writes_but_changed_evidence_is_saved(self):
         live_store = CollectionStore(Path(self.temp.name) / "unchanged.sqlite", data_mode_scope="LIVE")
@@ -1188,6 +1190,79 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(tuple(keyword), ("Mars Rover", 1))
         self.assertEqual(tuple(job), ("MODEL_UNAVAILABLE", "MODEL_INFERENCE_DEFERRED"))
         self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
+
+    def test_deferred_model_resume_reuses_only_the_fetch_keyword_ledger(self):
+        live_store = CollectionStore(Path(self.temp.name) / "deferred-resume.sqlite",
+                                     data_mode_scope="LIVE")
+        unrelated_source = live_source([
+            {"article_display": "Solar generator", "article_original": "Solar_generator",
+             "project": "en.wikipedia", "observation_date": "2026-11-09",
+             "fetched_at": "2026-11-11T00:00:00Z"}])
+        with patch.object(embeddings, "embed", side_effect=fake_embed):
+            prior = CollectionService(live_store)._process_fetch("prior-completed", unrelated_source)
+        self.assertEqual(prior["status"], "COMPLETED")
+        source = live_source([
+            {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
+             "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
+        deferred = CollectionService(live_store, fetch_model_inference_enabled=False)
+        with patch.object(embeddings, "embed", side_effect=AssertionError("deferred model must not run")):
+            first = deferred._process_fetch("deferred-resume", source)
+        self.assertEqual(first["status"], "MODEL_UNAVAILABLE")
+        with live_store.connect() as db:
+            original_manifest = db.execute(
+                "SELECT source_manifest FROM dataset_snapshots WHERE dataset_id='deferred-resume'"
+            ).fetchone()[0]
+
+        candidate_keywords = []
+        original_candidate_text = CollectionService._candidate_text
+
+        def candidate_text(record):
+            candidate_keywords.append(record["keyword"])
+            return original_candidate_text(record)
+
+        with patch.object(embeddings, "embed", side_effect=fake_embed), \
+                patch.object(CollectionService, "_candidate_text", side_effect=candidate_text):
+            resumed = CollectionService(live_store)._process_fetch(
+                "deferred-resume", source, cached_context_only=True,
+                resume_model_unavailable=True,
+            )
+
+        self.assertEqual(resumed["status"], "COMPLETED", resumed)
+        self.assertEqual(candidate_keywords, ["Mars Rover"])
+        with live_store.connect() as db:
+            snapshot = db.execute(
+                "SELECT source_manifest,processing_status FROM dataset_snapshots "
+                "WHERE dataset_id='deferred-resume'"
+            ).fetchone()
+            keywords = db.execute(
+                "SELECT count(*) FROM keywords WHERE data_mode='LIVE'"
+            ).fetchone()[0]
+        self.assertEqual(snapshot["source_manifest"], original_manifest)
+        self.assertEqual(snapshot["processing_status"], "COMPLETED")
+        self.assertEqual(keywords, 2)
+
+    def test_model_resume_does_not_start_a_second_active_processing_attempt(self):
+        live_store = CollectionStore(Path(self.temp.name) / "deferred-active.sqlite",
+                                     data_mode_scope="LIVE")
+        source = live_source([
+            {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
+             "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
+        deferred = CollectionService(live_store, fetch_model_inference_enabled=False)
+        deferred._process_fetch("deferred-active", source)
+        with live_store.connect() as db:
+            db.execute("UPDATE fetch_jobs SET status='PROCESSING' WHERE fetch_id='deferred-active'")
+
+        with patch.object(embeddings, "embed", side_effect=AssertionError("duplicate inference must not run")):
+            result = CollectionService(live_store)._process_fetch(
+                "deferred-active", [], cached_context_only=True,
+                resume_model_unavailable=True,
+            )
+        self.assertEqual(result["status"], "PROCESSING")
+        with live_store.connect() as db:
+            snapshot = db.execute(
+                "SELECT processing_status FROM dataset_snapshots WHERE dataset_id='deferred-active'"
+            ).fetchone()[0]
+        self.assertEqual(snapshot, "MODEL_UNAVAILABLE")
 
     def test_bulk_feedback_actions_are_atomic_and_durable(self):
         target = self.store.create({"name": "Space", "auto_match": False})

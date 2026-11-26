@@ -213,6 +213,44 @@ class GoogleTrendsRSSHandler:
             except Exception:
                 scope, grant = None, None
 
+        request_metadata = getattr(context, "request_metadata", None)
+        if (isinstance(request_metadata, dict)
+                and request_metadata.get("cache_only") is True):
+            if stale_cache_fallback is not None:
+                payload, fetched_at = stale_cache_fallback
+                records = payload["records"]
+                coverage = payload.get("coverage")
+                coverage = dict(coverage) if isinstance(coverage, dict) else {}
+                cached_count = coverage.get("provider_request_count")
+                if type(cached_count) is not int or cached_count < 0:
+                    cached_count = payload.get("provider_request_count")
+                if type(cached_count) is int and cached_count >= 0:
+                    coverage["cached_provider_request_count"] = cached_count
+                coverage.update(provider_request_count=0, attempted_calls=0,
+                                cache_fetched_at=fetched_at, cache_state="STALE",
+                                cache_only=True, refresh_attempt_status="NOT_ATTEMPTED")
+                flags = payload.get("quality_flags")
+                flags = {flag for flag in flags if isinstance(flag, str)} \
+                    if isinstance(flags, list) else set()
+                flags.add("STALE_SHARED_CACHE_REUSED")
+                return {
+                    **payload, "status": "PARTIAL", "delivery_state": "STALE_CACHE",
+                    "records": [{**record, "delivery_state": "STALE_CACHE"}
+                                for record in records],
+                    "record_count": len(records), "provider_request_count": 0,
+                    "shared_cache_state": "STALE",
+                    "shared_cache_fetched_at": fetched_at,
+                    "coverage": coverage, "quality_flags": sorted(flags),
+                }
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                "delivery_state": "UNAVAILABLE", "provider_request_count": 0,
+                "coverage": {"discovery_mode": "RSS_LIMITED_DISCOVERY",
+                             "cache_only": True, "cache_state": "UNAVAILABLE",
+                             "provider_request_count": 0},
+            }
+
         progress = ((context.resume_snapshot or {}).get("progress")
                     if isinstance(context.resume_snapshot, dict) else None)
         saved = progress.get("google_trends_receipt") if isinstance(progress, dict) else None

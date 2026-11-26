@@ -1,7 +1,14 @@
 # Vercel Performance and Scaling Report
 
+> **25 November 2026 — subsequent owner decision:** The owner has selected a
+> unified Neon PostgreSQL database for the migration goal. Statements below
+> about relational storage not being approved describe the earlier release,
+> not the current decision. Migration, cutover and acceptance have not yet
+> been completed. See [the migration working report](POSTGRESQL_MIGRATION_AND_PERFORMANCE_REPORT.md)
+> for the separate 12-gate status and current evidence.
+
 **Status:** Follow-up read-path and frontend optimizations are pushed and Production `READY` on `7faacb8cd9ee47c52bdbee0cc8318a1ca4b66c2a`. Focused regression checks passed. GET-only Production checks preserved the 1,580-record dataset; the first Collections read took 11.016 s and its warm repeat took 1.511 s. No Production Fetch or provider endpoint was called. The cache-only Fetch target, changed-data storage scalability, and Owner's manual browser performance acceptance remain open.
-**Updated:** 25 November 2026, 09:45 UTC
+**Updated:** 26 November 2026
 **Goal-gate progress:** 33% (3 of 9 gates fully passed: G1, G7, G8. Partial gates are not weighted.)
 
 ## Baseline and owner-provided acceptance run
@@ -51,6 +58,51 @@ The snapshot segment overlaps Collections processing and is not added again to t
 8. **Compatibility and operating limits.** Older snapshot encodings remain readable by this release. Releases predating `sqlite-segment-gzip-base64-v1` cannot read a pointer after a new-format snapshot is published; rollback after such a write must use a reader that supports the new encoding. Production verification only backfilled derived dashboard metadata; it did not publish a new SQLite snapshot.
 9. **No policy or data reset.** Source freshness, eight-hour refresh spacing, LIVE mode, quotas, credentials, provider policy, and business records were not changed or reset. No provider was called for verification.
 
+## Explicit cache-only Fetch and deferred-model recovery — 26 November 2026
+
+The current working tree adds `mode: "CACHE_ONLY"` to Fetch admission and a
+**Use saved cache only** button in the LIVE Fetch UI. Durable idempotency
+includes the selected mode. The worker routes cache-only requests to a
+separate handler registry; cache misses and missing cache-only handlers fail
+closed without calling a provider-capable handler. Source adapters return
+validated cached or stale-cache evidence with its provenance, or an explicit
+unavailable result. This change is local and has not been deployed.
+
+The existing Collections recovery endpoint can resume a terminal
+`MODEL_UNAVAILABLE` Fetch when the current runtime enables model inference. It
+reuses that Fetch's terminal checkpoint records and limits keyword loading to
+IDs created from those records; it does not scan all saved LIVE keywords or
+contact providers. Incomplete checkpoint evidence stays unavailable. A
+storage-level claim prevents a concurrent model retry from starting a second
+processing attempt. If inference is still unavailable, the saved status
+remains `MODEL_UNAVAILABLE`.
+
+The provider/cache group passed 137 tests and 11 subtests; two focused model
+service tests and two Vercel recovery API tests passed. One isolated Neon
+PostgreSQL composition passed with cache-only routing, zero provider counts,
+and no invocation of its LIVE handler registry. Cache-miss tests fail closed.
+All 32 Fetch controller tests and the offline Chrome workflow passed after the
+new button was added. The installed FastEmbed model was loaded with network
+access disabled and produced a nonzero 384-dimensional vector; an isolated
+temporary-store lifecycle smoke resumed one Fetch from its retained checkpoint
+without loading an unrelated keyword or calling a provider. That evidence is
+local and does not establish model availability in Vercel. No Production Fetch
+or deployment was performed. Production cache-only timing remains unmeasured,
+so the under-five-second target is still open.
+
+The PostgreSQL-only Vercel runtime now imports without the legacy Firestore,
+gRPC, or protobuf packages. The core `pyproject.toml` keeps PostgreSQL and
+FastAPI/model dependencies; Firestore/migration packages and Uvicorn are
+optional local extras. The function excludes tests, emulator fixtures, and
+migration scripts. Two Vercel request-timing tests, nine frontend API tests,
+one isolated Neon scheduler test, and the import-blocking package check passed.
+The local Firestore composition tests also passed. The current Production
+release was not changed, and no post-change Vercel bundle was built or measured.
+See the 12-gate migration report for the G9 evidence. The Vercel Python runtime
+supports `pyproject.toml` dependencies and `excludeFiles` and does not
+tree-shake Python packages ([official runtime documentation](https://vercel.com/docs/functions/runtimes/python),
+accessed 26 November 2026).
+
 ## Previous-release Production GET verification
 
 The application release `e421d2a9ba590c9055c17a37e0ad95e10b497f00` is Production `READY` as deployment `dpl_TPNbmCHHjJ3NHWtHhh5JaLySw2Tp` in `iad1`; the alias `trend-scout-mu.vercel.app` points to it. Vercel runtime logs on 25 November 2026 recorded these alias requests:
@@ -97,6 +149,44 @@ The Vercel build log noted a 235.75 MB bundle above its standard size and said i
 SQLite remains the transactional query engine for Collections, keywords, observations, and analysis. Firestore continues to hold shared job/checkpoint state and immutable snapshot blobs. Segment compression and bounded batched writes reduce per-blob transaction overhead and allow identical 4 MiB blocks to be reused. They do not make changed-data persistence incremental: a changed image still pays for full backup, digest, compression, and upload. The 80 MB expanded-image and bounded-segment limits are capacity bounds, not an incremental storage design.
 
 Direct Firestore rows, dependency-aware partitions/deltas, or managed relational storage would require a versioned data model, migration and backfill, consistency checks, query/index design, cost and IAM decisions, and rollback strategy. None is configured or approved in this repository, so this release keeps the existing data store and explicitly leaves changed-data scaling open.
+
+**Subsequent migration checkpoint (26 November 2026):** The owner approved one
+shared Neon PostgreSQL database as the target architecture. The separate
+12-gate migration report records G2, G8 and G9 as passed (3 of 12, 25%); the `trendscout`
+schema has migration versions 1 through 8 and no imported business rows. A verified Production
+SQLite snapshot previously measured 71,614,464 bytes across PostgreSQL
+relations, including indexes. A repeat comparison now shows 15,875 shared
+SQLite rows with changed values and source-only rows in the compared local
+backup and Production snapshot, so no source has been selected as canonical.
+The latest database SQL
+capacity probe reported 11,878,400 database bytes and one active connection
+including its own; Neon project-wide usage and headroom remain unverified.
+An opt-in Vercel PostgreSQL request composition now passes an isolated Neon
+integration check: Local and Vercel collection writes were visible through the
+other runtime's store in the same temporary schema. Without an OIDC header,
+Vercel also returned HTTP 200 for dataset, keyword, Run History, Analytics,
+Algorithms, Research, Dashboard and Scheduler GETs. This is composition
+evidence, not a Production
+performance result: the flag remains disabled by default, the current
+Production alias still runs the legacy SQLite/Firestore release, and the
+default Local path has not switched. Successful PostgreSQL identity and schema
+validation is cached for five minutes per warm process and configuration;
+failed checks are retried. The latest focused PostgreSQL Fetch regressions also
+verify cache-source continuation, compact unchanged-input reuse and a
+Collections no-op without SQLite snapshot flags. An isolated Neon composition
+test completed every fixture-cached source within a `max_sources=1` slice and
+read its terminal checkpoints back; the source handlers were fixtures and no
+provider was called. This is correctness evidence, not a latency measurement.
+The offline Chrome Fetch workflow also passes against a stubbed API: it resumes
+after transient status failures, reuses the same idempotency key for two
+continuations, recovers Collections once and reloads without another POST.
+Production and browser request timings have not been measured.
+Complete operational-state migration,
+project-level capacity, cutover and performance acceptance remain open. See the
+[PostgreSQL migration report](POSTGRESQL_MIGRATION_AND_PERFORMANCE_REPORT.md)
+for the detailed evidence and 12-gate status. The earlier release measurements
+in this report still describe the deployed SQLite/Firestore runtime at that
+time.
 
 ## Acceptance gates
 
@@ -154,3 +244,41 @@ Tests used local fixtures and fakes. They did not call a provider or Production 
 **Production verification:** Authenticated GET-only checks returned 200 for the site shell and nine API paths. The latest dataset contained 1,580 records. Runtime logs recorded capabilities 2.027 s, latest dataset 1.550 s, dashboard bootstrap 3.668 s, Analytics 1.539 s, Collections 11.016 s then 1.511 s, Research bootstrap 4.097 s, Algorithms 1.523 s, and Run History 2.394 s. The runtime error/fatal scan found no entries in ten minutes. No Fetch POST or provider endpoint was called. Owner browser performance acceptance remains pending.
 
 Vercel repository `ignoreCommand` skips documentation-only changes when `Backend` and `Frontend` are unchanged, as configured in the repository. See [Vercel `ignoreCommand` documentation](https://vercel.com/docs/project-configuration/vercel-json#ignorecommand), checked 25 November 2026. Report-only commits can create a canceled deployment record, but do not run the application build or change the Production alias.
+
+## Protected Production GET check — 26 November 2026
+
+The deployed Production URL returned Vercel Deployment Protection to direct
+unauthenticated requests. The connected Vercel fetch path then performed
+read-only GETs without changing Deployment Protection or the deployment. That
+connector may use a temporary Vercel share link. No Fetch POST, provider call,
+or business-data write was made.
+
+| Endpoint | HTTP | Response bytes |
+| --- | ---: | ---: |
+| `/api/health` | 200 | 15 |
+| `/api/v1/capabilities` | 200 | 10,933 |
+| `/api/v1/dashboard/bootstrap?limit=1` | 200 | 72,161 |
+| `/api/v1/collections` | 200 | 14,445 |
+| `/api/v1/algorithms/results?limit=5` | 200 | 41,105 |
+| `/api/v1/analytics/overview` | 200 | 64,453 |
+| `/api/v1/research/bootstrap` | 200 | 17,319 |
+| `/api/v1/runs/history?limit=5` | 200 | 23,466 |
+| `/api/v1/datasets/latest` | 200 | 4,431 |
+| `/api/v1/scheduler` | 503 | 51 |
+
+The Scheduler response was repeatable and returned
+`SCHEDULER_STORAGE_UNAVAILABLE`. Earlier report text recorded a 200 response
+for the Scheduler path; the latest check shows that prior result is not
+current and no runtime explanation for the difference has been confirmed.
+All ten responses were Vercel cache misses. Their `x-vercel-id` region path
+was `sin1:iad1`; Vercel documents that this header identifies the regions the
+request hit and the function execution region, confirming `iad1` execution
+from the `sin1` edge path for these requests ([request-header documentation](https://vercel.com/docs/headers/request-headers),
+accessed 26 November 2026).
+
+This check confirms read-path availability on the existing Production
+Firestore/SQLite release. The Vercel fetch response did not include function
+TTFB, SQL time, or a successful trace, so these response sizes and statuses
+are not latency measurements. They do not establish Neon connectivity,
+Vercel-to-Neon latency, post-migration behavior, or the cache-only under-five-
+second acceptance target.

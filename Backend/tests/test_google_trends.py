@@ -818,25 +818,33 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
             def get(self, *_args, **_kwargs):
                 return {"status": "UNAVAILABLE", "reason": "CACHE_MISS"}
 
+        class ForbiddenGateway:
+            data_mode = "LIVE"
+
+            async def fetch_page(self, **_kwargs):
+                raise AssertionError("cache-only mode must not call Trending Now")
+
         grant = CacheGrant(
             GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", NOW + timedelta(hours=1),
             3600, 7200, 7200, allowed=True,
         )
         handler = GoogleTrendsDiscoveryHandler(
-            policy_fingerprint="a" * 64, utcnow=lambda: NOW, cache=Cache(),
+            trends_gateway=ForbiddenGateway(), policy_fingerprint="a" * 64,
+            utcnow=lambda: NOW, cache=Cache(),
             resolve_cache_grant=lambda _source, _now: grant, data_mode="LIVE",
         )
         context = SourceWorkContext(
             "cache-miss-job", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
             NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+            request_metadata={"sources": [GOOGLE_SOURCE_ID], "cache_only": True},
         )
 
         result = await handler(context)
 
         self.assertEqual(result["status"], "UNAVAILABLE")
-        self.assertEqual(result["error_code"], "SOURCE_NOT_CONFIGURED")
+        self.assertEqual(result["error_code"], "CACHE_ONLY_MISS")
         self.assertEqual(result["record_count"], 0)
-        self.assertEqual(result["coverage"]["attempted_calls"], 0)
+        self.assertEqual(result["coverage"]["provider_request_count"], 0)
 
     async def test_stale_trends_cache_is_not_delivered_as_cached_or_paid_verified(self):
         candidate = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
@@ -910,6 +918,7 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         context = SourceWorkContext(
             "job-1", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
             NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+            request_metadata={"sources": [GOOGLE_SOURCE_ID], "cache_only": True},
         )
 
         result = await handler(context)

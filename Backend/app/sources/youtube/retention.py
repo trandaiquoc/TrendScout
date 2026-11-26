@@ -45,12 +45,29 @@ def purge_expired_youtube_checkpoints(
     state_key: str,
 ) -> dict[str, int]:
     """Remove only expired YouTube checkpoints and their expired, unshared blobs."""
-    if (type(store) is not LocalSQLiteAtomicStateStore or store.data_mode != "LIVE"
-            or type(snapshot_blobs) is not LocalSQLiteSnapshotBlobs
-            or snapshot_blobs.store is not store
+    local_pair = (
+        type(store) is LocalSQLiteAtomicStateStore
+        and store.data_mode == "LIVE"
+        and type(snapshot_blobs) is LocalSQLiteSnapshotBlobs
+        and snapshot_blobs.store is store
+    )
+    postgres_pair = False
+    try:
+        from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+        from app.storage.postgres_payloads import PostgresSourcePayloads
+
+        postgres_pair = (
+            type(store) is PostgresAtomicStateStore
+            and type(snapshot_blobs) is PostgresSourcePayloads
+            and store._schema == snapshot_blobs._schema
+            and store._environment == snapshot_blobs._environment
+        )
+    except Exception:
+        postgres_pair = False
+    if (not (local_pair or postgres_pair)
             or not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
             or not isinstance(state_key, str) or not state_key):
-        raise ValueError("local LIVE store, matching blob store, aware time and state key required")
+        raise ValueError("matching LIVE state and blob stores, aware time and state key required")
     now = now.astimezone(timezone.utc)
 
     def operation(state):

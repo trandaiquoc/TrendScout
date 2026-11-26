@@ -1,11 +1,13 @@
 """Public Fetch admission stays bounded and offline-only until live approval."""
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -139,12 +141,13 @@ def distributed_cached_fixture_service(state_path):
                           max_fresh_seconds=600, max_stale_seconds=1200,
                           max_retention_seconds=1800, allowed=True)
 
-    handlers = D5SourceHandlers(
+    source_handlers = D5SourceHandlers(
         query_collectors=collectors, wikimedia=wikimedia, plan=DEFAULT_QUERY_PLAN,
         limits=CollectionLimits(max_queries=1, max_pages_per_query=1, max_requests=1),
         observation_date=lambda: NOW.date(), shared_cache=SharedCache(store),
         resolve_cache_grant=cache_grant, utcnow=lambda: NOW,
-    ).build()
+    )
+    handlers = source_handlers.build()
 
     def checkpoint_grant(source_id, now):
         return CheckpointGrant(source_id, "SYNTHETIC", "offline-fixture-v1",
@@ -155,6 +158,8 @@ def distributed_cached_fixture_service(state_path):
     )
     service = DistributedPublicFetch(admission, worker, resolve_grant=checkpoint_grant,
                                     utcnow=lambda: NOW)
+    service.cache_only_handlers = source_handlers.build_cache_only()
+    service.d5_source_handlers = source_handlers
     return service, gateways, calls
 
 
@@ -267,10 +272,74 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_body_fields_and_oversized_body_are_rejected(self):
         unknown = await self.post_fetch(body='{"source_ids":["youtube_video_search"]}')
         oversized = await self.post_fetch(body='{"padding":"' + ("x" * 2048) + '"}')
+        cache_only = await self.post_fetch(
+            key="synthetic-cache-only-rejected", body='{"mode":"CACHE_ONLY"}'
+        )
+        invalid_mode = await self.post_fetch(
+            key="invalid-fetch-mode", body='{"mode":[]}'
+        )
 
         self.assertEqual(unknown.status_code, 422)
         self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(cache_only.status_code, 409)
+        self.assertEqual(cache_only.json()["detail"]["code"], "CACHE_ONLY_UNAVAILABLE")
+        self.assertEqual(invalid_mode.status_code, 422)
+        self.assertEqual(invalid_mode.json()["detail"]["code"], "INVALID_FETCH_MODE")
         self.assertEqual(OfflineFixtureAdapter.calls, 0)
+
+    async def test_live_cache_only_request_is_forwarded_as_a_distinct_mode(self):
+        class LiveSubmissionFacade:
+            data_mode = "LIVE"
+            available_sources = frozenset({GOOGLE_SOURCE_ID})
+            admission = SimpleNamespace(policy=SimpleNamespace(
+                enabled_sources=frozenset({GOOGLE_SOURCE_ID}),
+            ))
+
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, key, **options):
+                self.submissions.append((key, options))
+                return {"job_id": "f" * 32, "status": "COMPLETED",
+                        "result": "ACCEPTED", "created_at": "2026-11-26T00:00:00+00:00"}
+
+        facade = LiveSubmissionFacade()
+        self.app.state.distributed_public_fetch = facade
+
+        response = await self.post_fetch(
+            key="live-cache-only-request",
+            body=json.dumps({"sources": [GOOGLE_SOURCE_ID], "mode": "CACHE_ONLY"}),
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["fetch_mode"], "CACHE_ONLY")
+        self.assertEqual(facade.submissions, [(
+            "live-cache-only-request",
+            {"source_ids": [GOOGLE_SOURCE_ID], "cache_only": True},
+        )])
+
+    async def test_wikimedia_and_youtube_cache_misses_never_reach_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, _gateways, calls = distributed_cached_fixture_service(
+                str(Path(directory) / "cache-only-sources.sqlite")
+            )
+            provider_collect_calls = []
+
+            async def forbidden_collect():
+                provider_collect_calls.append("called")
+                raise AssertionError("cache-only miss must not invoke collection")
+
+            for source_id in (WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID):
+                result = await service.d5_source_handlers._with_cache(
+                    source_id,
+                    SimpleNamespace(request_metadata={"cache_only": True}),
+                    forbidden_collect,
+                )
+                self.assertEqual(result["status"], "UNAVAILABLE")
+                self.assertEqual(result["error_code"], "CACHE_ONLY_MISS")
+                self.assertEqual(result["provider_request_count"], 0)
+                self.assertEqual(calls[source_id], 0)
+            self.assertEqual(provider_collect_calls, [])
 
     async def test_origin_host_and_forwarded_headers_are_not_trusted(self):
         wrong_origin = await self.post_fetch(

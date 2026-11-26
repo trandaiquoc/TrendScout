@@ -1281,7 +1281,7 @@ class PublicAdmission:
                 and type(value.get("history_days")) is int
                 and 1 <= value["history_days"] <= 2):
             return {"kind": "WIKIMEDIA_HISTORY", "history_days": value["history_days"]}
-        allowed = {"sources", "owner_fresh_acceptance", "manual_source_refresh"}
+        allowed = {"sources", "owner_fresh_acceptance", "manual_source_refresh", "cache_only"}
         if (not isinstance(value, dict)
                 or "sources" not in value
                 or not set(value) <= allowed
@@ -1292,6 +1292,13 @@ class PublicAdmission:
                 or not set(value["sources"]) <= self.policy.enabled_sources):
             raise ValueError("invalid bounded Fetch request metadata")
         metadata = {"sources": sorted(value["sources"])}
+        if "cache_only" in value:
+            if type(value["cache_only"]) is not bool:
+                raise ValueError("cache-only mode must be boolean")
+            if value["cache_only"]:
+                if {"owner_fresh_acceptance", "manual_source_refresh"} & set(value):
+                    raise ValueError("cache-only Fetch cannot request provider refresh")
+                metadata["cache_only"] = True
         if "owner_fresh_acceptance" in value:
             if (value.get("owner_fresh_acceptance") != OWNER_FRESH_ACCEPTANCE_MARKER
                     or set(metadata["sources"]) != set(SOURCE_POOLS)):

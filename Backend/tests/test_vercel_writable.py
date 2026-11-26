@@ -47,8 +47,12 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
         settings = self.settings()
         self.assertFalse(settings.read_only)
         events = []
-        service = object()
-        snapshot = SimpleNamespace(save=lambda: events.append("snapshot_saved"))
+        service = SimpleNamespace(store=SimpleNamespace(latest_dataset=lambda: None))
+        snapshot = SimpleNamespace(
+            save=lambda: events.append("snapshot_saved"),
+            set_latest_dataset_summary_provider=lambda _provider: None,
+            set_dashboard_bootstrap_provider=lambda _provider: None,
+        )
         facade = SimpleNamespace(
             available_sources=set(), collection_service=service,
             collection_snapshot=snapshot,
@@ -104,7 +108,11 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
         settings = self.settings()
         events = []
         client = _Client(events)
-        snapshot = SimpleNamespace(save=lambda: events.append("snapshot_saved"))
+        snapshot = SimpleNamespace(
+            save=lambda: events.append("snapshot_saved"),
+            set_latest_dataset_summary_provider=lambda _provider: None,
+            set_dashboard_bootstrap_provider=lambda _provider: None,
+        )
         facade = SimpleNamespace(
             available_sources=set(), collection_snapshot=snapshot,
         )
@@ -250,7 +258,11 @@ class VercelWritableTests(unittest.IsolatedAsyncioTestCase):
             collection_service = CollectionService(
                 CollectionStore(Path(directory) / "collections.sqlite", data_mode_scope="LIVE")
             )
-            snapshot = SimpleNamespace(save=lambda: events.append("snapshot_saved"))
+            snapshot = SimpleNamespace(
+                save=lambda: events.append("snapshot_saved"),
+                set_latest_dataset_summary_provider=lambda _provider: None,
+                set_dashboard_bootstrap_provider=lambda _provider: None,
+            )
             facade = SimpleNamespace(
                 available_sources=set(), collection_service=collection_service,
                 collection_snapshot=snapshot,

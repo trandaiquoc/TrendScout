@@ -175,14 +175,8 @@ def _compact_workbench_keyword(item):
 
 
 def _mode(service):
-    with service.store.connect() as db:
-        row = db.execute("SELECT value FROM settings WHERE key='creation_mode'").fetchone()
-        if row:
-            # Present the legacy value clearly without making a GET mutate data.
-            if row["value"] == "SUGGEST":
-                return "SUGGEST_ONLY"
-            return row["value"]
-        return "AUTO_CREATE"
+    value = service.store.get_setting("creation_mode")
+    return "SUGGEST_ONLY" if value == "SUGGEST" else value or "AUTO_CREATE"
 
 
 @router.post("/collections", status_code=201)
@@ -193,9 +187,7 @@ async def create_collection(value: CollectionInput, request: Request):
         raise HTTPException(422, {"code": "COLLECTION_NAME_REQUIRED"})
     service = _service(request)
     if value.parent_id:
-        with service.store.connect() as db:
-            parent = db.execute("SELECT 1 FROM collections WHERE id=? AND status='ACTIVE'", (value.parent_id,)).fetchone()
-        if not parent:
+        if not service.store.collection_exists(value.parent_id):
             raise HTTPException(404, {"code": "COLLECTION_PARENT_NOT_FOUND"})
     try:
         identifier = service.store.create({**value.model_dump(), "name": name})
@@ -244,10 +236,8 @@ def merge_collection(collection_id: str, value: CollectionMergeInput, request: R
 @router.get("/collections/{collection_id}/keywords")
 def list_keywords(collection_id: str, request: Request):
     service = _service(request)
-    with service.store.connect() as db:
-        exists = db.execute("SELECT 1 FROM collections WHERE id=? AND status='ACTIVE'", (collection_id,)).fetchone()
-        if not exists:
-            raise HTTPException(404, {"code": "COLLECTION_NOT_FOUND"})
+    if not service.store.collection_exists(collection_id):
+        raise HTTPException(404, {"code": "COLLECTION_NOT_FOUND"})
     return {"items": service.store.keywords_for(collection_id)}
 
 
@@ -273,15 +263,13 @@ def reclassify_cached_keywords(value: CachedReclassificationInput, request: Requ
 @router.get("/collections/classifications/{keyword_id}")
 def keyword_classification(keyword_id: str, request: Request):
     service = _service(request)
-    with service.store.connect() as db:
-        row = db.execute("SELECT cr.* FROM classification_results cr JOIN keywords k ON k.id=cr.keyword_id "
-            "WHERE cr.keyword_id=? " + ("AND k.data_mode=?" if service.store.data_mode_scope else ""),
-            (keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope else (keyword_id,)).fetchone()
+    row = service.store.classification_for(keyword_id)
     if row is None:
         raise HTTPException(404, {"code": "CLASSIFICATION_NOT_FOUND"})
     item = dict(row)
     for key in ("topic_category_ids", "subcategory_ids", "rule_evidence", "source_evidence"):
-        item[key] = json.loads(item[key] or ("{}" if key == "source_evidence" else "[]"))
+        if isinstance(item[key], str):
+            item[key] = json.loads(item[key] or ("{}" if key == "source_evidence" else "[]"))
     from app.taxonomy.registry import resolve
     item["topic_categories"] = [{"id": value, "name": resolve(value).display_name,
         "scope": resolve(value).scope} for value in item["topic_category_ids"]]
@@ -300,11 +288,7 @@ def rollback_collection_reconciliation(run_id: str, request: Request):
 async def organize(request: Request):
     _mutating(request)
     service = _service(request)
-    with service.store.connect() as db:
-        rows = db.execute("SELECT * FROM keywords "
-            + ("WHERE data_mode=? " if service.store.data_mode_scope else "")
-            + "ORDER BY observed_at DESC",
-            (service.store.data_mode_scope,) if service.store.data_mode_scope else ()).fetchall()
+    rows = service.store.load_keywords_for_collection_processing()
     grouped = {}
     for row in rows:
         item = dict(row)
@@ -318,15 +302,7 @@ async def reclassify_from_cached_evidence(request: Request):
     """Re-run local classification without making provider requests."""
     _mutating(request)
     service = _service(request)
-    with service.store.connect() as db:
-        query = "SELECT * FROM keywords WHERE (eligible=1 OR " \
-            "(source='google_web_serp' AND rejection_reason='INVALID_GOOGLE_TRENDS_RECORD'))"
-        parameters = ()
-        if service.store.data_mode_scope:
-            query += " AND data_mode=?"
-            parameters = (service.store.data_mode_scope,)
-        query += " ORDER BY observed_at DESC"
-        rows = db.execute(query, parameters).fetchall()
+    rows = service.store.load_keywords_for_collection_processing(include_invalid_google=True)
     grouped = {}
     for row in rows:
         item = dict(row)
@@ -341,12 +317,8 @@ async def reclassify_from_cached_evidence(request: Request):
 def add_keyword(collection_id: str, value: MembershipInput, request: Request):
     _mutating(request)
     service = _service(request)
-    with service.store.connect() as db:
-        keyword = db.execute("SELECT * FROM keywords WHERE id=? "
-            + ("AND data_mode=?" if service.store.data_mode_scope else ""),
-            (value.keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope
-            else (value.keyword_id,)).fetchone()
-        collection = db.execute("SELECT 1 FROM collections WHERE id=? AND status='ACTIVE'", (collection_id,)).fetchone()
+    keyword = service.store.collection_keyword_record(value.keyword_id)
+    collection = service.store.collection_exists(collection_id)
     if not keyword or not collection:
         raise HTTPException(404, {"code": "KEYWORD_OR_COLLECTION_NOT_FOUND"})
     service.store.feedback_action(collection_id, dict(keyword), "ADD")
@@ -365,6 +337,28 @@ def bulk_membership(value: BulkMembershipInput, request: Request):
                 raise HTTPException(422, {"code": "INVALID_OBSERVATION_DATE"}) from None
     if value.date_from and value.date_to and value.date_from > value.date_to:
         raise HTTPException(422, {"code": "INVALID_OBSERVATION_DATE_RANGE"})
+    if value.all_filtered:
+        bulk_filtered = getattr(service.store, "bulk_membership_filtered", None)
+        if callable(bulk_filtered):
+            if value.action in {"ADD", "COPY", "MOVE", "APPROVE", "REMOVE", "REJECT"} and not value.collection_id:
+                raise HTTPException(422, {"code": "COLLECTION_REQUIRED"})
+            if value.action == "MOVE" and not value.source_collection_id:
+                raise HTTPException(422, {"code": "SOURCE_COLLECTION_REQUIRED"})
+            if value.action == "MOVE" and value.collection_id == value.source_collection_id:
+                raise HTTPException(422, {"code": "COLLECTION_MOVE_SAME_TARGET"})
+            try:
+                return bulk_filtered(query=value.query, state=value.state,
+                    collection_ids=value.collection_ids, source=value.source,
+                    classification=value.classification, evidence=value.evidence,
+                    date_from=value.date_from, date_to=value.date_to,
+                    action=value.action, collection_id=value.collection_id,
+                    source_collection_id=value.source_collection_id)
+            except ValueError as error:
+                code = str(error)
+                if code in {"COLLECTION_NOT_FOUND", "INVALID_BULK_ACTION", "KEYWORDS_REQUIRED"}:
+                    status = 404 if code == "COLLECTION_NOT_FOUND" else 422
+                    raise HTTPException(status, {"code": code}) from None
+                raise HTTPException(422, {"code": "INVALID_KEYWORD_QUERY"}) from None
     keyword_ids = value.keyword_ids
     if value.all_filtered:
         result = service.store.search_keywords(query=value.query, state=value.state,
@@ -397,11 +391,10 @@ def keyword_workbench_detail(keyword_id: str, request: Request):
     if not result["items"]:
         raise HTTPException(404, {"code": "KEYWORD_NOT_FOUND"})
     item = result["items"][0]
-    with service.store.connect() as db:
-        decision = db.execute("SELECT decision,reason,updated_at FROM keyword_decisions WHERE keyword_id=?", (keyword_id,)).fetchone()
-        feedback = db.execute("""SELECT f.collection_id,c.name,f.action,f.created_at
-            FROM feedback f LEFT JOIN collections c ON c.id=f.collection_id
-            WHERE f.keyword_id=? ORDER BY f.created_at DESC""", (keyword_id,)).fetchall()
+    metadata = service.store.keyword_detail_metadata(keyword_id)
+    if metadata is None:
+        raise HTTPException(404, {"code": "KEYWORD_NOT_FOUND"})
+    decision, feedback = metadata["decision"], metadata["feedback"]
     item["user_decision"] = dict(decision) if decision else None
     item["user_feedback"] = [dict(row) for row in feedback]
     for algorithm in item["algorithm_results"]:
@@ -416,13 +409,7 @@ def keyword_workbench_detail(keyword_id: str, request: Request):
 def remove_keyword(collection_id: str, keyword_id: str, request: Request):
     _mutating(request)
     service = _service(request)
-    with service.store.connect() as db:
-        exists = db.execute("SELECT 1 FROM memberships m JOIN keywords k ON k.id=m.keyword_id "
-            "WHERE m.collection_id=? AND m.keyword_id=? "
-            + ("AND k.data_mode=?" if service.store.data_mode_scope else ""),
-            (collection_id, keyword_id, service.store.data_mode_scope) if service.store.data_mode_scope
-            else (collection_id, keyword_id)).fetchone()
-    if not exists:
+    if not service.store.has_membership(collection_id, keyword_id):
         raise HTTPException(404, {"code": "MEMBERSHIP_NOT_FOUND"})
     service.store.feedback_action(collection_id, {"id": keyword_id, "keyword": "", "normalized": "",
         "source": "", "project": "", "observed_at": "", "data_mode": "LIVE", "evidence": "{}", "context": ""}, "REMOVE")
@@ -433,8 +420,7 @@ def remove_keyword(collection_id: str, keyword_id: str, request: Request):
 def set_mode(value: ModeInput, request: Request):
     _mutating(request)
     service = _service(request)
-    with service.store.connect() as db:
-        db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode',?)", (value.mode,))
+    service.store.set_setting("creation_mode", value.mode)
     return {"mode": value.mode}
 
 
@@ -458,13 +444,7 @@ def reject_suggestion(proposal_id: str, request: Request):
 @router.get("/collections/jobs/{fetch_id}")
 def get_job(fetch_id: str, request: Request):
     service = _service(request)
-    with service.store.connect() as db:
-        row = db.execute("SELECT f.* FROM fetch_jobs f "
-            + ("JOIN dataset_snapshots d ON d.dataset_id=f.fetch_id AND d.data_mode=? " if service.store.data_mode_scope else "")
-            + "WHERE f.fetch_id=?", (service.store.data_mode_scope, fetch_id)
-            if service.store.data_mode_scope else (fetch_id,)).fetchone()
-        created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? ORDER BY created_at",
-                             (f"%{fetch_id}%",)).fetchall()
+    row, created = service.store.collection_job(fetch_id)
     if row is None:
         return {"status": "NOT_PROCESSED", "processed": 0, "available": 0}
     return {**dict(row), "created_collection_names": [item["name"] for item in created]}

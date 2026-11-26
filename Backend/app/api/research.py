@@ -44,39 +44,7 @@ class ResearchPatch(BaseModel):
 
 
 def list_research_for_service(service, *, q="", status=None, limit=50, offset=0):
-    query = " ".join(q.casefold().split())
-    where = []
-    parameters = []
-    if service.store.data_mode_scope:
-        where.append("(r.keyword_id IS NULL OR k.data_mode=?)")
-        parameters.append(service.store.data_mode_scope)
-    if status:
-        where.append("r.status=?")
-        parameters.append(status)
-    if query:
-        where.append(
-            'lower(r.subject || " " || r.hypothesis || " " || r.product_category || " " || r.niche) LIKE ?'
-        )
-        parameters.append("%" + query + "%")
-    clause = " WHERE " + " AND ".join(where) if where else ""
-    with service.store.connect() as db:
-        total = db.execute(
-            "SELECT count(*) FROM research_records r LEFT JOIN keywords k ON k.id=r.keyword_id" + clause, parameters
-        ).fetchone()[0]
-        rows = db.execute(
-            """SELECT r.*,k.keyword,k.source,k.project,k.observed_at,k.data_mode
-            FROM research_records r LEFT JOIN keywords k ON k.id=r.keyword_id"""
-            + clause
-            + " ORDER BY r.updated_at DESC,r.id LIMIT ? OFFSET ?",
-            (*parameters, limit, offset),
-        ).fetchall()
-    return {
-        "items": [dict(row) for row in rows],
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "next_offset": offset + limit if offset + limit < total else None,
-    }
+    return service.store.list_research(q=q, status=status, limit=limit, offset=offset)
 
 
 def research_bootstrap_for_service(service, *, q="", status=None, keyword_page=None):
@@ -142,39 +110,15 @@ def create_research(value: ResearchInput, request: Request):
     now = datetime.now(timezone.utc).isoformat()
     identifier = uuid.uuid4().hex
     data = value.model_dump()
-    if data["keyword_id"]:
-        with service.store.connect() as db:
-            if (
-                db.execute("SELECT 1 FROM keywords WHERE id=? "
-                    + ("AND data_mode=?" if service.store.data_mode_scope else ""),
-                    (data["keyword_id"], service.store.data_mode_scope) if service.store.data_mode_scope
-                    else (data["keyword_id"],)).fetchone()
-                is None
-            ):
-                raise HTTPException(422, {"code": "RESEARCH_KEYWORD_NOT_FOUND"})
-    with service.store.connect() as db:
-        db.execute(
-            """INSERT INTO research_records(id,keyword_id,subject,hypothesis,product_category,niche,
-            competitor_notes,market_evidence,ip_notes,risk_notes,findings,status,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                identifier,
-                data["keyword_id"],
-                data["subject"].strip(),
-                data["hypothesis"].strip(),
-                data["product_category"].strip(),
-                data["niche"].strip(),
-                data["competitor_notes"].strip(),
-                data["market_evidence"].strip(),
-                data["ip_notes"].strip(),
-                data["risk_notes"].strip(),
-                data["findings"].strip(),
-                data["status"],
-                now,
-                now,
-            ),
-        )
-    return {"id": identifier, "status": data["status"], "created_at": now, "updated_at": now}
+    record = {key: content.strip() if isinstance(content, str) else content
+              for key, content in data.items()}
+    record.update({"id": identifier, "created_at": now, "updated_at": now})
+    try:
+        return service.store.create_research(record)
+    except ValueError as exc:
+        if str(exc) == "RESEARCH_KEYWORD_NOT_FOUND":
+            raise HTTPException(422, {"code": str(exc)}) from None
+        raise
 
 
 @router.patch("/research/{research_id}")
@@ -192,18 +136,9 @@ def update_research(research_id: str, value: ResearchPatch, request: Request):
             if field in {"subject", "hypothesis"} and not content:
                 raise HTTPException(422, {"code": "RESEARCH_FIELD_REQUIRED", "field": field})
             updates[field] = content
-    with service.store.connect() as db:
-        if (
-            db.execute("SELECT 1 FROM research_records WHERE id=?", (research_id,)).fetchone()
-            is None
-        ):
-            raise HTTPException(404, {"code": "RESEARCH_NOT_FOUND"})
-        assignments = [key + "=?" for key in updates] + ["updated_at=?"]
-        db.execute(
-            "UPDATE research_records SET " + ",".join(assignments) + " WHERE id=?",
-            (*updates.values(), datetime.now(timezone.utc).isoformat(), research_id),
-        )
-        row = db.execute(
-            "SELECT id,status,updated_at FROM research_records WHERE id=?", (research_id,)
-        ).fetchone()
-    return dict(row)
+    updated = service.store.update_research(
+        research_id, updates, datetime.now(timezone.utc).isoformat(),
+    )
+    if updated is None:
+        raise HTTPException(404, {"code": "RESEARCH_NOT_FOUND"})
+    return updated

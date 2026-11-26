@@ -235,16 +235,14 @@ class WikimediaEntityContextResolver:
         ids = list(dict.fromkeys(keyword_ids))
         if not ids:
             return {}
-        marks = ",".join("?" for _ in ids)
-        with self.store.connect() as db:
-            rows = db.execute(f"SELECT * FROM entity_context WHERE keyword_id IN ({marks})", ids).fetchall()
+        rows = self.store.entity_context_rows(ids)
         found = {}
         for row in rows:
             found[row["keyword_id"]] = EntityContext(
                 row["keyword_id"], row["title"], row["page_id"], row["entity_id"],
-                row["description"], row["entity_type"], tuple(json.loads(row["occupations"])),
-                tuple(json.loads(row["category_ids"])), row["source_url"], row["method"],
-                row["status"], row["captured_at"], tuple(json.loads(row["instance_types"] or "[]")),
+                row["description"], row["entity_type"], tuple(_json_array(row["occupations"])),
+                tuple(_json_array(row["category_ids"])), row["source_url"], row["method"],
+                row["status"], str(row["captured_at"]), tuple(_json_array(row["instance_types"] or "[]")),
                 row["page_namespace"], bool(row["is_disambiguation"]), row["redirected_from"],
                 row["page_language"],
                 bool(row["is_main_page"]) if bool(row["is_main_page_known"]) else None,
@@ -256,12 +254,7 @@ class WikimediaEntityContextResolver:
         ids = list(dict.fromkeys(row["id"] for row in records))
         if not ids:
             return []
-        marks = ",".join("?" for _ in ids)
-        with self.store.connect() as db:
-            cached_ids = {row[0] for row in db.execute(
-                f"SELECT keyword_id FROM entity_context WHERE context_version=? AND keyword_id IN ({marks})",
-                (CONTEXT_VERSION, *ids),
-            )}
+        cached_ids = self.store.entity_context_keyword_ids(ids, CONTEXT_VERSION)
         return [row for row in records if row["id"] not in cached_ids
                 and row.get("source") == "wikimedia_pageviews_top_per_country"
                 and row.get("project") in WikimediaEntityContextResolver.PROJECT_APIS
@@ -427,17 +420,11 @@ class WikimediaEntityContextResolver:
     def _persist(self, results):
         if not results:
             return
-        with self.store.connect() as db:
-            db.executemany("""INSERT INTO entity_context(keyword_id,title,page_id,entity_id,description,
-                page_namespace,is_disambiguation,redirected_from,page_language,is_main_page,is_main_page_known,entity_type,occupations,
-                category_ids,instance_types,source_url,method,status,context_version,captured_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(keyword_id) DO UPDATE SET
-                title=excluded.title,page_id=excluded.page_id,entity_id=excluded.entity_id,
-                description=excluded.description,page_namespace=excluded.page_namespace,
-                is_disambiguation=excluded.is_disambiguation,redirected_from=excluded.redirected_from,
-                page_language=excluded.page_language,is_main_page=excluded.is_main_page,
-                is_main_page_known=excluded.is_main_page_known,entity_type=excluded.entity_type,
-                occupations=excluded.occupations,category_ids=excluded.category_ids,instance_types=excluded.instance_types,
-                source_url=excluded.source_url,method=excluded.method,status=excluded.status,
-                context_version=excluded.context_version,captured_at=excluded.captured_at""",
-                [value.as_row() for value in results.values()])
+        self.store.upsert_entity_context([value.as_row() for value in results.values()])
+
+
+def _json_array(value):
+    items = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(items, list):
+        raise ValueError("stored entity context value must be a JSON array")
+    return items

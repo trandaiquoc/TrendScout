@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.fetches import validate_public_request_origin
-from app.scheduling.persistent import PersistentScheduleStore, ScheduleBusyError
+from app.scheduling.common import ScheduleBusyError
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ class SchedulePatch(BaseModel):
     enabled: bool | None = None
 
 
-def _store(request: Request) -> PersistentScheduleStore:
+def _store(request: Request):
     store = getattr(request.app.state, "scheduler_store", None)
     if store is None:
         if request.app.state.settings.environment_profile == "vercel":
@@ -46,6 +46,8 @@ def _store(request: Request) -> PersistentScheduleStore:
         else:
             directory = Path.home() / ".local" / "state" / "trendscout" / "scheduler-v1"
         try:
+            from app.scheduling.persistent import PersistentScheduleStore
+
             store = PersistentScheduleStore(directory / "schedules.sqlite")
         except (OSError, ValueError):
             raise HTTPException(503, {"code": "SCHEDULER_STORAGE_UNAVAILABLE"}) from None

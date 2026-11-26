@@ -8,7 +8,6 @@ from app.processing.wikimedia_cleaning import clean_snapshot
 from app.settings import Settings
 from app.sources.registry import SourceRegistry
 from app.sources.wikimedia.adapter import METADATA, WikimediaAdapter
-from app.storage.firestore import FirestoreStorage
 
 
 def source_registry(settings: Settings | None = None):
@@ -41,6 +40,8 @@ def build_run_service(
     """Build the local service; callers must never invoke this in read-only mode."""
     settings = settings or Settings.from_environment()
     if storage is None and settings.google_cloud_project:
+        from app.storage.firestore import FirestoreStorage
+
         storage = FirestoreStorage.from_project(settings.google_cloud_project)
     if storage is None:
         return None

@@ -63,6 +63,31 @@ class SettingsTests(unittest.TestCase):
             settings.wikimedia_user_agent, "TrendScout test (mailto:test@example.invalid)"
         )
 
+    def test_vercel_postgres_runtime_is_explicit_and_requires_both_database_urls(self):
+        settings = Settings.from_environment({
+            "VERCEL": "1",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+            "DATABASE_URL": "postgresql://runtime.invalid/db",
+            "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
+        })
+        self.assertTrue(settings.vercel_postgres_runtime_enabled)
+        self.assertFalse(settings.vercel_shared_live_enabled)
+
+        with self.assertRaisesRegex(ValueError, "pooled and direct"):
+            Settings.from_environment({
+                "VERCEL": "1",
+                "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+                "DATABASE_URL": "postgresql://runtime.invalid/db",
+            })
+        with self.assertRaisesRegex(ValueError, "writable LIVE Vercel"):
+            Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "local",
+                "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+                "DATABASE_URL": "postgresql://runtime.invalid/db",
+                "DATABASE_URL_UNPOOLED": "postgresql://runtime.invalid/db",
+            })
+
     def test_manual_run_operation_requires_non_read_only_operator_configuration(self):
         settings = Settings.from_environment(
             {

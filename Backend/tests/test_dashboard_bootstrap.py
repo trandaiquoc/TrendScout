@@ -1,7 +1,6 @@
 """Dashboard bootstrap reads its datasets through one SQLite-backed request."""
 
 import unittest
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -349,19 +348,9 @@ class DashboardBootstrapTests(unittest.TestCase):
 class RunHistoryProjectionTests(unittest.IsolatedAsyncioTestCase):
     def test_local_projection_is_bounded_and_marks_continuation(self):
         rows = [{"fetch_id": f"{index:032x}"} for index in range(21)]
-        queries = []
-
-        class Cursor:
-            def fetchall(self):
-                return rows
-
-        class Database:
-            def execute(self, query, parameters):
-                queries.append((query, parameters))
-                return Cursor()
-
+        limits = []
         service = SimpleNamespace(store=SimpleNamespace(
-            connect=lambda: nullcontext(Database()),
+            local_run_history_rows=lambda *, limit: limits.append(limit) or rows,
         ))
         with patch.object(
             analytics, "_history_item_from_job",
@@ -373,7 +362,7 @@ class RunHistoryProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["has_more"])
         self.assertEqual(result["limit"], 20)
         self.assertEqual(map_item.call_count, 20)
-        self.assertEqual(queries[0][1], (21,))
+        self.assertEqual(limits, [21])
 
     async def test_initial_history_page_uses_bounded_projection_and_keeps_cursor(self):
         run_id = "a" * 32

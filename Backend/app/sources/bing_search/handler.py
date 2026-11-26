@@ -50,13 +50,10 @@ def _parse_timestamp(value):
 
 
 def _read_saved_candidates(collection_store, *, now):
-    with collection_store.connect() as db:
-        rows = db.execute(
-            "SELECT id,keyword,source,project,observed_at,data_mode,evidence "
-            "FROM keywords WHERE source=? AND project LIKE 'google_trends:%' "
-            "AND data_mode='LIVE' AND eligible=1 ORDER BY observed_at DESC LIMIT ?",
-            (GOOGLE_SOURCE_ID, _MAX_CANDIDATES),
-        ).fetchall()
+    rows = collection_store.keyword_evidence_rows(
+        source_id=GOOGLE_SOURCE_ID, project_prefix="google_trends:", data_mode="LIVE",
+        eligible_only=True, limit=_MAX_CANDIDATES,
+    )
     candidates, recent, cached = [], set(), []
     cutoff = now - _CACHE_RETENTION
     for row in rows:
@@ -429,6 +426,28 @@ class BingSavedCandidateHandler:
             if cache_status == "CACHED" and not acceptance_fresh:
                 context.checkpoint({"bing_receipt": {"result": shared_result}})
                 return shared_result
+        cache_only = (isinstance(context.request_metadata, dict)
+                      and context.request_metadata.get("cache_only") is True)
+        if cache_only:
+            if shared_cache_fallback is not None:
+                result = dict(shared_cache_fallback)
+                coverage = result.get("coverage")
+                coverage = dict(coverage) if isinstance(coverage, dict) else {}
+                coverage.update(provider_request_count=0, cache_only=True,
+                                refresh_attempt_status="NOT_ATTEMPTED")
+                result["coverage"] = coverage
+                result["provider_request_count"] = 0
+                if result.get("delivery_state") == "STALE_CACHE":
+                    result["status"] = "PARTIAL"
+                context.checkpoint({"bing_receipt": {"result": result}})
+                return result
+            return {
+                "status": "UNAVAILABLE", "data_mode": self.gateway.data_mode,
+                "records": [], "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                "delivery_state": "UNAVAILABLE", "provider_request_count": 0,
+                "coverage": {"discovery_mode": "SAVED_GOOGLE_CANDIDATE_BING_SERP",
+                             "cache_only": True, "provider_request_count": 0},
+            }
         manual_schedule = None
         if acceptance_fresh:
             slot = f"{OWNER_ACCEPTANCE_SLOT_PREFIX}{context.job_id}"

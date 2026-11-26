@@ -210,6 +210,37 @@ class PublicAdmissionTests(unittest.TestCase):
             self.control.admit("oversized-history-request", now=NOW,
                                request_metadata={"kind": "WIKIMEDIA_HISTORY", "history_days": 3})
 
+    def test_cache_only_mode_is_durable_and_part_of_idempotency(self):
+        metadata = {"sources": [GOOGLE_SOURCE_ID], "cache_only": True}
+        accepted = self.control.admit(
+            "cache-only-request", now=NOW, request_metadata=metadata,
+        )
+        replay = self.control.admit(
+            "cache-only-request", now=NOW, request_metadata=metadata,
+        )
+        self.assertEqual(replay["result"], "REPLAY")
+        claim = self.control.claim_next("cache-only-worker", now=NOW)
+        self.assertEqual(claim["job_id"], accepted["job_id"])
+        self.assertEqual(claim["request_metadata"], metadata)
+        with self.assertRaisesRegex(AdmissionDenied, "IDEMPOTENCY_KEY_CONFLICT"):
+            self.control.admit(
+                "cache-only-request", now=NOW,
+                request_metadata={"sources": [GOOGLE_SOURCE_ID]},
+            )
+        with self.assertRaises(ValueError):
+            self.control.admit(
+                "invalid-cache-only-request", now=NOW,
+                request_metadata={"sources": [GOOGLE_SOURCE_ID], "cache_only": "true"},
+            )
+        with self.assertRaises(ValueError):
+            self.control.admit(
+                "cache-only-provider-refresh-conflict", now=NOW,
+                request_metadata={
+                    "sources": [GOOGLE_SOURCE_ID], "cache_only": True,
+                    "manual_source_refresh": MANUAL_SOURCE_REFRESH_MARKER,
+                },
+            )
+
     def test_worker_cannot_finish_before_all_selected_source_results_are_durable(self):
         accepted = self.control.admit(
             "durable-source-results-required", now=NOW,

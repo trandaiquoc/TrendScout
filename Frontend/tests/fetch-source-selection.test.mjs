@@ -58,6 +58,40 @@ test('posts only Bing for a Bing-only Fetch', async () => {
   assert.equal(requests[1].path, '/api/v1/fetches/' + COMPLETED_ID);
 });
 
+test('cache-only Fetch sends an explicit mode and keeps it on continuation', async () => {
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path: String(path), ...options });
+    const continuation = options.headers?.['X-TrendScout-Fetch-Continuation'] === '1';
+    return new Response(JSON.stringify({ fetch_id: COMPLETED_ID, status: 'QUEUED',
+      data_mode: 'LIVE', ...(continuation
+        ? { terminal_fetch: { fetch_id: COMPLETED_ID, status: 'COMPLETED', terminal: true } }
+        : {}) }), { status: 202, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  try {
+    const controller = new PublicFetchController({
+      onState: () => {}, onTerminal: () => {}, locale: () => 'en',
+      sourceIds: () => ['google_web_serp'], runtimeScope: () => 'VERCEL_SHARED_LIVE',
+      fetchMode: 'CACHE_ONLY',
+    });
+    await controller.activate();
+
+    assert.equal(requests.length, 2);
+    assert.deepEqual(JSON.parse(requests[0].body), {
+      sources: ['google_web_serp'], mode: 'CACHE_ONLY',
+    });
+    assert.deepEqual(JSON.parse(requests[1].body), {
+      sources: ['google_web_serp'], mode: 'CACHE_ONLY',
+    });
+    assert.equal(requests[0].headers['Idempotency-Key'],
+      requests[1].headers['Idempotency-Key']);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('sends the accepted YouTube policy version for submit and status polling', async () => {
   const requests = [];
   const previousFetch = globalThis.fetch;

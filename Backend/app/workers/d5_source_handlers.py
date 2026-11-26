@@ -204,6 +204,21 @@ class D5SourceHandlers:
             raise ValueError("incomplete guarded source registry")
         return handlers
 
+    def build_cache_only(self) -> dict[str, Callable[[SourceWorkContext], object]]:
+        """Build a separate handler registry whose request metadata forbids providers."""
+        live_handlers = self.build()
+        handlers = {}
+        for source_id, live_handler in live_handlers.items():
+            async def cache_only(context, handler=live_handler):
+                metadata = dict(context.request_metadata)
+                metadata["cache_only"] = True
+                return await handler(replace(context, request_metadata=metadata))
+
+            setattr(cache_only, "__trendscout_data_mode__",
+                    getattr(live_handler, "__trendscout_data_mode__", None))
+            handlers[source_id] = cache_only
+        return handlers
+
     def _unavailable_handler(self):
         async def unavailable(_context):
             return {"status": "UNAVAILABLE", "data_mode": self.unavailable_mode,
@@ -439,6 +454,10 @@ class D5SourceHandlers:
         )
         owner_manual_fresh = (source_id == YOUTUBE_SOURCE_ID
                               and self._youtube_force_fresh_once)
+        cache_only = (
+            isinstance(getattr(context, "request_metadata", None), dict)
+            and context.request_metadata.get("cache_only") is True
+        )
         # A manual button press is cache-first. Only the explicit one-time
         # owner acceptance or local test flag forces fresh provider requests.
         force_fresh = acceptance_fresh or owner_manual_fresh
@@ -447,6 +466,15 @@ class D5SourceHandlers:
             # YouTube handler, even when admission later rejects the attempt.
             self._youtube_force_fresh_once = False
         if self.shared_cache is None:
+            if cache_only:
+                return {
+                    "status": "UNAVAILABLE", "data_mode": "LIVE", "records": [],
+                    "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                    "delivery_state": "UNAVAILABLE",
+                    "provider_request_count": 0,
+                    "coverage": {"provider_request_count": 0,
+                                 "cache_status": "UNAVAILABLE"},
+                }
             result = await collect()
             if owner_manual_fresh:
                 result = self._mark_owner_fresh_test(result)
@@ -497,6 +525,7 @@ class D5SourceHandlers:
                             payload, "CACHED", now, cache_fetched_at=cached.get("fetched_at"),
                         )
                     if (cached_status == "STALE" and not force_fresh
+                            and not cache_only
                             and source_id == YOUTUBE_SOURCE_ID
                             and self.resolve_provider_batch is not None):
                         try:
@@ -518,6 +547,26 @@ class D5SourceHandlers:
                             payload, "STALE_CACHE", now,
                             cache_fetched_at=cached.get("fetched_at"),
                         )
+
+        if cache_only:
+            if cache_fallback is not None:
+                payload, fetched_at, delivery_state = cache_fallback
+                result = self._cache_delivery(
+                    payload, delivery_state, now, cache_fetched_at=fetched_at,
+                )
+                result["coverage"]["cache_only"] = True
+                return result
+            cache_reason = (cache_lookup.get("reason")
+                            if isinstance(cache_lookup, dict) else "CACHE_LOOKUP_UNAVAILABLE")
+            return {
+                "status": "UNAVAILABLE", "data_mode": "LIVE", "records": [],
+                "record_count": 0, "error_code": "CACHE_ONLY_MISS",
+                "delivery_state": "UNAVAILABLE", "provider_request_count": 0,
+                "coverage": {"cache_only": True, "cache_status": (
+                    cache_lookup.get("status") if isinstance(cache_lookup, dict)
+                    else "UNAVAILABLE"), "cache_reason": cache_reason,
+                    "provider_request_count": 0},
+            }
 
         if (source_id == YOUTUBE_SOURCE_ID and self.resolve_provider_batch is not None
                 and batch_decision is None):
