@@ -1,4 +1,4 @@
-"""Vercel uses PostgreSQL core pins; local setup opts into legacy workflows."""
+"""Vercel dependencies remain compatible with its active Firestore runtime."""
 
 import json
 import re
@@ -20,7 +20,7 @@ class RuntimePackagingTests(unittest.TestCase):
         ]
         self.assertEqual(
             requirements,
-            ['-e .[legacy-firestore,local-firestore,local-runtime]'],
+            ['-e .[local-firestore,local-runtime]'],
         )
 
         with (BACKEND / 'pyproject.toml').open('rb') as manifest:
@@ -28,22 +28,19 @@ class RuntimePackagingTests(unittest.TestCase):
 
         self.assertEqual(project['requires-python'], '>=3.12,<3.13')
         dependencies = project['dependencies']
-        legacy_firestore = project['optional-dependencies']['legacy-firestore']
         local_firestore = project['optional-dependencies']['local-firestore']
         local_runtime = project['optional-dependencies']['local-runtime']
-        self.assertGreater(len(dependencies), 20)
+        self.assertGreater(len(dependencies), 25)
         self.assertEqual(len(dependencies), len(set(dependencies)))
-        self.assertEqual(len(legacy_firestore), len(set(legacy_firestore)))
         self.assertEqual(len(local_firestore), len(set(local_firestore)))
         self.assertEqual(len(local_runtime), len(set(local_runtime)))
         self.assertTrue(all(re.fullmatch(r'[^=<>!~]+==[^=]+', item) for item in dependencies))
-        self.assertTrue(all(re.fullmatch(r'[^=<>!~]+==[^=]+', item) for item in legacy_firestore))
         self.assertTrue(all(re.fullmatch(r'[^=<>!~]+==[^=]+', item) for item in local_firestore))
         self.assertTrue(all(re.fullmatch(r'[^=<>!~]+==[^=]+', item) for item in local_runtime))
         self.assertIn('fastapi==0.162.2', dependencies)
         self.assertIn('psycopg[binary]==3.3.9', dependencies)
-        self.assertIn('google-cloud-firestore==2.34.1', legacy_firestore)
-        self.assertIn('protobuf==7.36.2', legacy_firestore)
+        self.assertIn('google-cloud-firestore==2.34.1', dependencies)
+        self.assertIn('protobuf==7.36.2', dependencies)
         self.assertEqual(set(local_runtime), {'click==8.5.1', 'uvicorn==0.54.0'})
         for item in (
             'CacheControl==0.14.4',
@@ -58,9 +55,6 @@ class RuntimePackagingTests(unittest.TestCase):
         ):
             with self.subTest(optional_dependency=item):
                 self.assertIn(item, local_firestore)
-                self.assertNotIn(item, dependencies)
-        for item in legacy_firestore:
-            with self.subTest(legacy_dependency=item):
                 self.assertNotIn(item, dependencies)
 
     def test_postgres_runtime_import_does_not_require_legacy_cloud_packages(self):
@@ -94,7 +88,7 @@ assert not any(name.startswith(('google.cloud.firestore', 'google.api_core',
 
     def test_vercel_function_excludes_development_sources(self):
         config = json.loads((BACKEND / 'vercel.json').read_text(encoding='utf-8'))
-        self.assertIn(".[legacy-firestore]", config['installCommand'])
+        self.assertNotIn('installCommand', config)
         patterns = config['functions']['app/main.py']['excludeFiles']
         self.assertIn('tests/**', patterns)
         self.assertIn('emulator_tests/**', patterns)
