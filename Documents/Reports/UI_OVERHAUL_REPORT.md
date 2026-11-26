@@ -1,6 +1,6 @@
 # TrendScout UI overhaul report
 
-- **Status:** Local implementation in review on `feature/ui-overhaul`
+- **Status:** UI implementation from `origin/main` (`5122e6f`) is integrated on `feature/postgresql` for API compatibility review
 - **Date:** 26 November 2026
 - **Baseline:** `cf09b2e`
 - **Verification:** Offline fixtures only; no provider calls, AI quota, or deployment
@@ -27,7 +27,7 @@ The reference website was not usable as an implementation input during the earli
 
 Primary navigation: Overview `/`, Keywords `/keywords`, Collections `/collections`, Product Ideas `/products`, Trends `/trends`, Sources `/sources`, Research `/research`, Settings `/settings`. Advanced navigation: Run History `/runs`, Algorithms `/algorithms`, Data Quality `/quality`.
 
-Deep links include `/collections/{id}` and `/sources/{source_id}`. `/trends` opens the analysis tab. Legacy hashes migrate to clean paths while preserving query parameters; `/dashboard`, `/dashboard/`, and `/dashboard/{path}` redirect backward. `/privacy` and `/terms` alias the existing published policy files without changing policy wording. The shared Vercel install command from the Database Goal is preserved.
+Deep links include `/collections/{id}` and `/sources/{source_id}`. `/trends` opens the analysis tab. Legacy hashes migrate to clean paths while preserving query parameters; `/dashboard`, `/dashboard/`, and `/dashboard/{path}` redirect backward. `/privacy` and `/terms` alias the existing published policy files without changing policy wording. The Database Goal's Vercel dependency installation behavior is preserved; the UI does not add a custom install command.
 
 Detailed paths and service contracts are recorded in [UI_CONTRACT.md](../Integration/UI_CONTRACT.md). Vercel's documented filesystem precedence, redirect-before-rewrite ordering, and route order were reviewed against [Vercel project configuration](https://vercel.com/docs/project-configuration/vercel-json) and [rewrite routing](https://vercel.com/docs/routing/rewrites) on 26 November 2026. These docs do not prove deployed routes are active.
 
