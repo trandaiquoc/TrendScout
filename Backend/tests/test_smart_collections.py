@@ -1114,7 +1114,12 @@ class SmartCollectionsTests(unittest.TestCase):
             result = self.service._process_fetch("suggestion-fetch", source)
             self.assertEqual(result["suggestions"], 1)
         proposal = self.store.suggestions()[0]
-        accepted = self.store.resolve_proposal(proposal["id"], True)
+        accepted = self.store.resolve_proposal(
+            proposal["id"], True, name="Reviewed sustainable fashion", description="Reviewed evidence context",
+        )
+        created = next(item for item in self.store.list_collections() if item["id"] == accepted)
+        self.assertEqual(created["name"], "Reviewed sustainable fashion")
+        self.assertEqual(created["description"], "Reviewed evidence context")
         self.assertEqual(len(self.store.keywords_for(accepted)), 3)
         self.assertEqual(self.store.resolve_proposal(proposal["id"], False), None)
 

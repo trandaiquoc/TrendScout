@@ -1,12 +1,39 @@
 {
+  "installCommand": "python3 -m pip install -e '.[legacy-firestore]'",
   "buildCommand": "python3 scripts/prepare_vercel.py",
   "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ':(top)Backend' ':(top)Frontend'",
   "redirects": [
     {
-      "source": "/",
-      "destination": "/dashboard/",
-      "permanent": false
+      "source": "/dashboard",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/dashboard/",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/dashboard/:path*",
+      "destination": "/:path*",
+      "permanent": true
     }
+  ],
+  "rewrites": [
+    { "source": "/keywords", "destination": "/index.html" },
+    { "source": "/collections", "destination": "/index.html" },
+    { "source": "/collections/:itemId", "destination": "/index.html" },
+    { "source": "/products", "destination": "/index.html" },
+    { "source": "/trends", "destination": "/index.html" },
+    { "source": "/sources", "destination": "/index.html" },
+    { "source": "/sources/:itemId", "destination": "/index.html" },
+    { "source": "/research", "destination": "/index.html" },
+    { "source": "/settings", "destination": "/index.html" },
+    { "source": "/runs", "destination": "/index.html" },
+    { "source": "/algorithms", "destination": "/index.html" },
+    { "source": "/quality", "destination": "/index.html" },
+    { "source": "/privacy", "destination": "/privacy.html" },
+    { "source": "/terms", "destination": "/terms.html" }
   ],
   "functions": {
     "app/main.py": {

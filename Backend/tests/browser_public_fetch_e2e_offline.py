@@ -4,12 +4,12 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from browser_support import find_chrome, require_linux_network_isolation
+from browser_support import find_chrome, require_linux_network_isolation, serve_offline_frontend
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
 RUN_ID = "a" * 32
-FETCH_ID = "f" * 43
+FETCH_ID = "f" * 32
 
 
 def main():
@@ -18,10 +18,6 @@ def main():
     if not chrome:
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    html = html.replace('<link rel="stylesheet" href="/dashboard/styles.css">', "<style>" + css + "</style>")
-    html = html.replace('href="/dashboard/phoenix.css"', 'href="' + (PUBLIC / "phoenix.css").as_uri() + '"')
-    html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     bridge = f"""<script>
 const fetchRequests=[];let statusReads=0;
 window.fetch=(path,options={{}})=>{{
@@ -56,7 +52,9 @@ check(posts[0]?.body==='{}','body is server-default empty object');
 check(Boolean(posts[0]?.headers['Idempotency-Key']),'request has an idempotency key');
 check(!fetchRequests.some(request=>/token|secret|credential|password/i.test(JSON.stringify(request.headers))),'no credential sent');
 check(statusReads===1,'one bounded status read receives terminal state');
-check(fetchRequests.filter(request=>request.path==='/api/v1/analytics/overview').length>=2,'saved analytics refresh after terminal result');
+check(fetchRequests.some(request=>request.path==='/api/v1/dashboard/bootstrap')
+  &&fetchRequests.filter(request=>request.path==='/api/v1/analytics/overview').length>=1,
+  'one bootstrap initializes the dashboard and analytics refresh after terminal result');
 check(!document.querySelector('#pageviews-empty').hidden&&document.querySelector('#pageviews-chart').children.length===0,'failed analytics does not leave an old chart looking current');
 check(document.querySelector('#fetch-status').textContent.includes('độ phủ nguồn chưa đầy đủ'),'partial synthetic state announced');
 check(document.querySelector('#runs-current').textContent===RUN_ID,'run results load without user-entered ID');
@@ -72,9 +70,8 @@ check(!Object.keys(localStorage).some(key=>/token|secret|credential|password/i.t
 document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+errors.join('; '):'PASS');})();
 </script>""".replace("RUN_ID", json.dumps(RUN_ID))
     html = html.replace("</body>", bridge + check + "</body>")
-    with tempfile.TemporaryDirectory(prefix="trendscout-public-fetch-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="trendscout-public-fetch-") as directory, \
+            serve_offline_frontend(PUBLIC, html) as frontend_url:
         command = [
             chrome,
             "--headless",
@@ -85,13 +82,12 @@ document.body.setAttribute('data-public-fetch-result',errors.length?'FAIL: '+err
             "--no-proxy-server",
             "--disable-sync",
             "--disable-component-update",
-            "--allow-file-access-from-files",
             "--no-first-run",
             f"--user-data-dir={directory}/profile",
             "--window-size=1280,900",
             "--virtual-time-budget=5000",
             "--dump-dom",
-            page.as_uri(),
+            frontend_url,
         ]
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", timeout=30)

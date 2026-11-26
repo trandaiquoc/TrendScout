@@ -74,6 +74,24 @@ class ModeInput(BaseModel):
     mode: Literal["SUGGEST_ONLY", "AUTO_CREATE", "OFF"]
 
 
+class ProposalAcceptInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=1200)
+
+    @field_validator("name")
+    @classmethod
+    def non_empty_name(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("proposal name must not be empty")
+        return value.strip() if value is not None else None
+
+    @field_validator("description")
+    @classmethod
+    def trim_description(cls, value):
+        return value.strip() if value is not None else None
+
+
 class BulkMembershipInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["ADD", "COPY", "MOVE", "REMOVE", "APPROVE", "REJECT", "EXCLUDE", "RESTORE"]
@@ -425,9 +443,12 @@ def set_mode(value: ModeInput, request: Request):
 
 
 @router.post("/collections/suggestions/{proposal_id}/accept")
-def accept_suggestion(proposal_id: str, request: Request):
+def accept_suggestion(proposal_id: str, request: Request, value: ProposalAcceptInput | None = None):
     _mutating(request)
-    identifier = _service(request).store.resolve_proposal(proposal_id, True)
+    overrides = value.model_dump(exclude_unset=True) if value is not None else {}
+    identifier = _service(request).store.resolve_proposal(
+        proposal_id, True, name=overrides.get("name"), description=overrides.get("description"),
+    )
     if identifier is None:
         raise HTTPException(404, {"code": "SUGGESTION_NOT_FOUND"})
     return {"collection_id": identifier}

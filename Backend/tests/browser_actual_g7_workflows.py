@@ -165,7 +165,7 @@ def main():
                 },
                 session,
             )
-            browser.call("Page.navigate", {"url": base_url + "/dashboard/#research"}, session)
+            browser.call("Page.navigate", {"url": base_url + "/research"}, session)
 
             def evaluate(expression):
                 result = browser.call(

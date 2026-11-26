@@ -52,6 +52,7 @@ class WorkspaceStructureTests(unittest.TestCase):
         html = (PUBLIC / "index.html").read_text(encoding="utf-8")
         for name in (
             "overview",
+            "products",
             "collections",
             "sources",
             "runs",
@@ -72,6 +73,9 @@ class WorkspaceStructureTests(unittest.TestCase):
         self.assertNotIn('id="quality-coverage">NOT_MEASURED', html)
         self.assertNotIn('id="quality-fetched">NOT_AVAILABLE', html)
         self.assertNotIn('data-view="keywords"', html)
+        self.assertIn('id="discover-results-heading"', html)
+        self.assertIn("normalizeFetchProgress", (PUBLIC / "modules" / "fetch-progress.js").read_text(encoding="utf-8"))
+        self.assertIn("fetch.progress-outcomes", (PUBLIC / "app.js").read_text(encoding="utf-8"))
         self.assertNotIn('data-view="refresh"', html)
         self.assertNotIn('data-view="usage"', html)
 

@@ -6,14 +6,17 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from browser_support import find_chrome, require_linux_network_isolation
+from browser_support import find_chrome, require_linux_network_isolation, serve_offline_frontend
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
 RUN_A = "a" * 32
 
 FAKE = r"""<script>
-window.testRequests=[];window.pwned=false;window.fixtureResearch=[];window.fixtureSchedules=[];window.holdCapabilities=true;window.releaseCapabilities=null;
+window.testRequests=[];window.pwned=false;window.fixtureResearch=[];window.fixtureSchedules=[];window.fixtureSuggestions=[
+  {id:'proposal-a',name:'Fixture proposal A',description:'Initial generated description',reason:'The saved fixture has related evidence.',support_ids:['a'.repeat(64),'b'.repeat(64),'c'.repeat(64),'d'.repeat(64),'e'.repeat(64),'f'.repeat(64)]},
+  {id:'proposal-b',name:'Fixture proposal B',description:'Dismissal fixture',support_ids:[]}
+];window.holdCapabilities=true;window.releaseCapabilities=null;
 window.fetch=(path,opts={})=>{
   const request={path:String(path),method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
   testRequests.push(request);
@@ -22,6 +25,15 @@ window.fetch=(path,opts={})=>{
   if(p==='/api/v1/collections/collection-a'&&request.method==='PATCH')return Promise.resolve(new Response(JSON.stringify({item:{id:'collection-a',name:JSON.parse(request.body).name||'Fixture Collection A'}}),{status:200}));
   if(p==='/api/v1/collections/collection-a'&&request.method==='DELETE')return Promise.resolve(new Response(JSON.stringify({deleted:true}),{status:200}));
   if(p==='/api/v1/collections/bulk'&&request.method==='POST')return Promise.resolve(new Response(JSON.stringify({updated:1,action:JSON.parse(request.body).action}),{status:200}));
+  if(p==='/api/v1/collections/reclassify'&&request.method==='POST')return Promise.resolve(new Response(JSON.stringify({status:'COMPLETED',processed:2,eligible:2,assigned:1,unassigned:1}),{status:200}));
+  if(p==='/api/v1/collections/suggestions/proposal-a/accept'&&request.method==='POST'){
+    const body=JSON.parse(request.body);window.fixtureSuggestions=window.fixtureSuggestions.filter(item=>item.id!=='proposal-a');
+    return Promise.resolve(new Response(JSON.stringify({collection_id:'accepted-fixture'}),{status:200}));
+  }
+  if(p==='/api/v1/collections/suggestions/proposal-b/reject'&&request.method==='POST'){
+    window.fixtureSuggestions=window.fixtureSuggestions.filter(item=>item.id!=='proposal-b');
+    return Promise.resolve(new Response(JSON.stringify({rejected:true}),{status:200}));
+  }
   if(p==='/api/v1/research'&&request.method==='POST'){
     const item={...JSON.parse(request.body),id:'research-fixture',created_at:'2026-01-08T00:00:00Z',updated_at:'2026-01-08T00:00:00Z'};
     window.fixtureResearch=[item];
@@ -57,7 +69,8 @@ window.fetch=(path,opts={})=>{
       {source_id:'wikimedia_pageviews_top_per_country',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false,last_saved_fetch:{status:'PARTIAL',record_count:7,fetched_at:'2026-11-14T01:00:00Z',data_mode:'SYNTHETIC'}},
       {source_id:'youtube_video_search',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
       {source_id:'google_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
-      {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
+      {source_id:'bing_web_serp',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false},
+      {source_id:'fixture_registry_source',display_name:'Fixture registry source',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false}
     ]}),{status:200});
     if(window.holdCapabilities)return new Promise(resolve=>{window.releaseCapabilities=()=>{window.holdCapabilities=false;resolve(response);};});
     return Promise.resolve(response);
@@ -69,7 +82,7 @@ window.fetch=(path,opts={})=>{
   ]}),{status:200}));
   if(p==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
   if(p==='/api/runs/'+'d'.repeat(32))return Promise.resolve(new Response('{}',{status:404}));
-  if(p.includes('/keywords/'))return Promise.resolve(new Response(JSON.stringify({
+  if(p.includes('/keywords/')&&!p.startsWith('/api/v1/collections/keywords/'))return Promise.resolve(new Response(JSON.stringify({
     keyword_id:'c'.repeat(64),display_keyword:'<img src=x onerror=window.pwned=true>',
     canonical_keyword:'safe-title',source:'Wikimedia',project:'en.wikipedia',
     observation_date:'2026-01-08',score:null,status:'INSUFFICIENT_DATA',
@@ -96,20 +109,33 @@ window.fetch=(path,opts={})=>{
     algorithm_id:'ewma',keyword:'YouTube',status:'SKIPPED',reason_code:'INSUFFICIENT_SAMPLES',
     value:null,unit:'approx_pageviews_upper_bound',result_json:JSON.stringify({quality_flags:['CENSORED_TOP_LIST']})
   }]}),{status:200}));
+  if(p.startsWith('/api/v1/dashboard/bootstrap?'))return Promise.resolve(new Response(JSON.stringify({
+    item:{dataset_id:'offline-fixture-dataset',status:'PARTIAL',data_mode:'SYNTHETIC',
+      sources:['wikimedia_pageviews_top_per_country'],provider_record_count:1,received_record_count:1,
+      retained_keyword_count:1,observation_start:'2026-01-08',observation_end:'2026-01-08',
+      fetched_at:'2026-01-08T01:00:00Z',quality_flags:[]},
+    analytics:{keyword_totals:{unique:1,eligible:1,excluded:0,classified:0,ambiguous:0,
+      unknown:1,unclassified:1,ineligible:0},source_volume:[],algorithm_distribution:[],
+      algorithm_effectiveness:{status:'NOT_YET_EVALUATED',reason:'Offline browser fixture.'}},
+    keywords:{items:[{id:'c'.repeat(64),keyword:'<img src=x onerror=window.pwned=true>',
+      source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,
+      classification_status:'UNKNOWN',memberships:[],evidence:{views_ceil:0}}],total:25,next_offset:20}
+  }),{status:200}));
   if(p==='/api/v1/collections')return Promise.resolve(new Response(JSON.stringify({
-    mode:'AUTO_CREATE',items:[
+    mode:'AUTO_CREATE',suggestions:window.fixtureSuggestions,items:[
       {id:'collection-a',name:'Fixture Collection A',description:'Parent Collection',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'USER',auto_match:false},
       {id:'collection-b',name:'Fixture Collection B',description:'Merge destination',examples:[],exclusions:[],membership_count:1,direct_membership_count:1,subtree_unique_keyword_count:1,created_by:'USER',auto_match:false},
       {id:'collection-parent',name:'Parent with saved topics',description:'Parent with child records',examples:[],exclusions:[],membership_count:2,direct_membership_count:0,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false},
       {id:'collection-child',name:'Saved child topics',description:'Child records',parent_id:'collection-parent',examples:[],exclusions:[],membership_count:2,direct_membership_count:2,subtree_unique_keyword_count:2,created_by:'AI',auto_match:false},
       ...Array.from({length:24},(_,index)=>({id:`merge-target-${index+1}`,name:`Merge destination ${String(index+1).padStart(2,'0')}`,description:'Long-list picker fixture',examples:[],exclusions:[],membership_count:0,direct_membership_count:0,subtree_unique_keyword_count:0,created_by:'USER',auto_match:false}))
-    ],suggestions:[],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
+    ],summary:{eligible_keywords:3,assigned_keywords:3,unclassified_keywords:0,excluded_keywords:0,classified_keywords:3,ambiguous_keywords:0,unknown_keywords:0,ineligible_topic_keywords:0,ai_assigned_keywords:0,manually_managed_keywords:3,ai_created_collections:0,sources:[]}
   }),{status:200}));
   if(p.startsWith('/api/v1/datasets/latest/keywords?')){
     const q=new URL(p,'https://local.invalid').searchParams;
     const empty=q.get('q')==='empty';
     return Promise.resolve(new Response(JSON.stringify({items:empty?[]:[{id:'c'.repeat(64),keyword:'Fixture keyword',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-01-08',eligible:1,classification_status:'CLASSIFIED',memberships:[],evidence:{views_ceil:12}}],total:empty?0:51,next_offset:empty?null:25}),{status:200}));
   }
+  if(/^\/api\/v1\/collections\/keywords\/[a-f0-9]{64}$/.test(p))return Promise.resolve(new Response(JSON.stringify({keyword:'Fixture support keyword '+p.at(-1),source:'wikimedia_pageviews_top_per_country'}),{status:200}));
   if(p.startsWith('/api/v1/research?'))return Promise.resolve(new Response(JSON.stringify({items:window.fixtureResearch,total:window.fixtureResearch.length}),{status:200}));
   if(p.startsWith('/api/v1/runs/history?'))return Promise.resolve(new Response(JSON.stringify({items:[{
     fetch_id:'f'.repeat(32),run_at:'2026-11-14T01:00:00Z',run_type:'FETCH',
@@ -153,13 +179,14 @@ CHECK = r"""<script>
 (async()=>{
   const errors=[];const check=(value,message)=>{if(!value)errors.push(message)};
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const until=async predicate=>{for(let index=0;index<150;index++){if(predicate())return true;await wait(20);}return Boolean(predicate());};
   try{
     await wait(300);
     check(!document.documentElement.classList.contains('js-pending'),'dashboard renders while capabilities are pending');
     check(typeof window.releaseCapabilities==='function','capabilities response is still held for the independent-loading check');
     check(testRequests.some(request=>request.path==='/api/v1/capabilities'),'startup requests capabilities');
-    check(testRequests.some(request=>request.path==='/api/v1/datasets/latest'),'latest dataset GET starts before capabilities finish');
-    check(testRequests.some(request=>request.path==='/api/v1/analytics/overview'),'analytics GET starts before capabilities finish');
+    check(testRequests.some(request=>request.path.startsWith('/api/v1/dashboard/bootstrap?')),'one dashboard bootstrap request starts before capabilities finish');
+    check(!testRequests.some(request=>request.path==='/api/v1/datasets/latest'||request.path==='/api/v1/analytics/overview'),'bootstrap avoids duplicate dataset and analytics requests');
     check(!testRequests.some(request=>request.path==='/api/v1/fetches'&&request.method==='POST'),'reload does not auto-submit a Fetch');
     window.releaseCapabilities?.();
     await wait(300);
@@ -184,13 +211,14 @@ CHECK = r"""<script>
     }
     check(document.documentElement.dataset.theme==='light','light default');
     check(document.documentElement.lang==='vi','Vietnamese default');
-    check(document.querySelectorAll('[data-nav]').length===8,'eight supported destination views remain available');
-    check(document.querySelectorAll('#workspace-nav > .nav-link[data-nav]').length===5,'five primary navigation items');
+    check(document.querySelectorAll('[data-nav]').length===11,'all workspace and advanced destinations remain available');
+    check(document.querySelectorAll('#workspace-nav > .nav-link[data-nav]').length===8,'eight primary navigation items');
     check(document.querySelector('.nav-advanced summary').textContent.includes('Nâng cao'),'technical navigation grouped under Advanced');
     check(document.querySelector('#open-fetch').disabled,'fetch disabled');
     check(!document.querySelector('#operator-token'),'no token input');
     check(!document.querySelector('#fetch-form'),'no fetch submit form');
-    check(document.querySelectorAll('#source-registry-list .source-card').length===4,'four runtime source descriptors rendered from metadata');
+    check(document.querySelectorAll('#source-registry-list .source-card').length===5,'five runtime source descriptors rendered from metadata');
+    check(document.querySelectorAll('#keyword-source-filter option').length===6&&[...document.querySelectorAll('#keyword-source-filter option')].some(option=>option.value==='fixture_registry_source'),'overview source filter is populated from the runtime registry, including an unknown future source');
     check(document.querySelectorAll('[data-dashboard-tab]').length===2,'two semantic dashboard tabs');
     check(document.querySelector('#metric-active-sources').textContent==='0','active source count comes from runtime capabilities');
     const wikimediaCard=[...document.querySelectorAll('#source-registry-list .source-card')].find(card=>card.querySelector('h2')?.textContent.includes('wikimedia_pageviews'));
@@ -198,14 +226,14 @@ CHECK = r"""<script>
     check(wikimediaCard?.textContent.includes('\u0110\u00e3 x\u00e1c nh\u1eadn b\u1eb1ng Fetch LIVE local th\u00e0nh c\u00f4ng'),'historical verification status is localized');
     check(wikimediaCard?.textContent.includes('Ch\u01b0a s\u1eb5n s\u00e0ng production'),'production readiness stays separate');
     check([...document.querySelectorAll('#source-registry-list .source-card')].filter(card=>!card.querySelector('h2')?.textContent.includes('wikimedia_pageviews')).every(card=>card.textContent.includes('Đã xác minh adapter ngoại tuyến')),'offline adapter states are reported from runtime metadata');
+    const routePaths={overview:'/',keywords:'/keywords',collections:'/collections',products:'/products',trends:'/trends',sources:'/sources',research:'/research',settings:'/settings',runs:'/runs',algorithms:'/algorithms',quality:'/quality'};
     const go=async name=>{
       if(innerWidth<=900 && !document.querySelector('#app-shell').classList.contains('menu-open'))document.querySelector('#menu-toggle').click();
       const link=document.querySelector('[data-nav="'+name+'"]');
       const group=link.closest('details');if(group)group.open=true;
       link.click();
-      if(location.hash!=='#'+name)location.hash='#'+name;
-      window.dispatchEvent(new Event('hashchange'));
       await wait(40);
+      check(location.pathname===routePaths[name]&&location.hash==='','navigation uses a clean path for '+name+': '+location.pathname+location.hash);
     };
     const {applyLocale}=await import(I18N_MODULE_URI);
     for(const link of document.querySelectorAll('[data-nav]')){
@@ -233,8 +261,15 @@ CHECK = r"""<script>
       check(document.activeElement===menuButton,'mobile navigation restores focus to its trigger');
     }
     await go('sources');await wait(40);
+    document.querySelector('#source-registry-list .source-card[data-source-id="google_web_serp"] h2 a')?.click();await wait(30);
+    check(location.pathname==='/sources/google_web_serp'&&document.querySelector('#source-registry-list .source-card[data-source-id="google_web_serp"] details')?.open,'source title opens a clean deep link with its details expanded');
+    history.back();await wait(60);
+    check(location.pathname==='/sources'&&![...document.querySelectorAll('#source-registry-list details')].some(details=>details.open),'browser back returns to the collapsed Source Center list');
+    history.forward();await wait(60);
+    check(location.pathname==='/sources/google_web_serp'&&document.querySelector('#source-registry-list .source-card[data-source-id="google_web_serp"] details')?.open,'browser forward restores the selected source detail');
+    history.back();await wait(60);
     const fetchDefaults=document.querySelector('#fetch-default-sources');
-    check(fetchDefaults?.querySelectorAll('input[type=checkbox]').length===4,'Source Center renders one default-Fetch control per source');
+    check(fetchDefaults?.querySelectorAll('input[type=checkbox]').length===5,'Source Center renders one default-Fetch control per runtime source');
     check([...fetchDefaults.querySelectorAll('input[type=checkbox]')].every(input=>input.disabled),'source preferences cannot enable server-disabled adapters');
     check(!document.querySelector('#serpapi-provider-budget').hidden,'shared SerpApi account quota is shown in Source Center');
     check(document.querySelector('#serpapi-provider-budget').textContent.includes('Bing'),'provider section distinguishes the Bing allocation');
@@ -244,7 +279,13 @@ CHECK = r"""<script>
     check(Boolean(sourceLibrary?.open&&document.querySelectorAll('#source-library-rows tr').length===1&&document.querySelector('#source-library-rows').textContent.includes('YouTube Search')),'searching the research inventory opens it and shows the matching source');
     sourceSearch.value='';sourceSearch.dispatchEvent(new Event('input',{bubbles:true}));
     check(document.querySelectorAll('#source-library-rows tr').length===3,'clearing research search restores all inventory candidates');
-    await go('collections');await wait(80);
+    await go('collections');await until(()=>Boolean(document.querySelector('#workbench-proposal-list .workbench-proposal')));
+    check(testRequests.some(request=>request.path==='/api/v1/collections'&&request.method==='GET'),'Collection workspace requested its saved Collection response');
+    const collectionProbe=await fetch('/api/v1/collections').then(response=>response.json());
+    check(collectionProbe.items?.length>0&&collectionProbe.suggestions?.length===2,'offline Collection fixture exposes Collections and proposals: '+JSON.stringify({items:collectionProbe.items?.length,suggestions:collectionProbe.suggestions?.length}));
+    document.querySelector('[data-collection-node][data-collection-id="collection-a"] .workbench-tree-item')?.click();await wait(40);
+    check(location.pathname==='/collections/collection-a'&&document.querySelector('#workbench-context-title')?.textContent.includes('Fixture Collection A'),'Collection selection receives a reloadable clean route; path='+location.pathname+'; status='+document.querySelector('#workbench-status')?.textContent+'; tree='+document.querySelector('#workbench-tree')?.textContent.slice(0,120));
+    await go('collections');await until(()=>Boolean(document.querySelector('#workbench-proposal-list .workbench-proposal')));
     if(innerWidth<=900){
       const filterToggle=document.querySelector('#workbench-filter-toggle');
       filterToggle.click();
@@ -257,6 +298,24 @@ CHECK = r"""<script>
     const collapsedParent=document.querySelector('[data-collection-id="collection-parent"]');
     check(collapsedParent?.querySelector('.workbench-disclosure')?.getAttribute('aria-expanded')==='false','parent Collection starts collapsed in the fixture');
     check(collapsedParent?.querySelector('.workbench-tree-count')?.textContent==='2','collapsed parent shows unique keywords saved in its child Collections');
+    const proposalCard=document.querySelector('#workbench-proposal-list .workbench-proposal');
+    check(Boolean(proposalCard),'editable proposal renders from the saved Collection suggestion response');
+    const proposalEvidence=proposalCard?.querySelector('.workbench-proposal-evidence');
+    proposalEvidence?.querySelector('summary')?.click();await until(()=>proposalEvidence?.querySelectorAll('li').length===5);
+    check(proposalEvidence?.querySelectorAll('li').length===5&&testRequests.filter(request=>request.path.startsWith('/api/v1/collections/keywords/')).length===5,'proposal evidence lazily previews a bounded five saved keywords');
+    if(proposalCard){
+      proposalCard.querySelector('.workbench-proposal-edit').open=true;
+      proposalCard.querySelector('input').value='Reviewed fixture Collection';
+      proposalCard.querySelector('textarea').value='Edited before acceptance.';
+      proposalCard.querySelector('.workbench-proposal-actions button:first-child').click();await wait(70);
+    }
+    const acceptRequest=testRequests.find(request=>request.path==='/api/v1/collections/suggestions/proposal-a/accept');
+    check(acceptRequest?.method==='POST'&&JSON.parse(acceptRequest.body).name==='Reviewed fixture Collection'&&JSON.parse(acceptRequest.body).description==='Edited before acceptance.','accepted proposal sends the user-reviewed Collection fields');
+    document.querySelector('#workbench-proposal-list .workbench-proposal .workbench-proposal-actions button:last-child')?.click();await wait(60);
+    check(testRequests.some(request=>request.path==='/api/v1/collections/suggestions/proposal-b/reject'&&request.method==='POST'),'proposal dismissal submits the explicit reject action');
+    document.querySelector('.workbench-organization summary')?.click();
+    document.querySelector('.workbench-organization button')?.click();await wait(70);
+    check(testRequests.some(request=>request.path==='/api/v1/collections/reclassify'&&request.method==='POST'),'saved-keyword reclassification uses its own action and does not start Fetch');
     const workbenchSearch=document.querySelector('#workbench-query');workbenchSearch.value='fixture';workbenchSearch.dispatchEvent(new Event('input',{bubbles:true}));await wait(420);
     check(testRequests.some(request=>request.path.startsWith('/api/v1/datasets/latest/keywords?')&&request.path.includes('q=fixture'))&&document.querySelector('#workbench-rows tr'),'Collection keyword search requests the entered query and renders its matching page');
     workbenchSearch.value='';workbenchSearch.dispatchEvent(new Event('input',{bubbles:true}));await wait(420);
@@ -339,12 +398,13 @@ CHECK = r"""<script>
     historyDetail.querySelector('button').click();
     check(historyDetail.hidden&&currentHistoryButton?.getAttribute('aria-expanded')==='false'&&document.activeElement===currentHistoryButton,'closing run detail restores focus to its current opener');
     history.replaceState(null,'',location.pathname+'?q=renewables#keywords');window.dispatchEvent(new Event('hashchange'));
-    check(location.hash==='#collections','legacy keyword deep link redirects to Collections');
+    check(location.pathname==='/keywords'&&location.hash==='','legacy keyword hash migrates to the clean keyword route');
     check(new URLSearchParams(location.search).get('q')==='renewables','legacy keyword deep link preserves the search query');
-    check(!document.querySelector('[data-view=collections]').hidden,'legacy keyword deep link opens the keyword workspace');
-    check(document.querySelector('[data-view=overview]').hidden,'legacy keyword deep link does not expose a second explorer');
+    check(document.querySelector('[data-nav=keywords]').getAttribute('aria-current')==='page','legacy keyword deep link activates keyword navigation');
+    check(!document.querySelector('[data-view=overview]').hidden,'keyword route shows the existing overview explorer');
     check(location.search==='?q=renewables','legacy route preserves query string');
     history.replaceState(null,'',location.pathname+'#runs');window.dispatchEvent(new Event('hashchange'));
+    check(location.pathname==='/runs'&&location.hash==='','legacy run hash migrates to the clean history route');
     document.querySelector('#run-id').value=RUN_A;document.querySelector('#load-run').click();await wait(180);
     check(document.querySelector('#runs-current').textContent===RUN_A,'run lookup');
     check(document.querySelector('#run-note').textContent.includes('Lần phân tích'),'Vietnamese dynamic run label');
@@ -439,7 +499,7 @@ CHECK = r"""<script>
     await wait(300);
     check(document.documentElement.dataset.theme==='dark','dark theme toggle');
     check(document.documentElement.lang==='en','English toggle');
-    check(document.querySelector('#keyword-count').textContent==='1,234','English number format');
+    check(document.querySelector('#keyword-count').textContent==='1,234','English number format: '+document.querySelector('#keyword-count').textContent+'; locale='+document.documentElement.lang);
     check(document.querySelector('#run-note').textContent.includes('Run '),'English dynamic run label');
     check(document.querySelector('[data-nav=overview]').textContent.includes('Overview'),'English navigation translation');
     check(document.querySelector('#rows').closest('table').querySelector('th[data-i18n="table.topic"]').textContent.includes('TOPIC'),'English Discover table translation');
@@ -479,9 +539,11 @@ CHECK = r"""<script>
     check(document.querySelector('#global-notice').textContent.includes('30 lần kiểm tra'),'polling stop status');
     window.setTimeout=nativeTimeout;
     const writes=testRequests.filter(request=>request.method!=='GET');
-    check(writes.length===8&&writes.every(request=>[
+    check(writes.length===11&&writes.every(request=>[
       'POST /api/v1/collections','PATCH /api/v1/collections/collection-a',
       'DELETE /api/v1/collections/collection-a','POST /api/v1/collections/bulk',
+      'POST /api/v1/collections/suggestions/proposal-a/accept',
+      'POST /api/v1/collections/suggestions/proposal-b/reject','POST /api/v1/collections/reclassify',
       'POST /api/v1/research','PATCH /api/v1/research/research-fixture',
       'POST /api/v1/scheduler','PATCH /api/v1/scheduler/'+'e'.repeat(32)
     ].includes(request.method+' '+request.path)),'offline browser writes are limited to explicitly exercised Collection, Research, and Scheduler fixture actions');
@@ -508,17 +570,9 @@ def main():
     if not chrome:
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    phoenix_css = (PUBLIC / "phoenix.css").read_text(encoding="utf-8")
     invalid_preferences = """<script>try{localStorage.setItem('trendscout.theme','sepia');localStorage.setItem('trendscout.locale','fr')}catch{}</script>"""
-    html = html.replace('<link rel="stylesheet" href="/dashboard/styles.css">', "<style>" + css + "</style>")
-    html = html.replace('<link rel="stylesheet" href="/dashboard/phoenix.css">', "<style>" + phoenix_css + "</style>")
-    html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     check = CHECK.replace("RUN_A", json.dumps("a" * 32))
-    check = check.replace("API_MODULE_URI", json.dumps((PUBLIC / "modules" / "api.js").as_uri()))
-    check = check.replace("I18N_MODULE_URI", json.dumps((PUBLIC / "modules" / "i18n.js").as_uri()))
     with tempfile.TemporaryDirectory(prefix="trendscout-browser-") as directory:
-        page = Path(directory) / "index.html"
         for width in (320, 390, 768, 1024, 1440, 1920):
             page_html = html
             if width == 768:
@@ -528,33 +582,39 @@ def main():
             width_check = check.replace(
                 "INVALID_PREFERENCE_TEST", "true" if width == 768 else "false"
             ).replace("RELOAD_TEST", "true" if width == 320 else "false")
-            page.write_text(page_html.replace("</body>", FAKE + width_check + "</body>"),
-                            encoding="utf-8")
-            command = [
-                chrome,
-                "--headless",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-background-networking",
-                "--disable-extensions",
-                "--no-proxy-server",
-                "--disable-sync",
-                "--disable-component-update",
-                "--allow-file-access-from-files",
-                "--no-first-run",
-                "--user-data-dir=" + directory + "/profile-" + str(width),
-                "--window-size=" + str(width) + ",1000",
-                "--virtual-time-budget=24000",
-                "--dump-dom",
-                page.as_uri(),
-            ]
+            width_check = width_check.replace(
+                "API_MODULE_URI", json.dumps("/modules/api.js")
+            ).replace("I18N_MODULE_URI", json.dumps("/modules/i18n.js"))
+            if width == 768:
+                page_html = page_html.replace(
+                    "<script>\n    (() => {", invalid_preferences + "<script>\n    (() => {", 1
+                )
             env = {
                 key: value
                 for key, value in os.environ.items()
                 if key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
             }
-            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
-                                    errors="replace", timeout=40, env=env)
+            page_html = page_html.replace("</body>", FAKE + width_check + "</body>")
+            with serve_offline_frontend(PUBLIC, page_html) as app_url:
+                command = [
+                    chrome,
+                    "--headless",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--disable-background-networking",
+                    "--disable-extensions",
+                    "--no-proxy-server",
+                    "--disable-sync",
+                    "--disable-component-update",
+                    "--no-first-run",
+                    "--user-data-dir=" + directory + "/profile-" + str(width),
+                    "--window-size=" + str(width) + ",1000",
+                    "--virtual-time-budget=24000",
+                    "--dump-dom",
+                    app_url,
+                ]
+                result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                        errors="replace", timeout=90, env=env)
             if result.returncode or 'data-browser-result="PASS"' not in result.stdout:
                 marker = (
                     result.stdout.split("data-browser-result=", 1)[-1][:800]

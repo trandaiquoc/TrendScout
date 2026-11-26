@@ -1876,7 +1876,7 @@ class CollectionStore:
                 + "ORDER BY p.created_at DESC",
                 (self.data_mode_scope,) if self.data_mode_scope else ())]
 
-    def resolve_proposal(self, proposal_id, accept):
+    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None):
         with self.connect() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=? AND status='PENDING'", (proposal_id,)).fetchone()
             if row is None:
@@ -1895,9 +1895,11 @@ class CollectionStore:
                            (fingerprint(row["name"]), "REJECTED_PROPOSAL", now(), row["name"]))
             else:
                 identifier, stamp = str(uuid.uuid4()), now()
+                collection_name = name if name is not None else row["name"]
+                collection_description = description if description is not None else row["description"]
                 db.execute("""INSERT INTO collections(id,name,description,created_by,reason,created_at,updated_at)
                     VALUES(?,?,?,'AI',?,?,?)""",
-                    (identifier, row["name"], row["description"], row["reason"], stamp, stamp))
+                    (identifier, collection_name, collection_description, row["reason"], stamp, stamp))
                 for keyword_id in support_ids:
                     db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,NULL,?,?)",
                                (identifier, keyword_id, "Representative keyword in accepted AI suggestion", now()))

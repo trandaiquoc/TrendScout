@@ -1,10 +1,10 @@
-"""Stage dashboard files as standalone Vercel static assets."""
+"""Stage frontend files as root-level Vercel static assets."""
 
 from pathlib import Path
 
 script = Path(__file__).resolve()
 backend = script.parents[1]
-target = backend / "public" / "dashboard"
+target = backend / "public"
 roots = [*script.parents, *Path.cwd().resolve().parents, Path.cwd().resolve()]
 source = next(
     (
@@ -27,12 +27,8 @@ if "index.html" not in assets:
     raise FileNotFoundError("Frontend/public/index.html was not included in the Vercel dashboard bundle")
 
 target.mkdir(parents=True, exist_ok=True)
-expected = set(assets)
-for existing in target.rglob("*"):
-    if existing.is_file() and existing.relative_to(target).as_posix() not in expected:
-        existing.unlink()
 for relative, path in assets.items():
     destination = target / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(path.read_bytes())
-print(f"Staged {len(assets)} dashboard assets in {target}")
+print(f"Staged {len(assets)} frontend assets in {target}")

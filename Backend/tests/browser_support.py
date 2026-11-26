@@ -3,6 +3,7 @@
 import base64
 import errno
 import hashlib
+import http.server
 import json
 import os
 import platform
@@ -13,7 +14,11 @@ import struct
 import subprocess
 import sys
 import time
+import threading
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def require_linux_network_isolation():
@@ -133,6 +138,49 @@ def find_chrome():
         if root:
             candidates.append(str(Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe"))
     return next((item for item in candidates if item and Path(item).is_file()), None)
+
+
+@contextmanager
+def serve_offline_frontend(public_directory, html):
+    """Serve an injected UI fixture on loopback so clean-path history works in Chrome."""
+    public_root = Path(public_directory).resolve()
+    route_paths = {
+        "/", "/keywords", "/collections", "/products", "/trends", "/sources",
+        "/research", "/settings", "/runs", "/algorithms", "/quality",
+    }
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(public_root), **kwargs)
+
+        def do_GET(self):
+            path = urlsplit(self.path).path
+            if path in route_paths or (
+                path.count("/") == 2
+                and any(path.startswith(prefix) for prefix in ("/collections/", "/sources/"))
+            ):
+                payload = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            super().do_GET()
+
+        def log_message(self, _format, *args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 class ChromeDevTools:

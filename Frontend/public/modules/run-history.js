@@ -243,7 +243,7 @@ async function loadRunHistoryDetail(fetchId, trigger) {
   return {
     load: loadRunHistory,
     relocalize() {
-      if (window.location.hash === '#runs') loadRunHistory();
+      if (window.location.pathname === '/runs') loadRunHistory();
       if (!$('#run-history-detail').hidden && state.runHistoryDetailItem) renderRunHistoryDetail(state.runHistoryDetailItem);
     },
   };

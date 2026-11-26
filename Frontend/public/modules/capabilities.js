@@ -1,4 +1,5 @@
 import { getJson } from './api.js';
+import { createSourceMark } from './source-brand.js';
 
 const CAPABILITIES_REQUEST_TIMEOUT_MS = 55_000;
 const CAPABILITY_RETRY_DELAYS_MS = Object.freeze([2_000, 5_000, 10_000]);
@@ -420,8 +421,9 @@ export function renderSourceCapabilities(capabilities, translate) {
     grid.replaceChildren();
     for (const descriptor of descriptors.values()) {
       const card=document.createElement('article'); card.className='panel source-card';
+      card.dataset.sourceId = descriptor.source_id;
       const head=document.createElement('div'); head.className='source-card-head';
-      const icon=document.createElement('span'); icon.className='source-monogram'; icon.textContent=descriptor.icon || '•';
+      const icon=createSourceMark(descriptor.source_id, { showExistingLogo: false }); icon.classList.add('source-monogram');
       const badge=document.createElement('span'); badge.className='pill pill--gray';
       const badges=document.createElement('div'); badges.className='source-card-badges';
       const adapterBadge=document.createElement('span'); adapterBadge.className='source-adapter-badge';
@@ -429,7 +431,15 @@ export function renderSourceCapabilities(capabilities, translate) {
         ? descriptor.local_live_verification_status : descriptor.adapter_status;
       adapterBadge.textContent=localizedStatus(statusBadge,translate);
       badges.append(adapterBadge,badge); head.append(icon,badges); card.append(head);
-      const title=document.createElement('h2'); title.textContent=descriptor.display_name || descriptor.source_id; card.append(title);
+      const title=document.createElement('h2');
+      const titleLink=document.createElement('a');
+      titleLink.textContent=descriptor.display_name || descriptor.source_id;
+      titleLink.href=`/sources/${encodeURIComponent(descriptor.source_id)}`;
+      titleLink.setAttribute('aria-label', translate('sources.open-details', {
+        name: descriptor.display_name || descriptor.source_id,
+      }));
+      titleLink.dataset.sourceDetailRoute='true';
+      title.append(titleLink); card.append(title);
       const summary=document.createElement('p'); summary.textContent=localizedSourceText(descriptor,'meaning',descriptor.metric?.meaning,translate); card.append(summary);
       const list=document.createElement('dl'); list.className='detail-list';
       for (const [labelKey,field] of STATUS_FIELDS) {
@@ -542,6 +552,7 @@ export function renderSourceCapabilities(capabilities, translate) {
         const dt=document.createElement('dt'); dt.textContent=label; const dd=document.createElement('dd'); dd.textContent=value; const row=document.createElement('div'); row.append(dt,dd); list.append(row);
       }
       const details=document.createElement('details'); details.className='source-capability-details';
+      details.dataset.sourceId = descriptor.source_id;
       const detailSummary=document.createElement('summary'); detailSummary.textContent=translate('phoenix.source-details'); details.append(detailSummary,list);
       try {
         const url=new URL(descriptor.documentation_url);
@@ -569,17 +580,20 @@ export function renderSourceCapabilities(capabilities, translate) {
   const sidebarStatus = document.querySelector('#sidebar-source-status');
   const sidebarDot = document.querySelector('#sidebar-source-dot');
   const mainStatus = document.querySelector('#main-source-status');
+  const sourceList = Array.isArray(capabilities?.sources) ? capabilities.sources : null;
+  const enabledSourceCount = sourceList?.filter((source) => source.enabled_for_current_operation === true).length;
+  if (sidebarStatus) {
+    sidebarStatus.textContent = sourceList
+      ? translate('source.sidebar-summary', { enabled: enabledSourceCount, total: sourceList.length })
+      : translate('common.unavailable');
+  }
   if (!isVercelSharedLive(capabilities)
       && wikimedia?.local_live_verification_status === 'LOCAL_LIVE_VERIFIED') {
-    for (const badge of [sidebarStatus, mainStatus]) {
-      if (badge) badge.textContent = translate(enabled ? 'source.enabled-local-verified' : 'source.historical-local-verified');
-    }
-  } else {
-    for (const badge of [sidebarStatus, mainStatus]) {
-      if (badge) badge.textContent = translate(enabled ? 'source.enabled' : 'source.disabled');
-    }
+    if (mainStatus) mainStatus.textContent = translate(enabled ? 'source.enabled-local-verified' : 'source.historical-local-verified');
+  } else if (mainStatus) {
+    mainStatus.textContent = translate(enabled ? 'source.enabled' : 'source.disabled');
   }
-  if (sidebarDot) sidebarDot.className = `status-dot ${enabled ? 'status-dot--green' : 'status-dot--muted'}`;
+  if (sidebarDot) sidebarDot.className = `status-dot ${enabledSourceCount > 0 ? 'status-dot--green' : 'status-dot--muted'}`;
   if (mainStatus) {
     mainStatus.classList.toggle('pill--green', enabled);
     mainStatus.classList.toggle('pill--gray', !enabled);
