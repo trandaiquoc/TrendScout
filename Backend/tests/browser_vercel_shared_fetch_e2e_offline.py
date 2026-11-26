@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from browser_support import find_chrome, require_linux_network_isolation
+from browser_support import find_chrome, require_linux_network_isolation, serve_offline_frontend
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
@@ -61,19 +61,6 @@ def main():
     }
 
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    css = (PUBLIC / "styles.css").read_text(encoding="utf-8")
-    html = html.replace(
-        '<link rel="stylesheet" href="/dashboard/styles.css">',
-        "<style>" + css + "</style>",
-    )
-    html = html.replace(
-        'href="/dashboard/phoenix.css"',
-        'href="' + (PUBLIC / "phoenix.css").as_uri() + '"',
-    )
-    html = html.replace(
-        'src="/dashboard/app.js"',
-        'src="' + (PUBLIC / "app.js").as_uri() + '"',
-    )
     bridge = """
 <script>
 const fetchId = '__FETCH_ID__';
@@ -218,7 +205,8 @@ window.fetch = (path, options = {}) => {
     'unchanged source evidence does not refresh analytics');
   check(!recoveryRequests.some((request) => request.path === '/api/v1/collections/jobs/' + fetchId),
     'successful reuse does not poll for a deliberately absent Collections job');
-  check(window.location.hash === '#overview', 'completed Shared LIVE Fetch stays on Overview');
+  check(window.location.pathname === '/' && window.location.hash === '',
+    'completed Shared LIVE Fetch stays on the clean Overview route');
   document.querySelector('[data-nav="collections"]').click();
   await wait(250);
   check(window.collectionsReads >= 1, 'persisted Collections snapshot is readable');
@@ -245,9 +233,8 @@ window.fetch = (path, options = {}) => {
 </script>
 """
     html = html.replace("</body>", bridge + check + "</body>")
-    with tempfile.TemporaryDirectory(prefix="trendscout-vercel-shared-fetch-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="trendscout-vercel-shared-fetch-") as directory, \
+            serve_offline_frontend(PUBLIC, html) as frontend_url:
         command = [
             chrome,
             "--headless",
@@ -258,13 +245,12 @@ window.fetch = (path, options = {}) => {
             "--no-proxy-server",
             "--disable-sync",
             "--disable-component-update",
-            "--allow-file-access-from-files",
             "--no-first-run",
             f"--user-data-dir={directory}/profile",
             "--window-size=1280,900",
             "--virtual-time-budget=15000",
             "--dump-dom",
-            page.as_uri(),
+            frontend_url,
         ]
         result = subprocess.run(
             command,

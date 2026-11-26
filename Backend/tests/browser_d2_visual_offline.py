@@ -1,15 +1,21 @@
 """Capture reviewed D2 screenshots from the offline dashboard fixture."""
 
 import base64
+import json
 import tempfile
 import time
 from pathlib import Path
 
-from browser_support import ChromeDevTools, find_chrome, require_linux_network_isolation
+from browser_support import (
+    ChromeDevTools,
+    find_chrome,
+    require_linux_network_isolation,
+    serve_offline_frontend,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ROOT / "Frontend" / "public"
-OUTPUT = ROOT / "Documents" / "Reports" / "windows-evidence" / "overnight-g2-g7"
+OUTPUT = ROOT / "Documents" / "Reports" / "windows-evidence" / "ui-overhaul"
 RUN_ID = "a" * 32
 KEYWORD_ID = "c" * 64
 
@@ -20,6 +26,30 @@ window.fetch=(path,options={})=>{
   const value=String(path).split('?')[0];
   if(value==='/api/v1/scheduler'&&options.method==='POST')return Promise.resolve(new Response(JSON.stringify({item:{id:'f'.repeat(32),name:'Daily synthetic check',frequency:'DAILY',timezone:'Asia/Ho_Chi_Minh',hour:9,minute:0,enabled:false}}),{status:201}));
   if(value==='/api/health')return Promise.resolve(new Response(JSON.stringify({status:'ok'}),{status:200}));
+  if(value==='/api/v1/dashboard/bootstrap')return Promise.resolve(new Response(JSON.stringify({
+    item:{dataset_id:'fixture-dataset',status:'PARTIAL',data_mode:'SYNTHETIC',
+      sources:['wikimedia_pageviews_top_per_country'],provider_record_count:4,received_record_count:3,
+      retained_keyword_count:3,snapshot_retained_keyword_count:3,eligible_keyword_count:3,
+      assigned_keyword_count:2,unassigned_keyword_count:1,excluded_keyword_count:0,
+      observation_start:'2026-11-10',observation_end:'2026-11-10',fetched_at:'2026-11-11T03:00:00Z',
+      quality_flags:[],ledger_coverage_status:'SNAPSHOT_ONLY'},
+    analytics:{keyword_totals:{unique:3,eligible:3,excluded:0,classified:2,ambiguous:0,unknown:1,ineligible:0,unclassified:1},active_sources:[],
+      source_volume:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}],
+      algorithm_distribution:[{algorithm_id:'observed-volume-rank',version:'v3',status:'COMPLETED',count:3},{algorithm_id:'observed-volume-rank',version:'v3',status:'SKIPPED',count:1}],
+      algorithm_effectiveness:{status:'NOT_YET_EVALUATED',reason:'No comparable labeled historical evaluation is stored.'},
+      source_operations:[{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',source_manifest:[{source_id:'wikimedia_pageviews_top_per_country',status:'PARTIAL',accepted_records:3,record_count:4}]}],
+      multi_source_coverage:{status:'INSUFFICIENT_SOURCES',sources:[{source:'wikimedia_pageviews_top_per_country',keywords:3,first_seen:'2026-11-10',last_seen:'2026-11-10'}]},
+      observations_over_time:[{source:'wikimedia_pageviews_top_per_country',observation_date:'2026-11-10',observed:0,unavailable:null}],
+      top_observed:[{rank:1,keyword:'Example topic',metric:'views_ceil',unit:'approx_pageviews_upper_bound',observed_value:8400}],
+      top_observed_context:{source:'wikimedia_pageviews_top_per_country',project:'en.wikipedia',observation_date:'2026-11-10',cohort_size:3,
+        scope:['wikimedia_pageviews_top_per_country','US','all-access','en.wikipedia','views_ceil','approx_pageviews_upper_bound'],quality_flags:['CENSORED_TOP_LIST','SYNTHETIC_FIXTURE']},
+      last_successful_fetch:{fetched_at:'2026-11-11T03:00:00Z',status:'PARTIAL',age_seconds:3600}},
+    keywords:{items:[
+      {id:'c'.repeat(64),keyword:'Kitchen organizer',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'CLASSIFIED',memberships:[{id:'fixture-child',name:'Smart Home',origin:'LOCAL_AI'}],evidence:{views_ceil:8400}},
+      {id:'d'.repeat(64),keyword:'Home energy monitor',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'CLASSIFIED',memberships:[{id:'fixture-child',name:'Smart Home',origin:'LOCAL_AI'}],evidence:{views_ceil:4200}},
+      {id:'e'.repeat(64),keyword:'Compact apartment storage',source:'wikimedia_pageviews_top_per_country',observed_at:'2026-11-10',eligible:1,classification_status:'UNKNOWN',memberships:[],evidence:{views_ceil:2100}}
+    ],total:3,next_offset:null}
+  }),{status:200}));
   if(value==='/api/v1/capabilities')return Promise.resolve(new Response(JSON.stringify({contract_version:'1.0',environment_mode:'local',read_only:false,local_live_demo:true,authentication_required:false,public_fetch_enabled:false,fetch_enabled:false,fetch_block_reason:'FEATURE_DISABLED',data_mode:'LIVE',sources:[
     {source_id:'wikimedia_pageviews_top_per_country',display_name:'Wikimedia Pageviews',icon:'W',category:'trends_search_interest',adapter_status:'IMPLEMENTED',approval_status:'PENDING_LIVE_APPROVAL',configuration_status:'NOT_REQUIRED',local_live_verification_status:'LOCAL_LIVE_VERIFIED',production_readiness:'NOT_PRODUCTION_READY',enabled_for_current_operation:false,last_saved_fetch:{status:'PARTIAL',data_mode:'SYNTHETIC',record_count:4,fetched_at:'2026-11-11T03:00:00Z',observation_start:'2026-11-10',observation_end:'2026-11-10'},metric:{name:'views_ceil',unit:'approx_pageviews_upper_bound',meaning:'Approximate pageviews in a censored source sample'},market_scope:'US country scoped top list',documentation_url:'https://doc.wikimedia.org/generated-data-platform/aqs/'},
     {source_id:'youtube_video_search',display_name:'YouTube',icon:'▶',category:'video_streaming',adapter_status:'IMPLEMENTED_OFFLINE_VERIFIED',approval_status:'PENDING_APPROVAL',configuration_status:'NOT_CONFIGURED',local_live_verification_status:'NOT_VERIFIED',production_readiness:'NOT_APPROVED',enabled_for_current_operation:false,metric:{name:'result_rank',unit:'ordinal result position',meaning:'Position in query-scoped video search results'},market_scope:'US region filter',documentation_url:'https://developers.google.com/youtube/v3/docs/search/list'},
@@ -87,15 +117,11 @@ def main():
     if not chrome:
         raise SystemExit("Chrome unavailable")
     html = (PUBLIC / "index.html").read_text(encoding="utf-8")
-    html = html.replace(
-        'href="/dashboard/styles.css"', 'href="' + (PUBLIC / "styles.css").as_uri() + '"'
-    )
-    html = html.replace('src="/dashboard/app.js"', 'src="' + (PUBLIC / "app.js").as_uri() + '"')
     html = html.replace("</body>", FAKE + "</body>")
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="trendscout-d2-visual-") as directory:
-        page = Path(directory) / "index.html"
-        page.write_text(html, encoding="utf-8")
+    with serve_offline_frontend(PUBLIC, html) as app_url, tempfile.TemporaryDirectory(
+        prefix="trendscout-d2-visual-"
+    ) as directory:
         browser = ChromeDevTools(chrome, Path(directory) / "profile")
         call = browser.call
         console_errors = []
@@ -107,7 +133,7 @@ def main():
             ]
             call("Page.enable", session=session)
             call("Runtime.enable", session=session)
-            call("Page.navigate", {"url": page.as_uri()}, session)
+            call("Page.navigate", {"url": app_url}, session)
 
             def evaluate(expression, await_promise=False):
                 result = call(
@@ -168,7 +194,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             evaluate("document.querySelector('#settings-schedule-form').elements.namedItem('name').value='Daily synthetic check';document.querySelector('#settings-schedule-form').elements.namedItem('operator-key').value='offline-scheduler-key-0123456789';document.querySelector('#settings-schedule-form').requestSubmit()")
             if not evaluate("window.waitFor(()=>window.fetchCalls.some(call=>call.path==='/api/v1/scheduler'&&call.method==='POST'))", await_promise=True):
                 raise RuntimeError("scheduler create control did not call the protected same-origin API")
-            if not evaluate("window.fetchCalls.find(call=>call.path==='/api/v1/scheduler'&&call.method==='POST')?.headers?.Authorization==='Bearer offline-scheduler-key-0123456789'&&document.querySelector('#settings-schedule-form').elements.namedItem('operator-key').value===''&&!localStorage.length&&!sessionStorage.length"):
+            if not evaluate("window.fetchCalls.find(call=>call.path==='/api/v1/scheduler'&&call.method==='POST')?.headers?.Authorization==='Bearer offline-scheduler-key-0123456789'&&document.querySelector('#settings-schedule-form').elements.namedItem('operator-key').value===''&&!Object.entries(localStorage).some(([key,value])=>/token|secret|credential/i.test(key+' '+value))&&!Object.entries(sessionStorage).some(([key,value])=>/token|secret|credential/i.test(key+' '+value))"):
                 raise RuntimeError("scheduler operator key was not transient or was not sent to the protected endpoint")
             if not evaluate("document.querySelector('#settings-schedule-feedback').textContent.includes('Đã tạo lịch ở trạng thái tắt')"):
                 raise RuntimeError("scheduler create did not explain that the new schedule remains disabled")
@@ -212,10 +238,11 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                     raise RuntimeError("theme or locale did not update")
 
             def go(view):
-                evaluate(
-                    "location.hash='#" + view + "';window.dispatchEvent(new Event('hashchange'))"
-                )
+                route = "/" if view == "overview" else "/trends" if view == "analysis" else "/" + view
+                evaluate("history.pushState(null,''," + json.dumps(route) + ");window.dispatchEvent(new PopStateEvent('popstate',{state:null}))")
                 time.sleep(0.08)
+                if evaluate("location.pathname") != route or evaluate("location.hash"):
+                    raise RuntimeError("clean path navigation failed for " + view)
 
             def capture(name, width, full_page=True, configure=True):
                 if configure:
@@ -270,7 +297,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
             capture("mobile-dark-en-overview.webp", 375)
 
             set_preferences("light", "vi")
-            for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
+            for view in ("keywords", "analysis", "collections", "products", "sources", "runs", "algorithms", "quality", "research", "settings"):
                 for width in (320, 390, 768, 1024, 1440, 1920):
                     set_viewport(width, 900 if width > 500 else 820)
                     go(view)
@@ -309,7 +336,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
 
             for locale, theme in (("vi", "dark"), ("en", "light"), ("en", "dark")):
                 set_preferences(theme, locale)
-                for view in ("analysis", "collections", "sources", "runs", "algorithms", "quality", "research", "settings"):
+                for view in ("keywords", "analysis", "collections", "products", "sources", "runs", "algorithms", "quality", "research", "settings"):
                     for width in (320, 390, 768, 1024, 1440, 1920):
                         set_viewport(width, 900 if width > 500 else 820)
                         go(view)
@@ -317,6 +344,25 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                             raise RuntimeError(f"{width}px document horizontal overflow on {view} ({locale}/{theme})")
                         time.sleep(0.18)
                         capture(f"screen-{view}-{width}-{locale}-{theme}.webp", width, configure=False)
+
+            # Load a source deep link from the server, then reload that exact URL.
+            # This exercises the direct-route fallback and source-detail expansion.
+            source_url = app_url + "sources/google_web_serp"
+            call("Page.navigate", {"url": source_url}, session)
+            for _ in range(200):
+                if evaluate("location.pathname==='/sources/google_web_serp'&&Boolean(document.querySelector('#source-registry-list .source-card[data-source-id=google_web_serp] details')?.open)"):
+                    break
+                time.sleep(0.025)
+            else:
+                raise RuntimeError("direct source deep link did not render expanded source details")
+            call("Page.reload", {"ignoreCache": True}, session)
+            for _ in range(200):
+                if evaluate("location.pathname==='/sources/google_web_serp'&&Boolean(document.querySelector('#source-registry-list .source-card[data-source-id=google_web_serp] details')?.open)"):
+                    break
+                time.sleep(0.025)
+            else:
+                raise RuntimeError("reloading a source deep link did not preserve the expanded source detail")
+            evaluate(async_def_js)
 
             set_viewport(1280)
             set_preferences("light", "vi")
@@ -373,7 +419,7 @@ window.waitFor=async function(p){for(let n=0;n<100;n++){if(p())return true;await
                         console_errors.append(message or "console.error")
             if console_errors:
                 raise RuntimeError("Browser console errors: " + " | ".join(console_errors))
-            print("Visual evidence: Overview and all eight screens captured at six widths in VI/EN light/dark, plus merge picker/review dialogs.")
+            print("Visual evidence: Overview and ten workspace screens captured at six widths in VI/EN light/dark, plus merge dialogs; direct source deep link and reload: PASS.")
         finally:
             browser.close()
 

@@ -1005,6 +1005,9 @@ dialog::backdrop { background: rgb(12 20 34 / 58%); backdrop-filter: blur(3px); 
   .chart-row { grid-template-columns: minmax(70px, 1fr) minmax(35px, .8fr) minmax(48px, auto); gap: 7px; }
   .chart-label, .chart-value { font-size: 9px; }
   .source-scope-pill { padding: 4px 6px; font-size: 8px; }
+  .discover-grid .panel-heading { flex-wrap: wrap; }
+  .discover-grid .panel-heading > div { min-width: 0; }
+  .discover-grid .source-scope-pill { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
   dialog { padding: 17px; }
 }
 
@@ -1114,8 +1117,6 @@ select:disabled, input:disabled { cursor:not-allowed; opacity:.7; }
 button:disabled { filter:saturate(.65); }
 @media (max-width:1100px) {
   .sidebar-collapse { display:none; }
-  .source-context-panel .panel-heading { flex-wrap:wrap; }
-  .source-context-panel #main-source-status { max-width:100%; white-space:normal; }
   .shell.sidebar-collapsed { grid-template-columns:minmax(0,1fr); }
   .shell.sidebar-collapsed .sidebar { width:min(84vw,310px); padding:22px 15px 16px; }
   .shell.sidebar-collapsed .brand-word, .shell.sidebar-collapsed .nav-label, .shell.sidebar-collapsed .policy-links,

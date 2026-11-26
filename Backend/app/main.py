@@ -12,10 +12,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
@@ -1295,10 +1295,6 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    @application.get("/", include_in_schema=False)
-    async def dashboard_root():
-        return RedirectResponse(url="/dashboard/", status_code=307)
-
     @application.get("/api/config")
     async def app_config():
         return {"read_only": read_only}
@@ -1328,15 +1324,51 @@ def create_app(
             postgres_context_factory=vercel_postgres_context_factory,
         )
     frontend_source = Path(__file__).resolve().parents[2] / "Frontend" / "public"
-    vercel_frontend = Path(__file__).resolve().parents[1] / "public" / "dashboard"
+    vercel_frontend = Path(__file__).resolve().parents[1] / "public"
     frontend = (
         vercel_frontend if settings.environment_profile == "vercel" and vercel_frontend.is_dir()
         else frontend_source
     )
     if frontend.is_dir():
-        application.mount(
-            "/dashboard", StaticFiles(directory=frontend, html=True), name="dashboard"
-        )
+        index_file = frontend / "index.html"
+
+        async def serve_frontend_index():
+            return FileResponse(index_file)
+
+        async def serve_policy_page(page: str):
+            return FileResponse(frontend / page)
+
+        @application.get("/dashboard", include_in_schema=False)
+        @application.get("/dashboard/", include_in_schema=False)
+        async def legacy_dashboard_root():
+            return RedirectResponse(url="/", status_code=308)
+
+        @application.get("/dashboard/{legacy_path:path}", include_in_schema=False)
+        async def legacy_dashboard_path(legacy_path: str, request: Request):
+            if any(part in {".", ".."} for part in legacy_path.split("/")):
+                return JSONResponse({"detail": "Not found"}, status_code=404)
+            destination = "/" + quote(legacy_path, safe="/-._~")
+            if request.url.query:
+                destination += "?" + request.url.query
+            return RedirectResponse(url=destination, status_code=308)
+
+        @application.get("/privacy", include_in_schema=False)
+        async def privacy_page():
+            return await serve_policy_page("privacy.html")
+
+        @application.get("/terms", include_in_schema=False)
+        async def terms_page():
+            return await serve_policy_page("terms.html")
+
+        for route in (
+            "/keywords", "/collections", "/products", "/trends", "/sources",
+            "/research", "/settings", "/runs", "/algorithms", "/quality",
+        ):
+            application.add_api_route(route, serve_frontend_index, methods=["GET"], include_in_schema=False)
+        for route in ("/collections/{item_id}", "/sources/{item_id}"):
+            application.add_api_route(route, serve_frontend_index, methods=["GET"], include_in_schema=False)
+
+        application.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
 
     @application.exception_handler(StorageError)
     async def storage_error(_request: Request, _exc: StorageError):

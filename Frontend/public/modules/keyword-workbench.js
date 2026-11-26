@@ -467,11 +467,15 @@ function usesDefaultKeywordPage() {
     && state.limit === 25;
 }
 function updateRoute() {
-  const url=new URL(window.location.href); for(const key of ['q','state','classification','source','evidence','sort','from','to','collection_id','offset']) url.searchParams.delete(key);
+  const url=new URL(window.location.href); for(const key of ['q','state','classification','source','evidence','sort','from','to','collection_id','collection_ids','offset']) url.searchParams.delete(key);
+  const collectionPath = url.pathname === '/collections' || url.pathname.startsWith('/collections/');
+  if (collectionPath) {
+    url.pathname = state.collectionId ? `/collections/${encodeURIComponent(state.collectionId)}` : '/collections';
+  }
   if(state.query) url.searchParams.set('q',state.query); if(state.filterState!=='all') url.searchParams.set('state',state.filterState);
   if(state.classification!=='all') url.searchParams.set('classification',state.classification); if(state.source) url.searchParams.set('source',state.source);
   if(state.evidence!=='all') url.searchParams.set('evidence',state.evidence); if(state.sort!=='recent') url.searchParams.set('sort',state.sort);
-  if(state.dateFrom) url.searchParams.set('from',state.dateFrom); if(state.dateTo) url.searchParams.set('to',state.dateTo); if(state.collectionId) url.searchParams.set('collection_id',state.collectionId); if(state.offset) url.searchParams.set('offset',String(state.offset));
+  if(state.dateFrom) url.searchParams.set('from',state.dateFrom); if(state.dateTo) url.searchParams.set('to',state.dateTo); if(state.collectionId&&!collectionPath) url.searchParams.set('collection_id',state.collectionId); if(state.offset) url.searchParams.set('offset',String(state.offset));
   window.history.replaceState(null,'',url.pathname+url.search+url.hash);
 }
 function changedFilters() { state.selected.clear(); state.allFiltered=false; renderActiveFilters(); updateRoute(); loadRows(); }
@@ -541,10 +545,184 @@ async function refresh() {
     await loadRows(usesDefaultKeywordPage() ? response.keyword_page : null);
   } catch(error){state.items=[];state.suggestions=[];state.summary=null;state.rows=[];state.total=null;state.selected.clear();state.allFiltered=false;renderTree();renderSuggestions();renderSummary();renderTable();status(error.message||labels('collections.error','Could not load Collections'),true);}
 }
+async function loadRows(preloadedResult = null) {
+  const sequence = ++state.sequence;
+  if (!$('#workbench-rows')) return;
+  try {
+    const result = preloadedResult && Array.isArray(preloadedResult.items)
+      && Number.isInteger(preloadedResult.total)
+      ? preloadedResult
+      : await getJson('/api/v1/datasets/latest/keywords?' + queryParams(), { locale: getLocale() });
+    if (sequence !== state.sequence) return;
+    state.rows = Array.isArray(result.items) ? result.items : [];
+    state.total = Number.isInteger(result.total) && result.total >= 0 ? result.total : null;
+    renderTable();
+    if (state.total === null) {
+      status(labels('workbench.rows-unavailable', 'Keyword count is unavailable. Reload to try again.'), true);
+    }
+  } catch (error) {
+    if (sequence !== state.sequence) return;
+    state.rows = [];
+    state.total = null;
+    renderTable();
+    status(error.message || labels('error.keyword-fetch', 'Could not load keywords'), true);
+  }
+}
 function displayCount(value){return value===null||value===undefined?labels('common.unavailable','—'):number(value);}
 function renderSummary(){const summary=$('#workbench-summary');if(!summary)return;summary.replaceChildren();const s=state.summary||{};for(const [key,value] of [['workbench.keywords',s.eligible_keywords],['workbench.in-collections',s.assigned_keywords],['workbench.unclassified',s.unclassified_keywords],['workbench.excluded',s.excluded_keywords]]){const card=make('div','','workbench-stat');card.append(make('span',labels(key,key)),make('strong',displayCount(value)));summary.append(card);}const note=make('p','','workbench-summary-note');note.textContent=formatted('workbench.summary-detail',{classified:displayCount(s.classified_keywords),ambiguous:displayCount(s.ambiguous_keywords),unknown:displayCount(s.unknown_keywords),ineligible:displayCount(s.ineligible_topic_keywords),automatic:displayCount(s.ai_assigned_keywords),manual:displayCount(s.manually_managed_keywords),created:displayCount(s.ai_created_collections)},'Classification: {classified} clear, {ambiguous} uncertain, {unknown} lacking context, {ineligible} not a topic. Placed automatically: {automatic}; added by you: {manual}; new Collections: {created}.');summary.append(note);}
-function renderSuggestions(){const details=$('#workbench-proposals'),summary=$('#workbench-proposals-summary'),list=$('#workbench-proposal-list');if(!details||!summary||!list)return;summary.textContent=formatted('workbench.proposals',{count:number(state.suggestions.length)},'Suggested topics ({count})');list.replaceChildren();details.hidden=!state.suggestions.length;for(const proposal of state.suggestions){const card=make('article','','workbench-proposal');card.append(make('strong',proposal.name),make('p',proposal.description||labels('common.unavailable','Unavailable')));let support=[];try{support=Array.isArray(proposal.support_ids)?proposal.support_ids:JSON.parse(proposal.support_ids||'[]');}catch{}card.append(make('small',formatted('workbench.proposal-support',{count:number(support.length)},'Supported by {count} keywords')));const actions=make('div','','workbench-proposal-actions');const accept=button(labels('collections.accept','Accept'));accept.addEventListener('click',async()=>{try{await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/accept`,{method:'POST',locale:getLocale()});await refresh();status(labels('workbench.proposal-accepted','Topic proposal added as a Collection.'));}catch(error){status(error.message||labels('collections.error','Could not accept proposal'),true);}});const reject=button(labels('collections.reject','Dismiss'));reject.addEventListener('click',async()=>{try{await requestJson(`/api/v1/collections/suggestions/${encodeURIComponent(proposal.id)}/reject`,{method:'POST',locale:getLocale()});await refresh();status(labels('workbench.proposal-dismissed','Topic proposal dismissed.'));}catch(error){status(error.message||labels('collections.error','Could not dismiss proposal'),true);}});actions.append(accept,reject);card.append(actions);list.append(card);}}
-async function loadRows(preloadedResult=null){const seq=++state.sequence;const body=$('#workbench-rows');if(!body)return;try{const result=preloadedResult&&Array.isArray(preloadedResult.items)&&Number.isInteger(preloadedResult.total)?preloadedResult:await getJson('/api/v1/datasets/latest/keywords?'+queryParams(),{locale:getLocale()});if(seq!==state.sequence)return;state.rows=Array.isArray(result.items)?result.items:[];state.total=Number.isInteger(result.total)&&result.total>=0?result.total:null;renderTable();if(state.total===null)status(labels('workbench.rows-unavailable','Keyword count is unavailable. Reload to try again.'),true);}catch(error){if(seq===state.sequence){state.rows=[];state.total=null;renderTable();status(error.message||labels('error.keyword-fetch','Could not load keywords'),true);}}}
+function renderSuggestions() {
+  const details = $('#workbench-proposals');
+  const summary = $('#workbench-proposals-summary');
+  const list = $('#workbench-proposal-list');
+  if (!details || !summary || !list) return;
+  summary.textContent = formatted('workbench.proposals', {
+    count: number(state.suggestions.length),
+  }, 'Suggested topics (' + number(state.suggestions.length) + ')');
+  list.replaceChildren();
+  details.hidden = !state.suggestions.length;
+
+  state.suggestions.forEach((proposal, index) => {
+    const card = make('article', '', 'workbench-proposal');
+    const title = make('h3', proposal.name || labels('common.unavailable', 'Unavailable'));
+    const description = make('p', proposal.description || labels('common.unavailable', 'Unavailable'));
+    card.append(title, description);
+
+    const support = parseSupportIds(proposal.support_ids);
+    card.append(make('small', formatted('workbench.proposal-support', {
+      count: number(support.length),
+    }, 'Supported by ' + number(support.length) + ' keywords')));
+    if (typeof proposal.reason === 'string' && proposal.reason.trim()) {
+      card.append(make('p', proposal.reason, 'fine-print'));
+    } else {
+      card.append(make('p', labels('workbench.proposal-reason-unavailable',
+        'The proposal reason was not reported.'), 'fine-print'));
+    }
+
+    const edit = make('details', '', 'workbench-proposal-edit');
+    edit.append(make('summary', labels('workbench.proposal-edit', 'Review and edit')));
+    const nameLabel = make('label', '', 'workbench-proposal-field');
+    const nameCaption = make('span', labels('workbench.proposal-name', 'Collection name'));
+    const nameInput = make('input');
+    nameInput.id = 'proposal-name-' + index;
+    nameInput.maxLength = 80;
+    nameInput.required = true;
+    nameInput.value = typeof proposal.name === 'string' ? proposal.name : '';
+    nameLabel.htmlFor = nameInput.id;
+    nameLabel.append(nameCaption, nameInput);
+    const descriptionLabel = make('label', '', 'workbench-proposal-field');
+    const descriptionCaption = make('span', labels('workbench.proposal-description', 'Description'));
+    const descriptionInput = make('textarea');
+    descriptionInput.id = 'proposal-description-' + index;
+    descriptionInput.maxLength = 1200;
+    descriptionInput.rows = 3;
+    descriptionInput.value = typeof proposal.description === 'string' ? proposal.description : '';
+    descriptionLabel.htmlFor = descriptionInput.id;
+    descriptionLabel.append(descriptionCaption, descriptionInput);
+    edit.append(nameLabel, descriptionLabel);
+
+    const evidence = make('details', '', 'workbench-proposal-evidence');
+    evidence.append(make('summary', labels('workbench.proposal-supporting-keywords',
+      'Supporting keywords')));
+    const evidenceList = make('ul');
+    const evidenceStatus = make('p', labels('workbench.proposal-support-prompt',
+      'Open to load up to five saved keyword names.'), 'fine-print');
+    evidence.append(evidenceList, evidenceStatus);
+    evidence.addEventListener('toggle', async () => {
+      if (!evidence.open || evidence.dataset.loaded === 'true' || evidence.dataset.loaded === 'loading') return;
+      evidence.dataset.loaded = 'loading';
+      evidenceStatus.textContent = labels('common.loading', 'Loading');
+      const ids = support.filter((id) => typeof id === 'string' && id.length <= 64).slice(0, 5);
+      if (!ids.length) {
+        evidenceStatus.textContent = labels('workbench.proposal-support-unavailable',
+          'Supporting keyword records are unavailable.');
+        evidence.dataset.loaded = 'true';
+        return;
+      }
+      try {
+        const records = await Promise.all(ids.map((id) => getJson(
+          '/api/v1/collections/keywords/' + encodeURIComponent(id), { locale: getLocale() },
+        )));
+        evidenceList.replaceChildren();
+        for (const record of records) {
+          const keyword = typeof record?.keyword === 'string' && record.keyword.trim()
+            ? record.keyword : labels('common.unavailable', 'Unavailable');
+          const source = typeof record?.source === 'string' ? ' · ' + sourceName(record.source) : '';
+          evidenceList.append(make('li', keyword + source));
+        }
+        evidenceStatus.textContent = support.length > ids.length
+          ? formatted('workbench.proposal-support-limit', {
+            shown: number(ids.length), total: number(support.length),
+          }, 'Showing ' + number(ids.length) + ' of ' + number(support.length) + ' supported keywords.')
+          : '';
+        evidence.dataset.loaded = 'true';
+      } catch (error) {
+        evidenceStatus.textContent = error.message
+          || labels('workbench.proposal-support-unavailable', 'Supporting keyword records are unavailable.');
+        evidence.dataset.loaded = '';
+      }
+    });
+    card.append(edit, evidence);
+
+    const actions = make('div', '', 'workbench-proposal-actions');
+    const accept = button(labels('workbench.proposal-accept-edited',
+      'Accept with these details'), 'button button-primary');
+    const reject = button(labels('collections.reject', 'Dismiss'));
+    accept.addEventListener('click', async () => {
+      const name = nameInput.value.trim();
+      if (!name) {
+        nameInput.setCustomValidity(labels('workbench.proposal-name-required',
+          'Enter a Collection name before accepting.'));
+        nameInput.reportValidity();
+        return;
+      }
+      nameInput.setCustomValidity('');
+      accept.disabled = true;
+      reject.disabled = true;
+      try {
+        await requestJson('/api/v1/collections/suggestions/' + encodeURIComponent(proposal.id) + '/accept', {
+          method: 'POST',
+          body: { name, description: descriptionInput.value.trim() },
+          locale: getLocale(),
+        });
+        await refresh();
+        status(labels('workbench.proposal-accepted', 'Topic proposal added as a Collection.'));
+      } catch (error) {
+        accept.disabled = false;
+        reject.disabled = false;
+        status(error.message || labels('collections.error', 'Could not accept proposal'), true);
+      }
+    });
+    nameInput.addEventListener('input', () => nameInput.setCustomValidity(''));
+    reject.addEventListener('click', async () => {
+      accept.disabled = true;
+      reject.disabled = true;
+      try {
+        await requestJson('/api/v1/collections/suggestions/' + encodeURIComponent(proposal.id) + '/reject', {
+          method: 'POST', locale: getLocale(),
+        });
+        await refresh();
+        status(labels('workbench.proposal-dismissed', 'Topic proposal dismissed.'));
+      } catch (error) {
+        accept.disabled = false;
+        reject.disabled = false;
+        status(error.message || labels('collections.error', 'Could not dismiss proposal'), true);
+      }
+    });
+    actions.append(accept, reject);
+    card.append(actions);
+    list.append(card);
+  });
+}
+
+function parseSupportIds(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string');
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
 function renderTable(){const body=$('#workbench-rows');if(!body)return;body.replaceChildren();const empty=$('#workbench-empty');empty.replaceChildren();empty.hidden=state.rows.length>0; if(!state.rows.length){const failed=state.total===null;empty.append(make('strong',failed?labels('workbench.rows-unavailable','Keyword count is unavailable. Reload to try again.'):state.total>0?labels('workbench.no-filter-results','No keywords match these filters'):labels('workbench.no-keywords','No stored keywords yet')),make('p',failed?labels('workbench.rows-unavailable-help','The keyword list could not be confirmed. Your saved data has not been changed.'):labels('workbench.empty-help','Change filters or collect data to populate the workbench.')));if(state.total===0&&([state.query,state.source,state.dateFrom,state.dateTo,state.collectionId].some(Boolean)||state.filterState!=='all'||state.classification!=='all'||state.evidence!=='all')){const clear=button(labels('workbench.clear-filters','Clear filters'),'text-button');clear.addEventListener('click',()=>{state.query='';state.source='';state.dateFrom='';state.dateTo='';state.collectionId='';state.filterState='all';state.classification='all';state.evidence='all';state.offset=0;$('#workbench-query').value='';$('#workbench-state').value='all';$('#workbench-classification').value='all';$('#workbench-evidence').value='all';$('#workbench-source').value='';$('#workbench-from').value='';$('#workbench-to').value='';renderTree();changedFilters();});empty.append(clear);}}
   for(const item of state.rows){const row=make('tr');const selection=make('td');selection.dataset.label=labels('dataset.select-page','Select');const check=make('input');check.type='checkbox';check.checked=state.allFiltered||state.selected.has(item.id);check.disabled=state.allFiltered;check.setAttribute('aria-label',`${labels('workbench.select','Select')} ${item.keyword}`);check.addEventListener('change',()=>{if(check.checked&&state.selected.size>=500){check.checked=false;status(labels('workbench.selection-limit','Select at most 500 rows manually, or use Select all matching for larger results.'),true);return;}state.allFiltered=false;check.checked?state.selected.add(item.id):state.selected.delete(item.id);renderSelection();});selection.append(check);row.append(selection);
     const title=make('td');title.dataset.label=labels('workbench.keyword','Keyword');title.append(make('strong',item.keyword),make('small',sourceName(item.source)));row.append(title);
@@ -620,4 +798,48 @@ function openDeleteConfirmation(item,impact){const dialog=$('#workbench-collecti
 
 function openMergeConfirmation(item,targetId){const dialog=$('#workbench-collection-dialog');const target=state.items.find(value=>value.id===targetId);dialog.replaceChildren();const title=labelDialog(dialog,make('h2',labels('workbench.merge-title','Merge Collections?')) );const copy=make('p',formatted('workbench.merge-impact',{source:nameOf(item),target:nameOf(target||{name:''})},'Move memberships from “{source}” and its descendants to “{target}”, then remove the source Collections. Keyword evidence and user decisions are retained.'));const actions=make('div','','collection-actions');const cancel=button(labels('collections.cancel','Cancel'));cancel.addEventListener('click',()=>dialog.close());const confirm=button(labels('workbench.merge-confirm','Confirm merge'),'button button-primary');confirm.addEventListener('click',async()=>{confirm.disabled=true;try{const result=await requestJson(`/api/v1/collections/${encodeURIComponent(item.id)}/merge`,{method:'POST',body:{target_id:targetId},locale:getLocale()});state.collectionId=result.target_id;dialog.close();await refresh();status(labels('collections.merged','Collections merged'));}catch(error){confirm.disabled=false;status(error.message||labels('collections.error','Could not merge Collections'),true);}});actions.append(cancel,confirm);dialog.append(title,copy,actions);dialog.showModal();cancel.focus();}
 function renderManageActions(){const root=$('#workbench-tree');if(!root)return;}
-export function initializeKeywordWorkbench(){const params=new URLSearchParams(window.location.search);state.query=params.get('q')||'';state.filterState=params.get('state')||'all';state.classification=params.get('classification')||'all';state.source=params.get('source')||'';state.evidence=params.get('evidence')||'all';state.sort=params.get('sort')||'recent';state.dateFrom=params.get('from')||'';state.dateTo=params.get('to')||'';state.collectionId=params.get('collection_id')||params.get('collection_ids')||'';state.offset=Number(params.get('offset')||0)||0;build();$('#collection-create').addEventListener('click',()=>openCollectionDialog());document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;if(state.mobileOpen){setMobileOpen(false);return;}const view=$('[data-view="collections"]');if(state.detailId&&view&&!view.hidden&&!event.target.closest('details[open]')){event.preventDefault();clearDetail();}});window.addEventListener('resize',()=>{if(window.innerWidth>900)setMobileOpen(false);});document.addEventListener('trendscout:locale',()=>{if($('#workbench-root')){build();if(!$('[data-view="collections"]')?.hidden)refresh();}});window.addEventListener('hashchange',()=>{const params=new URLSearchParams(window.location.search);state.query=params.get('q')||'';state.filterState=params.get('state')||'all';state.classification=params.get('classification')||'all';state.source=params.get('source')||'';state.evidence=params.get('evidence')||'all';state.sort=params.get('sort')||'recent';state.dateFrom=params.get('from')||'';state.dateTo=params.get('to')||'';state.collectionId=params.get('collection_id')||params.get('collection_ids')||'';state.offset=Number(params.get('offset')||0)||0;});return {refresh,items:()=>state.items};}
+function syncLocationFilters(event) {
+  const params = new URLSearchParams(window.location.search);
+  const route = event?.detail;
+  state.query = params.get('q') || '';
+  state.filterState = params.get('state') || 'all';
+  state.classification = params.get('classification') || 'all';
+  state.source = params.get('source') || '';
+  state.evidence = params.get('evidence') || 'all';
+  state.sort = params.get('sort') || 'recent';
+  state.dateFrom = params.get('date_from') || params.get('from') || '';
+  state.dateTo = params.get('date_to') || params.get('to') || '';
+  state.collectionId = (route?.page === 'collections' && route.itemId)
+    || params.get('category_id') || params.get('collection_id') || params.get('collection_ids') || '';
+  state.offset = Number(params.get('offset') || 0) || 0;
+}
+
+export function initializeKeywordWorkbench() {
+  syncLocationFilters();
+  build();
+  $('#collection-create').addEventListener('click', () => openCollectionDialog());
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (state.mobileOpen) {
+      setMobileOpen(false);
+      return;
+    }
+    const view = $('[data-view="collections"]');
+    if (state.detailId && view && !view.hidden && !event.target.closest('details[open]')) {
+      event.preventDefault();
+      clearDetail();
+    }
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) setMobileOpen(false);
+  });
+  document.addEventListener('trendscout:locale', () => {
+    if ($('#workbench-root')) {
+      build();
+      if (!$('[data-view="collections"]')?.hidden) refresh();
+    }
+  });
+  window.addEventListener('popstate', syncLocationFilters);
+  document.addEventListener('trendscout:route', syncLocationFilters);
+  return { refresh, items: () => state.items };
+}

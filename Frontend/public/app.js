@@ -1,6 +1,7 @@
 import { ApiError, getJson, requestJson } from './modules/api.js';
 import { acceptsDiscovery, canStartFetch, capabilityRetryDelayMs, defaultFetchSourceIds, isLocalLiveDemo, isRetryableCapabilityCheckError, isVercelSharedLive, loadCapabilities, readLastKnownCapabilities, renderFetchDefaults, renderSourceCapabilities, saveLastKnownCapabilities } from './modules/capabilities.js';
 import { PublicFetchController, liveFetchMessageKey } from './modules/fetch.js';
+import { normalizeFetchProgress } from './modules/fetch-progress.js';
 import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
 import { initializeTheme } from './modules/theme.js';
@@ -8,6 +9,8 @@ import { initializeKeywordWorkbench } from './modules/keyword-workbench.js';
 import { initializeSourceLibrary } from './modules/source-library.js';
 import { initializeResearchWorkspace } from './modules/research-workspace.js';
 import { initializeRunHistory } from './modules/run-history.js';
+import { pathForView, resolveLocation } from './modules/router.js';
+import { createSourceMark } from './modules/source-brand.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -27,6 +30,12 @@ const state = {
   category: 'all',
   query: '',
   sort: 'recent',
+  datasetSource: '',
+  datasetCategoryId: '',
+  datasetClassification: 'all',
+  datasetEvidence: 'all',
+  datasetDateFrom: '',
+  datasetDateTo: '',
   offset: 0,
   limit: 20,
   next: null,
@@ -54,6 +63,7 @@ const state = {
   collectionJobStatus: null,
   collectionInboxTotal: 0,
   activeView: null,
+  activeNav: null,
   collectionSelected: new Set(),
   collectionMembershipSelected: {},
   algorithmCatalog: null,
@@ -74,7 +84,16 @@ let startupCapabilities = null;
 const collectionRecoveryInFlight = new Map();
 const collectionRecoverySucceeded = new Set();
 let collectionFiltersPromise = null;
-state.query = new URLSearchParams(window.location.search).get('q') || '';
+const initialQuery = new URLSearchParams(window.location.search);
+state.query = initialQuery.get('q') || '';
+state.sort = initialQuery.get('sort') || 'recent';
+state.collectionFilters = new Set(initialQuery.getAll('collection_ids').filter((value) => value.length <= 64));
+state.datasetSource = initialQuery.get('source') || '';
+state.datasetCategoryId = initialQuery.get('category_id') || '';
+state.datasetClassification = initialQuery.get('classification') || 'all';
+state.datasetEvidence = initialQuery.get('evidence') || 'all';
+state.datasetDateFrom = initialQuery.get('date_from') || initialQuery.get('from') || '';
+state.datasetDateTo = initialQuery.get('date_to') || initialQuery.get('to') || '';
 
 function number(value) {
   return formatNumber(value, getLocale());
@@ -280,6 +299,7 @@ async function loadAnalytics(preloadedData = null) {
 }
 
 async function loadDashboardBootstrap() {
+  if (!datasetFiltersAreValid()) return null;
   const query = currentDatasetQuery().toString();
   try {
     const data = await getJson('/api/v1/dashboard/bootstrap?' + query, { locale: getLocale() });
@@ -287,6 +307,7 @@ async function loadDashboardBootstrap() {
     if (!data?.analytics || !data?.keywords) return null;
     state.persistedDataset = data.item || null;
     state.persistedDatasetAvailable = Boolean(data.item);
+    renderDatasetFilterAvailability();
     if (data.item) renderPersistedDataset(data.item);
     else {
       $('#overview-context').textContent = t('overview.no-fetch-context');
@@ -911,65 +932,60 @@ const FETCH_SOURCE_LABELS = {
   bing_web_serp: 'fetch.source.bing',
   youtube_video_search: 'fetch.source.youtube',
 };
-const FETCH_SOURCE_IDS = Object.keys(FETCH_SOURCE_LABELS);
-
 function renderFetchSourceOutcomes(fetchStatus) {
-  if (!fetchStatus || typeof fetchStatus !== 'object') return null;
-  const selected = Array.isArray(fetchStatus.selected_sources)
-    ? fetchStatus.selected_sources
-    : Array.isArray(fetchStatus.sources)
-      && fetchStatus.sources.every((source) => typeof source === 'string')
-      ? fetchStatus.sources : [];
-  const outcomes = new Map((Array.isArray(fetchStatus.sources) ? fetchStatus.sources : [])
-    .filter((source) => source && typeof source === 'object')
-    .map((source) => [source.source_id, source]));
-  if (!selected.length && !outcomes.size) return null;
+  const progress = normalizeFetchProgress(fetchStatus);
+  if (!progress || (!progress.selectedSources.length && !progress.outcomes.length)) return null;
+  const outcomes = new Map(progress.outcomes.map((item) => [item.sourceId, item.value]));
+  const order = new Map((state.capabilities?.sources || []).map((source, index) => [source.source_id, index]));
+  const sourceIds = [...new Set([...progress.selectedSources, ...outcomes.keys()])]
+    .sort((left, right) => (order.get(left) ?? Number.MAX_SAFE_INTEGER)
+      - (order.get(right) ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right));
   const list = document.createElement('ul');
   list.className = 'fetch-source-outcomes';
-  for (const sourceId of FETCH_SOURCE_IDS) {
+  for (const sourceId of sourceIds) {
     const source = outcomes.get(sourceId);
-    const isSelected = selected.includes(sourceId);
     const coverage = source?.coverage && typeof source.coverage === 'object'
       ? source.coverage : {};
     const statusKey = `fetch.source-status.${source?.status || ''}`;
     const errorKey = `fetch.source-error.${source?.error_code || ''}`;
-    const fields = [t(isSelected ? 'fetch.source-selected' : 'fetch.source-not-selected')];
+    const fields = [];
     if (source) {
-      fields.push(t(statusKey) !== statusKey ? t(statusKey) : source.status);
-      if (typeof source.data_mode === 'string') fields.push(source.data_mode);
+      fields.push(t(statusKey) !== statusKey ? t(statusKey) : t('source.status-unknown'));
       if (source.delivery_state) {
         const deliveryKey = `fetch.delivery.${source.delivery_state}`;
         fields.push(t(deliveryKey) !== deliveryKey ? t(deliveryKey) : source.delivery_state);
       }
-      const requestCount = Number.isInteger(source.provider_request_count)
+      if (Number.isSafeInteger(source.record_count) && source.record_count >= 0) {
+        fields.push(t('fetch.source-record-count', { count: number(source.record_count) }));
+      }
+      if (source.error_code) {
+        fields.push(t(errorKey) !== errorKey ? t(errorKey) : t('fetch.source-error-unknown'));
+      }
+      const technicalDetails = [];
+      const requestCount = Number.isSafeInteger(source.provider_request_count)
         ? source.provider_request_count : coverage.provider_request_count;
-      if (Number.isInteger(requestCount) && requestCount >= 0) {
-        fields.push(t('fetch.source-request-count', { count: number(requestCount) }));
+      if (Number.isSafeInteger(requestCount) && requestCount >= 0) {
+        technicalDetails.push(t('fetch.source-request-count', { count: number(requestCount) }));
       }
       const observedAt = coverage.source_fetched_at || coverage.fetched_at
         || coverage.provider_data_at || coverage.cache_fetched_at;
       if (typeof observedAt === 'string') {
-        fields.push(t('fetch.source-observation-time', { time: timestamp(observedAt) }));
+        technicalDetails.push(t('fetch.source-observation-time', { time: timestamp(observedAt) }));
       }
       if (typeof coverage.cache_delivery_at === 'string') {
-        fields.push(t('fetch.source-cache-delivery-time', {
+        technicalDetails.push(t('fetch.source-cache-delivery-time', {
           time: timestamp(coverage.cache_delivery_at),
         }));
       }
-      const freshness = coverage.cache_freshness;
-      if (typeof freshness === 'string') {
-        const freshnessKey = `fetch.delivery.${freshness}`;
-        fields.push(t('fetch.source-freshness', {
-          state: t(freshnessKey) !== freshnessKey ? t(freshnessKey) : freshness,
-        }));
+      if (typeof coverage.cache_freshness === 'string') {
+        const freshnessKey = `fetch.delivery.${coverage.cache_freshness}`;
+        const freshness = t(freshnessKey) !== freshnessKey ? t(freshnessKey) : coverage.cache_freshness;
+        technicalDetails.push(t('fetch.source-freshness', { state: freshness }));
       }
       if (typeof coverage.next_eligible_at === 'string') {
-        fields.push(t('fetch.source-next-refresh', {
+        technicalDetails.push(t('fetch.source-next-refresh', {
           time: timestamp(coverage.next_eligible_at),
         }));
-      }
-      if (source.error_code) {
-        fields.push(t(errorKey) !== errorKey ? t(errorKey) : source.error_code);
       }
       const diagnostic = coverage.persistence_diagnostic
         || coverage.worker_failure_diagnostic || coverage.transport_diagnostic;
@@ -978,28 +994,93 @@ function renderFetchSourceOutcomes(fetchStatus) {
           diagnostic.exception_class].filter((value) => typeof value === 'string'
           && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value));
         if (diagnosticParts.length) {
-          fields.push(t('fetch.source-diagnostic', { details: diagnosticParts.join(' · ') }));
+          technicalDetails.push(t('fetch.source-diagnostic', { details: diagnosticParts.join(' · ') }));
         }
       }
       const googleSummary = googleFetchSummary(source);
-      if (googleSummary) fields.push(googleSummary);
+      if (googleSummary) technicalDetails.push(googleSummary);
       if (Number.isInteger(source.retry_after_seconds)) {
         fields.push(t('fetch.retry-after', { seconds: source.retry_after_seconds }));
       }
-    } else if (isSelected) {
+      if (source.error_code) technicalDetails.push(`${t('fetch.source-error-code')}: ${source.error_code}`);
+      if (technicalDetails.length) {
+        const details = document.createElement('details');
+        details.className = 'fetch-source-technical-details';
+        const summary = document.createElement('summary');
+        summary.textContent = t('fetch.source-details');
+        const content = document.createElement('span');
+        content.textContent = technicalDetails.join(' · ');
+        details.append(summary, content);
+        fields.push(details);
+      }
+    } else {
       fields.push(t('fetch.source-no-outcome'));
     }
     const row = document.createElement('li');
     row.className = `fetch-source-outcome${source?.delivery_state === 'STALE_CACHE'
       ? ' fetch-source-outcome--stale' : ''}`;
     const name = document.createElement('strong');
-    name.textContent = t(FETCH_SOURCE_LABELS[sourceId]);
+    const labelKey = FETCH_SOURCE_LABELS[sourceId];
+    const registryEntry = state.capabilities?.sources?.find((item) => item.source_id === sourceId);
+    name.textContent = labelKey ? t(labelKey) : registryEntry?.display_name || source?.display_name || sourceId.replaceAll('_', ' ');
     const details = document.createElement('span');
-    details.textContent = fields.join(' · ');
-    row.append(name, details);
+    const primaryFields = fields.filter((field) => typeof field === 'string');
+    details.textContent = primaryFields.join(' · ');
+    row.append(createSourceMark(sourceId, { showExistingLogo: false }), name, details);
+    fields.filter((field) => field instanceof HTMLElement).forEach((field) => row.append(field));
     list.append(row);
   }
   return list;
+}
+
+function renderFetchProgressSummary(fetchStatus) {
+  const progress = normalizeFetchProgress(fetchStatus);
+  if (!progress || !Number.isInteger(progress.totalSources) || progress.totalSources < 1
+      || !Number.isInteger(progress.completedSources)) return null;
+  const root = document.createElement('section');
+  root.className = 'fetch-progress-summary';
+  const heading = document.createElement('p');
+  heading.className = 'fetch-progress-count';
+  heading.textContent = t('fetch.progress-count', {
+    completed: number(progress.completedSources), total: number(progress.totalSources),
+  });
+  const bar = document.createElement('progress');
+  bar.max = progress.totalSources;
+  bar.value = progress.completedSources;
+  bar.setAttribute('aria-label', t('fetch.progress-aria', {
+    completed: number(progress.completedSources), total: number(progress.totalSources),
+  }));
+  root.append(heading, bar);
+
+  const tally = { success: 0, partial: 0, failed: 0, unavailable: 0 };
+  for (const item of progress.outcomes) {
+    const key = item.status.toLowerCase();
+    if (Object.hasOwn(tally, key)) tally[key] += 1;
+  }
+  if (progress.outcomes.length) {
+    const outcomes = document.createElement('p');
+    outcomes.className = 'fetch-progress-outcomes';
+    outcomes.textContent = t('fetch.progress-outcomes', {
+      success: number(tally.success), partial: number(tally.partial),
+      failed: number(tally.failed), unavailable: number(tally.unavailable),
+    });
+    root.append(outcomes);
+  }
+  const start = progress.startedAt ? Date.parse(progress.startedAt) : null;
+  const end = progress.finishedAt ? Date.parse(progress.finishedAt) : Date.now();
+  if (Number.isFinite(start) && end >= start) {
+    const seconds = Math.floor((end - start) / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const elapsed = document.createElement('p');
+    elapsed.className = 'fetch-progress-elapsed';
+    elapsed.textContent = t('fetch.progress-elapsed', {
+      duration: minutes ? t('fetch.duration-minutes-seconds', {
+        minutes: number(minutes), seconds: number(seconds % 60),
+      }) : t('fetch.duration-seconds', { seconds: number(seconds) }),
+    });
+    root.append(elapsed);
+  }
+  return root;
 }
 
 function renderFetchPresentation() {
@@ -1108,6 +1189,8 @@ function renderFetchPresentation() {
       : t(cacheOnlyMessage || (liveFetch
         ? liveFetchMessage(presentation.kind, presentation.requestKind) || messageKey : messageKey));
     status.append(message);
+    const progressSummary = renderFetchProgressSummary(presentation.fetch);
+    if (progressSummary) status.append(progressSummary);
     const sourceOutcomes = renderFetchSourceOutcomes(presentation.fetch);
     if (sourceOutcomes) status.append(sourceOutcomes);
     renderYouTubeFetchEvidence(status, presentation.fetch);
@@ -1134,7 +1217,7 @@ function renderYouTubeFetchEvidence(container, fetchStatus) {
   brand.setAttribute('aria-label', 'YouTube');
   brand.title = 'YouTube';
   const logo = document.createElement('img');
-  logo.src = '/dashboard/assets/youtube-logo.svg';
+  logo.src = '/assets/youtube-logo.svg';
   logo.alt = '';
   logo.decoding = 'async';
   brand.append(logo);
@@ -1241,7 +1324,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
       if (job.status === 'MODEL_UNAVAILABLE') {
         $('#workbench-status').textContent = t('collections.model-unavailable');
       } else if (job.status === 'COMPLETED') {
-        if (window.location.hash === '#collections') await loadCollections();
+        if (state.activeView === 'collections') await loadCollections();
         const summary = $('#workbench-status');
         summary.replaceChildren(element('span', t('collections.completed', {
           assigned: number(job.assigned), collections: state.collections.filter((item) => item.membership_count > 0).length,
@@ -1251,9 +1334,9 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
         })));
       }
       if (!viewsAlreadyRefreshed) {
-        if (window.location.hash !== '#collections') await loadDashboardBootstrap();
+        if (state.activeView !== 'collections') await loadDashboardBootstrap();
       }
-      if (window.location.hash === '#collections' && job.status !== 'COMPLETED') loadCollections();
+      if (state.activeView === 'collections' && job.status !== 'COMPLETED') loadCollections();
     } catch {}
   };
   if (isVercelSharedLive(state.capabilities)
@@ -1350,7 +1433,6 @@ function renderYoutubePolicySettings(feedbackKey = null) {
 
 function openYoutubePolicySettings() {
   showView('settings');
-  window.location.hash = 'settings';
   renderYoutubePolicySettings('fetch.youtube-consent-required');
   $('#settings-youtube-policy-consent')?.focus();
 }
@@ -1413,6 +1495,7 @@ function scheduleCapabilityRefresh(delayMs) {
 
 function applyPublicCapabilities(capabilities) {
   state.capabilities = capabilities;
+  renderDatasetSourceOptions();
   renderYoutubePolicySettings();
   const sourceSelect = $('#fetch-source-select');
   const sourceControl = $('#fetch-source-control');
@@ -1453,6 +1536,7 @@ function applyPublicCapabilities(capabilities) {
     state.fetchPresentation = { kind: 'disabled', busy: false };
   }
   renderSourceCapabilities(capabilities, t);
+  openSourceDetail(state.activeRoute);
   renderFetchDefaults(capabilities, t);
   sourceLibrary.setCapabilities(capabilities);
   renderFetchPresentation();
@@ -1558,7 +1642,6 @@ function handleFetchTerminal(runId, fetchStatus) {
       state.offset = 0;
       showView('overview', { loadDashboard: false });
       dashboardRefreshHandled = true;
-      window.location.hash = 'overview';
       renderPublicFetchDiscovery();
       if (unchangedDataset && missingPersistedDataset
           && state.capabilities.deployment_environment !== 'production') {
@@ -1586,7 +1669,6 @@ function handleFetchTerminal(runId, fetchStatus) {
       if (localLive || sharedLive) {
         showView('overview', { loadDashboard: false });
         dashboardRefreshHandled = true;
-        window.location.hash = 'overview';
         if (!fetchStatus?.fetch_id) void loadDashboardBootstrap();
         if (sharedLive) renderPublicFetchDiscovery();
       } else {
@@ -1634,7 +1716,6 @@ async function resumeRecoveredFetch(run) {
   const controller = requestKind === 'WIKIMEDIA_HISTORY' ? historyFetchController
     : run.fetch_mode === 'CACHE_ONLY' ? cacheOnlyFetchController : fetchController;
   showView('overview', { loadDashboard: false });
-  window.location.hash = 'overview';
   if (!hasCurrentYoutubeConsent(run.sources)) return;
   void controller.resumeAvailableJob({
     sources: run.sources,
@@ -2016,10 +2097,145 @@ function renderRows(items) {
 
 function currentDatasetQuery() {
   const params = new URLSearchParams({ q: state.query, state: $('#keyword-state-filter')?.value || 'all',
+    classification: state.datasetClassification, evidence: state.datasetEvidence,
     sort: state.sort === 'score' ? 'recent' : state.sort, limit: String(state.limit), offset: String(state.offset),
     include_algorithm_results: 'false' });
-  for (const id of state.collectionFilters) params.append('collection_ids', id);
+  if (state.datasetSource) params.set('source', state.datasetSource);
+  if (state.datasetDateFrom) params.set('date_from', state.datasetDateFrom);
+  if (state.datasetDateTo) params.set('date_to', state.datasetDateTo);
+  for (const id of new Set([...state.collectionFilters, state.datasetCategoryId].filter(Boolean))) {
+    params.append('collection_ids', id);
+  }
   return params;
+}
+
+function renderDatasetSourceOptions() {
+  const select = $('#keyword-source-filter');
+  if (!select) return;
+  const selected = state.datasetSource;
+  select.replaceChildren(new Option(t('dataset.source-all'), ''));
+  const sources = Array.isArray(state.capabilities?.sources) ? state.capabilities.sources : [];
+  const listedIds = new Set();
+  for (const source of sources) {
+    const sourceId = source?.source_id;
+    if (typeof sourceId !== 'string' || !sourceId || listedIds.has(sourceId)) continue;
+    listedIds.add(sourceId);
+    const labelKey = FETCH_SOURCE_LABELS[sourceId];
+    const label = labelKey ? t(labelKey) : source.display_name || localizedSourceName(sourceId);
+    select.add(new Option(label, sourceId));
+  }
+  if (selected && !listedIds.has(selected)) {
+    select.add(new Option(t('dataset.source-unlisted', { source: selected }), selected));
+  }
+  select.value = selected;
+}
+
+function renderDatasetFilterAvailability() {
+  const unavailable = !state.persistedDatasetAvailable;
+  $$('#keyword-advanced-filter-toggle select, #keyword-advanced-filter-toggle input, #keyword-filter-reset')
+    .forEach((control) => { control.disabled = unavailable; });
+  const note = $('#keyword-filter-availability');
+  if (note) note.hidden = !unavailable;
+}
+
+function renderTopicCategoryOptions() {
+  const select = $('#keyword-category-filter');
+  if (!select) return;
+  const selected = state.datasetCategoryId;
+  select.replaceChildren(new Option(t('dataset.category-all'), ''));
+  const categories = new Map();
+  for (const collection of state.collections) {
+    if (typeof collection?.category_id !== 'string' || !collection.category_id || !collection.id) continue;
+    const current = categories.get(collection.category_id);
+    if (!current || collection.name.localeCompare(current.name) < 0) {
+      categories.set(collection.category_id, { id: collection.id, name: collection.name || collection.category_id,
+        categoryId: collection.category_id });
+    }
+  }
+  const choices = [...categories.values()].sort((left, right) => left.name.localeCompare(right.name));
+  for (const category of choices) {
+    const key = `topic.${category.categoryId}`;
+    const label = t(key) === key ? category.name : t(key);
+    select.add(new Option(label, category.id));
+  }
+  select.value = choices.some((category) => category.id === selected) ? selected : '';
+}
+
+function syncDatasetFiltersToUrl() {
+  const params = new URLSearchParams(window.location.search);
+  for (const key of ['q', 'state', 'sort', 'source', 'category_id', 'classification', 'evidence', 'date_from', 'date_to', 'from', 'to', 'collection_ids']) {
+    params.delete(key);
+  }
+  if (state.query) params.set('q', state.query);
+  const keywordState = $('#keyword-state-filter')?.value || 'all';
+  if (keywordState !== 'all') params.set('state', keywordState);
+  if (state.sort !== 'recent') params.set('sort', state.sort);
+  if (state.datasetSource) params.set('source', state.datasetSource);
+  if (state.datasetCategoryId) params.set('category_id', state.datasetCategoryId);
+  if (state.datasetClassification !== 'all') params.set('classification', state.datasetClassification);
+  if (state.datasetEvidence !== 'all') params.set('evidence', state.datasetEvidence);
+  if (state.datasetDateFrom) params.set('date_from', state.datasetDateFrom);
+  if (state.datasetDateTo) params.set('date_to', state.datasetDateTo);
+  for (const id of state.collectionFilters) params.append('collection_ids', id);
+  const search = params.toString();
+  window.history.replaceState(null, '', `${window.location.pathname}${search ? `?${search}` : ''}`);
+}
+
+function datasetFiltersAreValid() {
+  if (state.datasetDateFrom && state.datasetDateTo && state.datasetDateFrom > state.datasetDateTo) {
+    setNotice('#keyword-notice', t('dataset.invalid-date-range'), 'error');
+    $('#keyword-date-from')?.setAttribute('aria-invalid', 'true');
+    $('#keyword-date-to')?.setAttribute('aria-invalid', 'true');
+    return false;
+  }
+  $('#keyword-date-from')?.removeAttribute('aria-invalid');
+  $('#keyword-date-to')?.removeAttribute('aria-invalid');
+  if (new Set([...state.collectionFilters, state.datasetCategoryId].filter(Boolean)).size > 20) {
+    setNotice('#keyword-notice', t('dataset.too-many-collections', { max: 20 }), 'error');
+    return false;
+  }
+  return true;
+}
+
+function resetDatasetFilters() {
+  state.query = '';
+  state.sort = 'recent';
+  state.datasetSource = '';
+  state.datasetCategoryId = '';
+  state.datasetClassification = 'all';
+  state.datasetEvidence = 'all';
+  state.datasetDateFrom = '';
+  state.datasetDateTo = '';
+  state.collectionFilters.clear();
+  $('#search').value = '';
+  $('#sort').value = 'recent';
+  $('#keyword-state-filter').value = 'all';
+  $('#keyword-source-filter').value = '';
+  $('#keyword-category-filter').value = '';
+  $('#keyword-classification-filter').value = 'all';
+  $('#keyword-evidence-filter').value = 'all';
+  $('#keyword-date-from').value = '';
+  $('#keyword-date-to').value = '';
+  renderCollectionFilters();
+  state.offset = 0;
+  state.selectedKeywordIds.clear();
+  state.selectAllFiltered = false;
+  syncDatasetFiltersToUrl();
+  loadKeywords();
+}
+
+function applyOverviewDatasetFilters() {
+  state.datasetSource = $('#keyword-source-filter').value;
+  state.datasetCategoryId = $('#keyword-category-filter').value;
+  state.datasetClassification = $('#keyword-classification-filter').value;
+  state.datasetEvidence = $('#keyword-evidence-filter').value;
+  state.datasetDateFrom = $('#keyword-date-from').value;
+  state.datasetDateTo = $('#keyword-date-to').value;
+  state.offset = 0;
+  state.selectedKeywordIds.clear();
+  state.selectAllFiltered = false;
+  syncDatasetFiltersToUrl();
+  if (datasetFiltersAreValid()) loadKeywords();
 }
 
 function updateKeywordBulkUi() {
@@ -2049,11 +2265,13 @@ function renderCollectionFilters() {
       state.offset = 0;
       state.selectedKeywordIds.clear();
       state.selectAllFiltered = false;
-      loadKeywords();
+      syncDatasetFiltersToUrl();
+      if (datasetFiltersAreValid()) loadKeywords();
     });
     label.append(checkbox, element('span', collection.name));
     box.append(label);
   }
+  renderTopicCategoryOptions();
 }
 
 async function loadCollectionFilters() {
@@ -2083,6 +2301,7 @@ async function loadLatestDataset() {
     const response = await getJson('/api/v1/datasets/latest', { locale: getLocale() });
     state.persistedDataset = response.item || null;
     state.persistedDatasetAvailable = Boolean(response.item);
+    renderDatasetFilterAvailability();
     if (response.item) {
       const item = response.item;
       renderPersistedDataset(item);
@@ -2093,6 +2312,7 @@ async function loadLatestDataset() {
     return null;
   } catch (error) {
     state.persistedDatasetAvailable = false;
+    renderDatasetFilterAvailability();
     $('#analysis-source-volume').replaceChildren(element('p', t('analysis.error')));
     setNotice('#keyword-notice', getErrorMessage(error, 'error.keyword-fetch'));
     return null;
@@ -2281,6 +2501,7 @@ function showEmpty(title, detail) {
 }
 
 async function loadKeywords(preloadedResult = null) {
+  if (!datasetFiltersAreValid()) return;
   if (state.publicFetchDiscovery) {
     const category = state.category === 'home_goods' ? 'home_living' : state.category;
     const query = state.query.normalize('NFC').trim().toLocaleLowerCase();
@@ -2603,26 +2824,33 @@ async function openDetail(id) {
   }
 }
 
-function showView(name, { refresh = true, loadDashboard = true } = {}) {
+function showView(name, { refresh = true, loadDashboard = true, updateRoute = true, replace = false } = {}) {
   if (name === 'main-content') {
     closeMobileNav();
     $('#main-content').focus();
     return;
   }
-  const legacyOverview = name === 'results' || name === 'keywords';
-  const dashboardTab = name === 'analysis' ? 'analysis' : 'overview';
-  const valid = new Set(['overview', 'analysis', 'collections', 'sources', 'runs', 'algorithms', 'quality', 'research', 'settings']);
-  const selected = legacyOverview ? 'collections' : !valid.has(name) ? 'overview' : name === 'analysis' ? 'overview' : name;
-  const viewChanged = state.activeView !== selected;
-  state.activeView = selected;
-  if (legacyOverview) {
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#collections`);
-  } else if (name && !valid.has(name)) {
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#overview`);
+  const view = name === 'analysis' ? 'trends' : name === 'results' ? 'keywords' : name;
+  const pathname = pathForView(view);
+  if (updateRoute && (window.location.pathname !== pathname || window.location.hash)) {
+    const method = replace ? 'replaceState' : 'pushState';
+    window.history[method](null, '', `${pathname}${window.location.search}`);
   }
+  const route = resolveLocation({ pathname: window.location.pathname, search: window.location.search, hash: window.location.hash });
+  if (route.replace || route.invalid) window.history.replaceState(null, '', `${route.pathname}${route.search}`);
+  renderRoute(route, { refresh, loadDashboard });
+}
+
+function renderRoute(route, { refresh = true, loadDashboard = true } = {}) {
+  const selected = route.page;
+  const dashboardTab = route.tab || 'overview';
+  const viewChanged = state.activeView !== selected || state.activeNav !== route.nav;
+  state.activeView = selected;
+  state.activeNav = route.nav;
+  state.activeRoute = route;
   $$('[data-view]').forEach((panel) => { panel.hidden = panel.dataset.view !== selected; });
   $$('[data-nav]').forEach((link) => {
-    const active = link.dataset.nav === selected;
+    const active = link.dataset.nav === route.nav;
     link.classList.toggle('active', active);
     if (active) {
       link.setAttribute('aria-current', 'page');
@@ -2630,9 +2858,15 @@ function showView(name, { refresh = true, loadDashboard = true } = {}) {
       link.removeAttribute('aria-current');
     }
   });
-  $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
+  $('#breadcrumb-current').textContent = t(route.nav === 'overview' && selected === 'overview'
+    ? `dashboard.${dashboardTab}` : 'nav.' + route.nav);
   setDashboardTab(dashboardTab, false);
-  $('#breadcrumb-current').textContent = t(selected === 'overview' ? `dashboard.${dashboardTab}` : 'nav.' + selected);
+  document.dispatchEvent(new CustomEvent('trendscout:route', { detail: route }));
+  if (selected === 'sources' && route.itemId) openSourceDetail(route);
+  else if (selected === 'sources') {
+    state.sourceDetailPath = null;
+    $$('#source-registry-list .source-capability-details').forEach((details) => { details.open = false; });
+  } else state.sourceDetailPath = null;
   const shouldLoadView = viewChanged || refresh;
   if (shouldLoadView && selected === 'overview' && loadDashboard) loadDashboardView();
   if (shouldLoadView && selected === 'quality') loadAnalytics();
@@ -2642,7 +2876,23 @@ function showView(name, { refresh = true, loadDashboard = true } = {}) {
   if (shouldLoadView && selected === 'sources') sourceLibrary.load();
   if (shouldLoadView && selected === 'settings') loadRuntimeStatus();
   if (shouldLoadView && selected === 'research') researchWorkspace.load();
+  if (route.focus) document.getElementById(route.focus)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   closeMobileNav();
+}
+
+function openSourceDetail(route = state.activeRoute) {
+  if (route?.page !== 'sources' || typeof route.itemId !== 'string') return false;
+  const card = [...($('#source-registry-list')?.children || [])]
+    .find((item) => item.dataset.sourceId === route.itemId);
+  const details = card?.querySelector('.source-capability-details');
+  if (!card || !details) return false;
+  details.open = true;
+  if (state.sourceDetailPath !== route.pathname) {
+    state.sourceDetailPath = route.pathname;
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    details.querySelector('summary')?.focus({ preventScroll: true });
+  }
+  return true;
 }
 
 function setDashboardTab(tab, updateRoute = true, focus = false) {
@@ -2656,8 +2906,13 @@ function setDashboardTab(tab, updateRoute = true, focus = false) {
   $$('[data-dashboard-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.dashboardPanel !== selected;
   });
-  if (updateRoute && window.location.hash !== `#${selected}`) {
-    window.history.pushState(null, '', `${window.location.pathname}${window.location.search}#${selected}`);
+  if (updateRoute) {
+    const pathname = pathForView(selected === 'analysis' ? 'trends' : 'overview');
+    if (window.location.pathname !== pathname || window.location.hash) {
+      window.history.pushState(null, '', `${pathname}${window.location.search}`);
+      const route = resolveLocation({ pathname, search: window.location.search });
+      renderRoute(route, { refresh: false });
+    }
   }
   $('#breadcrumb-current').textContent = t(`dashboard.${selected}`);
 }
@@ -2905,11 +3160,27 @@ function addAlgorithmDetail(list, label, value) {
 }
 
 function bindEvents() {
+  renderDatasetSourceOptions();
+  $('#keyword-state-filter').value = ['all', 'unassigned', 'ai', 'manual', 'needs_review', 'excluded', 'non_topic']
+    .includes(initialQuery.get('state')) ? initialQuery.get('state') : 'all';
+  $('#sort').value = ['recent', 'views', 'keyword', 'rank'].includes(state.sort) ? state.sort : 'recent';
+  $('#keyword-classification-filter').value = state.datasetClassification;
+  $('#keyword-evidence-filter').value = state.datasetEvidence;
+  $('#keyword-date-from').value = state.datasetDateFrom;
+  $('#keyword-date-to').value = state.datasetDateTo;
+  renderDatasetFilterAvailability();
   $('#source-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
   $('#fetch-capabilities-retry').addEventListener('click', () => retryCapabilityCheck());
   $('#keyword-collection-filter-toggle').addEventListener('toggle', (event) => {
     if (event.currentTarget.open) void loadCollectionFilters();
   });
+  $('#keyword-advanced-filter-toggle').addEventListener('toggle', (event) => {
+    if (event.currentTarget.open) void loadCollectionFilters();
+  });
+  ['#keyword-source-filter', '#keyword-category-filter', '#keyword-classification-filter',
+    '#keyword-evidence-filter', '#keyword-date-from', '#keyword-date-to']
+    .forEach((selector) => $(selector).addEventListener('change', applyOverviewDatasetFilters));
+  $('#keyword-filter-reset').addEventListener('click', resetDatasetFilters);
   $('#menu-toggle').addEventListener('click', () => setMobileNav(!$('#app-shell').classList.contains('menu-open')));
   $('#sidebar-collapse').addEventListener('click', () => {
     if (isMobileNav()) return;
@@ -2973,9 +3244,29 @@ function bindEvents() {
     }
   });
   window.addEventListener('resize', () => setMobileNav($('#app-shell').classList.contains('menu-open')));
-  const handleViewNavigation = () => showView(window.location.hash.slice(1), { refresh: false });
+  const handleViewNavigation = () => {
+    const route = resolveLocation({ pathname: window.location.pathname, search: window.location.search, hash: window.location.hash });
+    if (route.replace || route.invalid) window.history.replaceState(null, '', `${route.pathname}${route.search}`);
+    renderRoute(route, { refresh: false });
+  };
   window.addEventListener('hashchange', handleViewNavigation);
   window.addEventListener('popstate', handleViewNavigation);
+  document.addEventListener('click', (event) => {
+    const link = event.target instanceof Element
+      ? event.target.closest('a[data-route], a[data-goto], a[data-nav], a[data-source-detail-route]')
+      : null;
+    if (!link) return;
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const url = new URL(link.href, window.location.href);
+    if (url.origin !== window.location.origin) return;
+    event.preventDefault();
+    if (link.dataset.sourceDetailRoute) {
+      window.history.pushState(null, '', `${url.pathname}${url.search}${url.hash}`);
+      renderRoute(resolveLocation({ pathname: url.pathname, search: url.search, hash: url.hash }));
+      return;
+    }
+    showView(link.dataset.route || link.dataset.goto || link.dataset.nav);
+  });
   $$('[data-dashboard-tab]').forEach((button) => {
     button.addEventListener('click', () => setDashboardTab(button.dataset.dashboardTab));
     button.addEventListener('keydown', (event) => {
@@ -3011,7 +3302,7 @@ function bindEvents() {
   });
   $('#empty-fetch').addEventListener('click', () => {
     if (state.fetchReady) activateFetchWithPolicyConsent(fetchController);
-    else { showView('overview'); window.location.hash = 'overview'; }
+    else showView('overview');
   });
   $('#fetch-source-select').addEventListener('change', renderFetchPresentation);
   $('#settings-youtube-policy-consent')
@@ -3042,11 +3333,7 @@ function bindEvents() {
     const query = event.currentTarget.value;
     searchTimer = setTimeout(() => {
       state.query = query;
-      const params = new URLSearchParams(window.location.search);
-      if (query) params.set('q', query);
-      else params.delete('q');
-      const search = params.toString();
-      window.history.replaceState(null, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+      syncDatasetFiltersToUrl();
       state.offset = 0;
       state.selectedKeywordIds.clear();
       state.selectAllFiltered = false;
@@ -3058,12 +3345,14 @@ function bindEvents() {
   $('#sort').addEventListener('change', (event) => {
     state.sort = event.currentTarget.value;
     state.offset = 0;
+    syncDatasetFiltersToUrl();
     loadKeywords();
   });
   $('#keyword-state-filter').addEventListener('change', () => {
     state.offset = 0;
     state.selectedKeywordIds.clear();
     state.selectAllFiltered = false;
+    syncDatasetFiltersToUrl();
     loadKeywords();
   });
   $('#keyword-select-page').addEventListener('change', (event) => {
@@ -3139,13 +3428,10 @@ function bindEvents() {
     if (!state.persistedDatasetAvailable && isLocalLiveDemo(state.capabilities)) {
       $('#overview-context').textContent = t('overview.no-fetch-context');
     }
-    if (state.run) {
-      updateRun(state.run);
-    }
     if (state.publicFetchDiscovery) {
       renderPublicFetchDiscovery();
     }
-    if (window.location.hash === '#algorithms') loadAlgorithmCatalog();
+    if (state.activeNav === 'algorithms') loadAlgorithmCatalog();
     if (state.dataRunId || state.publicFetchDiscovery || state.persistedDatasetAvailable) {
       loadKeywords();
     }
@@ -3156,15 +3442,16 @@ function bindEvents() {
       renderSourceCapabilities(state.capabilities, t);
     }
     if (state.persistedDataset) renderPersistedDataset(state.persistedDataset);
+    if (state.run) updateRun(state.run);
     if (state.analytics) loadAnalytics();
     runHistory.relocalize();
     renderYoutubePolicySettings();
-    if (window.location.hash === '#sources') sourceLibrary.load();
-    if (window.location.hash === '#settings') loadRuntimeStatus();
-    if (window.location.hash === '#research') researchWorkspace.load();
+    if (state.activeNav === 'sources') sourceLibrary.load();
+    if (state.activeNav === 'settings') loadRuntimeStatus();
+    if (state.activeNav === 'research') researchWorkspace.load();
     renderFetchPresentation();
-    $('#breadcrumb-current').textContent = t(window.location.hash === '#analysis'
-      ? 'dashboard.analysis' : 'nav.' + (window.location.hash.slice(1) || 'overview'));
+    $('#breadcrumb-current').textContent = t(state.activeNav === 'overview' && state.activeView === 'overview'
+      ? 'dashboard.overview' : 'nav.' + (state.activeNav || 'overview'));
   });
 }
 
@@ -3182,4 +3469,6 @@ setMobileNav(false);
 document.documentElement.classList.remove('js-pending');
 applyLastKnownCapabilities();
 startupCapabilities = loadPublicCapabilities();
-showView(window.location.hash.slice(1));
+const initialRoute = resolveLocation({ pathname: window.location.pathname, search: window.location.search, hash: window.location.hash });
+if (initialRoute.replace || initialRoute.invalid) window.history.replaceState(null, '', `${initialRoute.pathname}${initialRoute.search}`);
+renderRoute(initialRoute);

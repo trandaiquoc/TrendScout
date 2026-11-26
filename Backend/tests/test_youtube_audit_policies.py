@@ -13,14 +13,14 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
         app = create_demo_app(test_fixture=True)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://127.0.0.1") as client:
-            homepage = await client.get("/dashboard/")
-            privacy = await client.get("/dashboard/privacy.html")
-            terms = await client.get("/dashboard/terms.html")
-            css = await client.get("/dashboard/policy.css")
+            homepage = await client.get("/")
+            privacy = await client.get("/privacy")
+            terms = await client.get("/terms")
+            css = await client.get("/policy.css")
         self.assertEqual([homepage.status_code, privacy.status_code, terms.status_code,
                           css.status_code], [200, 200, 200, 200])
-        self.assertIn('/dashboard/privacy.html', homepage.text)
-        self.assertIn('/dashboard/terms.html', homepage.text)
+        self.assertIn('href="/privacy.html"', homepage.text)
+        self.assertIn('href="/terms.html"', homepage.text)
         self.assertIn('POLICY PUBLISHED', homepage.text)
         self.assertIn('href="policy.css"', privacy.text)
         self.assertIn('href="https://trend-scout-mu.vercel.app/dashboard/terms.html"',
@@ -56,7 +56,7 @@ class PolicyPageTests(unittest.IsolatedAsyncioTestCase):
         app = create_app(read_only=True)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://127.0.0.1") as client:
-            policy = await client.get("/dashboard/privacy.html")
+            policy = await client.get("/privacy")
             capabilities = await client.get("/api/v1/capabilities")
             blocked = await client.post("/api/v1/fetches", json={})
         self.assertEqual(policy.status_code, 200)

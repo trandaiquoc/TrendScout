@@ -173,7 +173,7 @@ cython_debug/
 
 # Vercel build artifact
 Backend/app/dashboard_assets.py
-Backend/public/dashboard/
+Backend/public/
 
 # Local editor, OS and deployment metadata
 .idea/
