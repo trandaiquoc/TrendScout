@@ -289,7 +289,7 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
                    or getattr(request.app.state, "collection_service", None))
         if service is None:
             return
-        if cached_context_only:
+        if cached_context_only or result.get("fetch_mode") == "CACHE_ONLY":
             processed = await service.process_fetch(
                 fetch_id, result.get("sources", []), cached_context_only=True
             )

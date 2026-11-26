@@ -386,6 +386,15 @@ class CollectionService:
         if taxonomy_assignments:
             self.store.add_taxonomy_memberships_if_allowed(taxonomy_assignments)
 
+        candidate_ids = [record["id"] for record in records
+                         if record.get("classification_result", {}).get("classification_status") != "INELIGIBLE"]
+        if (candidate_ids and not self.fetch_model_inference_enabled
+                and getattr(self.store, "supports_incremental_fetch_persistence", False)):
+            return self._model_unavailable_result(
+                fetch_id, available=available, skipped=skipped,
+                policy_excluded=policy_excluded, eligible=eligible,
+                unassigned=len(records), error_code="MODEL_INFERENCE_DEFERRED", algorithms=analysis,
+            )
         if self.ai_engine is None:
             return self._model_unavailable_result(
                 fetch_id, available=available, skipped=skipped,
@@ -396,8 +405,6 @@ class CollectionService:
                          processed=len(records))
         combined = {"assigned": [], "unassigned_keyword_ids": [], "proposal_ids": [],
                     "job_ids": [], "reconciliation_ids": []}
-        candidate_ids = [record["id"] for record in records
-                         if record.get("classification_result", {}).get("classification_status") != "INELIGIBLE"]
         for offset in range(0, len(candidate_ids), 200):
             batch_ids = candidate_ids[offset:offset + 200]
             stable_job_id = "ai_" + uuid.uuid5(

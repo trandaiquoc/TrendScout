@@ -763,7 +763,14 @@ def test_collection_service_processes_fixture_through_postgres_without_model_or_
         try:
             apply_migrations(connection, schema=schema)
             store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
-            service = CollectionService(store, fetch_model_inference_enabled=False)
+            def unexpected_inference(*_args, **_kwargs):
+                raise AssertionError("PostgreSQL Fetch must not wait for AI inference")
+
+            service = CollectionService(
+                store,
+                fetch_model_inference_enabled=False,
+                ai_engine=SimpleNamespace(classify_keyword_ids=unexpected_inference),
+            )
             fetch_id = "pg-fixture-" + uuid.uuid4().hex
             source = {
                 "source_id": "wikimedia_pageviews_top_per_country",

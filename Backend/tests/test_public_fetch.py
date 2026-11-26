@@ -17,6 +17,7 @@ from test_d5_wikimedia_gateway import USER_AGENT
 from test_d5_wikimedia_gateway import response as wikimedia_fixture
 from test_runs import fixture
 
+from app.api.fetches import _process_fetch_collections
 from app.jobs.distributed_worker import DistributedFetchWorker
 from app.jobs.public_admission import PoolLimit
 from app.jobs.shared_cache import CacheGrant, SharedCache
@@ -317,6 +318,33 @@ class PublicFetchApiTests(unittest.IsolatedAsyncioTestCase):
             "live-cache-only-request",
             {"source_ids": [GOOGLE_SOURCE_ID], "cache_only": True},
         )])
+
+    async def test_cache_only_collection_processing_skips_provider_context_enrichment(self):
+        calls = []
+
+        class CollectionServiceProbe:
+            async def process_fetch(self, fetch_id, sources, *, cached_context_only=False):
+                calls.append((fetch_id, sources, cached_context_only))
+                return {"status": "MODEL_UNAVAILABLE"}
+
+        class DistributedProbe:
+            postgres_live = True
+            firestore_shared_live = False
+            collection_service = CollectionServiceProbe()
+
+            def status(self, _fetch_id, *, include_records, include_discovery):
+                self.asserted_options = (include_records, include_discovery)
+                return {"terminal": True, "fetch_mode": "CACHE_ONLY", "sources": []}
+
+        distributed = DistributedProbe()
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(state=SimpleNamespace(collection_service=None)),
+        )
+        await _process_fetch_collections(request, distributed, "cache-only-fetch")
+
+        self.assertEqual(distributed.asserted_options, (True, False))
+        self.assertEqual(calls, [("cache-only-fetch", [], True)])
 
     async def test_wikimedia_and_youtube_cache_misses_never_reach_providers(self):
         with tempfile.TemporaryDirectory() as directory:
