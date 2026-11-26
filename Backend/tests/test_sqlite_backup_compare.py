@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -5,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from app.collections.store import SCHEMA
+from app.storage.local_file_security import secure_private_directory, verify_private_file
 from app.storage.sqlite_backup_compare import _normalize_schema_sql, compare_backups
+from app.storage.sqlite_backup_review import write_reconciliation_review
 from app.storage.sqlite_to_postgres import InvalidBackup
 
 
@@ -158,3 +161,95 @@ def test_schema_sql_normalization_ignores_layout_whitespace_only():
     production = "CREATE TABLE sample(id TEXT NOT NULL, payload TEXT DEFAULT 'a , b')"
 
     assert _normalize_schema_sql(local) == _normalize_schema_sql(production)
+
+
+def test_private_review_artifact_keeps_conflicts_unresolved_and_inputs_unchanged(tmp_path):
+    secure_private_directory(tmp_path)
+    local = tmp_path / "local.sqlite"
+    production = tmp_path / "production.sqlite"
+    output = tmp_path / "row-review.jsonl"
+    _make_backup(local, [
+        ("same-row", '{"a":1,"b":true}'),
+        ("changed-row", '{"private":"local-value"}'),
+        ("local-only-row", '{"source":"local"}'),
+    ])
+    _make_backup(production, [
+        ("same-row", '{"b":true,"a":1.0}'),
+        ("changed-row", '{"private":"production-value"}'),
+        ("production-only-row", '{"source":"production"}'),
+    ])
+    before = (local.read_bytes(), production.read_bytes())
+
+    result = write_reconciliation_review(local, production, output, batch_size=1)
+
+    verify_private_file(output)
+    assert (local.read_bytes(), production.read_bytes()) == before
+    assert result["row_counts"] == {
+        "changed": 1,
+        "local_only": 1,
+        "production_only": 1,
+    }
+    assert result["authority_decisions"] == 0
+
+    lines = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["record_type"] == "manifest"
+    assert lines[0]["authority_decision"] == "none"
+    assert lines[-1]["record_type"] == "summary"
+    rows = lines[1:-1]
+    assert {(row["table"], row["status"]) for row in rows} == {
+        ("keywords", "changed"),
+        ("keywords", "local_only"),
+        ("keywords", "production_only"),
+    }
+
+    changed = next(row for row in rows if row["status"] == "changed")
+    assert changed["domain_hint"] == "provider_observations"
+    assert changed["authority_decision"] == "unresolved"
+    assert changed["changed_columns"] == ["evidence"]
+    assert changed["timestamp_order"]["observed_at"]["relation"] == "not_orderable"
+    assert changed["local_row"]["evidence"] == '{"private":"local-value"}'
+    assert changed["production_row"]["evidence"] == '{"private":"production-value"}'
+    assert "same-row" not in output.read_text(encoding="utf-8")
+
+
+def test_private_review_artifact_never_overwrites_existing_destination(tmp_path):
+    secure_private_directory(tmp_path)
+    local = tmp_path / "local.sqlite"
+    production = tmp_path / "production.sqlite"
+    output = tmp_path / "row-review.jsonl"
+    _make_backup(local, [])
+    _make_backup(production, [])
+    output.write_text("owner data", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        write_reconciliation_review(local, production, output)
+
+    assert output.read_text(encoding="utf-8") == "owner data"
+
+
+def test_private_review_artifact_summarizes_binary_values_without_copying_them(tmp_path):
+    secure_private_directory(tmp_path)
+    local = tmp_path / "local.sqlite"
+    production = tmp_path / "production.sqlite"
+    output = tmp_path / "row-review.jsonl"
+    _make_backup(local, [])
+    _make_backup(production, [])
+    binary_value = b"private-vector-bytes"
+    with sqlite3.connect(local) as connection:
+        connection.execute(
+            """INSERT INTO cache
+               (fingerprint, model_version, collection_version, text_hash, vector, dimension)
+               VALUES ('local-cache-id', 'model-v1', 1, 'text-hash', ?, 3)""",
+            (binary_value,),
+        )
+
+    write_reconciliation_review(local, production, output)
+
+    lines = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    row = next(item for item in lines if item.get("table") == "cache")
+    assert row["local_row"]["vector"] == {
+        "$type": "binary",
+        "sha256": hashlib.sha256(binary_value).hexdigest(),
+        "size_bytes": len(binary_value),
+    }
+    assert binary_value.decode() not in output.read_text(encoding="utf-8")
