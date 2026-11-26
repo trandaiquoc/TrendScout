@@ -93,4 +93,4 @@ Screenshots, browser tests, and fixture values demonstrate local UI behavior onl
 
 ## Goal gate status
 
-U1–U8 implementation and contract boundaries are represented above. U9 offline/browser verification is complete; all listed fixtures passed and no live provider was called. U10 contract/report content is ready; branch-only commit and push remain the final handoff steps. No merge to `main` or production deploy is part of this handoff.
+U1–U8 implementation and contract boundaries are represented above. U9 offline/browser verification is complete; all listed fixtures passed and no live provider was called. U10 contract/report content is committed and pushed on `feature/ui-overhaul`. No merge to `main` or production deploy is part of this handoff.
