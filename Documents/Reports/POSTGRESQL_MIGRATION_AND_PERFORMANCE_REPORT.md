@@ -1,8 +1,8 @@
 # PostgreSQL migration and performance — working report
 
 **Status: migration in progress; no cutover.** Updated 26 November 2026. This
-report records the new 12-gate goal, which is distinct from the earlier
-nine-gate performance goal. Three gates have passed: **3 / 12 (25%)**.
+report tracks the active 12-gate migration goal. Three gates have passed:
+**3 / 12 (25%)**.
 
 ## Production dependency regression and recovery — 26 November 2026
 
@@ -1168,6 +1168,24 @@ The fetch result did not expose function TTFB or database timing, and the
 health-request trace lookup returned 404. Therefore Vercel-to-Neon latency,
 Production cold/warm TTFB, and post-migration behavior remain unmeasured.
 
+## Guarded attempt replay after dispatch interruption — 26 November 2026
+
+An offline SQLite regression now models cancellation after a synthetic request
+has been marked as dispatched. After the worker lease expires, a successor with
+a newer fence reuses the same attempt identity. The durable receipt returns
+`ALREADY_RESERVED`, the synthetic request callback is not invoked again, the
+daily quota remains at one reservation, and the provider-request timestamp is
+preserved. This verifies the local coordination path without contacting a
+provider.
+
+An equivalent isolated-schema PostgreSQL integration test has been added, but
+the current focused run skipped both PostgreSQL environment-gated tests because
+`TRENDSCOUT_TEST_POSTGRES_URL` was not configured. It therefore does not yet
+provide new PostgreSQL cancellation/replay evidence. The affected focused suite
+passed 65 tests and 23 subtests with 2 skips; Ruff, Python compilation and
+`git diff --check` also passed. No gate changed state: G7 and G10 remain open,
+and the overall score remains **3 / 12 (25%)**.
+
 ## Gate status
 
 | Gate | State | Remaining evidence |
@@ -1178,10 +1196,10 @@ Production cold/warm TTFB, and post-migration behavior remain unmeasured.
 | G4 | Open | 25 November real-data captures reconciled in isolated schemas, but the 26 November local read-only probe was denied; final current capture through an authorized path, writer fence, quota/payload reconciliation and production staging remain. |
 | G5 | Open | Local LIVE `create_app` selects PostgreSQL collection, analysis and scheduler stores. In one isolated Neon schema, Vercel without OIDC read a Local collection write; the Local store observed a Vercel collection write; eight major read routes returned 200. A fail-closed startup guard now requires business rows and imported LIVE quota state, but the Neon schema is still migration-only; the Vercel flag remains off by default, and Local's normal default path and Production have not switched. |
 | G6 | Open | New G6-R subcriterion: rolling seven-local-date expiry is calculated and a 500-row transactional/audited payload cleanup is wired into the explicit PostgreSQL LIVE composition. A real Neon isolated-schema test verifies dry-run, batch continuation, reference expiry, audit, and protected-row preservation. It does not yet purge source evidence or provider copies in keyword/classification/algorithm/research records because complete collection-time and lineage are missing; these are retained. Neon business/operational import, default Local SQLite removal, broader incremental-ingestion coverage, project-level capacity, and end-to-end retention proof remain. |
-| G7 | Open | PostgreSQL cached continuation, terminal checkpoint readback, compact manifest reuse, Collections no-op, same-key replay, lease fencing and recovery after a simulated interruption have focused regression coverage (110 tests, 46 subtests; isolated Neon atomic-state, composition and collection-read integration passed). Offline Chrome verifies continuation after transient status failures, single recovery and reload without repeat POST using a stubbed API. Real backend interruption, adapter attempt receipts, provider reliability and end-to-end latency acceptance remain. |
+| G7 | Open | PostgreSQL cached continuation, terminal checkpoint readback, compact manifest reuse, Collections no-op, same-key replay, lease fencing and recovery after a simulated interruption have focused regression coverage (110 tests, 46 subtests; isolated Neon atomic-state, composition and collection-read integration passed). A new offline SQLite case confirms that cancellation after a synthetic dispatch preserves the same attempt receipt and one quota reservation across worker recovery. The matching isolated PostgreSQL test is added but skipped until `TRENDSCOUT_TEST_POSTGRES_URL` is supplied. Offline Chrome verifies continuation after transient status failures, single recovery and reload without repeat POST using a stubbed API. PostgreSQL cancellation/replay, provider reliability and end-to-end latency acceptance remain. |
 | G8 | **PASS** | Explicit cache-only API/UI and separate worker registry; provider/cache tests and isolated Neon composition prove no LIVE handler invocation and zero reported provider requests, with cache misses failing closed. Same-Fetch checkpoint replay, exact keyword filtering, concurrent retry protection, and offline inference with the installed local model passed. Production availability/timing is not claimed; latency belongs to G12. |
 | G9 | **PASS** | PostgreSQL read routes and the five-minute identity/schema validation cache; PostgreSQL request-timing and credential-safe route logging; 9 frontend API tests for in-flight coalescing/cache invalidation, 32 Fetch-controller tests and offline Chrome workflow; isolated Neon scheduler claim/recovery/fencing; PostgreSQL-only core dependency profile with legacy/local extras and function file exclusions. Production latency and browser measurements are G12. |
-| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. This retention update's focused suite passed 80 tests and 59 subtests with 4 skips; its isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
+| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. The retention update's focused suite passed 80 tests and 59 subtests with 4 skips, and this guarded-attempt update's focused suite passed 65 tests and 23 subtests with 2 PostgreSQL environment-gated skips; the isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
 | G11 | Open | Fenced cutover, proven rollback, release and exact deployed SHA. |
 | G12 | Open | The current alias still serves `cf09b2e`: health GET returns 200, while capabilities and latest dataset return 403 `FIRESTORE_IDENTITY_REJECTED`. The compatible `7faacb8` deployment returns 200 for those direct GETs, but the alias was not changed under the current no-deploy instruction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
 

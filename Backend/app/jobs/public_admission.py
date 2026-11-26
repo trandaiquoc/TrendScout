@@ -1,6 +1,7 @@
 """Storage-independent shared admission and pre-attempt quota reservation.
 
-The local Google LIVE Fetch can explicitly use it with SQLite or Firestore.
+The local Google LIVE Fetch can explicitly use it with SQLite, Firestore, or
+PostgreSQL.
 Its guarantees depend on a serializable durable store and a trustworthy,
 bounded-skew server clock.
 """
