@@ -43,6 +43,12 @@ storage, and runtime composition. The other goals own their domain behavior:
 - Persist large raw source bodies once in the source-evidence/payload boundary.
   Other tables should carry stable references, digests, and derived values,
   not untracked copies of provider content.
+- Calculate `source_evidence.expires_at` with the versioned source-retention
+  registry and the seven-local-date application limit, choosing the earlier
+  deadline. Persist policy version, review status, and any provider maximum in
+  `sources.configuration.retention_policy`. Unknown source IDs must fail
+  lineage closed; a `partial` policy review is not evidence that provider terms
+  have been fully mapped.
 
 ## Existing schema ownership map
 

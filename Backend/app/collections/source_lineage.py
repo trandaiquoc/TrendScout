@@ -13,10 +13,16 @@ import math
 from datetime import date, datetime, timezone
 
 from app.collections.store import keyword_record
-from app.retention.policy import effective_retention_deadline
-from app.sources.catalog import BING_SOURCE_ID, source_capability
+from app.retention.source_policy import (
+    effective_source_retention_deadline,
+    source_retention_policy,
+)
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    WIKIMEDIA_CONTEXT_SOURCE_ID,
+    source_capability,
+)
 
-WIKIMEDIA_CONTEXT_SOURCE_ID = "wikimedia_entity_context"
 _INTERNAL_SOURCE_NAMES = {WIKIMEDIA_CONTEXT_SOURCE_ID: "Wikimedia entity context"}
 _ENTITY_CONTEXT_COLUMNS = (
     "keyword_id", "title", "page_id", "entity_id", "description", "page_namespace",
@@ -195,6 +201,12 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
         if collected_at is None:
             untracked_records += 1
             return
+        try:
+            policy = source_retention_policy(source_id)
+            expires_at = effective_source_retention_deadline(source_id, collected_at)
+        except (TypeError, ValueError):
+            untracked_records += 1
+            return
 
         content_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         observed_at = _observed_at(content)
@@ -219,7 +231,8 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 "observed_at": observed_at,
                 "collected_at": collected_at,
                 "payload": None,
-                "expires_at": effective_retention_deadline(collected_at),
+                "expires_at": expires_at,
+                "retention_policy": policy.metadata(),
                 "keyword_ids": set(),
             }
             evidence_by_id[evidence_id] = row

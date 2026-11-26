@@ -6,6 +6,7 @@ WIKIMEDIA_SOURCE_ID = "wikimedia_pageviews_top_per_country"
 YOUTUBE_SOURCE_ID = "youtube_video_search"
 GOOGLE_SOURCE_ID = "google_web_serp"
 BING_SOURCE_ID = "bing_web_serp"
+WIKIMEDIA_CONTEXT_SOURCE_ID = "wikimedia_entity_context"
 
 DEFAULT_WIKIMEDIA_USER_AGENT = "TrendScout/0.1 (https://github.com/trandaiquoc/TrendScout)"
 

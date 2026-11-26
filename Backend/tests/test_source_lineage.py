@@ -4,19 +4,28 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from psycopg import sql
 
 from app.collections.postgres_store import PostgresCollectionStore
 from app.collections.service import CollectionService
-from app.collections.source_lineage import WIKIMEDIA_CONTEXT_SOURCE_ID, build_source_evidence
+from app.collections.source_lineage import build_source_evidence
 from app.collections.store import keyword_record
 from app.retention.policy import effective_retention_deadline
+from app.retention.source_policy import (
+    SOURCE_RETENTION_POLICY_VERSION,
+    effective_source_retention_deadline,
+    source_retention_policy,
+)
 from app.sources.catalog import (
     BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    SOURCE_CAPABILITIES,
+    WIKIMEDIA_CONTEXT_SOURCE_ID,
     WIKIMEDIA_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
 )
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import apply_migrations
@@ -57,6 +66,9 @@ def test_wikimedia_lineage_preserves_date_scope_without_inventing_observation_ti
         "meaning": "observation_geography",
     }
     assert evidence["expires_at"] == effective_retention_deadline(evidence["collected_at"])
+    assert evidence["retention_policy"]["version"] == SOURCE_RETENTION_POLICY_VERSION
+    assert evidence["retention_policy"]["provider_max_age_days"] is None
+    assert evidence["retention_policy"]["review_status"] == "reviewed"
     assert evidence["payload"] is None
     assert len(evidence["content_digest"]) == 64
     assert "Portable Solar Generator" not in str(evidence["query_scope"])
@@ -231,6 +243,26 @@ def test_wikimedia_entity_context_is_indexed_as_provider_derived_lineage():
     assert evidence["query_scope"]["entity_id"] == "Q123"
 
 
+def test_source_policy_registry_covers_catalog_and_keeps_the_stricter_deadline():
+    catalog_source_ids = {item.source_id for item in SOURCE_CAPABILITIES}
+    assert catalog_source_ids == {
+        WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID,
+    }
+    for source_id in (*catalog_source_ids, WIKIMEDIA_CONTEXT_SOURCE_ID):
+        assert source_retention_policy(source_id).source_id == source_id
+
+    collected = datetime(2026, 11, 26, 4, 0, tzinfo=timezone.utc)
+    youtube = source_retention_policy(YOUTUBE_SOURCE_ID)
+    assert youtube.provider_max_age_days == 30
+    assert effective_source_retention_deadline(YOUTUBE_SOURCE_ID, collected) == (
+        effective_retention_deadline(collected)
+    )
+    assert source_retention_policy(GOOGLE_SOURCE_ID).review_status == "partial"
+    assert source_retention_policy(WIKIMEDIA_CONTEXT_SOURCE_ID).review_status == "partial"
+    with pytest.raises(ValueError, match="not registered"):
+        source_retention_policy("unreviewed-provider")
+
+
 def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:
@@ -293,6 +325,11 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
             }
             store.persist_dataset_snapshot("lineage-fetch", **snapshot)
             store.persist_dataset_snapshot("lineage-fetch", **snapshot)
+            extended_rows = [dict(row) for row in evidence_rows]
+            extended_rows[0]["expires_at"] += timedelta(days=2)
+            store.persist_dataset_snapshot(
+                "lineage-fetch", **{**snapshot, "source_evidence_rows": extended_rows}
+            )
 
             source_evidence_table = sql.Identifier(schema, "source_evidence")
             dataset_evidence_table = sql.Identifier(schema, "dataset_evidence")
@@ -303,6 +340,11 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
             assert saved[0] is None
             assert saved[1] == evidence_rows[0]["content_digest"]
             assert saved[2] == evidence_rows[0]["expires_at"]
+            saved_policy = connection.execute(sql.SQL("""SELECT configuration
+                FROM {} WHERE id=%s""").format(sql.Identifier(schema, "sources")),
+                (evidence_rows[0]["source_id"],)).fetchone()[0]["retention_policy"]
+            assert saved_policy["version"] == SOURCE_RETENTION_POLICY_VERSION
+            assert saved_policy["provider_max_age_days"] is None
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE dataset_id=%s")
                 .format(dataset_evidence_table), ("lineage-fetch",)).fetchone()[0] == 2
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")

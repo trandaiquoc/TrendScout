@@ -820,16 +820,44 @@ class PostgresCollectionStore(PostgresCollectionReader):
             return
         source_names = {}
         for row in rows:
-            source_names[row["source_id"]] = row["source_display_name"]
+            source_id = row["source_id"]
+            policy = row.get("retention_policy")
+            if (not isinstance(policy, dict)
+                    or not isinstance(policy.get("version"), str)
+                    or policy.get("review_status") not in {"reviewed", "partial"}
+                    or (policy.get("provider_max_age_days") is not None
+                        and (type(policy["provider_max_age_days"]) is not int
+                             or policy["provider_max_age_days"] < 1))
+                    or not isinstance(policy.get("scope"), str)):
+                raise ValueError("source evidence has no valid retention policy")
+            source_entry = (row["source_display_name"], policy)
+            previous = source_names.get(source_id)
+            if previous is not None and previous != source_entry:
+                raise ValueError("source evidence has conflicting retention policy metadata")
+            source_names[source_id] = source_entry
         with db.cursor() as cursor:
-            cursor.executemany(sql.SQL("""INSERT INTO {}(id,display_name)
-                VALUES (%s,%s) ON CONFLICT(id) DO NOTHING""").format(self._table("sources")),
-                sorted(source_names.items()))
+            cursor.executemany(sql.SQL("""INSERT INTO {} AS stored_source(
+                    id,display_name,configuration)
+                VALUES (%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                    display_name=EXCLUDED.display_name,
+                    configuration=stored_source.configuration || EXCLUDED.configuration,
+                    updated_at=clock_timestamp()
+                WHERE stored_source.display_name IS DISTINCT FROM EXCLUDED.display_name
+                   OR stored_source.configuration->'retention_policy'
+                      IS DISTINCT FROM EXCLUDED.configuration->'retention_policy'""")
+                .format(self._table("sources")), [
+                    (source_id, display_name, Jsonb({"retention_policy": policy}))
+                    for source_id, (display_name, policy) in sorted(source_names.items())
+                ])
 
-            insert_evidence = sql.SQL("""INSERT INTO {}(id,source_id,external_id,content_digest,
+            insert_evidence = sql.SQL("""INSERT INTO {} AS stored_evidence(
+                id,source_id,external_id,content_digest,
                 query_scope,geography,observed_at,collected_at,payload,expires_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING""").format(
-                    self._table("source_evidence"))
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET
+                    expires_at=LEAST(stored_evidence.expires_at,EXCLUDED.expires_at)""").format(
+                        self._table("source_evidence"))
             for offset in range(0, len(rows), 500):
                 batch = rows[offset:offset + 500]
                 cursor.executemany(insert_evidence, [(
