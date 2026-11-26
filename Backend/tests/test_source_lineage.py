@@ -264,7 +264,13 @@ def test_wikimedia_entity_context_is_indexed_as_provider_derived_lineage():
     assert evidence["keyword_ids"] == ("wikimedia-keyword-id",)
     assert evidence["collected_at"] == datetime(2026, 11, 26, 12, tzinfo=timezone.utc)
     assert evidence["expires_at"] == effective_retention_deadline(evidence["collected_at"])
-    assert evidence["payload"] is None
+    context_lineage = evidence["payload"]["retention_lineage"]["entity_context_rows"]
+    assert evidence["payload"]["retention_lineage"]["keyword_fields"] == []
+    assert context_lineage[0]["keyword_id"] == "wikimedia-keyword-id"
+    assert context_lineage[0]["context_version"] == "wikimedia-entity-context-v4"
+    assert context_lineage[0]["collected_at"] == captured_at
+    assert len(context_lineage[0]["value_sha256"]) == 64
+    assert "Provider description" not in json.dumps(evidence["payload"])
     assert evidence["id"] == replay["rows"][0]["id"]
     assert evidence["query_scope"]["entity_id"] == "Q123"
 
@@ -363,7 +369,7 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
             saved = connection.execute(sql.SQL("""SELECT payload,content_digest,expires_at
                 FROM {} WHERE id=%s""").format(source_evidence_table),
                 (evidence_rows[0]["id"],)).fetchone()
-            assert saved[0] is None
+            assert saved[0] == evidence_rows[0]["payload"]
             assert saved[1] == evidence_rows[0]["content_digest"]
             assert saved[2] == evidence_rows[0]["expires_at"]
             saved_policy = connection.execute(sql.SQL("""SELECT configuration

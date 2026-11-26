@@ -53,9 +53,11 @@ storage, and runtime composition. The other goals own their domain behavior:
   store a versioned list of `keywords.evidence` top-level field paths and hashes
   in `source_evidence.payload.retention_lineage`. The list contains no field
   values; a consumer must compare the current field digest before redacting it.
-  This is forward lineage only: it does not certify historical rows or permit
-  deleting source evidence while classification, algorithm, entity-context, or
-  saved-research copies remain untracked.
+  Wikimedia entity-context rows may store a keyword ID, context version,
+  collection instant, and whole-row digest in the same metadata object. This is
+  forward lineage only: it does not certify historical rows or permit deleting
+  source evidence while classification, algorithm, or saved-research copies
+  remain untracked.
 
 ## Existing schema ownership map
 

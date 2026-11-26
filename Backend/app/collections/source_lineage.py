@@ -121,6 +121,25 @@ def _keyword_field_lineage(source_id, keyword_id, content, *, evidence_kind):
     return result
 
 
+def _entity_context_lineage(keyword_id, content):
+    """Fingerprint one provider-derived entity-context row for exact invalidation."""
+    if not isinstance(keyword_id, str) or not keyword_id or not isinstance(content, dict):
+        return None
+    collected_at = _aware_timestamp(content.get("fetched_at"))
+    if collected_at is None:
+        return None
+    try:
+        value_digest = hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, OverflowError, UnicodeError):
+        return None
+    return {
+        "keyword_id": keyword_id,
+        "context_version": content.get("context_version"),
+        "collected_at": collected_at.isoformat(),
+        "value_sha256": value_digest,
+    }
+
+
 def _aware_timestamp(value):
     if isinstance(value, datetime):
         parsed = value
@@ -229,7 +248,7 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
     untracked_records = 0
 
     def add(source_id, content, *, data_mode, snapshot_status, evidence_kind,
-            keyword_id=None, keyword_field_lineage=()):
+            keyword_id=None, keyword_field_lineage=(), entity_context_lineage=None):
         nonlocal untracked_records
         if not isinstance(content, dict):
             untracked_records += 1
@@ -282,6 +301,7 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 "collected_at": collected_at,
                 "payload": None,
                 "keyword_field_lineage": [],
+                "entity_context_lineage": [],
                 "expires_at": expires_at,
                 "retention_policy": policy.metadata(),
                 "keyword_ids": set(),
@@ -299,6 +319,14 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
             })
             row["keyword_field_lineage"] = [
                 existing_lineage[key] for key in sorted(existing_lineage)
+            ]
+        if isinstance(entity_context_lineage, dict):
+            existing_context = {
+                _canonical_json(item): item for item in row["entity_context_lineage"]
+            }
+            existing_context[_canonical_json(entity_context_lineage)] = entity_context_lineage
+            row["entity_context_lineage"] = [
+                existing_context[key] for key in sorted(existing_context)
             ]
 
     source_list = list(sources) if isinstance(sources, (list, tuple)) else []
@@ -343,6 +371,10 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 continue
 
             keyword_id = record.get("keyword_id") if source_id == WIKIMEDIA_CONTEXT_SOURCE_ID else None
+            entity_context_target = (
+                _entity_context_lineage(keyword_id, record)
+                if source_id == WIKIMEDIA_CONTEXT_SOURCE_ID else None
+            )
             cleaned = None
             if source_id != WIKIMEDIA_CONTEXT_SOURCE_ID:
                 try:
@@ -355,6 +387,7 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
             add(source_id, record, data_mode=data_mode,
                 snapshot_status=snapshot_status, evidence_kind="provider_record",
                 keyword_id=keyword_id,
+                entity_context_lineage=entity_context_target,
                 keyword_field_lineage=_keyword_field_lineage(
                     source_id, keyword_id, record, evidence_kind="provider_record",
                 ))
@@ -393,14 +426,19 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
     rows = []
     for row in evidence_by_id.values():
         row["keyword_ids"] = tuple(sorted(row["keyword_ids"]))
-        if row["keyword_field_lineage"]:
+        if row["keyword_field_lineage"] or row["entity_context_lineage"]:
             row["payload"] = {
                 "retention_lineage": {
                     "version": 1,
                     "keyword_fields": row["keyword_field_lineage"],
+                    "entity_context_rows": sorted(
+                        row["entity_context_lineage"],
+                        key=lambda item: (item["keyword_id"], item["value_sha256"]),
+                    ),
                 },
             }
         del row["keyword_field_lineage"]
+        del row["entity_context_lineage"]
         rows.append(row)
     rows.sort(key=lambda row: (row["source_id"], row["id"]))
     return {"rows": rows, "untracked_record_count": untracked_records}
