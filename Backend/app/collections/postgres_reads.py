@@ -320,7 +320,7 @@ class PostgresCollectionReader:
                 raise ValueError("AI_KEYWORD_NOT_FOUND")
             collections = db.execute(sql.SQL("""SELECT id,name,description,version,auto_match
                 FROM {} WHERE status='ACTIVE' AND category_id IS NULL
-                ORDER BY id COLLATE "C"""").format(self._table("collections"))).fetchall()
+                ORDER BY id COLLATE "C" """).format(self._table("collections"))).fetchall()
             result = []
             for row in rows:
                 item = dict(row)
@@ -560,7 +560,7 @@ class PostgresCollectionReader:
             item_filters.append(sql.SQL("r.status=%s"))
             item_parameters.append(status)
         summary_where = sql.SQL(" AND ").join(summary_filters)
-        item_where = sql.SQL("k.eligible=TRUE AND ") + sql.SQL(" AND ").join(item_filters)
+        item_where = sql.SQL("k.eligible=1 AND ") + sql.SQL(" AND ").join(item_filters)
 
         def read(db):
             counts = db.execute(sql.SQL("""SELECT r.algorithm_id,r.version,

@@ -1042,12 +1042,10 @@ def create_app(
                 or vercel_firestore_client_factory is not None
                 or vercel_live_context_factory is not None):
             raise ValueError("Vercel PostgreSQL runtime requires one validated PostgreSQL configuration")
-        from app.storage.postgres_runtime import verify_postgres_runtime
+        from app.storage.postgres_runtime import initialize_postgres_runtime_defaults
 
-        verify_postgres_runtime(
-            vercel_postgres_environment,
-            schema=vercel_postgres_schema,
-            require_cutover_data=True,
+        initialize_postgres_runtime_defaults(
+            vercel_postgres_environment, schema=vercel_postgres_schema
         )
     elif (vercel_postgres_environment is not None
           or vercel_postgres_context_factory is not None):

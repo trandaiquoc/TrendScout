@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from app.api.analytics import _history_storage
 from app.api.runs import read_storage
@@ -21,7 +22,7 @@ from app.normal_wikimedia_live_policy import GOOGLE_STATE_KEY, normal_google_liv
 from app.orchestration.normal_google_live_composition import normal_google_live_composition
 from app.scheduling.postgres import PostgresScheduleStore
 from app.settings import Settings
-from app.sources.catalog import GOOGLE_SOURCE_ID
+from app.sources.catalog import GOOGLE_SOURCE_ID, SOURCE_CAPABILITIES
 from app.storage.postgres_analysis import PostgresAnalysisStorage
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_connection import postgres_connection
@@ -85,6 +86,145 @@ def _seed_cutover_readiness(connection, environment, schema, *, now):
 
 
 class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_postgres_fresh_start_serves_empty_reads_and_blocks_live_fetch(self):
+        url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+        if not url:
+            self.skipTest("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+        environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+        schema = "ts_test_" + uuid.uuid4().hex
+        namespace = sql.Identifier(schema)
+        schema_created = False
+        source_id = SOURCE_CAPABILITIES[0].source_id
+        source_configuration = {"operator_setting": "keep"}
+        settings = Settings.from_environment({
+            "VERCEL": "1",
+            "TREND_SCOUT_RUN_MODE": "live",
+            "TREND_SCOUT_POSTGRES_RUNTIME_ENABLED": "true",
+            "DATABASE_URL": url,
+            "DATABASE_URL_UNPOOLED": url,
+            "TREND_SCOUT_SCHEDULER_ENABLED": "false",
+            "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
+        })
+        safe_provider_environment = {
+            "VERCEL": "1",
+            "SERPAPI_API_KEY": "",
+            "YOUTUBE_API_KEY": "",
+            "OPENROUTER_API_KEY": "",
+            "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
+            "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
+            "TREND_SCOUT_GOOGLE_SERP_APPROVED": "false",
+            "TREND_SCOUT_BING_SERP_APPROVED": "false",
+            "TREND_SCOUT_SERPAPI_BING_POLICY_MIGRATION_APPROVED": "false",
+            "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "false",
+            "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "false",
+            "TREND_SCOUT_SCHEDULER_ENABLED": "false",
+        }
+
+        with postgres_connection(environment, direct=True) as connection:
+            connection.autocommit = True
+            self.assertFalse(connection.execute(
+                "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+            ).fetchone()[0])
+            try:
+                apply_migrations(connection, schema=schema)
+                schema_created = True
+                with patch.dict(os.environ, safe_provider_environment, clear=False):
+                    application = create_app(
+                        settings=settings,
+                        vercel_postgres_environment=environment,
+                        vercel_postgres_schema=schema,
+                    )
+                    connection.execute(
+                        sql.SQL("UPDATE {}.sources SET configuration=%s::jsonb WHERE id=%s")
+                        .format(namespace), (Jsonb(source_configuration), source_id),
+                    )
+                    # A second startup must preserve source configuration and avoid
+                    # duplicating the idempotently initialized source catalog.
+                    create_app(
+                        settings=settings,
+                        vercel_postgres_environment=environment,
+                        vercel_postgres_schema=schema,
+                    )
+                    self.assertEqual(connection.execute(
+                        sql.SQL("SELECT COUNT(*) FROM {}.sources").format(namespace)
+                    ).fetchone()[0], len(SOURCE_CAPABILITIES))
+                    self.assertEqual(connection.execute(
+                        sql.SQL("SELECT configuration FROM {}.sources WHERE id=%s")
+                        .format(namespace), (source_id,),
+                    ).fetchone()[0], source_configuration)
+
+                    base_url = "https://trend-scout-mu.vercel.app"
+                    with TestClient(application, base_url=base_url) as client:
+                        latest = client.get("/api/v1/datasets/latest")
+                        self.assertEqual(latest.status_code, 200, latest.text)
+                        self.assertIsNone(latest.json()["item"])
+
+                        keywords = client.get("/api/v1/datasets/latest/keywords")
+                        self.assertEqual(keywords.status_code, 200, keywords.text)
+                        self.assertEqual(keywords.json()["items"], [])
+                        self.assertEqual(keywords.json()["total"], 0)
+
+                        collections = client.get("/api/v1/collections")
+                        self.assertEqual(collections.status_code, 200, collections.text)
+                        self.assertEqual(collections.json()["items"], [])
+
+                        for path in (
+                            "/api/v1/runs/history?limit=20",
+                            "/api/v1/analytics/overview",
+                            "/api/v1/algorithms/results",
+                            "/api/v1/research/bootstrap",
+                            "/api/v1/dashboard/bootstrap",
+                            "/api/v1/scheduler",
+                        ):
+                            read_response = client.get(path)
+                            self.assertEqual(
+                                read_response.status_code, 200,
+                                f"{path}: {read_response.text}",
+                            )
+
+                        capabilities = client.get("/api/v1/capabilities")
+                        self.assertEqual(
+                            capabilities.status_code, 200, capabilities.text
+                        )
+                        self.assertFalse(capabilities.json()["fetch_enabled"])
+                        self.assertEqual(
+                            capabilities.json()["fetch_block_reason"],
+                            "POSTGRES_OPERATIONAL_STATE_UNVERIFIED",
+                        )
+
+                        blocked_fetch = client.post(
+                            "/api/v1/fetches",
+                            json={},
+                            headers={
+                                "Origin": base_url,
+                                "Idempotency-Key": "db02-fresh-start-blocked-001",
+                            },
+                        )
+                        self.assertEqual(blocked_fetch.status_code, 503)
+                        self.assertEqual(
+                            blocked_fetch.json()["detail"]["code"],
+                            "POSTGRES_OPERATIONAL_STATE_UNVERIFIED",
+                        )
+
+                for table in (
+                    "keywords", "dataset_snapshots", "coordination_fields",
+                    "coordination_entries", "fetch_jobs",
+                ):
+                    self.assertEqual(
+                        connection.execute(
+                            sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                                namespace, sql.Identifier(table),
+                            )
+                        ).fetchone()[0],
+                        0,
+                        f"Fresh Start must leave {table} empty",
+                    )
+            finally:
+                if schema_created:
+                    connection.execute(
+                        sql.SQL("DROP SCHEMA {} CASCADE").format(namespace)
+                    )
+
     async def test_explicit_postgres_composition_constructs_without_provider_requests(self):
         url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
         if not url:
@@ -323,7 +463,20 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                     "DATABASE_URL_UNPOOLED": url,
                     "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
                 })
-                with patch.dict(os.environ, {"VERCEL": "1"}, clear=False):
+                with patch.dict(os.environ, {
+                    "VERCEL": "1",
+                    "SERPAPI_API_KEY": "",
+                    "YOUTUBE_API_KEY": "",
+                    "OPENROUTER_API_KEY": "",
+                    "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
+                    "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
+                    "TREND_SCOUT_GOOGLE_SERP_APPROVED": "false",
+                    "TREND_SCOUT_BING_SERP_APPROVED": "false",
+                    "TREND_SCOUT_SERPAPI_BING_POLICY_MIGRATION_APPROVED": "false",
+                    "TREND_SCOUT_SERPAPI_ACCOUNT_API_APPROVED": "false",
+                    "TREND_SCOUT_YOUTUBE_LIVE_APPROVED": "false",
+                    "TREND_SCOUT_SCHEDULER_ENABLED": "false",
+                }, clear=False):
                     vercel_app = create_app(
                         settings=vercel_settings,
                         vercel_postgres_environment=environment,

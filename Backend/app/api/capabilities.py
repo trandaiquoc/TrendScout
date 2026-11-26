@@ -460,6 +460,14 @@ async def capabilities(request: Request, response: Response):
     distributed = (getattr(request.state, "distributed_public_fetch", None)
                    or request.app.state.distributed_public_fetch)
     runtime_metadata, refresh_schedule = await _read_capability_metadata(distributed)
+    postgres_block_reason = (
+        getattr(distributed, "postgres_live_state_block_reason", None)
+        if distributed is not None and getattr(distributed, "postgres_live", False)
+        else None
+    )
+    if enabled and postgres_block_reason:
+        enabled = False
+        block_reason = postgres_block_reason
     if enabled:
         if distributed is not None:
             try:

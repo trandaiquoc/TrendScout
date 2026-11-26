@@ -381,10 +381,10 @@ async def normal_google_live_composition(*, user_agent,
         from app.storage.postgres_atomic_state import PostgresAtomicStateStore
         from app.storage.postgres_payloads import PostgresSourcePayloads
         from app.storage.postgres_retention import PostgresRetentionStore
-        from app.storage.postgres_runtime import verify_postgres_runtime
+        from app.storage.postgres_runtime import initialize_postgres_runtime_defaults
 
-        verify_postgres_runtime(
-            postgres_environment, schema=postgres_schema, require_cutover_data=True
+        initialize_postgres_runtime_defaults(
+            postgres_environment, schema=postgres_schema
         )
         store = PostgresAtomicStateStore(postgres_environment, schema=postgres_schema)
         store.vercel_runtime_enabled = vercel_postgres_runtime
@@ -421,18 +421,26 @@ async def normal_google_live_composition(*, user_agent,
         store, policy, state_key=GOOGLE_STATE_KEY,
         owner_manual_youtube_live=youtube_manual_live,
     )
-    if uses_firestore or uses_postgres:
+    if uses_postgres:
+        # Empty business tables are valid for Fresh Start. Read the durable
+        # operational ledger without creating defaults; its absence disables
+        # Fetch while the read-only APIs remain available.
+        existing_state = store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
+    elif uses_firestore:
         existing_state = (
             {} if capability_metadata_request
-            or vercel_shared_live and not vercel_postgres_runtime
+            or vercel_shared_live
             else store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
         )
-        if uses_postgres and not existing_state and not capability_metadata_request:
-            raise ValueError(
-                "PostgreSQL operational state has not been reconciled"
-            )
     else:
         existing_state = store.transact(GOOGLE_STATE_KEY, lambda state: (state, state))
+    from app.storage.postgres_runtime import postgres_live_state_block_reason
+
+    postgres_live_block_reason = (
+        postgres_live_state_block_reason(
+            existing_state, policy_digest=admission.policy_digest
+        ) if uses_postgres else None
+    )
     # First launch has no quota state to migrate; any populated ledger must
     # still match one of the explicit migration paths below.
     if (uses_firestore and existing_state
@@ -442,21 +450,6 @@ async def normal_google_live_composition(*, user_agent,
             "Firestore shared LIVE quota policy differs from stored state; "
             "refusing an implicit shared-state migration"
         )
-    if (uses_postgres and existing_state
-            and existing_state.get("policy_digest") != admission.policy_digest):
-        raise ValueError(
-            "PostgreSQL LIVE quota policy differs from stored state; "
-            "refusing an implicit quota migration"
-        )
-    if uses_postgres and existing_state and (
-        existing_state.get("schema") != 1
-        or not isinstance(existing_state.get("policy_digest"), str)
-        or any(not isinstance(existing_state.get(name), dict)
-               for name in ("jobs", "keys", "quota", "inflight"))
-        or not existing_state["quota"]
-        or not isinstance(existing_state.get("starts"), list)
-    ):
-        raise ValueError("PostgreSQL operational state is incomplete")
     if (not uses_firestore and not uses_postgres and existing_state
             and existing_state.get("policy_digest") != admission.policy_digest):
         def make_policy(*, bing_enabled, youtube_enabled, fetch_starts_per_hour=None):
@@ -1092,6 +1085,10 @@ async def normal_google_live_composition(*, user_agent,
             ),
             vercel_postgres_live=vercel_postgres_runtime,
         )
+        facade.postgres_live_state_ready = (
+            not uses_postgres or postgres_live_block_reason is None
+        )
+        facade.postgres_live_state_block_reason = postgres_live_block_reason
         # Expose the same business store that the source worker and cache use.
         # Runtime assembly must not independently choose SQLite for Collections
         # when this composition is backed by PostgreSQL.
@@ -1123,6 +1120,10 @@ async def normal_google_live_composition(*, user_agent,
             "serp_pages_per_query": 1,
             "local_only": not (uses_firestore or uses_postgres),
             "live_verified": False,
+            "operational_state_status": (
+                "VERIFIED" if facade.postgres_live_state_ready else "UNVERIFIED"
+            ),
+            "live_fetch_block_reason": postgres_live_block_reason,
         }
 
         def refresh_schedule_metadata(state_snapshot=None):
@@ -1187,6 +1188,14 @@ async def normal_google_live_composition(*, user_agent,
 
         def capability_runtime_metadata(state_snapshot=None):
             """Read admission and provider quota data from one durable state snapshot."""
+            if uses_postgres and postgres_live_block_reason is not None:
+                return {
+                    "admission_status": "UNAVAILABLE",
+                    "operational_enabled": False,
+                    "readiness_reason": postgres_live_block_reason,
+                    "google": {"status": "UNAVAILABLE"},
+                    "youtube": {"status": "UNAVAILABLE"},
+                }
             pool_names = tuple(name for name in (
                 "serpapi", "google_rss", "serpapi_google", "serpapi_bing",
                 "youtube", "youtube_other",

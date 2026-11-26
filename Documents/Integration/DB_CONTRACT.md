@@ -22,8 +22,9 @@ storage, and runtime composition. The other goals own their domain behavior:
 ## Shared persistence rules
 
 - Neon PostgreSQL is the target runtime store. SQLite and Firestore remain
-  migration sources until their data is reconciled, legacy writers are fenced,
-  and the Integration Gate authorizes cutover.
+  retained historical stores. The approved DB02 Fresh Start does not require
+  importing historical trend, keyword, cache, or analysis data; preserve the
+  SQLite/Firestore databases and backups unchanged.
 - Use one configured database identity for Local and Vercel. Keep connection
   secrets in environment configuration; never place them in source, reports,
   API payloads, or logs.
@@ -71,9 +72,9 @@ storage, and runtime composition. The other goals own their domain behavior:
 
 ## Existing schema ownership map
 
-The Neon target has migration versions 1–9 applied and checksum-verified.
-Version 9 adds retention audit summaries. All 35 non-ledger tables remain
-empty; the schema is a foundation, not a cutover-ready populated database.
+The PostgreSQL target has migration versions 1–9 applied and checksum-verified.
+Version 9 adds retention audit summaries. All 35 non-ledger tables may remain
+empty for Fresh Start; this does not represent migrated historical data.
 
 | Data | Current table(s) | Owner and notes |
 | --- | --- | --- |
@@ -86,9 +87,9 @@ empty; the schema is a foundation, not a cutover-ready populated database.
 | Quota, jobs, and scheduler | `coordination_*`, `fetch_jobs`, `schedules`, `schedule_occurrences` | Database owns transactions, idempotency keys, leases/fences, quota continuity, and bounded recovery. User-facing jobs must expose stable states rather than database internals. |
 | User settings and saved configuration | `settings` | Preserve unless an explicit user action or a separately approved policy says otherwise. Never purge solely by age. |
 
-The actual business and operational table population has not been reconciled
-into Neon. New goal branches must not treat this table map as proof of migrated
-rows or as permission to switch runtime flags.
+Historical business and operational rows have not been reconciled into
+PostgreSQL and are not required for Fresh Start. This table map does not prove
+that historical rows were migrated.
 
 Known retention gap: legacy `keywords.evidence`,
 `classification_results.source_evidence`, algorithm rows, and saved research
@@ -136,10 +137,10 @@ as proof that all provider content copies have expired.
 - New tables must define explicit ownership, primary/unique keys, foreign-key
   deletion semantics, indexes for bounded queries, and transaction boundaries.
   Destructive changes require an explicit reconciliation and rollback plan.
-- Runtime code validates the exact bundled migration ledger and readiness.
-  Migration application is an operator action, never an HTTP request side
-  effect. Do not activate PostgreSQL while business or operational tables are
-  empty or partially reconciled.
+- Runtime code validates database identity and the exact bundled migration
+  ledger. Migration application is an operator action, never an HTTP request
+  side effect. Empty business tables are valid for Fresh Start; LIVE Fetch
+  remains blocked until quota, cooldown, and operational state are verified.
 - Shared API/schema changes must be backward-compatible during rolling
   integration: additive response fields, stable existing meanings, explicit
   status enums, and versioned destructive/semantic changes. Database schema
@@ -149,6 +150,20 @@ as proof that all provider content copies have expired.
   provenance, user edits, quota and reservation state. Reconcile conflicts by
   domain semantics and evidence; never choose an entire database as winner by
   default.
+
+## DB02 Fresh Start decision (26 November 2026)
+
+- Collect new trend and keyword data with Fetch All after the PostgreSQL runtime
+  is ready. Historical trend, keyword, cache, and analysis imports from SQLite,
+  Firestore, or Production are not required. Keep those databases and backups.
+- Startup requires the existing schema and verified migration checksums, but
+  no imported keyword rows or datasets. Static source metadata may be inserted
+  idempotently without replacing existing `sources.configuration`; credentials
+  and provider settings remain in their current configuration.
+- Empty reads return empty results. Do not insert placeholder trends or
+  keywords. Missing or unverified quota, cooldown, or operational state blocks
+  LIVE Fetch while the application and read APIs remain available. Startup
+  must not reset quota or create operational admission state.
 
 ## Current coordination status
 

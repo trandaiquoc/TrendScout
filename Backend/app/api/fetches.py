@@ -376,6 +376,14 @@ async def create_fetch(
         raise HTTPException(422, {"code": "INVALID_SOURCE_SELECTION"})
 
     distributed = _distributed_for_request(request)
+    ensure_postgres_readiness = getattr(
+        distributed, "ensure_postgres_live_state_ready", None
+    ) if distributed is not None else None
+    if callable(ensure_postgres_readiness):
+        try:
+            ensure_postgres_readiness()
+        except AdmissionDenied as exc:
+            _raise_distributed_admission_error(exc.code, distributed)
     if cache_only and (distributed is None or getattr(distributed, "data_mode", None) != "LIVE"):
         raise HTTPException(409, {"code": "CACHE_ONLY_UNAVAILABLE"})
     if distributed is not None:

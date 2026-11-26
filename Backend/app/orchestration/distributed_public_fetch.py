@@ -142,6 +142,8 @@ class DistributedPublicFetch:
         self.firestore_shared_live = firestore_shared_live
         self.vercel_postgres_live = vercel_postgres_live
         self.postgres_live = False
+        self.postgres_live_state_ready = True
+        self.postgres_live_state_block_reason = None
         # Results larger than the inline checkpoint budget are stored by the
         # worker's journal in its durable snapshot blob store. Reads must use
         # that same journal so terminal status can restore the full result.
@@ -194,6 +196,11 @@ class DistributedPublicFetch:
             local_state = type(admission.store) is LocalSQLiteAtomicStateStore
             postgres_state = type(admission.store) is PostgresAtomicStateStore
             self.postgres_live = postgres_state
+            if postgres_state:
+                self.postgres_live_state_ready = False
+                self.postgres_live_state_block_reason = (
+                    "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
+                )
             vercel_postgres_state = (
                 self.vercel_postgres_live and os.environ.get("VERCEL") == "1"
                 and postgres_state
@@ -267,10 +274,19 @@ class DistributedPublicFetch:
             return summary
         return None
 
+    def ensure_postgres_live_state_ready(self) -> None:
+        if (self.postgres_live
+                and self.postgres_live_state_ready is not True):
+            raise AdmissionDenied(
+                self.postgres_live_state_block_reason
+                or "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
+            )
+
     def submit(self, idempotency_key: str, *, history_days: int | None = None,
                source_ids: list[str] | None = None,
                manual_source_refresh: bool = False,
                cache_only: bool = False) -> dict:
+        self.ensure_postgres_live_state_ready()
         if type(manual_source_refresh) is not bool or type(cache_only) is not bool:
             raise ValueError("Fetch mode flags must be boolean")
         if manual_source_refresh and (history_days is not None or source_ids is None):
@@ -957,10 +973,12 @@ class DistributedPublicFetch:
         return items
 
     async def run_once(self, owner: str):
+        self.ensure_postgres_live_state_ready()
         return await self.worker.run_once(owner)
 
     async def run_slice(self, owner: str, fetch_id: str, *, max_sources: int = 1):
         """Continue one requested shared Fetch through a bounded source slice."""
+        self.ensure_postgres_live_state_ready()
         previous_manifest = None
         summary = await asyncio.to_thread(self._latest_reuse_summary)
         if ((self.firestore_shared_live or self.postgres_live)
