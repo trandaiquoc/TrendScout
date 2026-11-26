@@ -18,6 +18,7 @@ from app.collections.source_digest import (
     COLLECTION_INPUT_DIGEST_VERSION,
     source_input_digest,
 )
+from app.collections.source_lineage import build_source_evidence
 from app.collections.store import (
     CollectionStore,
     bing_verification_update,
@@ -169,6 +170,7 @@ class CollectionService:
         replay_available = begin["replay_available"]
         replay_skipped = begin["replay_skipped"]
         records, rejected, bing_updates = [], [], []
+        entity_context_rows = []
         policy_excluded = 0
         skipped = replay_skipped if retry_existing_snapshot and not sources else 0
         available = (sum(len(source.get("records", [])) for source in sources
@@ -219,7 +221,10 @@ class CollectionService:
         # operations consume persisted context and never trigger a new provider request.
         if sources and self.entity_context_resolver is not None and not cached_context_only:
             try:
-                self.entity_context_resolver.enrich(records)
+                contexts = self.entity_context_resolver.enrich(records)
+                if isinstance(contexts, dict):
+                    entity_context_rows = [context.as_row() for context in contexts.values()
+                                           if callable(getattr(context, "as_row", None))]
             except Exception:
                 # Context enrichment is optional evidence; provider Fetch and analysis continue.
                 pass
@@ -227,7 +232,8 @@ class CollectionService:
                          skipped=skipped + policy_excluded)
         if sources and not fetch_id.startswith("organize-"):
             self._persist_dataset_snapshot(
-                fetch_id, sources, records, available, skipped, policy_excluded
+                fetch_id, sources, records, available, skipped, policy_excluded,
+                bing_updates=bing_updates, entity_context_rows=entity_context_rows,
             )
         if sources and not records and not fetch_id.startswith("organize-"):
             # A failed or empty source response is still an auditable snapshot,
@@ -477,7 +483,7 @@ class CollectionService:
         self.store.update_fetch_job(fetch_id, changes)
 
     def _persist_dataset_snapshot(self, fetch_id, sources, records, available, skipped,
-                                  policy_excluded=0):
+                                  policy_excluded=0, *, bing_updates=(), entity_context_rows=()):
         manifests, flags, modes = [], [], set()
         provider_count = 0
         for source_index, source in enumerate(sources):
@@ -516,6 +522,14 @@ class CollectionService:
             flags.append("CLEANING_REJECTIONS")
         if policy_excluded:
             flags.append("YOUTUBE_KEYWORD_EXTRACTION_DISABLED")
+        source_evidence_rows = None
+        if getattr(self.store, "supports_source_evidence_lineage", False):
+            lineage = build_source_evidence(
+                sources, bing_updates=bing_updates, entity_context_rows=entity_context_rows,
+            )
+            source_evidence_rows = lineage["rows"]
+            if lineage["untracked_record_count"]:
+                flags.append("SOURCE_EVIDENCE_LINEAGE_INCOMPLETE")
         dates, fetched = [], []
         for record in records:
             try:
@@ -543,24 +557,26 @@ class CollectionService:
                 continue
             if timestamp.tzinfo is not None and timestamp.utcoffset() is not None:
                 fetched.append(timestamp.astimezone(timezone.utc).isoformat())
-        self.store.persist_dataset_snapshot(
-            fetch_id,
-            status=("FAILED" if sources and all(
+        snapshot = {
+            "status": ("FAILED" if sources and all(
                 source.get("status") not in {"SUCCESS", "PARTIAL"} for source in sources
             ) else "PARTIAL" if flags else "COMPLETED"),
-            data_mode=next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else "UNKNOWN",
-            source_manifest=manifests,
-            provider_record_count=provider_count,
-            received_record_count=available,
-            retained_keyword_count=len(records),
-            rejected_record_count=skipped,
-            observation_start=min(dates) if dates else None,
-            observation_end=max(dates) if dates else None,
-            fetched_at=max(fetched) if fetched else None,
-            quality_flags=sorted(set(flags)),
-            processing_status="PROCESSING",
-            created_at=now(),
-        )
+            "data_mode": next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else "UNKNOWN",
+            "source_manifest": manifests,
+            "provider_record_count": provider_count,
+            "received_record_count": available,
+            "retained_keyword_count": len(records),
+            "rejected_record_count": skipped,
+            "observation_start": min(dates) if dates else None,
+            "observation_end": max(dates) if dates else None,
+            "fetched_at": max(fetched) if fetched else None,
+            "quality_flags": sorted(set(flags)),
+            "processing_status": "PROCESSING",
+            "created_at": now(),
+        }
+        if source_evidence_rows is not None:
+            snapshot["source_evidence_rows"] = source_evidence_rows
+        self.store.persist_dataset_snapshot(fetch_id, **snapshot)
 
     def _analyze_persisted_keywords(self, changed_records):
         """Persist observation facts and execute the registry across every eligible keyword."""

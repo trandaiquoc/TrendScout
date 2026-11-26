@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 from app.collections.analysis_storage import analysis_state_digest
 from app.collections.identity import fingerprint
 from app.collections.postgres_reads import PostgresCollectionReader, _json_result
+from app.collections.source_lineage import build_source_evidence
 from app.storage.postgres_connection import PostgresConnectionError, postgres_connection
 
 
@@ -116,6 +117,8 @@ class PostgresAlgorithmAnalysisSession:
 
 
 class PostgresCollectionStore(PostgresCollectionReader):
+    supports_source_evidence_lineage = True
+
     def _write(self, operation, *, serialize=True):
         try:
             with postgres_connection(self._environment) as db:
@@ -170,6 +173,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
     def upsert_entity_context(self, rows):
         if not rows:
             return
+        lineage = build_source_evidence([], entity_context_rows=rows)
         columns = ("keyword_id", "title", "page_id", "entity_id", "description", "page_namespace",
                    "is_disambiguation", "redirected_from", "page_language", "is_main_page",
                    "is_main_page_known", "entity_type", "occupations", "category_ids", "instance_types",
@@ -198,6 +202,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     context_version=EXCLUDED.context_version,captured_at=EXCLUDED.captured_at""")
                     .format(self._table("entity_context"), sql.SQL(",").join(map(sql.Identifier, columns)),
                             sql.SQL(",").join(sql.Placeholder() for _ in columns)), values)
+            self._persist_source_evidence(db, None, lineage["rows"])
 
         return self._write(write)
 
@@ -766,7 +771,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                  provider_record_count, received_record_count,
                                  retained_keyword_count, rejected_record_count,
                                  observation_start, observation_end, fetched_at, quality_flags,
-                                 processing_status, created_at):
+                                 processing_status, created_at, source_evidence_rows=None):
         def operation(db):
             mode_scope = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
             keyword_scope = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
@@ -802,9 +807,59 @@ class PostgresCollectionStore(PostgresCollectionReader):
                  received_record_count, retained_keyword_count, rejected_record_count, observation_start,
                  observation_end, fetched_at, Jsonb(quality_flags), processing_status,
                  counts["eligible"], counts["assigned"], counts["unassigned"], created_at))
+            if source_evidence_rows:
+                self._persist_source_evidence(db, dataset_id, source_evidence_rows)
             return counts
 
         return self._write(operation)
+
+    def _persist_source_evidence(self, db, dataset_id, evidence_rows):
+        """Write lineage and both relationship sets in the snapshot transaction."""
+        rows = [row for row in evidence_rows if isinstance(row, dict)]
+        if not rows:
+            return
+        source_names = {}
+        for row in rows:
+            source_names[row["source_id"]] = row["source_display_name"]
+        with db.cursor() as cursor:
+            cursor.executemany(sql.SQL("""INSERT INTO {}(id,display_name)
+                VALUES (%s,%s) ON CONFLICT(id) DO NOTHING""").format(self._table("sources")),
+                sorted(source_names.items()))
+
+            insert_evidence = sql.SQL("""INSERT INTO {}(id,source_id,external_id,content_digest,
+                query_scope,geography,observed_at,collected_at,payload,expires_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING""").format(
+                    self._table("source_evidence"))
+            for offset in range(0, len(rows), 500):
+                batch = rows[offset:offset + 500]
+                cursor.executemany(insert_evidence, [(
+                    row["id"], row["source_id"], row.get("external_id"), row["content_digest"],
+                    Jsonb(row["query_scope"]),
+                    Jsonb(row["geography"]) if row.get("geography") is not None else None,
+                    row.get("observed_at"), row["collected_at"], None, row["expires_at"],
+                ) for row in batch])
+
+            if dataset_id is not None:
+                cursor.executemany(sql.SQL("""INSERT INTO {}(dataset_id,evidence_id)
+                    VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("dataset_evidence")),
+                    [(dataset_id, row["id"]) for row in rows])
+
+            requested_keyword_ids = sorted({keyword_id for row in rows
+                                            for keyword_id in row.get("keyword_ids", ())})
+            existing_keyword_ids = set()
+            for offset in range(0, len(requested_keyword_ids), 500):
+                batch = requested_keyword_ids[offset:offset + 500]
+                if batch:
+                    found = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s)")
+                                       .format(self._table("keywords")), (batch,)).fetchall()
+                    existing_keyword_ids.update(item["id"] for item in found)
+            links = sorted({(row["id"], keyword_id) for row in rows
+                            for keyword_id in row.get("keyword_ids", ())
+                            if keyword_id in existing_keyword_ids})
+            for offset in range(0, len(links), 500):
+                cursor.executemany(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
+                    VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("evidence_keywords")),
+                    links[offset:offset + 500])
 
     def create(self, data, *, created_by="USER", reason=""):
         identifier = str(uuid.uuid4())

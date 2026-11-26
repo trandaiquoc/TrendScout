@@ -107,6 +107,17 @@ official [Python runtime dependency documentation](https://vercel.com/docs/funct
 and [Install Command configuration](https://vercel.com/docs/builds/configure-a-build)
 were checked on 26 November 2026.
 
+## Safe Git resume check — 26 November 2026
+
+After `git fetch origin`, `origin/main` remains at
+`cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4`. The goal branch is
+`feature/postgresql` at `6fcfc95e1ab9b7ea56b42045b17c9aaf469db107`, matching
+`origin/feature/postgresql` with four commits after `origin/main`. The working
+tree contains the existing source-lineage implementation and report edits;
+they were preserved. No branch switch, merge, reset, or force update occurred.
+The other three local goal worktrees remain at `cf09b2e`; the fetch exposed no
+remote AI, Algorithms, or Frontend contract branch requiring reconciliation.
+
 The current feature branch adds this install command to `Backend/vercel.json`:
 
 ```text
@@ -118,6 +129,33 @@ packaging and legacy Vercel path suite passed 55 tests and 59 subtests. This
 correction remains unbuilt and undeployed. No deployment, alias change, IAM
 change, Fetch, or provider request was made; Production still returns the two
 403 responses.
+
+## Latest read-only Production recheck — 26 November 2026
+
+Vercel alias metadata currently maps `trend-scout-mu.vercel.app` to READY
+deployment `dpl_AizETu6tMZXvScnxWTSLa22GXW8j`, built from
+`cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4` and configured for `iad1`. Fresh,
+authenticated GETs at 03:56 UTC returned JSON HTTP 200 for `/api/health` and
+HTTP 403 `FIRESTORE_IDENTITY_REJECTED` for `/api/v1/capabilities` and
+`/api/v1/datasets/latest`. The latter responses were `no-store` cache misses;
+their `x-vercel-id` values again show the `sin1` edge and `iad1` function
+route. This confirms the Production regression is still present. It does not
+identify the exact runtime exception or rule out a separate identity failure.
+
+The previously verified compatible deployment `dpl_4nrYBmDRyoKDVgYg97Mbub9CDCjs`
+remains READY on `7faacb8cd9ee47c52bdbee0cc8318a1ca4b66c2a`. Fresh authenticated
+GETs to that deployment at 04:00 UTC returned HTTP 200 for health, capabilities,
+and latest dataset. This confirms a known working release is still available;
+it is not the current alias. Comparing it with the current `cf09b2e` deployment
+strengthens the dependency-packaging regression hypothesis but does not prove
+the exact exception.
+
+The earlier report entry records a temporary alias restoration to compatible
+deployment `dpl_4nrYBmDRyoKDVgYg97Mbub9CDCjs` on `7faacb8`; that is not the
+current alias. The latest branch-only instruction does not authorize a new
+Production release or alias mutation, so no promotion, rollback, deployment,
+Fetch POST, IAM change, or data write was made. The Firestore-extra install
+correction remains local and has not been built or deployed.
 
 ## Rolling retention implementation — G6 subcriterion, not a new gate
 
@@ -132,6 +170,40 @@ payload backlog. Missed batches can continue on a later invocation. It makes
 no provider requests and is reached opportunistically from the explicit
 PostgreSQL LIVE composition. No Vercel Cron or paid service was added.
 
+The PostgreSQL Fetch path now writes a deterministic `source_evidence` index
+for newly collected provider records in the same transaction as each dataset
+snapshot. It records the content digest, provider and query scope, explicitly
+scoped geography, an aware collection timestamp, an aware observation
+timestamp when one exists, and the seven-day policy deadline. Date-only
+observations remain text in `query_scope`; no instant is invented. Evidence
+payloads stay null, and dataset/keyword relationships are idempotent. Google
+records and attached Bing verifications are indexed as separate provider
+evidence. The combined Wikimedia/Wikidata entity-context copy is indexed in
+the same transaction as its `entity_context` upsert and linked to the keyword;
+when returned during Fetch, it is also linked to that dataset snapshot. Records
+without an explicit aware per-record collection timestamp are not assigned a
+guessed one; PostgreSQL snapshots carry the
+`SOURCE_EVIDENCE_LINEAGE_INCOMPLETE` quality flag. This adds provenance for
+future cleanup but does not migrate historical snapshots or remove any
+provider content copies.
+
+Provider-policy documentation was checked on 26 November 2026. YouTube's
+Developer Policies generally require stored YouTube API data such as Search
+results to be deleted or refreshed after 30 calendar days; the exception for
+longer storage concerns qualifying statistical data and requires accepted
+analytics use. The application's seven-local-date policy is shorter than that
+general limit. SerpApi's current Legal and FAQ pages say its own search JSON,
+Markdown and HTML files expire after 31 days on SerpApi's service; that is
+SerpApi's service-side retention statement, not a client-side license or
+retention ceiling. These checks do not establish a shorter-than-seven-day
+local limit for either source. A source-policy registry is not yet wired into
+Fetch lineage, and the remaining active-source terms have not all been mapped;
+records still receive the seven-day application deadline. This is interim
+policy evidence, not end-to-end provider-copy expiry proof. See the official
+[YouTube Developer Policies](https://developers.google.com/youtube/terms/developer-policies),
+[SerpApi Legal Documents](https://serpapi.com/legal), and
+[SerpApi FAQ](https://serpapi.com/faq), checked 26 November 2026.
+
 The runner deliberately does **not** delete `source_evidence` yet. It reports
 rows whose `collected_at` or provider `expires_at` is due, but the current
 schema also stores provider-derived content in keyword and classification
@@ -144,6 +216,12 @@ redaction/invalidation contracts. No user Collections, Research, settings,
 quota, reservation, cooldown, or refresh-eligibility state is age-purged.
 Current YouTube cache limits remain unchanged and are not extended by this
 default policy.
+
+Focused offline coverage for the new lineage builder, Fetch snapshot path and
+entity-context lineage passed 7 tests; its isolated PostgreSQL transaction test was skipped because
+`TRENDSCOUT_TEST_POSTGRES_URL` was not configured. Existing collection tests
+passed 38 tests and 7 subtests; 7 PostgreSQL-backed cases were skipped for the
+same missing test URL. No Neon connection or Production Fetch was made.
 
 `Documents/Integration/DB_CONTRACT.md` publishes the database ownership and
 cross-goal storage/migration requirements. At this fetch there were no remote
@@ -1237,13 +1315,13 @@ and the overall score remains **3 / 12 (25%)**.
 | G3 | Open | The earlier local/Production comparator (50,783 / 55,332 rows) found 15,875 changed shared rows and source-only rows (33,979 local / 38,528 Production); no canonical winner was selected. The current first-host capture has 31,954 Collections rows and no matching Production snapshot is available for a fresh comparison. The second Windows host has not been inventoried; per-domain authority and reconciliation are open. |
 | G4 | Open | 25 November real-data captures reconciled in isolated schemas, but the 26 November local read-only probe was denied; final current capture through an authorized path, writer fence, quota/payload reconciliation and production staging remain. |
 | G5 | Open | Local LIVE `create_app` selects PostgreSQL collection, analysis and scheduler stores. In one isolated Neon schema, Vercel without OIDC read a Local collection write; the Local store observed a Vercel collection write; eight major read routes returned 200. A fail-closed startup guard now requires business rows and imported LIVE quota state, but the Neon schema is still migration-only; the Vercel flag remains off by default, and Local's normal default path and Production have not switched. |
-| G6 | Open | New G6-R subcriterion: rolling seven-local-date expiry is calculated and a 500-row transactional/audited payload cleanup is wired into the explicit PostgreSQL LIVE composition. A real Neon isolated-schema test verifies dry-run, batch continuation, reference expiry, audit, and protected-row preservation. It does not yet purge source evidence or provider copies in keyword/classification/algorithm/research records because complete collection-time and lineage are missing; these are retained. Neon business/operational import, default Local SQLite removal, broader incremental-ingestion coverage, project-level capacity, and end-to-end retention proof remain. |
+| G6 | Open | New G6-R subcriterion: rolling seven-local-date expiry is calculated and a 500-row transactional/audited payload cleanup is wired into the explicit PostgreSQL LIVE composition. A real Neon isolated-schema test verifies dry-run, batch continuation, reference expiry, audit, and protected-row preservation. New PostgreSQL Fetches index per-record source digests and source/dataset/keyword lineage in the snapshot transaction; entity-context copies are indexed with their keyword rows, and missing aware collection times are flagged. Official policy checks found a 30-calendar-day general YouTube Search-data limit and a 31-day SerpApi service-side search-file retention period; seven local dates are shorter than these reviewed periods, but a source-policy registry is not yet wired into lineage and not all active-source terms were mapped. The PostgreSQL lineage transaction test was skipped because no test URL was configured. Historical records remain unindexed, and provider copies in keyword/classification/algorithm/research records are not yet purged because field-level lineage and dependent-record redaction are incomplete. Neon business/operational import, default Local SQLite removal, broader incremental-ingestion coverage, project-level capacity, and end-to-end retention proof remain. |
 | G7 | Open | PostgreSQL cached continuation, terminal checkpoint readback, compact manifest reuse, Collections no-op, same-key replay, lease fencing and recovery after a simulated interruption have focused regression coverage (110 tests, 46 subtests; isolated Neon atomic-state, composition and collection-read integration passed). A new offline SQLite case confirms that cancellation after a synthetic dispatch preserves the same attempt receipt and one quota reservation across worker recovery. The matching isolated PostgreSQL test is added but skipped until `TRENDSCOUT_TEST_POSTGRES_URL` is supplied. Offline Chrome verifies continuation after transient status failures, single recovery and reload without repeat POST using a stubbed API. PostgreSQL cancellation/replay, provider reliability and end-to-end latency acceptance remain. |
 | G8 | **PASS** | Explicit cache-only API/UI and separate worker registry; provider/cache tests and isolated Neon composition prove no LIVE handler invocation and zero reported provider requests, with cache misses failing closed. Same-Fetch checkpoint replay, exact keyword filtering, concurrent retry protection, and offline inference with the installed local model passed. Production availability/timing is not claimed; latency belongs to G12. |
 | G9 | **PASS** | PostgreSQL read routes and the five-minute identity/schema validation cache; PostgreSQL request-timing and credential-safe route logging; 9 frontend API tests for in-flight coalescing/cache invalidation, 32 Fetch-controller tests and offline Chrome workflow; isolated Neon scheduler claim/recovery/fencing; PostgreSQL-only core dependency profile with legacy/local extras and function file exclusions. Production latency and browser measurements are G12. |
-| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. The retention update's focused suite passed 80 tests and 59 subtests with 4 skips; guarded-attempt coverage passed 65 tests and 23 subtests with 2 PostgreSQL environment-gated skips; and the packaging/legacy Vercel check passed 55 tests and 59 subtests. The isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
+| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. The retention update's focused suite passed 80 tests and 59 subtests with 4 skips; guarded-attempt coverage passed 65 tests and 23 subtests with 2 PostgreSQL environment-gated skips; and the packaging/legacy Vercel check passed 55 tests and 59 subtests. New source-lineage coverage passed 7 tests with its PostgreSQL integration case skipped; related collection coverage passed 38 tests and 7 subtests with 7 PostgreSQL-backed cases skipped. The isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
 | G11 | Open | Fenced cutover, proven rollback, release and exact deployed SHA. |
-| G12 | Open | Current alias `trend-scout-mu.vercel.app` points to `dpl_AizETu6tMZXvScnxWTSLa22GXW8j` on `cf09b2e`: authenticated JSON health GET returns 200, while capabilities and latest dataset return 403 `FIRESTORE_IDENTITY_REJECTED`. Build evidence shows the deployed SHA auto-installed `pyproject.toml` dependencies without the Firestore optional extra; the current branch configures that extra, but it has not been built or deployed. The compatible `7faacb8` deployment returned 200 for the same API GETs. No deployment or alias change was made under the current restriction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
+| G12 | Open | Latest authenticated GET recheck at 03:56 UTC confirms alias `trend-scout-mu.vercel.app` points to READY `dpl_AizETu6tMZXvScnxWTSLa22GXW8j` on `cf09b2e`: health returned 200, while capabilities and latest dataset returned 403 `FIRESTORE_IDENTITY_REJECTED` from the `sin1:iad1` route. Build evidence shows the deployed SHA auto-installed `pyproject.toml` dependencies without the Firestore optional extra; the current branch configures that extra, but it has not been built or deployed. Compatible deployment `dpl_4nrYBmDRyoKDVgYg97Mbub9CDCjs` on `7faacb8` remains READY; fresh direct GETs at 04:00 UTC returned 200 for the same three paths, but it is not the current alias. No deployment or alias mutation was made under the latest branch-only instruction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
 
 No business-data migration, runtime cutover, Production deployment, live
 provider request, quota reset or business-row modification has been performed.
