@@ -1418,6 +1418,12 @@ and the overall score remains **3 / 12 (25%)**.
 
 ## Gate status
 
+Latest UI/PostgreSQL compatibility verification (26 November 2026): the focused
+backend group passed 61 tests and 45 subtests; 9 PostgreSQL integration cases
+were skipped because `TRENDSCOUT_TEST_POSTGRES_URL` was unavailable. The
+integrated frontend Node suite passed 71/71. This is focused verification only;
+G10 remains open pending the consolidated suite and Firestore emulator run.
+
 | Gate | State | Remaining evidence |
 | --- | --- | --- |
 | G1 | Open | The current Windows host's 26 November inventory captured 3 SQLite stores (31,965 total rows) with valid integrity and no FK violations; Scheduler and D6 smoke SQLite files were missing. Its 31,954-row Collections image differs from the prior 50,783-row local comparator image, which is unavailable for same-file verification. The second host and a fresh authorized Production capture remain missing. Production GETs confirm function execution in `iad1` from `sin1`; Neon SQL reports 13,000,704 database bytes and 1/112 connections including the probe, but project-level capacity and Vercel-to-Neon latency are unavailable. |
