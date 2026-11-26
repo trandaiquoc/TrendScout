@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 import json
 import math
 import re
 import time
-from urllib.parse import quote_plus
 import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from urllib.parse import quote_plus
 
 from app.ai.openrouter import OpenRouterAdapter, OpenRouterError
 from app.ai.schemas import (
@@ -28,7 +28,6 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
-
 
 STATE_KEY = "trendscout-ai-engine-v1"
 PROMPT_VERSION = "trendscout-semantic-v1"
@@ -417,6 +416,38 @@ class AIService:
         cutoff = now.timestamp() - ATTEMPT_RETENTION_SECONDS
         state["attempts"] = [item for item in state["attempts"]
                              if type(item.get("epoch")) in (int, float) and item["epoch"] >= cutoff]
+
+    @staticmethod
+    def prune_expired_content(state, now):
+        """Remove only AI-derived content whose provider evidence has expired.
+
+        Retention cleanup deliberately leaves jobs, idempotency metadata,
+        leases, and quota attempts untouched. Content without an explicit
+        expiry remains visible to the caller as untracked instead of being
+        guessed at or silently discarded.
+        """
+        _ensure_state(state)
+        counts = {"ai_cache": 0, "ai_recommendations": 0,
+                  "ai_job_results": 0, "ai_content_untracked": 0}
+        for job in state["jobs"].values():
+            if not isinstance(job, dict) or job.get("result") is None:
+                continue
+            expires = _parse_time(job.get("result_expires_at"))
+            if expires is None:
+                counts["ai_content_untracked"] += 1
+            elif expires <= now:
+                job["result"] = None
+                counts["ai_job_results"] += 1
+        for field, output_key in (("cache", "ai_cache"),
+                                  ("recommendations", "ai_recommendations")):
+            for key, item in list(state[field].items()):
+                expires = _parse_time(item.get("expires_at")) if isinstance(item, dict) else None
+                if expires is None:
+                    counts["ai_content_untracked"] += 1
+                elif expires <= now:
+                    state[field].pop(key, None)
+                    counts[output_key] += 1
+        return counts
 
     def _update_job(self, job_id, **fields):
         stamp = _iso_now(self._now())

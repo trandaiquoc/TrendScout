@@ -88,7 +88,8 @@ def _canonical_json(value):
                       allow_nan=False, separators=(",", ":"))
 
 
-def _keyword_field_lineage(source_id, keyword_id, content, *, evidence_kind):
+def _keyword_field_lineage(source_id, keyword_id, content, *, evidence_kind,
+                           target_path=None):
     """Describe exact provider-derived keyword fields without copying their values."""
     if not isinstance(keyword_id, str) or not keyword_id or not isinstance(content, dict):
         return []
@@ -115,6 +116,61 @@ def _keyword_field_lineage(source_id, keyword_id, content, *, evidence_kind):
             return []
         result.append({
             "keyword_id": keyword_id,
+            "source_id": source_id,
+            "column": "evidence",
+            "path": list(target_path) if target_path is not None else [field],
+            "value_sha256": value_digest,
+        })
+    return result
+
+
+def _keyword_row_lineage(keyword, source_id):
+    """Fingerprint provider-derived keyword columns for retention scrubbing."""
+    if not isinstance(keyword, dict) or not isinstance(keyword.get("id"), str):
+        return []
+    result = []
+    for column in ("keyword", "normalized", "observed_at", "context"):
+        value = keyword.get(column)
+        if not isinstance(value, str):
+            continue
+        try:
+            value_digest = hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            return []
+        result.append({
+            "keyword_id": keyword["id"],
+            "source_id": source_id,
+            "column": column,
+            "path": [],
+            "value_sha256": value_digest,
+        })
+    return result
+
+
+def _keyword_evidence_lineage(keyword, source_id):
+    """Fingerprint every persisted provider field so cleanup never guesses."""
+    if not isinstance(keyword, dict) or not isinstance(keyword.get("id"), str):
+        return []
+    try:
+        evidence = json.loads(keyword.get("evidence", "{}"))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(evidence, dict):
+        return []
+    result = []
+    for field, value in evidence.items():
+        # Bing verification has its own source evidence and expiry. Its
+        # descendants are tracked by Bing lineage entries below.
+        if field in {"bing_verification", "bing_verification_history"}:
+            continue
+        try:
+            value_digest = hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            return []
+        result.append({
+            "keyword_id": keyword["id"],
+            "source_id": source_id,
+            "column": "evidence",
             "path": [field],
             "value_sha256": value_digest,
         })
@@ -128,8 +184,13 @@ def _entity_context_lineage(keyword_id, content):
     collected_at = _aware_timestamp(content.get("fetched_at"))
     if collected_at is None:
         return None
+    canonical_content = dict(content)
+    canonical_content["fetched_at"] = collected_at.isoformat()
+    for field in ("is_disambiguation", "is_main_page", "is_main_page_known"):
+        if field in canonical_content:
+            canonical_content[field] = bool(canonical_content[field])
     try:
-        value_digest = hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest()
+        value_digest = hashlib.sha256(_canonical_json(canonical_content).encode("utf-8")).hexdigest()
     except (TypeError, ValueError, OverflowError, UnicodeError):
         return None
     return {
@@ -427,8 +488,12 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 snapshot_status=snapshot_status, evidence_kind="provider_record",
                 keyword_id=keyword_id,
                 entity_context_lineage=entity_context_target,
-                keyword_field_lineage=_keyword_field_lineage(
-                    source_id, keyword_id, record, evidence_kind="provider_record",
+                keyword_field_lineage=(
+                    _keyword_field_lineage(
+                        source_id, keyword_id, record, evidence_kind="provider_record",
+                    ) + (_keyword_evidence_lineage(cleaned, source_id)
+                         + _keyword_row_lineage(cleaned, source_id)
+                         if cleaned is not None else [])
                 ))
 
             # Google keyword evidence can contain several attached Bing checks.
@@ -439,7 +504,9 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                 verifications = [*(history if isinstance(history, list) else [])]
                 if isinstance(current, dict):
                     verifications.append(current)
-                for verification in verifications:
+                history_count = len(history) if isinstance(history, list) else 0
+                for index, verification in enumerate(verifications):
+                    is_current = index >= history_count
                     add(BING_SOURCE_ID, verification, data_mode=data_mode,
                         snapshot_status=snapshot_status,
                         evidence_kind="search_verification", keyword_id=keyword_id,
@@ -447,7 +514,11 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
                             _keyword_field_lineage(
                                 BING_SOURCE_ID, keyword_id, verification,
                                 evidence_kind="search_verification",
-                            ) if verification is current else ()
+                                target_path=(
+                                    ["bing_verification"] if is_current
+                                    else ["bing_verification_history", str(index)]
+                                ),
+                            )
                         ))
 
     for update in bing_updates if isinstance(bing_updates, (list, tuple)) else ():

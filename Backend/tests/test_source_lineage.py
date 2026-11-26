@@ -75,10 +75,19 @@ def test_wikimedia_lineage_preserves_date_scope_without_inventing_observation_ti
     keyword_evidence = json.loads(keyword["evidence"])
     field_lineage = evidence["payload"]["retention_lineage"]["keyword_fields"]
     assert evidence["payload"]["retention_lineage"]["version"] == 1
-    assert {entry["path"][0] for entry in field_lineage} == {
+    assert {
         "article_original", "article_display", "provider_rank", "views_ceil",
         "country_scope", "access", "observation_date", "fetched_at",
         "source_url",
+    } <= {entry["path"][0] for entry in field_lineage
+          if entry.get("column", "evidence") == "evidence" and entry["path"]}
+    assert set(keyword_evidence) == {
+        entry["path"][0] for entry in field_lineage
+        if entry.get("column", "evidence") == "evidence" and entry["path"]
+    }
+    row_lineage = evidence["payload"]["retention_lineage"]["keyword_fields"]
+    assert {entry["column"] for entry in row_lineage} >= {
+        "keyword", "normalized", "observed_at", "context", "evidence",
     }
     assert all(entry["keyword_id"] == keyword["id"] for entry in field_lineage)
     expected_digests = {
@@ -86,11 +95,13 @@ def test_wikimedia_lineage_preserves_date_scope_without_inventing_observation_ti
             keyword_evidence[field], ensure_ascii=False, sort_keys=True,
             allow_nan=False, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
-        for field in (entry["path"][0] for entry in field_lineage)
+        for field in (entry["path"][0] for entry in field_lineage
+                      if entry.get("column", "evidence") == "evidence" and entry["path"])
     }
-    assert {entry["path"][0]: entry["value_sha256"] for entry in field_lineage} == (
-        expected_digests
-    )
+    assert {
+        entry["path"][0]: entry["value_sha256"] for entry in field_lineage
+        if entry.get("column", "evidence") == "evidence" and entry["path"]
+    } == expected_digests
     assert "Portable Solar Generator" not in json.dumps(evidence["payload"])
     assert len(evidence["content_digest"]) == 64
     assert "Portable Solar Generator" not in str(evidence["query_scope"])
@@ -242,13 +253,19 @@ def test_bing_history_and_current_record_deduplicate_by_evidence_identity():
     expected_keyword = keyword_record(google_record, "google_web_serp", "LIVE")
     assert bing_rows[0]["keyword_ids"] == (expected_keyword["id"],)
     assert bing_rows[0]["query_scope"]["evidence_kind"] == "search_verification"
-    assert bing_rows[0]["payload"]["retention_lineage"]["keyword_fields"][0]["path"] == [
-        "bing_verification"
-    ]
+    assert {tuple(entry["path"]) for entry in
+            bing_rows[0]["payload"]["retention_lineage"]["keyword_fields"]} == {
+        ("bing_verification_history", "0"), ("bing_verification",),
+    }
     assert google_rows[0]["payload"]["retention_lineage"]["keyword_fields"]
-    assert all(entry["path"][0] not in {
-        "snapshot_status", "metric_definition", "bing_verification_history",
-    } for entry in google_rows[0]["payload"]["retention_lineage"]["keyword_fields"])
+    google_keyword = keyword_record(google_record, "google_web_serp", "LIVE")
+    persisted_fields = set(json.loads(google_keyword["evidence"]))
+    bing_fields = {"bing_verification", "bing_verification_history"}
+    assert persisted_fields - bing_fields <= {
+        entry["path"][0]
+        for entry in google_rows[0]["payload"]["retention_lineage"]["keyword_fields"]
+        if entry.get("column", "evidence") == "evidence" and entry["path"]
+    }
 
 
 def test_collection_service_marks_missing_postgres_lineage_in_snapshot_quality():

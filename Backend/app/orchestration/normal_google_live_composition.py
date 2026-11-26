@@ -594,7 +594,28 @@ async def normal_google_live_composition(*, user_agent,
             purge_payloads=not uses_postgres,
         )
         if uses_postgres:
-            retention_summary = retention_store.sweep(now=now)
+            retention_runs = []
+            for _ in range(32):
+                retention_summary = retention_store.sweep(now=now)
+                retention_runs.append(retention_summary)
+                if not retention_summary.get("has_more"):
+                    break
+            retention_summary = dict(retention_runs[-1])
+            retention_summary["batch_count"] = len(retention_runs)
+            retention_summary["source_evidence_deleted_count"] = sum(
+                item.get("source_evidence_deleted_count", 0) for item in retention_runs
+            )
+            retention_summary["payload_deleted_count"] = sum(
+                item.get("payload_deleted_count", 0) for item in retention_runs
+            )
+            retention_summary["payload_candidate_count"] = sum(
+                item.get("payload_candidate_count", 0) for item in retention_runs
+            )
+            aggregated_counts = {}
+            for item in retention_runs:
+                for key, value in item.get("dependent_cleanup_counts", {}).items():
+                    aggregated_counts[key] = aggregated_counts.get(key, 0) + value
+            retention_summary["dependent_cleanup_counts"] = aggregated_counts
             return {
                 "cache_entries": int(cache_deleted),
                 "expired_blobs": int(retention_summary["payload_deleted_count"]),

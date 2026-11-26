@@ -72,7 +72,7 @@ async def postgres_live_composition(
             "force_refresh_trends": True,
             "allow_initial_google_acceptance": True,
             "allow_initial_bing_acceptance": True,
-            "preserve_expired_data": True,
+            "preserve_expired_data": False,
             "youtube_max_queries": 1,
             "youtube_allow_initial_acceptance": True,
             "vercel_shared_live": True,

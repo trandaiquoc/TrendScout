@@ -84,12 +84,12 @@ _YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS = 60 * 60
 
 
 async def _run_youtube_retention_sweeper(cleanup, *, sleep=asyncio.sleep):
-    """Run local YouTube-only cache expiry without making provider requests."""
+    """Run local retention cleanup without making provider requests."""
     while True:
         try:
             await asyncio.to_thread(cleanup)
         except Exception:
-            _logger.exception("Local YouTube cache retention sweep failed")
+            _logger.exception("Local retention cleanup failed")
         await sleep(_YOUTUBE_RETENTION_SWEEP_INTERVAL_SECONDS)
 
 

@@ -722,8 +722,22 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     }
         return found
 
-    def upsert_embedding_cache(self, entries):
+    def upsert_embedding_cache(self, entries, *, evidence_ids_by_fingerprint=None):
+        """Persist derived vectors and optional source-evidence expiry lineage.
+
+        PostgreSQL retention can invalidate a vector only when the producer
+        supplies the evidence IDs used to build it. Unlinked legacy vectors
+        are preserved until their owner can provide lineage.
+        """
         entries = list(entries)
+        lineage = evidence_ids_by_fingerprint or {}
+        if (not isinstance(lineage, dict)
+                or any(not isinstance(key, str) or not isinstance(values, (list, tuple, set))
+                       or not values or len(values) > 100
+                       or any(not isinstance(value, str) or not value for value in values)
+                       for key, values in lineage.items())):
+            raise ValueError("embedding-cache source evidence lineage is invalid")
+
         def operation(db):
             for offset in range(0, len(entries), 500):
                 batch = entries[offset:offset + 500]
@@ -736,6 +750,38 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     model_version=EXCLUDED.model_version,collection_version=EXCLUDED.collection_version,
                     text_hash=EXCLUDED.text_hash,vector=EXCLUDED.vector,dimension=EXCLUDED.dimension""")
                     .format(self._table("cache"), values), params)
+
+            fingerprints = [entry[0] for entry in entries]
+            if fingerprints:
+                db.execute(sql.SQL("DELETE FROM {} WHERE fingerprint=ANY(%s)")
+                           .format(self._table("cache_evidence")), (fingerprints,))
+            requested_ids = sorted({evidence_id for fingerprint in fingerprints
+                                    for evidence_id in lineage.get(fingerprint, ())})
+            expiry_by_id = {}
+            for offset in range(0, len(requested_ids), 500):
+                rows = db.execute(sql.SQL("SELECT id,expires_at FROM {} WHERE id=ANY(%s)")
+                                  .format(self._table("source_evidence")),
+                                  (requested_ids[offset:offset + 500],)).fetchall()
+                expiry_by_id.update({row["id"]: row["expires_at"] for row in rows})
+            if set(expiry_by_id) != set(requested_ids):
+                raise ValueError("embedding-cache lineage references unknown source evidence")
+            now = datetime.now(timezone.utc)
+            links = []
+            for cache_fingerprint, evidence_ids in lineage.items():
+                if cache_fingerprint not in fingerprints:
+                    continue
+                expires = [expiry_by_id[value] for value in evidence_ids]
+                if any(value is None or value <= now for value in expires):
+                    raise ValueError("embedding-cache source evidence is expired")
+                links.extend((cache_fingerprint, evidence_id, min(expires))
+                             for evidence_id in sorted(set(evidence_ids)))
+            if links:
+                with db.cursor() as cursor:
+                    cursor.executemany(sql.SQL("""INSERT INTO {}(
+                        fingerprint,evidence_id,expires_at) VALUES(%s,%s,%s)
+                        ON CONFLICT(fingerprint,evidence_id) DO UPDATE
+                        SET expires_at=EXCLUDED.expires_at""").format(
+                            self._table("cache_evidence")), links)
 
         return self._write(operation)
 
