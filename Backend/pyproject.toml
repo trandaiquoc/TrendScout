@@ -15,7 +15,6 @@ dependencies = [
     "charset-normalizer==3.5.2",
     "cryptography==50.0.2",
     "fastapi==0.162.2",
-    "fastembed==0.9.1",
     "google-auth==2.62.1",
     "h11==0.16.0",
     "httpcore==1.0.9",
@@ -61,6 +60,9 @@ local-firestore = [
 local-runtime = [
     "click==8.5.1",
     "uvicorn==0.54.0",
+]
+legacy-local-embeddings = [
+    "fastembed==0.9.1",
 ]
 
 [tool.setuptools.packages.find]

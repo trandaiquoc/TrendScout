@@ -1,4 +1,4 @@
-"""No-network smoke/evaluation for the already-cached multilingual local model."""
+"""Optional legacy no-network probe; this model is not used by the active runtime."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 from app.api.collections import _mode
-from app.collections.embeddings import MODEL_NAME, embed
-from app.collections.service import CollectionService, cosine
+from app.collections.embeddings import MODEL_NAME, cosine, embed
+from app.collections.service import CollectionService
 from app.collections.store import CollectionStore
 
 

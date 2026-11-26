@@ -1,8 +1,9 @@
-"""Bounded local CPU embedding adapter. Model loading is lazy and failure is safe."""
+"""Optional legacy local embedding adapter; the active runtime uses OpenRouter AI."""
 
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 from threading import Lock
 
@@ -13,6 +14,17 @@ MODEL_VERSION = "fastembed-0.9.1"
 MAX_INPUT_CHARS = 1200
 _lock = Lock()
 _model = None
+
+
+def cosine(left, right) -> float:
+    """Cosine similarity helper retained for the optional offline legacy probe."""
+    if len(left) != len(right) or not left:
+        return 0.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
 
 
 def _cache_dir() -> Path:

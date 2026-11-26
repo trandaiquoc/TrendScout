@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
 from app.api.algorithms import router as algorithms_router
+from app.api.ai import router as ai_router
 from app.api.analytics import router as analytics_router
 from app.api.capabilities import router as capabilities_router
 from app.api.collections import router as collections_router
@@ -119,6 +120,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
             or path.startswith("/api/v1/analytics/")
             or path == "/api/v1/algorithms/results"
             or path == "/api/v1/capabilities"
+            or path.startswith("/api/v1/ai/")
             or path == "/api/v1/runtime"
             or path == "/api/v1/research"
             or path == "/api/v1/research/bootstrap"
@@ -132,6 +134,7 @@ def _is_vercel_shared_live_request(settings, method, path, *, enabled):
                 "/api/v1/datasets/latest/keywords",
             }
         )
+        or path.startswith("/api/v1/ai/")
         or path == "/api/v1/collections" and method in {"GET", "POST"}
         or path.startswith("/api/v1/collections/")
         and method in {"GET", "POST", "PATCH", "PUT", "DELETE"}
@@ -668,6 +671,7 @@ class VercelSharedLiveMiddleware:
             None if use_collection_read_context else distributed
         )
         state["collection_service"] = getattr(distributed, "collection_service", None)
+        state["ai_service"] = getattr(distributed, "ai_service", None)
         state["latest_dataset_summary_available"] = getattr(
             distributed, "latest_dataset_summary_available", False
         )
@@ -871,6 +875,7 @@ class VercelSharedLiveMiddleware:
         state = scope.setdefault("state", {})
         state["distributed_public_fetch"] = distributed
         state["collection_service"] = getattr(distributed, "collection_service", None)
+        state["ai_service"] = getattr(distributed, "ai_service", None)
         state["postgres_analysis_storage"] = getattr(
             distributed, "analysis_storage", None
         )
@@ -1040,6 +1045,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         app.state.run_service = None
+        app.state.ai_service = None
         app.state.operator_token = (
             operator_token if operator_token is not None else settings.operator_token
         )
@@ -1052,6 +1058,31 @@ def create_app(
                 async with local_live_context_factory() as local_live_fetch:
                     _validate_local_live_facade(local_live_fetch)
                     app.state.distributed_public_fetch = local_live_fetch
+                    ai_provider = None
+                    ai_service = None
+                    postgres_environment = getattr(local_live_fetch, "postgres_environment", None)
+                    collection_store = getattr(local_live_fetch, "collection_store", None)
+                    if postgres_environment is not None and collection_store is not None:
+                        try:
+                            from app.collections.postgres_store import PostgresCollectionStore
+                            from app.ai.openrouter import OpenRouterAdapter
+                            from app.ai.runtime import AIConfig, AIService
+                            from app.storage.postgres_atomic_state import PostgresAtomicStateStore
+
+                            if not isinstance(collection_store, PostgresCollectionStore):
+                                raise RuntimeError("AI requires the PostgreSQL Collection store")
+                            ai_provider = OpenRouterAdapter(os.environ.get("OPENROUTER_API_KEY"))
+                            postgres_schema = getattr(local_live_fetch, "postgres_schema", "trendscout")
+                            ai_service = AIService(
+                                PostgresAtomicStateStore(postgres_environment, schema=postgres_schema),
+                                config=AIConfig.from_environment(),
+                                provider=ai_provider,
+                            )
+                        except Exception:
+                            _logger.exception("PostgreSQL AI service could not start")
+                            if ai_provider is not None:
+                                ai_provider.close()
+                            ai_provider = None
                     retention_task = None
                     youtube_retention_cleanup = getattr(
                         local_live_fetch, "youtube_retention_cleanup", None
@@ -1076,13 +1107,12 @@ def create_app(
                                 before_request=getattr(local_live_fetch,
                                                        "entity_lookup_before_request", None),
                             ),
+                            ai_engine=ai_service,
                         )
                     except Exception:
                         _logger.exception("Local Collections storage could not start; Wikimedia Fetch remains available")
                         app.state.collection_service = None
-                    postgres_environment = getattr(
-                        local_live_fetch, "postgres_environment", None
-                    )
+                    app.state.ai_service = ai_service
                     if postgres_environment is not None:
                         postgres_schema = getattr(
                             local_live_fetch, "postgres_schema", "trendscout"
@@ -1111,8 +1141,11 @@ def create_app(
                             await asyncio.gather(retention_task, return_exceptions=True)
                         app.state.distributed_public_fetch = None
                         app.state.collection_service = None
+                        app.state.ai_service = None
                         app.state.public_fetch_enabled = False
                         app.state.public_fetch_block_reason = "LOCAL_RUNTIME_STOPPED"
+                        if ai_provider is not None:
+                            ai_provider.close()
                 return
             # Vercel Functions are stateless between invocations. Shared LIVE
             # routes build their request-scoped services from Firestore; never
@@ -1192,6 +1225,7 @@ def create_app(
     application.state.public_fetch_block_reason = public_fetch_block_reason
     application.state.distributed_public_fetch = distributed_public_fetch
     application.state.collection_service = None
+    application.state.ai_service = None
     application.state.postgres_analysis_storage = None
     application.state.scheduler_store = scheduler_store
     application.state.scheduler_worker = None
@@ -1302,6 +1336,7 @@ def create_app(
     application.include_router(health_router, prefix="/api")
     application.include_router(runs_router, prefix="/api")
     application.include_router(capabilities_router, prefix="/api/v1")
+    application.include_router(ai_router, prefix="/api/v1")
     application.include_router(algorithms_router, prefix="/api/v1")
     application.include_router(analytics_router, prefix="/api/v1")
     application.include_router(research_router, prefix="/api/v1")

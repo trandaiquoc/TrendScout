@@ -46,6 +46,26 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
         async def reclassify_cached():
             return {"ok": True}
 
+        @app.get("/api/v1/ai/capabilities")
+        async def ai_capabilities():
+            return {"ok": True}
+
+        @app.post("/api/v1/ai/classifications/reclassify")
+        async def ai_reclassify():
+            return {"ok": True}
+
+        @app.post("/api/v1/ai/jobs/{job_id}/resume")
+        async def resume_ai_job(job_id: str):
+            return {"job_id": job_id}
+
+        @app.patch("/api/v1/ai/proposals/{proposal_id}")
+        async def patch_ai_proposal(proposal_id: str):
+            return {"proposal_id": proposal_id}
+
+        @app.post("/api/v1/collections/suggestions/{proposal_id}/accept")
+        async def accept_ai_suggestion(proposal_id: str):
+            return {"proposal_id": proposal_id}
+
         transport = httpx.ASGITransport(app=LocalLiveGuard(app), client=(peer, 1234))
         async with httpx.AsyncClient(transport=transport, base_url=url) as client:
             return await client.request(method, url, headers=headers)
@@ -91,6 +111,18 @@ class LocalLiveGuardTests(unittest.IsolatedAsyncioTestCase):
         run_id = "reconcile-12345678-1234-1234-1234-123456789abc"
         response = await self.request(url=f"http://localhost/api/v1/collections/reconciliation/{run_id}/rollback", method="POST")
         self.assertEqual(response.status_code, 200)
+
+    async def test_ai_actions_and_proposal_lifecycle_are_allowed(self):
+        for method, path in (
+            ("GET", "/api/v1/ai/capabilities"),
+            ("POST", "/api/v1/ai/classifications/reclassify"),
+            ("POST", "/api/v1/ai/jobs/ai_0123456789/resume"),
+            ("PATCH", "/api/v1/ai/proposals/prop_0123456789abcdef0123456789abcdef"),
+            ("POST", "/api/v1/collections/suggestions/prop_0123456789abcdef0123456789abcdef/accept"),
+        ):
+            with self.subTest(method=method, path=path):
+                response = await self.request(url="http://localhost" + path, method=method)
+                self.assertEqual(response.status_code, 200)
 
     async def test_collection_merge_is_allowed(self):
         collection_id = "12345678-1234-1234-1234-123456789abc"

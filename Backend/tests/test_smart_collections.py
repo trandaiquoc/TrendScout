@@ -829,7 +829,7 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(set(restored), {"LOCAL_AI", "USER"})
         self.assertEqual((restored["LOCAL_AI"]["score"], restored["LOCAL_AI"]["reason"]), (0.8, "old match"))
 
-    def test_multiple_membership_semantic_match_negative_feedback_and_replay(self):
+    def test_ai_unavailable_preserves_saved_keywords_and_manual_feedback(self):
         first = self.store.create({"name": "Sustainable fashion", "description": "Recycled denim and eco clothing"})
         second = self.store.create({"name": "Fashion", "description": "Denim clothing", "auto_match": False})
         source = "wikimedia_pageviews_top_per_country"
@@ -840,38 +840,30 @@ class SmartCollectionsTests(unittest.TestCase):
              "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"},
         ]
         sources = live_source(rows)
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            result = self.service._process_fetch("live-fetch-1", sources)
-            self.assertEqual(result["available"], 2)
-            self.assertEqual(result["processed"], 2)
-            self.assertEqual(result["assigned"], 1)
-            self.assertEqual(len(self.store.keywords_for(first)), 1)
-            candidate = keyword_record(rows[0], source, "LIVE")
-            self.store.feedback_action(second, candidate, "ADD")
-            self.store.feedback_action(first, candidate, "REMOVE")
-            self.service._process_fetch("live-fetch-2", sources)
-            self.assertEqual(self.store.keywords_for(first), [])
-            self.assertEqual(len(self.store.keywords_for(second)), 1)
-            replay = self.service._process_fetch("live-fetch-1", sources)
-            self.assertEqual(replay["assigned"], 1)
+        result = self.service._process_fetch("live-fetch-1", sources)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(result["available"], 2)
+        self.assertEqual(result["assigned"], 0)
+        candidate = keyword_record(rows[0], source, "LIVE")
+        self.store.feedback_action(second, candidate, "ADD")
+        self.store.feedback_action(first, candidate, "REMOVE")
+        self.service._process_fetch("live-fetch-2", sources)
+        self.assertEqual(self.store.keywords_for(first), [])
+        self.assertEqual(len(self.store.keywords_for(second)), 1)
+        replay = self.service._process_fetch("live-fetch-1", sources)
+        self.assertEqual(replay["assigned"], 0)
 
-    def test_local_embedding_input_is_bounded_without_changing_source_text(self):
-        calls = []
-
-        def measured(texts):
-            calls.append(texts)
-            return [[1.0, 0.0, 0.0] for _ in texts]
-
-        self.service._thread_state.embedding_counts = {
-            "cached_embeddings": 0, "inferred_embeddings": 0,
-        }
-        long_context = "verified context " * 100
-        with patch.object(embeddings, "embed", side_effect=measured):
-            vectors = self.service._embed_cached([long_context], [0])
-
-        self.assertEqual(len(vectors), 1)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(len(calls[0][0]), embeddings.MAX_INPUT_CHARS)
+    def test_fetch_does_not_load_the_legacy_local_embedding_model(self):
+        source = live_source([{
+            "article_display": "Outdoor equipment", "article_original": "Outdoor_equipment",
+            "project": "en.wikipedia", "observation_date": "2026-11-10",
+            "fetched_at": "2026-11-12T00:00:00Z",
+        }])
+        with patch.object(embeddings, "embed", side_effect=AssertionError("legacy model must stay inactive")):
+            result = self.service._process_fetch("no-local-embedding", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(result["available"], 1)
+        self.assertEqual(self.store.search_keywords(query="Outdoor equipment")["total"], 1)
 
     def test_full_record_input_and_cache_reuse(self):
         with self.store.connect() as db:
@@ -879,36 +871,27 @@ class SmartCollectionsTests(unittest.TestCase):
         records = [{"article_display": f"Mars Rover {i}", "article_original": f"Mars_Rover_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(212)]
-        calls = []
-        def measured(texts):
-            calls.append(len(texts))
-            return fake_embed(texts)
         source = live_source(records)
-        with patch.object(embeddings, "embed", side_effect=measured):
-            result = self.service._process_fetch("full-set", source)
-            self.assertEqual(result["available"], 212)
-            self.assertEqual(result["processed"], 212)
-            self.assertEqual(result["skipped"], 0)
-            self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
-            self.assertEqual(result["algorithms"]["executed_keywords"], 212)
-            self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
-            self.assertTrue(result["membership_reconciliation_id"].startswith("reconcile-"))
-            self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
-            self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
-            with self.store.connect() as db:
-                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
-                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)
-                self.assertEqual(db.execute("SELECT status FROM membership_reconciliation_runs WHERE id=?",
-                    (result["membership_reconciliation_id"],)).fetchone()[0], "APPLIED")
-                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
-                self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
-            previous_calls = sum(calls)
-            with patch("app.collections.service._algorithm_digest_input",
-                       side_effect=AssertionError("unchanged ledger should reuse analysis")):
-                replay = self.service._process_fetch("full-set-again", source)
-            self.assertEqual(replay["algorithms"]["executed_keywords"], 0)
-            self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
-            self.assertEqual(sum(calls), previous_calls)
+        result = self.service._process_fetch("full-set", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(result["available"], 212)
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
+        self.assertEqual(result["algorithms"]["executed_keywords"], 212)
+        self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
+        self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
+        self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0], 212 * 12)
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_observations").fetchone()[0], 212)
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-volume-rank' AND status='COMPLETED'").fetchone()[0], 212)
+            self.assertEqual(db.execute("SELECT count(*) FROM algorithm_results WHERE algorithm_id='observed-percentile-rank' AND status='COMPLETED'").fetchone()[0], 212)
+        with patch("app.collections.service._algorithm_digest_input",
+                   side_effect=AssertionError("unchanged ledger should reuse analysis")):
+            replay = self.service._process_fetch("full-set-again", source)
+        self.assertEqual(replay["algorithms"]["executed_keywords"], 0)
+        self.assertEqual(replay["algorithms"]["unchanged_keywords"], 212)
 
     def test_analysis_cache_invalidates_for_observation_result_and_registry_changes(self):
         from dataclasses import replace
@@ -1078,41 +1061,30 @@ class SmartCollectionsTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertIsNotNone(collection_technical_reason(project, title))
 
-    def test_proposals_require_pairwise_cohesion(self):
-        with self.store.connect() as db:
-            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST_ONLY')")
-        titles = ["A topic", "B topic", "C topic", "D topic"]
-        records = [("id-" + title[0], title) for title in titles]
-        vectors = [[float(index)] for index in range(4)]
-        similarity = {
-            (0, 1): 0.90, (0, 2): 0.90, (1, 2): 0.40,
-            (2, 3): 0.90, (0, 3): 0.10, (1, 3): 0.10,
-        }
-
-        def pair_score(left, right):
-            a, b = sorted((int(left[0]), int(right[0])))
-            return 1.0 if a == b else similarity.get((a, b), 0.0)
-
-        with patch("app.collections.service.cosine", side_effect=pair_score):
-            result = self.service._propose(
-                "cohesion-test",
-                [({"id": identifier, "keyword": title}, vector)
-                 for (identifier, title), vector in zip(records, vectors)],
-                [],
-            )
-        self.assertEqual(result, (0, 0))
+    def test_no_local_similarity_pipeline_creates_collection_proposals(self):
+        source = live_source([
+            {"article_display": f"Outdoor topic {index}", "article_original": f"Outdoor_topic_{index}",
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-12T00:00:00Z"}
+            for index in range(4)
+        ])
+        result = self.service._process_fetch("no-local-proposals", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(result["suggestions"], 0)
         self.assertEqual(self.store.suggestions(), [])
 
     def test_suggestion_acceptance_and_deleted_name_suppression(self):
-        with self.store.connect() as db:
-            db.execute("INSERT OR REPLACE INTO settings VALUES('creation_mode','SUGGEST_ONLY')")
         rows = [{"article_display": f"Sustainable fashion item {i}", "article_original": f"Sustainable_fashion_item_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(3)]
         source = live_source(rows)
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            result = self.service._process_fetch("suggestion-fetch", source)
-            self.assertEqual(result["suggestions"], 1)
+        result = self.service._process_fetch("suggestion-fetch", source)
+        self.assertEqual(result["suggestions"], 0)
+        keyword_ids = self.store.search_keywords(query="Sustainable fashion item", limit=None, ids_only=True)["ids"]
+        self.assertEqual(len(keyword_ids), 3)
+        stamp = "2026-11-26T00:00:00+00:00"
+        self.store.create_proposal("legacy-proposal", "Sustainable fashion", "Legacy local proposal",
+                                   keyword_ids, "legacy compatibility", stamp, stamp)
         proposal = self.store.suggestions()[0]
         accepted = self.store.resolve_proposal(
             proposal["id"], True, name="Reviewed sustainable fashion", description="Reviewed evidence context",
@@ -1123,22 +1095,16 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(len(self.store.keywords_for(accepted)), 3)
         self.assertEqual(self.store.resolve_proposal(proposal["id"], False), None)
 
-    def test_auto_create_requires_three_supports_and_delete_is_suppressed(self):
+    def test_fetch_without_postgres_ai_does_not_auto_create_collections(self):
         rows = [{"article_display": f"Sustainable fashion item {i}", "article_original": f"Sustainable_fashion_item_{i}",
             "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}
             for i in range(3)]
         source = live_source(rows)
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            result = self.service._process_fetch("auto-create-fetch", source)
-            self.assertEqual(result["created_collections"], 1)
-            created = self.store.list_collections()[0]
-            self.assertEqual(created["created_by"], "AI")
-            self.assertEqual(len(self.store.keywords_for(created["id"])), 3)
-            self.store.delete(created["id"])
-            result = self.service._process_fetch("after-delete-fetch", source)
+        result = self.service._process_fetch("auto-create-fetch", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
         self.assertEqual(result["created_collections"], 0)
-        self.assertTrue(all(item["category_id"] for item in self.store.list_collections()))
-        self.assertFalse(any(item["name"] == created["name"] for item in self.store.list_collections()))
+        self.assertEqual(result["suggestions"], 0)
+        self.assertFalse(any(item["name"] == "Sustainable fashion" for item in self.store.list_collections()))
 
     def test_ambiguous_equal_similarity_stays_unassigned(self):
         first = self.store.create({"name": "Fashion and clothing", "description": "denim"})
@@ -1146,8 +1112,8 @@ class SmartCollectionsTests(unittest.TestCase):
         source = live_source([
             {"article_display": "Upcycled denim jacket", "article_original": "Upcycled_denim_jacket",
              "project": "en.wikipedia", "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            result = self.service._process_fetch("ambiguous-fetch", source)
+        result = self.service._process_fetch("ambiguous-fetch", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
         self.assertEqual(result["assigned"], 0)
         self.assertEqual(self.store.keywords_for(first), [])
         self.assertEqual(self.store.keywords_for(second), [])
@@ -1156,8 +1122,7 @@ class SmartCollectionsTests(unittest.TestCase):
         source = live_source([
             {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
              "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
-        with patch.object(embeddings, "embed", side_effect=RuntimeError("offline model missing")):
-            result = self.service._process_fetch("offline", source)
+        result = self.service._process_fetch("offline", source)
         self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
         self.assertEqual(result["available"], 1)
         self.assertEqual(result["unassigned"], 1)
@@ -1174,11 +1139,11 @@ class SmartCollectionsTests(unittest.TestCase):
             {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
              "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
         service = CollectionService(self.store, fetch_model_inference_enabled=False)
-        with patch.object(embeddings, "embed", side_effect=AssertionError("model inference must not run")):
+        with patch.object(embeddings, "embed", side_effect=AssertionError("legacy model must not run")):
             result = service._process_fetch("deferred-model", source)
 
         self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
-        self.assertEqual(result["error_code"], "MODEL_INFERENCE_DEFERRED")
+        self.assertEqual(result["error_code"], "AI_DISABLED")
         self.assertEqual(result["available"], 1)
         self.assertEqual(result["unassigned"], 1)
         with self.store.connect() as db:
@@ -1196,55 +1161,35 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(tuple(job), ("MODEL_UNAVAILABLE", "MODEL_INFERENCE_DEFERRED"))
         self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
 
-    def test_deferred_model_resume_reuses_only_the_fetch_keyword_ledger(self):
+    def test_model_unavailable_keeps_keyword_and_algorithm_ledger_for_retry(self):
         live_store = CollectionStore(Path(self.temp.name) / "deferred-resume.sqlite",
                                      data_mode_scope="LIVE")
-        unrelated_source = live_source([
-            {"article_display": "Solar generator", "article_original": "Solar_generator",
-             "project": "en.wikipedia", "observation_date": "2026-11-09",
-             "fetched_at": "2026-11-11T00:00:00Z"}])
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            prior = CollectionService(live_store)._process_fetch("prior-completed", unrelated_source)
-        self.assertEqual(prior["status"], "COMPLETED")
         source = live_source([
             {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
              "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
-        deferred = CollectionService(live_store, fetch_model_inference_enabled=False)
-        with patch.object(embeddings, "embed", side_effect=AssertionError("deferred model must not run")):
-            first = deferred._process_fetch("deferred-resume", source)
+        first = CollectionService(live_store)._process_fetch("deferred-resume", source)
         self.assertEqual(first["status"], "MODEL_UNAVAILABLE")
+        self.assertGreater(first["algorithms"]["executed_keywords"], 0)
         with live_store.connect() as db:
             original_manifest = db.execute(
                 "SELECT source_manifest FROM dataset_snapshots WHERE dataset_id='deferred-resume'"
             ).fetchone()[0]
+            original_results = db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0]
 
-        candidate_keywords = []
-        original_candidate_text = CollectionService._candidate_text
-
-        def candidate_text(record):
-            candidate_keywords.append(record["keyword"])
-            return original_candidate_text(record)
-
-        with patch.object(embeddings, "embed", side_effect=fake_embed), \
-                patch.object(CollectionService, "_candidate_text", side_effect=candidate_text):
-            resumed = CollectionService(live_store)._process_fetch(
-                "deferred-resume", source, cached_context_only=True,
-                resume_model_unavailable=True,
-            )
-
-        self.assertEqual(resumed["status"], "COMPLETED", resumed)
-        self.assertEqual(candidate_keywords, ["Mars Rover"])
+        resumed = CollectionService(live_store)._process_fetch(
+            "deferred-resume", [], cached_context_only=True, resume_model_unavailable=True,
+        )
+        self.assertEqual(resumed["status"], "MODEL_UNAVAILABLE")
         with live_store.connect() as db:
             snapshot = db.execute(
                 "SELECT source_manifest,processing_status FROM dataset_snapshots "
                 "WHERE dataset_id='deferred-resume'"
             ).fetchone()
-            keywords = db.execute(
-                "SELECT count(*) FROM keywords WHERE data_mode='LIVE'"
-            ).fetchone()[0]
+            keywords = db.execute("SELECT count(*) FROM keywords WHERE data_mode='LIVE'").fetchone()[0]
+            algorithm_results = db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0]
         self.assertEqual(snapshot["source_manifest"], original_manifest)
-        self.assertEqual(snapshot["processing_status"], "COMPLETED")
-        self.assertEqual(keywords, 2)
+        self.assertEqual(keywords, 1)
+        self.assertEqual(algorithm_results, original_results)
 
     def test_model_resume_does_not_start_a_second_active_processing_attempt(self):
         live_store = CollectionStore(Path(self.temp.name) / "deferred-active.sqlite",
@@ -1292,26 +1237,27 @@ class SmartCollectionsTests(unittest.TestCase):
         with self.store.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM feedback WHERE action='REMOVE'").fetchone()[0], 2)
 
-    def test_auto_proposal_rejects_single_word_name_from_distinct_titles(self):
-        unassigned = [
-            ({"id": "harry-r", "keyword": "Harry R. Truman"}, [1.0, 0.0]),
-            ({"id": "harry-s", "keyword": "Harry S. Truman"}, [1.0, 0.0]),
-        ]
-        with patch("app.collections.service.cosine", return_value=0.99):
-            created, suggestions = self.service._propose("test-single-word-name", unassigned, [])
+    def test_ai_unavailable_does_not_propose_similar_person_names(self):
+        source = live_source([
+            {"article_display": name, "article_original": name.replace(" ", "_"),
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-12T00:00:00Z"}
+            for name in ("Harry R. Truman", "Harry S. Truman")
+        ])
+        result = self.service._process_fetch("no-person-proposal", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(self.store.suggestions(), [])
 
-        self.assertEqual((created, suggestions), (0, 0))
-        self.assertEqual(self.store.list_collections(), [])
-
-    def test_platform_titles_do_not_form_auto_collection_proposals(self):
-        records = [
-            {"id": "a", "keyword": "MediaWiki", "normalized": "mediawiki"},
-            {"id": "b", "keyword": "Wikimedia APIs", "normalized": "wikimedia apis"},
-            {"id": "c", "keyword": "Wikipedia", "normalized": "wikipedia"},
-        ]
-        with patch("app.collections.service.cosine", return_value=0.95):
-            result = self.service._propose("platform-noise", [(row, [1.0]) for row in records], [])
-        self.assertEqual(result, (0, 0))
+    def test_ai_unavailable_does_not_propose_platform_names(self):
+        source = live_source([
+            {"article_display": name, "article_original": name.replace(" ", "_"),
+             "project": "en.wikipedia", "observation_date": "2026-11-10",
+             "fetched_at": "2026-11-12T00:00:00Z"}
+            for name in ("MediaWiki", "Wikimedia APIs", "Wikipedia")
+        ])
+        result = self.service._process_fetch("no-platform-proposal", source)
+        self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(self.store.suggestions(), [])
         self.assertEqual(self.store.suggestions(), [])
 
 

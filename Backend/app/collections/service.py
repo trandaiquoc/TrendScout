@@ -1,19 +1,15 @@
-"""Conservative, explainable local semantic matching and fetch coverage."""
+"""Collection persistence, deterministic taxonomy, and AI workflow delegation."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
-import math
-import struct
 import uuid
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import date, datetime, timezone
-from threading import local
 
-from app.collections import embeddings
 from app.collections.source_digest import (
     COLLECTION_INPUT_DIGEST_VERSION,
     source_input_digest,
@@ -21,7 +17,6 @@ from app.collections.source_digest import (
 from app.collections.store import (
     CollectionStore,
     bing_verification_update,
-    fingerprint,
     keyword_identity,
     keyword_record,
     now,
@@ -29,21 +24,6 @@ from app.collections.store import (
 from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
 from app.taxonomy.registry import resolve as resolve_category
 
-# Calibrated against the real local-model Smart Home positive (0.538 with its
-# explicit semantic anchor) and unrelated saved topics. The margin and explicit
-# negative examples remain additional gates when several Collections fit.
-ASSIGN_THRESHOLD = 0.52
-ASSIGN_MARGIN = 0.08
-PROPOSAL_THRESHOLD = 0.82
-EXCLUSION_THRESHOLD = 0.68
-MIN_PROPOSAL_SUPPORT = 2
-PAIR_PROPOSAL_THRESHOLD = 0.92
-
-# Small, explicit domain anchors let a named Collection work before the user has
-# supplied examples. They are semantic model inputs, never assignment decisions.
-COLLECTION_SEMANTIC_ANCHORS = {
-    "smart home": "Relevant Smart Home topics include robot vacuum cleaner, smart thermostat, connected appliances, smart speakers, and home automation.",
-}
 INITIAL_TOPIC_ROOTS = ("fashion", "home_living", "technology", "entertainment", "sports", "gaming")
 
 _COHORT_MARKER = {"__trendscout_cohort_payload__": True}
@@ -103,35 +83,30 @@ def _algorithm_digest_input(input_data, *, popularity, cohort_bytes):
     return encoded
 
 
-def cosine(left, right):
-    dot = sum(a * b for a, b in zip(left, right))
-    norm_left = math.sqrt(sum(value * value for value in left))
-    norm_right = math.sqrt(sum(value * value for value in right))
-    return dot / (norm_left * norm_right) if norm_left and norm_right else 0.0
-
-
 class CollectionService:
     def __init__(self, store: CollectionStore, entity_context_resolver=None, *,
-                 fetch_model_inference_enabled=True):
+                 fetch_model_inference_enabled=False, ai_engine=None):
         if type(fetch_model_inference_enabled) is not bool:
             raise TypeError("fetch model inference setting must be boolean")
         self.store = store
         self.entity_context_resolver = entity_context_resolver
         self.fetch_model_inference_enabled = fetch_model_inference_enabled
-        self._thread_state = local()
+        self.ai_engine = ai_engine
 
     def _model_unavailable_result(self, fetch_id, *, available, skipped,
                                   policy_excluded, eligible, unassigned,
-                                  error_code):
+                                  error_code, algorithms=None):
         self.store.mark_fetch_model_unavailable(
             fetch_id, available=available, skipped=skipped + policy_excluded,
             eligible=eligible, error_code=error_code,
-            cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
-            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"],
+            cached_embeddings=0,
+            inferred_embeddings=0,
         )
         return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "available": available,
                 "processed": 0, "assigned": 0, "unassigned": unassigned,
-                "skipped": skipped + policy_excluded, "error_code": error_code}
+                "eligible": eligible, "created_collections": 0, "suggestions": 0,
+                "skipped": skipped + policy_excluded, "error_code": error_code,
+                "algorithms": algorithms}
 
     async def process_fetch(self, fetch_id: str, sources: list[dict], *,
                             cached_context_only: bool = False,
@@ -150,7 +125,6 @@ class CollectionService:
 
     def _process_fetch(self, fetch_id, sources, cached_context_only=False,
                        resume_model_unavailable=False):
-        self._thread_state.embedding_counts = {"cached_embeddings": 0, "inferred_embeddings": 0}
         if self.store.data_mode_scope:
             sources = [source for source in sources
                        if source.get("data_mode") == self.store.data_mode_scope]
@@ -337,135 +311,73 @@ class CollectionService:
                 for category_id in record.get("entity_category_ids", ())
                 if category_collection_ids.get(category_id)
             )
-        if not self.fetch_model_inference_enabled:
-            return self._model_unavailable_result(
-                fetch_id, available=available, skipped=skipped,
-                policy_excluded=policy_excluded, eligible=eligible,
-                unassigned=len(records), error_code="MODEL_INFERENCE_DEFERRED",
-            )
-
-        # Do not claim inference succeeded if package/model is missing. Provider Fetch remains complete.
-        try:
-            collections = self.store.list_collections()
-            examples = self.store.user_member_examples([item["id"] for item in collections])
-            for item in collections:
-                item["member_examples"] = examples.get(item["id"], [])
-            vectors = self._embed_cached([self._candidate_text(row) for row in records], [0] * len(records))
-            topic_vectors = self._embed_cached([self._topic_text(row) for row in records], [0] * len(records))
-            collection_prototypes = [self._collection_prototypes(item) for item in collections]
-            flattened_prototypes = [text for prototypes in collection_prototypes for text in prototypes]
-            prototype_versions = [item["version"] for item, prototypes in zip(collections, collection_prototypes)
-                                  for _ in prototypes]
-            prototype_vectors = self._embed_cached(flattened_prototypes, prototype_versions) if flattened_prototypes else []
-            exclusion_inputs = [example for item in collections for example in item["exclusions"]]
-            exclusion_vectors = self._embed_cached(exclusion_inputs, [0] * len(exclusion_inputs)) if exclusion_inputs else []
-        except Exception:
-            return self._model_unavailable_result(
-                fetch_id, available=available, skipped=skipped,
-                policy_excluded=policy_excluded, eligible=eligible,
-                unassigned=len(records), error_code="LOCAL_MODEL_UNAVAILABLE",
-            )
-
-        unassigned_rows = []
-        reconciliation_id = None if google_only_live_fetch else f"reconcile-{uuid.uuid4()}"
-        self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
-            processed=len(records), cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
-            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"])
-        self._update_job(fetch_id, stage="ASSIGNING_KEYWORDS")
-        if reconciliation_id is not None:
-            self.store.archive_unpinned_ai_memberships(
-                reconciliation_id, f"Contextual full-ledger replay for {fetch_id}"
-            )
-            self._update_job(fetch_id, membership_reconciliation_id=reconciliation_id)
-        guardrails = self.store.membership_guardrails(
-            [record["id"] for record in records],
-            [category_id for record in records for category_id in record.get("category_collection_ids", ())],
-        )
-        membership_assignments = []
-        for record, vector, topic_vector in zip(records, vectors, topic_vectors):
+        taxonomy_assignments = []
+        for record in records:
             if record.get("classification_result", {}).get("classification_status") == "INELIGIBLE":
                 continue
-            scores = []
-            fits_existing_collection = False
-            exclusion_cursor = 0
-            prototype_cursor = 0
-            for item, prototype_texts in zip(collections, collection_prototypes):
-                exclusion_start = exclusion_cursor
-                exclusion_cursor += len(item["exclusions"])
-                local_prototypes = prototype_vectors[prototype_cursor:prototype_cursor + len(prototype_texts)]
-                prototype_cursor += len(prototype_texts)
-                if item.get("category_id"):
-                    continue
-                pair = (item["id"], record["id"])
-                if pair in guardrails["removed_pairs"] or pair in guardrails["pinned_pairs"]:
-                    continue
-                excluded = item["exclusions"]
-                exclusion_match = any(
-                    cosine(vector, exclusion_vectors[exclusion_start + offset]) >= EXCLUSION_THRESHOLD
-                    for offset in range(len(excluded))
-                )
-                if exclusion_match:
-                    continue
-                score = max((cosine(vector, prototype) for prototype in local_prototypes), default=0.0)
-                if score >= ASSIGN_THRESHOLD:
-                    fits_existing_collection = True
-                if not item["auto_match"]:
-                    continue
-                scores.append((score, item))
-            strong = [(score, item) for score, item in scores if score >= ASSIGN_THRESHOLD]
             for category_collection_id in record.get("category_collection_ids", ()):
-                pair = (category_collection_id, record["id"])
-                if (category_collection_id not in guardrails["active_category_ids"]
-                        or pair in guardrails["removed_pairs"] or pair in guardrails["pinned_pairs"]):
-                    continue
-                reason = (f"Verified entity context: {record.get('entity_type', 'unknown')}; "
-                          f"taxonomy category {record.get('entity_category_ids', ())}")
-                membership_assignments.append((category_collection_id, record["id"], None, reason))
-                fits_existing_collection = True
-            # A single strong match is unambiguous. Multiple strong matches are retained
-            # when each collection independently matches; they are valid many-to-many links.
-            # Close matches just above threshold remain review-only unless backed by an
-            # explicit positive example or approved keyword prototype.
-            scores.sort(key=lambda value: value[0], reverse=True)
-            ambiguous = (not strong or (len(strong) > 1
-                and strong[0][0] - strong[1][0] < ASSIGN_MARGIN))
-            if not ambiguous:
-                for score, item in strong:
-                    reason = (f"LOCAL_AI semantic cosine={score:.3f}; threshold={ASSIGN_THRESHOLD:.2f}; "
-                              "matched collection name, context, example, or approved keyword")
-                    membership_assignments.append((item["id"], record["id"], score, reason))
-            else:
-                rejected = record["id"] in guardrails["removed_keyword_ids"]
-                unresolved_person = record.get("entity_type") == "person" and not record.get("entity_category_ids")
-                if not rejected and not fits_existing_collection and not unresolved_person:
-                    unassigned_rows.append((record, topic_vector))
-        assigned = self.store.replace_local_ai_memberships(
-            membership_assignments,
-            source_ids=source_keyword_ids if google_only_live_fetch else None,
-        )
-        self._update_job(fetch_id, stage="DISCOVERING_NEW_TOPICS", assigned=assigned)
-        created, suggestions = self._propose(
-            reconciliation_id or fetch_id, unassigned_rows, collections
-        )
+                taxonomy_assignments.append((
+                    category_collection_id, record["id"],
+                    f"Verified entity context: {record.get('entity_type', 'unknown')}; "
+                    f"taxonomy category {record.get('entity_category_ids', ())}",
+                ))
+        if taxonomy_assignments:
+            self.store.add_taxonomy_memberships_if_allowed(taxonomy_assignments)
+
+        if self.ai_engine is None:
+            return self._model_unavailable_result(
+                fetch_id, available=available, skipped=skipped,
+                policy_excluded=policy_excluded, eligible=eligible,
+                unassigned=len(records), error_code="AI_DISABLED", algorithms=analysis,
+            )
+        self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
+                         processed=len(records))
+        combined = {"assigned": [], "unassigned_keyword_ids": [], "proposal_ids": [],
+                    "job_ids": [], "reconciliation_ids": []}
+        candidate_ids = [record["id"] for record in records
+                         if record.get("classification_result", {}).get("classification_status") != "INELIGIBLE"]
+        for offset in range(0, len(candidate_ids), 200):
+            batch_ids = candidate_ids[offset:offset + 200]
+            stable_job_id = "ai_" + uuid.uuid5(
+                uuid.NAMESPACE_URL, f"trendscout-fetch:{fetch_id}:{offset}").hex
+            try:
+                result = self.ai_engine.classify_keyword_ids(
+                    self.store, batch_ids, job_id=stable_job_id, automatic=True,
+                )
+            except Exception:
+                result = {"job_id": stable_job_id, "status": "DEFERRED",
+                          "error_code": "AI_STORAGE_UNAVAILABLE"}
+            combined["job_ids"].append(result.get("job_id", stable_job_id))
+            if result.get("status") != "COMPLETED":
+                unavailable = self._model_unavailable_result(
+                    fetch_id, available=available, skipped=skipped,
+                    policy_excluded=policy_excluded, eligible=eligible,
+                    unassigned=len(records), error_code=result.get("error_code") or "AI_MODEL_UNAVAILABLE",
+                    algorithms=analysis,
+                )
+                unavailable["ai_job_ids"] = combined["job_ids"]
+                return unavailable
+            combined["assigned"].extend(result.get("assigned", []))
+            combined["unassigned_keyword_ids"].extend(result.get("unassigned_keyword_ids", []))
+            combined["proposal_ids"].extend(result.get("proposal_ids", []))
+            if result.get("membership_reconciliation_id"):
+                combined["reconciliation_ids"].append(result["membership_reconciliation_id"])
+
         assigned = self.store.count_ai_assigned_keywords()
         outcome = {"fetch_id": fetch_id, "status": "COMPLETED", "available": available,
                    "processed": len(records), "assigned": assigned,
-                   "unassigned": self._unassigned_count(), "created_collections": created,
-                   "suggestions": suggestions, "skipped": skipped + policy_excluded,
-                   "eligible": eligible,
-                   "cached_embeddings": self._thread_state.embedding_counts["cached_embeddings"],
-                   "inferred_embeddings": self._thread_state.embedding_counts["inferred_embeddings"],
-                   "membership_reconciliation_id": reconciliation_id,
+                   "unassigned": self._unassigned_count(), "created_collections": 0,
+                   "suggestions": len(combined["proposal_ids"]), "skipped": skipped + policy_excluded,
+                   "eligible": eligible, "ai_job_ids": combined["job_ids"],
+                   "proposal_ids": combined["proposal_ids"],
+                   "membership_reconciliation_ids": combined["reconciliation_ids"],
                    "algorithms": analysis}
-        self._update_job(fetch_id, stage="SAVING_RESULTS", assigned=assigned, created_collections=created,
-            unassigned=outcome["unassigned"])
+        self._update_job(fetch_id, stage="SAVING_RESULTS", assigned=assigned,
+                         created_collections=0, unassigned=outcome["unassigned"])
         self._update_job(fetch_id, stage="COMPLETED", status="COMPLETED", available=available,
             eligible=eligible, processed=outcome["processed"], assigned=assigned,
-            unassigned=outcome["unassigned"], created_collections=created,
-            suggestions=suggestions, skipped=skipped + policy_excluded,
-            cached_embeddings=self._thread_state.embedding_counts["cached_embeddings"],
-            inferred_embeddings=self._thread_state.embedding_counts["inferred_embeddings"],
-            membership_reconciliation_id=reconciliation_id)
+            unassigned=outcome["unassigned"], created_collections=0,
+            suggestions=outcome["suggestions"], skipped=skipped + policy_excluded)
         self.store.complete_fetch_dataset_snapshot(fetch_id)
         return outcome
 
@@ -721,85 +633,6 @@ class CollectionService:
 
         return self.store.run_algorithm_analysis(analyze)
 
-    def _embed_cached(self, texts, versions):
-        if (not isinstance(texts, list) or not isinstance(versions, list)
-                or len(texts) != len(versions)
-                or any(not isinstance(text, str) or not text.strip() for text in texts)):
-            raise ValueError("embedding text and version lists must be aligned and non-empty")
-        # Entity descriptions and Collection examples can exceed the local
-        # model's input budget. Bound model context while keeping full source
-        # evidence unchanged in storage and classification results.
-        texts = [text[:embeddings.MAX_INPUT_CHARS] for text in texts]
-        results, pending, keys = [None] * len(texts), [], []
-        requested = []
-        for index, (text, version) in enumerate(zip(texts, versions)):
-            text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            key = hashlib.sha256(f"{embeddings.MODEL_VERSION}:{version}:{text_hash}".encode()).hexdigest()
-            requested.append((index, key, text_hash, version, text))
-        cached = self.store.get_embedding_cache([
-            (key, embeddings.MODEL_VERSION, version, text_hash)
-            for _, key, text_hash, version, _ in requested
-        ])
-        for index, key, text_hash, version, text in requested:
-            row = cached.get(key)
-            if row:
-                results[index] = list(struct.unpack(f"<{row['dimension']}f", row["vector"]))
-                self._thread_state.embedding_counts["cached_embeddings"] += 1
-            else:
-                pending.append(text)
-                keys.append((index, key, text_hash, version))
-        if pending:
-            self._thread_state.embedding_counts["inferred_embeddings"] += len(pending)
-            vectors = []
-            for offset in range(0, len(pending), 256):
-                vectors.extend(embeddings.embed(pending[offset:offset + 256]))
-            cache_entries = []
-            for (index, key, text_hash, version), vector in zip(keys, vectors):
-                results[index] = vector
-                cache_entries.append((key, embeddings.MODEL_VERSION, version, text_hash,
-                                      struct.pack(f"<{len(vector)}f", *vector), len(vector)))
-            self.store.upsert_embedding_cache(cache_entries)
-        return results
-
-    @staticmethod
-    def _candidate_text(record):
-        # Provider/project metadata describes provenance, not the keyword's subject.
-        # Keep it in evidence and avoid diluting topic semantics with repetitive context.
-        description = record.get("entity_description", "")
-        categories = ", ".join(record.get("entity_category_ids", ()))
-        entity_type = record.get("entity_type", "unknown")
-        context = f" Verified context: {description}." if description else ""
-        role = f" Verified topic categories: {categories}." if categories else ""
-        return f"Topic: {record['keyword']}. Entity type: {entity_type}.{context}{role}"
-
-    @staticmethod
-    def _topic_text(record):
-        description = record.get("entity_description", "")
-        categories = ", ".join(record.get("entity_category_ids", ()))
-        context = f" Description: {description}." if description else ""
-        topic = f" Categories: {categories}." if categories else ""
-        return f"Wikimedia topic: {record['keyword']}.{context}{topic}"
-
-    @staticmethod
-    def _collection_text(item):
-        examples = "; ".join((item["examples"] + item.get("member_examples", []))[:120])
-        return f"Collection topic: {item['name']}. Context: {item['description']}. Examples: {examples}."
-
-    @staticmethod
-    def _collection_prototypes(item):
-        """Keep names, descriptions, examples, and prior approvals individually searchable.
-
-        Embedding one long concatenated description can dilute an exact positive example.
-        Each prototype still goes through the real local model and is version-cached.
-        """
-        prototypes = [f"Collection topic: {item['name']}. Context: {item['description']}."]
-        anchor = COLLECTION_SEMANTIC_ANCHORS.get(" ".join(item["name"].casefold().split()))
-        if anchor:
-            prototypes.append(anchor)
-        prototypes.extend(f"Relevant keyword example: {example}." for example in item["examples"])
-        prototypes.extend(f"Previously approved keyword: {example}." for example in item.get("member_examples", []))
-        return list(dict.fromkeys(text for text in prototypes if text.strip()))
-
     def _unassigned_count(self):
         return self.store.unassigned_keyword_count()
 
@@ -887,123 +720,3 @@ class CollectionService:
              "eligible": bool(source_records[identifier]["eligible"])}
             for identifier, result in updated
         ]}
-
-    def _propose(self, fetch_id, unassigned, collections):
-        if len(unassigned) < MIN_PROPOSAL_SUPPORT:
-            return 0, 0
-        mode = self.store.get_setting("creation_mode", "AUTO_CREATE")
-        if mode == "OFF":
-            return 0, 0
-        # Require a cohesive group: every pair must clear the reviewed cosine cutoff.
-        groups, used = [], set()
-        for index, (record, vector) in enumerate(unassigned[:256]):
-            if index in used:
-                continue
-            group = [(record, vector)]
-            for other_index in range(index + 1, min(len(unassigned), 256)):
-                candidate_vector = unassigned[other_index][1]
-                if other_index not in used and all(
-                    cosine(member_vector, candidate_vector) >= PROPOSAL_THRESHOLD
-                    for _, member_vector in group
-                ):
-                    used.add(other_index)
-                    group.append(unassigned[other_index])
-            if len(group) >= MIN_PROPOSAL_SUPPORT and (len(group) > 2 or all(
-                cosine(group[0][1], member[1]) >= PAIR_PROPOSAL_THRESHOLD for member in group[1:]
-            )):
-                groups.append(group)
-        created = suggestions = 0
-        for group in groups:
-            titles = [row[0]["keyword"] for row in group]
-            if self._contains_platform_noise(titles):
-                continue
-            name = self._representative_name(titles)
-            if len(name.strip()) < 3:
-                continue
-            if len(name.split()) < 2:
-                # A single shared word such as "Harry" does not identify a
-                # cohesive topic when the source titles differ.
-                continue
-            key = fingerprint(name)
-            if any(fingerprint(item["name"]) == key for item in collections):
-                continue
-            if self._near_duplicate_name(name, collections):
-                continue
-            support = [row[0]["id"] for row in group]
-            description = self._group_description(name, titles)
-            reason = f"{len(group)} unassigned keyword records formed a local semantic group in fetch {fetch_id}."
-            if mode == "AUTO_CREATE":
-                identifier = self.store.create({"name": name, "description": description,
-                    "examples": titles[:5]}, created_by="AI", reason=reason)
-                assignment_reason = f"Grouped with {len(group)} locally matched topics: " + "; ".join(titles[:3])
-                self.store.add_local_ai_memberships(identifier, support, assignment_reason)
-                created += 1
-            elif mode == "SUGGEST_ONLY":
-                stamp, proposal_id = now(), str(uuid.uuid4())
-                self.store.create_proposal(proposal_id, name, description, support, reason, stamp, stamp)
-                suggestions += 1
-        return created, suggestions
-
-    @staticmethod
-    def _group_description(name, titles):
-        examples = ", ".join(titles[:4])
-        return f"{name} topics, including {examples}. Identified from saved keyword evidence."
-
-    @staticmethod
-    def _contains_platform_noise(titles):
-        platform_terms = ("mediawiki", "wikimedia api", "wikipedia", "wiktionary", "wikisource",
-                          "wikibooks", "wikifunctions")
-        return any(any(term in title.casefold() for term in platform_terms) for title in titles)
-
-    def _near_duplicate_name(self, name, collections):
-        candidates = self.store.collection_name_candidates(fingerprint(name))
-        if candidates["suppressed"]:
-            return True
-        labels = candidates["labels"]
-        labels.extend(item["name"] for item in collections
-                      if not item.get("category_id") or fingerprint(item["name"]) == fingerprint(name))
-        labels = list(dict.fromkeys(labels))[:500]
-        if any(self._name_overlap(name, existing) >= 0.70 for existing in labels):
-            return True
-        if not labels:
-            return False
-        vectors = self._embed_cached(
-            [f"Collection topic: {value}." for value in [name, *labels]], [0] * (len(labels) + 1)
-        )
-        return any(cosine(vectors[0], vector) >= 0.84 for vector in vectors[1:])
-
-    @staticmethod
-    def _name_overlap(left, right):
-        left_tokens = set(" ".join(left.casefold().split()).replace("-", " ").split())
-        right_tokens = set(" ".join(right.casefold().split()).replace("-", " ").split())
-        union = left_tokens | right_tokens
-        return len(left_tokens & right_tokens) / len(union) if union else 0.0
-
-    @staticmethod
-    def _representative_name(titles):
-        # Use a title phrase shared by the actual group; remove parenthetical metadata
-        # such as language or format before finding the common prefix.
-        cleaned = [" ".join(title.split("(", 1)[0].replace("_", " ").split()).strip(" -:") for title in titles]
-        tokens = [title.split() for title in cleaned]
-        prefix = []
-        for group in zip(*tokens):
-            if len({word.casefold() for word in group}) != 1:
-                break
-            prefix.append(group[0])
-        name = " ".join(prefix).strip(" -:")
-        if name.casefold().endswith(" minus"):
-            name = name.rsplit(" ", 1)[0]
-        if name and all("film" in title.casefold() or "movie" in title.casefold() for title in titles):
-            name = f"{name} films"
-        if len(name) < 3:
-            # Fall back to a repeated observed bigram, never a fabricated generic label.
-            phrases = Counter()
-            for title in cleaned:
-                parts = [part for part in title.split() if len(part) > 2]
-                for index in range(max(1, len(parts) - 1)):
-                    phrase = " ".join(parts[index:index + 2])
-                    if phrase:
-                        phrases[phrase] += 1
-            shared = [(phrase, count) for phrase, count in phrases.items() if count >= len(titles)]
-            name = max(shared, key=lambda item: (len(item[0].split()), len(item[0])))[0] if shared else ""
-        return name[:80]
