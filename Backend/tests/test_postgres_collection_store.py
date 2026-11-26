@@ -525,6 +525,7 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
                 "evidence": json.dumps({
                     "article_original": "Solar_generator",
                     "observation_date": "2026-11-25",
+                    "fetched_at": "2026-11-26T01:00:00+00:00",
                     "views_ceil": 900,
                     "provider_rank": 4,
                     "snapshot_status": "SUCCESS",
@@ -537,6 +538,7 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
             assert first["eligible_keywords"] == 1
             assert first["executed_keywords"] == 1
             assert first["registered_algorithms"] == 12
+            assert first["persisted_algorithms"] == 4
             replay = service._analyze_persisted_keywords(changed)
             assert replay["executed_keywords"] == 0
             assert replay["unchanged_keywords"] == 1
@@ -545,8 +547,14 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
                                       (record["id"],)).fetchone()[0] == 1
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
                                       .format(sql.Identifier(schema, "algorithm_results")),
-                                      (record["id"],)).fetchone()[0] == 12
-            assert store.get_setting("algorithm_analysis_state_v1:ALL")
+                                      (record["id"],)).fetchone()[0] == 4
+            digests = store.run_algorithm_analysis(
+                lambda session: session.result_digests_for([record["id"]])
+            )
+            assert set(digests[record["id"]]) == {
+                "growth-ratio", "median-baseline", "observed-volume-rank",
+                "observed-percentile-rank",
+            }
         finally:
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
@@ -590,7 +598,7 @@ def test_collection_service_processes_fixture_through_postgres_without_model_or_
             assert result["available"] == 1 and result["unassigned"] == 1
             rows = store.search_keywords(query="Solar generator")["items"]
             assert len(rows) == 1 and rows[0]["data_mode"] == "LIVE"
-            assert len(rows[0]["algorithm_results"]) == 12
+            assert len(rows[0]["algorithm_results"]) == 4
             assert store.fetch_collection_processing_result(fetch_id) == {
                 "status": "MODEL_UNAVAILABLE", "error_code": "MODEL_INFERENCE_DEFERRED",
             }

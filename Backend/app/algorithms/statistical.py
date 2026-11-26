@@ -24,10 +24,8 @@ class EWMAConfig:
 
 
 def validate(item, minimum, censored):
-    if item.scope.source != SOURCE: return 'UNSUPPORTED_SOURCE'
-    if item.scope.metric != METRIC: return 'UNSUPPORTED_METRIC'
-    if item.scope.unit != UNIT: return 'UNSUPPORTED_UNIT'
-    if not all((item.scope.country, item.scope.access, item.scope.project, item.scope.article)):
+    if not all((item.scope.source, item.scope.metric, item.scope.unit,
+                item.scope.country, item.scope.access, item.scope.project, item.scope.article)):
         return 'INVALID_SCOPE'
     if type(item.analysis_date) is not date or type(item.window_days) is not int or not 1 <= item.window_days <= 90:
         return 'INVALID_WINDOW'
@@ -45,8 +43,14 @@ def validate(item, minimum, censored):
         if not count_ok(point.value): return 'INVALID_OBSERVATION'
     if len(item.history) < minimum: return 'INSUFFICIENT_SAMPLES'
     if len(item.history) != item.window_days: return 'MISSING_DAYS'
-    if not censored: return 'CENSORED_SOURCE_NOT_ACCEPTED'
+    if item.scope.source == SOURCE and not censored:
+        return 'CENSORED_SOURCE_NOT_ACCEPTED'
     return None
+
+
+def conditional_flags(item):
+    return (('CENSORED_TOP_LIST', 'VIEWS_APPROXIMATE', 'CONDITIONAL_ON_TOP')
+            if item.scope.source == SOURCE else ())
 
 
 def evidence(item, config):
@@ -55,15 +59,16 @@ def evidence(item, config):
             ('input_metric', item.scope.metric), ('input_unit', item.scope.unit),
             ('analysis_date', str(item.analysis_date)), ('window_days', item.window_days),
             ('historical_sample_count', len(item.history)), ('total_sample_count', len(item.history) + 1),
-            ('historical_observations', tuple((str(p.date), p.status, p.value, p.snapshot_status) for p in ordered)),
+            ('historical_observations', tuple((str(p.date), p.status, p.snapshot_status) for p in ordered)),
             ('evidence_url', item.evidence_url), ('config', tuple(config)))
 
 
 class RobustZMad:
-    metadata = AlgorithmMetadata('robust-z-mad', 'v0.1', 'Robust Z / MAD', SOURCE,
-        'robust_z', 'dimensionless', 14, 90, input_metric=METRIC, input_unit=UNIT,
+    metadata = AlgorithmMetadata('robust-z-mad', 'v0.2', 'Robust Z / MAD', '*',
+        'robust_z', 'dimensionless', 14, 90, input_metric='*', input_unit='*',
         description='Robust deviation from historical median measured in scaled MAD units.',
-        family='anomaly', supported_windows=tuple(range(14, 91)),
+        family='anomaly', supported_capabilities=('daily_numeric_series',),
+        supported_windows=tuple(range(14, 91)),
         missing_data='Requires complete daily history and a nonzero MAD.', accepts_censored_top_list=False,
         parameters=(('minimum_samples', 14), ('allow_top_censored', False)), runtime_limit='O(n log n)',
         interpretation='Descriptive robust Z score; no significance test.',
@@ -99,14 +104,15 @@ class RobustZMad:
         return AlgorithmResult(item.keyword_id, self.metadata.algorithm_id, self.metadata.version, 'COMPLETED', z,
             'robust_z', 'dimensionless', item.current_value, center, item.window_days, len(values),
             ev + (('historical_median', center), ('mad', mad), ('scale', 0.67448975)),
-            ('CENSORED_TOP_LIST', 'VIEWS_APPROXIMATE', 'CONDITIONAL_ON_TOP', 'NOT_SIGNIFICANCE_TEST'),
+            conditional_flags(item) + ('NOT_SIGNIFICANCE_TEST',),
             minimum_samples=self.config.minimum_samples, config_version=self.config.version)
 
 
 class EWMA:
-    metadata = AlgorithmMetadata('ewma', 'v0.1', 'Daily EWMA', SOURCE,
-        'ewma', UNIT, 7, 90, input_metric=METRIC, input_unit=UNIT,
+    metadata = AlgorithmMetadata('ewma', 'v0.2', 'Daily EWMA', '*',
+        'ewma', 'input_unit', 7, 90, input_metric='*', input_unit='*',
         description='Exponentially weighted moving average with fixed alpha.', family='anomaly',
+        supported_capabilities=('daily_numeric_series',),
         supported_windows=tuple(range(7, 91)),
         missing_data='Requires complete daily history and a confirmed current snapshot.',
         accepts_censored_top_list=False, parameters=(('alpha', 0.3), ('warmup', 7),
@@ -138,7 +144,7 @@ class EWMA:
                              ('initialization', 'first_historical_observation'), ('cadence', '1_day'),
                              ('allow_top_censored', self.config.allow_top_censored)))
         return AlgorithmResult(item.keyword_id, self.metadata.algorithm_id, self.metadata.version, 'COMPLETED', current,
-            'ewma', UNIT, item.current_value, reference, item.window_days, len(ordered),
+            'ewma', item.scope.unit, item.current_value, reference, item.window_days, len(ordered),
             ev + (('historical_ewma', reference), ('current_ewma', current)),
-            ('CENSORED_TOP_LIST', 'VIEWS_APPROXIMATE', 'CONDITIONAL_ON_TOP', 'NOT_SIGNIFICANCE_TEST'),
+            conditional_flags(item) + ('NOT_SIGNIFICANCE_TEST',),
             minimum_samples=self.config.warmup, config_version=self.config.version)

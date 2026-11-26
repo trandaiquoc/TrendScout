@@ -71,7 +71,7 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         registry.register(first)
         registry.register(second)
         output = AlgorithmRunner(registry).run(make_input(), ['first@v1'])
-        self.assertEqual(output[0].status,'SKIPPED')
+        self.assertEqual(output[0].status,'INSUFFICIENT_DATA')
         first.execute.assert_not_called()
         second.applicable.assert_not_called()
         second.execute.assert_not_called()
@@ -99,14 +99,17 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
                  (replace(base, window_days=8), 'INVALID_WINDOW'),
                  (replace(base, minimum_samples=2), 'INVALID_CONFIG'),
                  (replace(base, history=base.history[:2]), 'INSUFFICIENT_SAMPLES'),
-                 (replace(base, current_value=None), 'INVALID_CURRENT'),
+                 (replace(base, current_value=None), 'CURRENT_OBSERVATION_MISSING'),
                  (replace(base, history=tuple(replace(x,value=0) for x in base.history)), 'ZERO_BASELINE'),
                  (replace(base, history=(replace(base.history[0],scope=replace(SCOPE,project='fr.wikipedia')),)+base.history[1:]), 'INCOMPATIBLE_OBSERVATION'),
                  (replace(base, history=(replace(base.history[0],value=None),)+base.history[1:]), 'INVALID_OBSERVATION')]
         for item, code in cases:
             with self.subTest(code=code):
                 result = self.runner.run(item, ['growth-ratio@v0.1'])[0]
-                self.assertEqual((result.status,result.reason_code,result.value), ('SKIPPED',code,None))
+                status = 'INSUFFICIENT_DATA' if code in {
+                    'INSUFFICIENT_SAMPLES', 'CURRENT_OBSERVATION_MISSING', 'ZERO_BASELINE',
+                } else 'SKIPPED'
+                self.assertEqual((result.status,result.reason_code,result.value), (status,code,None))
         zero = self.runner.run(make_input((0,0,0)), ['median-baseline@v0.1'])[0]
         self.assertEqual((zero.status,zero.value),('COMPLETED',0))
 
@@ -159,7 +162,7 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         item = AlgorithmInput('keyword', scope, DAY, 180, history, window_days=7,
                               minimum_samples=3, current_snapshot_status='SUCCESS')
         selected = ['rolling-mean-baseline@v1', 'relative-change@v1',
-                    'theil-sen-slope@v1', 'kendall-trend@v1']
+                    'theil-sen-slope@v1', 'kendall-trend@v2']
         results = self.runner.run(item, selected)
         self.assertEqual([result.status for result in results], ['COMPLETED'] * 4)
         values = {result.algorithm_id: result.value for result in results}
@@ -171,14 +174,49 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         skipped = self.runner.run(censored, selected)
         self.assertEqual({result.reason_code for result in skipped}, {'CENSORED_SOURCE_NOT_ACCEPTED'})
 
+    def test_robust_and_ewma_methods_accept_complete_uncensored_source_series(self):
+        scope = Scope('provider_daily_series', 'US', 'public', 'search', 'robot vacuum',
+                      'observed_count', 'items')
+        history = tuple(Observation(DAY - timedelta(days=i), scope, 'OBSERVED', 100 + (14 - i) * 10)
+                        for i in range(14, 0, -1))
+        item = AlgorithmInput('keyword', scope, DAY, 240, history, window_days=14,
+                              minimum_samples=14, current_snapshot_status='SUCCESS')
+        results = self.runner.run(item, ['robust-z-mad@v0.2', 'ewma@v0.2'])
+        self.assertEqual([result.status for result in results], ['COMPLETED', 'COMPLETED'])
+        self.assertTrue(all('CENSORED_TOP_LIST' not in result.quality_flags for result in results))
+        self.assertEqual((results[1].metric_name, results[1].metric_unit), ('ewma', 'items'))
+
+    def test_kendall_trend_uses_tau_b_when_values_tie(self):
+        scope = Scope('provider_daily_series', 'US', 'public', 'search', 'robot vacuum',
+                      'observed_count', 'items')
+        values = (1, 1, 3, 3, 5, 5, 7)
+        history = tuple(Observation(DAY - timedelta(days=7 - index), scope, 'OBSERVED', value)
+                        for index, value in enumerate(values))
+        item = AlgorithmInput('keyword', scope, DAY, 7, history, window_days=7,
+                              minimum_samples=3, current_snapshot_status='SUCCESS')
+        result = self.runner.run(item, ['kendall-trend@v2'])[0]
+        self.assertEqual(result.status, 'COMPLETED')
+        self.assertAlmostEqual(result.value, (3 / 4) ** 0.5)
+
     def test_registry_catalog_is_metadata_driven_and_marks_unavailable_methods(self):
         response = catalog()
         ids = {item['algorithm_id'] for item in response['algorithms']}
         self.assertTrue({'wikimedia-trend', 'growth-ratio', 'median-baseline',
                          'robust-z-mad', 'ewma', 'theil-sen-slope', 'kendall-trend'} <= ids)
+        execution = {item['algorithm_id']: item['execution']['status']
+                     for item in response['algorithms']}
+        self.assertEqual({key for key, status in execution.items() if status == 'PERSISTED_WIKIMEDIA'},
+                         {'growth-ratio', 'median-baseline', 'observed-volume-rank',
+                          'observed-percentile-rank'})
+        self.assertEqual(len(execution), 12)
+        self.assertEqual(execution['wikimedia-trend'], 'LEGACY_PATH_ONLY')
+        self.assertEqual(execution['robust-z-mad'], 'NOT_EXECUTED_SOURCE_AND_RETENTION')
         theil = next(item for item in response['algorithms'] if item['algorithm_id'] == 'theil-sen-slope')
         wikimedia = next(source for source in theil['sources'] if source['source_id'] == SOURCE)
         self.assertEqual(wikimedia['status'], 'INCOMPATIBLE')
+        relative = next(item for item in response['algorithms'] if item['algorithm_id'] == 'relative-source-rank')
+        youtube = next(source for source in relative['sources'] if source['source_id'] == 'youtube_video_search')
+        self.assertEqual((youtube['status'], youtube['reason']), ('INCOMPATIBLE', 'POLICY_RESTRICTED'))
         self.assertEqual(response['evaluation_status'], 'NOT_YET_EVALUATED')
 
     def test_catalog_uses_a_mock_second_source_without_provider_calls(self):
@@ -200,6 +238,63 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual(capability['source_id'], 'mock_second_source')
         self.assertEqual(capability['status'], 'SUPPORTED_BUT_NOT_LIVE')
         self.assertEqual((capability['icon'], capability['display_name']), ('M', 'Mock source'))
+        daily_source = replace(
+            wikimedia,
+            source_id='mock_daily_series', provider_id='mock_series_adapter',
+            display_name='Mock daily series', icon='D', readiness='PENDING_APPROVAL',
+            default_enabled=False, adapter_status='IMPLEMENTED_OFFLINE_VERIFIED',
+            approval_status='PENDING_APPROVAL', supported_data_modes=('SYNTHETIC',),
+            capabilities=('daily_numeric_series',), metric_name='observed_count',
+            metric_unit='items',
+            local_live_verification_status='NOT_VERIFIED', production_readiness='NOT_APPROVED',
+        )
+        daily_catalog = catalog((daily_source,))
+        robust = next(item for item in daily_catalog['algorithms']
+                      if item['algorithm_id'] == 'robust-z-mad')
+        self.assertEqual(robust['sources'][0]['status'], 'SUPPORTED_BUT_NOT_LIVE')
+
+    def test_relative_source_rank_uses_one_query_cohort_without_self_or_duplicate_items(self):
+        scope = Scope('mock_web_search', 'US', 'web', 'query:portable power station',
+                      'item-current', 'result_rank', 'ordinal result position')
+        peers = (
+            Observation(DAY, replace(scope, article='item-current'), 'OBSERVED', None, 'SUCCESS', 1),
+            Observation(DAY, replace(scope, article='item-a'), 'OBSERVED', None, 'SUCCESS', 1),
+            Observation(DAY, replace(scope, article='item-a'), 'OBSERVED', None, 'SUCCESS', 1),
+            Observation(DAY, replace(scope, article='item-b'), 'OBSERVED', None, 'SUCCESS', 3),
+            Observation(DAY, replace(scope, article='item-conflict'), 'OBSERVED', None, 'SUCCESS', 2),
+            Observation(DAY, replace(scope, article='item-conflict'), 'OBSERVED', None, 'SUCCESS', 4),
+            Observation(DAY - timedelta(days=1), replace(scope, article='item-old'),
+                        'OBSERVED', None, 'SUCCESS', 100),
+        )
+        item = AlgorithmInput('candidate', scope, DAY, 3, (), cohort=peers,
+                              current_snapshot_status='SUCCESS')
+        result = AlgorithmRunner(algorithm_registry()).run(
+            item, ['relative-source-rank@v2'],
+        )[0]
+        self.assertEqual((result.status, result.sample_count, result.value),
+                         ('COMPLETED', 3, 25.0))
+        self.assertEqual(dict(result.evidence)['query_scope'],
+                         ('mock_web_search', 'US', 'web', 'query:portable power station'))
+        self.assertNotIn('observed_ranks', dict(result.evidence))
+
+    def test_relative_source_rank_rejects_policy_and_incompatible_query_cohorts(self):
+        scope = Scope('mock_web_search', 'US', 'web', 'query:camera',
+                      'item-current', 'result_rank', 'ordinal result position')
+        peer = Observation(DAY, replace(scope, article='item-peer'), 'OBSERVED', None, 'SUCCESS', 4)
+        runner = AlgorithmRunner(algorithm_registry())
+        policy = runner.run(replace(
+            AlgorithmInput('video-candidate', replace(scope, source='youtube_video_search'),
+                           DAY, 2, (), cohort=(peer,)), current_snapshot_status='SUCCESS'),
+            ['relative-source-rank@v2'],
+        )[0]
+        self.assertEqual((policy.status, policy.reason_code), ('SKIPPED', 'POLICY_RESTRICTED'))
+        mismatched = replace(peer, scope=replace(peer.scope, project='query:another-camera'))
+        incompatible = runner.run(AlgorithmInput(
+            'candidate', scope, DAY, 2, (), cohort=(mismatched,),
+            current_snapshot_status='SUCCESS',
+        ), ['relative-source-rank@v2'])[0]
+        self.assertEqual((incompatible.status, incompatible.reason_code),
+                         ('SKIPPED', 'INCOMPATIBLE_COHORT'))
 
     def test_snapshot_popularity_ranks_ties_without_claiming_population_coverage(self):
         cohort = (Observation(DAY, replace(SCOPE, article='Page A'), 'OBSERVED', 500, 'SUCCESS', 2),
@@ -207,7 +302,7 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
                   Observation(DAY, replace(SCOPE, article='Page C'), 'OBSERVED', 100, 'SUCCESS', 4))
         item = replace(make_input(current=500), cohort=cohort, current_snapshot_status='SUCCESS')
         runner = AlgorithmRunner(algorithm_registry())
-        results = runner.run(item, ['observed-volume-rank@v3','observed-percentile-rank@v3'])
+        results = runner.run(item, ['observed-volume-rank@v4','observed-percentile-rank@v4'])
         values = {row.algorithm_id: row.value for row in results}
         self.assertEqual(values['observed-volume-rank'], 1)
         self.assertAlmostEqual(values['observed-percentile-rank'], 200/3)
@@ -226,13 +321,13 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         )
         item = replace(make_input(current=500), cohort=peers, current_snapshot_status='PARTIAL')
         runner = AlgorithmRunner(algorithm_registry())
-        keys = ['observed-volume-rank@v3', 'observed-percentile-rank@v3']
+        keys = ['observed-volume-rank@v4', 'observed-percentile-rank@v4']
         first = runner.run(item, keys)
         second = runner.run(replace(item, cohort=tuple(reversed(peers))), keys)
         self.assertEqual(first, second)
         values = {row.algorithm_id: (row.status, row.value, row.sample_count) for row in first}
-        self.assertEqual(values['observed-volume-rank'], ('COMPLETED', 1, 3))
-        self.assertEqual(values['observed-percentile-rank'], ('COMPLETED', 75.0, 3))
+        self.assertEqual(values['observed-volume-rank'], ('COMPLETED', 1, 4))
+        self.assertEqual(values['observed-percentile-rank'], ('COMPLETED', 250 / 3, 4))
 
     def test_snapshot_rank_separates_scope_and_skips_insufficient_or_invalid_values(self):
         mismatched = (
@@ -247,9 +342,9 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         )
         base = replace(make_input(current=0), cohort=mismatched, current_snapshot_status='SUCCESS')
         runner = AlgorithmRunner(algorithm_registry())
-        for versioned_key in ('observed-volume-rank@v3', 'observed-percentile-rank@v3'):
+        for versioned_key in ('observed-volume-rank@v4', 'observed-percentile-rank@v4'):
             result = runner.run(base, [versioned_key])[0]
-            self.assertEqual((result.status, result.reason_code), ('SKIPPED', 'INSUFFICIENT_COHORT'))
+            self.assertEqual((result.status, result.reason_code), ('INSUFFICIENT_DATA', 'INSUFFICIENT_COHORT'))
             self.assertEqual((result.sample_count, dict(result.evidence)['cohort_size']), (1, 1))
             self.assertTrue({'CENSORED_TOP_LIST', 'PARTIAL_SAMPLE', 'VIEWS_APPROXIMATE'}
                             <= set(result.quality_flags))
@@ -260,12 +355,12 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         peer = Observation(DAY, replace(SCOPE, article='Peer'), 'OBSERVED', 0, 'SUCCESS')
         base = replace(make_input(current=0), cohort=(peer,))
         runner = AlgorithmRunner(algorithm_registry())
-        for versioned_key in ('observed-volume-rank@v3', 'observed-percentile-rank@v3'):
+        for versioned_key in ('observed-volume-rank@v4', 'observed-percentile-rank@v4'):
             partial = runner.run(replace(base, current_snapshot_status='PARTIAL'), [versioned_key])[0]
             self.assertEqual((partial.status, partial.value), ('COMPLETED', 1 if 'volume' in versioned_key else 50.0))
             unknown = runner.run(replace(base, current_snapshot_status='UNKNOWN'), [versioned_key])[0]
             self.assertEqual((unknown.status, unknown.reason_code),
-                             ('SKIPPED', 'CURRENT_COVERAGE_UNCONFIRMED'))
+                             ('INSUFFICIENT_DATA', 'CURRENT_COVERAGE_UNCONFIRMED'))
 
 
 class LegacyStrategyTests(unittest.IsolatedAsyncioTestCase):
@@ -283,5 +378,5 @@ class LegacyStrategyTests(unittest.IsolatedAsyncioTestCase):
         item2 = replace(item,keyword_id=insufficient.keyword_id, scope=scope2,
                         current_value=insufficient.current_views_ceil,legacy_result=insufficient)
         skipped = runner.run(item2,['wikimedia-trend@v0.1'])[0]
-        self.assertEqual((skipped.status,skipped.reason_code,skipped.value),('SKIPPED','INSUFFICIENT_DATA',None))
+        self.assertEqual((skipped.status,skipped.reason_code,skipped.value),('INSUFFICIENT_DATA','INSUFFICIENT_DATA',None))
         self.assertEqual(insufficient.status,'INSUFFICIENT_DATA')

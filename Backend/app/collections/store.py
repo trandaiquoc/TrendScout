@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import uuid
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -430,27 +431,42 @@ class CollectionStore:
             item["coverage_status"] = "PARTIAL" if item["status"] == "PARTIAL" else "RECORDED"
             return item
 
-    def algorithm_results_overview(self, *, limit=100):
-        mode = self.data_mode_scope
-        keyword_filter = " AND k.data_mode=?" if mode else ""
-        parameters = (mode,) if mode else ()
+    def algorithm_results_overview(self, *, limit=100, offset=0, source="",
+                                   algorithm_id="", status=""):
+        mode_filter = " AND k.data_mode=?" if self.data_mode_scope else ""
+        source_filter = " AND k.source=?" if source else ""
+        algorithm_filter = " AND r.algorithm_id=?" if algorithm_id else ""
+        status_filter = " AND r.status=?" if status else ""
+        base_parameters = ((self.data_mode_scope,) if self.data_mode_scope else ())
+        base_parameters += ((source,) if source else ())
+        summary_filters = mode_filter + source_filter + algorithm_filter
+        summary_parameters = base_parameters + ((algorithm_id,) if algorithm_id else ())
+        item_filters = summary_filters + status_filter
+        item_parameters = summary_parameters + ((status,) if status else ())
+        topic_filter = "COALESCE(cr.classification_status,'')<>'INELIGIBLE'"
         with self.connect() as db:
             counts = db.execute('''SELECT r.algorithm_id,r.version,
-                sum(status='COMPLETED') AS completed,sum(status='SKIPPED') AS skipped,
-                sum(status='FAILED') AS failed,count(*) AS total,max(updated_at) AS updated_at
+                sum(r.status='COMPLETED') AS completed,sum(r.status='SKIPPED') AS skipped,
+                sum(r.status='INSUFFICIENT_DATA') AS insufficient_data,
+                sum(r.status='FAILED') AS failed,count(*) AS total,max(r.updated_at) AS updated_at
                 FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
                 LEFT JOIN classification_results cr ON cr.keyword_id=k.id
-                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
-                + keyword_filter + ' GROUP BY r.algorithm_id,r.version ORDER BY r.algorithm_id',
-                parameters).fetchall()
+                WHERE ''' + topic_filter + summary_filters
+                + ' GROUP BY r.algorithm_id,r.version ORDER BY r.algorithm_id',
+                summary_parameters).fetchall()
+            item_where = "k.eligible=1 AND " + topic_filter + item_filters
+            total = db.execute('''SELECT count(*) FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
+                LEFT JOIN classification_results cr ON cr.keyword_id=k.id WHERE ''' + item_where,
+                item_parameters).fetchone()[0]
             rows = db.execute('''SELECT r.keyword_id,k.keyword,r.algorithm_id,r.version,r.status,r.reason_code,
-                r.value,r.metric,r.unit,r.result_json,r.updated_at FROM algorithm_results r
+                r.value,r.metric,r.unit,r.input_digest,r.result_json,r.updated_at FROM algorithm_results r
                 JOIN keywords k ON k.id=r.keyword_id LEFT JOIN classification_results cr ON cr.keyword_id=k.id
-                WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' '''
-                + keyword_filter + ' ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ?',
-                (*parameters, limit)).fetchall()
+                WHERE ''' + item_where
+                + ' ORDER BY r.updated_at DESC,k.keyword COLLATE NOCASE,r.algorithm_id LIMIT ? OFFSET ?',
+                (*item_parameters, limit, offset)).fetchall()
         return {"summary": [dict(row) for row in counts], "items": [dict(row) for row in rows],
-                "limit": limit}
+                "total": total, "limit": limit, "offset": offset,
+                "next_offset": offset + limit if offset + limit < total else None}
 
     def analytics_overview_inputs(self):
         mode = self.data_mode_scope
@@ -476,6 +492,18 @@ class CollectionStore:
                 min(substr(observed_at,1,10)) AS first_seen,max(substr(observed_at,1,10)) AS last_seen
                 FROM keywords k WHERE 1=1""" + keyword_filter
                 + " GROUP BY source ORDER BY keywords DESC,source", parameters).fetchall()
+            verification_rows = db.execute("""SELECT
+                count(CASE WHEN json_extract(CASE WHEN json_valid(k.evidence)
+                    THEN k.evidence ELSE '{}' END,'$.data_source')='GOOGLE_TRENDS' THEN 1 END)
+                    AS google_trends_candidates,
+                count(CASE WHEN json_type(CASE WHEN json_valid(k.evidence)
+                    THEN k.evidence ELSE '{}' END,'$.serp_verification')='object' THEN 1 END)
+                    AS google_search_candidates,
+                count(CASE WHEN json_type(CASE WHEN json_valid(k.evidence)
+                    THEN k.evidence ELSE '{}' END,'$.bing_verification')='object' THEN 1 END)
+                    AS bing_search_candidates
+                FROM keywords k WHERE k.source='google_web_serp'"""
+                + keyword_filter, parameters).fetchone()
             algorithm_rows = db.execute("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
                 FROM algorithm_results r JOIN keywords k ON k.id=r.keyword_id
                 LEFT JOIN classification_results cr ON cr.keyword_id=k.id
@@ -520,6 +548,7 @@ class CollectionStore:
             "totals": dict(totals),
             "classifications": [dict(row) for row in classifications],
             "source_rows": [dict(row) for row in source_rows],
+            "verification_rows": dict(verification_rows) if verification_rows else {},
             "algorithm_rows": [dict(row) for row in algorithm_rows],
             "observations": [dict(row) for row in observations],
             "top": [dict(row) for row in top],
@@ -574,7 +603,7 @@ class CollectionStore:
     def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
                         sort="recent", limit=50, offset=0, ids_only=False,
                         classification="all", evidence="all", date_from="", date_to="",
-                        keyword_id=None, include_algorithm_results=True):
+                        keyword_id=None, evidence_source="", include_algorithm_results=True):
         normalized = " ".join(query.casefold().split())
         clauses, parameters = [], []
         if self.data_mode_scope:
@@ -587,6 +616,21 @@ class CollectionStore:
         if source:
             clauses.append("k.source=?")
             parameters.append(source)
+        if evidence_source == "wikimedia_pageviews_top_per_country":
+            clauses.append("k.source='wikimedia_pageviews_top_per_country'")
+        elif evidence_source == "google_trends":
+            clauses.append("k.source='google_web_serp' AND json_extract(CASE WHEN json_valid(k.evidence) "
+                           "THEN k.evidence ELSE '{}' END,'$.data_source')='GOOGLE_TRENDS'")
+        elif evidence_source == "google_web_serp":
+            clauses.append("k.source='google_web_serp' AND json_type(CASE WHEN json_valid(k.evidence) "
+                           "THEN k.evidence ELSE '{}' END,'$.serp_verification')='object'")
+        elif evidence_source == "bing_web_serp":
+            clauses.append("k.source='google_web_serp' AND json_type(CASE WHEN json_valid(k.evidence) "
+                           "THEN k.evidence ELSE '{}' END,'$.bing_verification')='object'")
+        elif evidence_source == "youtube_video_search":
+            clauses.append("0=1")
+        elif evidence_source:
+            raise ValueError("INVALID_EVIDENCE_SOURCE")
         if keyword_id:
             clauses.append("k.id=?")
             parameters.append(keyword_id)
@@ -2077,6 +2121,8 @@ def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status
         collection_technical_reason,
     )
 
+    normalization_version = "keyword-identity-nfc-case-preserving-v2"
+
     title = record.get("article_display") or record.get("canonical_keyword") or record.get("article_original")
     if not isinstance(title, str) or not title.strip() or len(title) > 256:
         return None
@@ -2084,7 +2130,7 @@ def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status
     observed = record.get("observation_date", "")
     if not isinstance(project, str) or not isinstance(observed, str):
         return None
-    original = title.strip()
+    original = " ".join(unicodedata.normalize("NFC", title).split())
     if collection_technical_reason(project, original):
         return None
     if (not isinstance(record.get("fetched_at"), str)
@@ -2092,13 +2138,15 @@ def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status
             or type(record.get("provider_rank")) is not int or record["provider_rank"] < 1):
         return None
     stable = keyword_identity(record, source)
-    return {"id": stable, "keyword": original, "normalized": " ".join(original.casefold().split()),
+    return {"id": stable, "keyword": original, "normalized": _normalized_keyword_identity(original),
         "source": source, "project": project, "observed_at": observed, "data_mode": data_mode,
         "evidence": json.dumps({**{key: record.get(key) for key in (
             "article_original", "article_display", "provider_rank", "views_ceil", "country_scope",
             "access", "observation_date", "fetched_at", "source_url", "quality_flags")},
             "snapshot_status": snapshot_status,
-            "normalization_provenance": f"{RULE_VERSION}; {COLLECTION_FILTER_VERSION}"}, ensure_ascii=False, sort_keys=True),
+            "normalization_provenance": (
+                f"{RULE_VERSION}; {COLLECTION_FILTER_VERSION}; {normalization_version}"
+            )}, ensure_ascii=False, sort_keys=True),
         "context": f"Wikimedia Pageviews, project {project}; country scope {record.get('country_scope', 'unknown')}, access {record.get('access', 'unknown')}"}
 
 
@@ -2113,8 +2161,17 @@ def keyword_identity(record: dict, source: str) -> str | None:
             _, normalized = normalize_keyword(title)
         except (TypeError, ValueError):
             return None
+    elif source == "wikimedia_pageviews_top_per_country":
+        normalized = _normalized_keyword_identity(title, case_sensitive=True)
     else:
-        normalized = " ".join(title.strip().casefold().split())
+        normalized = _normalized_keyword_identity(title)
     if not normalized:
         return None
     return hashlib.sha256(f"{source}:{project}:{normalized}".encode()).hexdigest()
+
+
+def _normalized_keyword_identity(value: str, *, case_sensitive=False) -> str:
+    display = " ".join(unicodedata.normalize("NFC", value).split())
+    if case_sensitive:
+        return display
+    return " ".join(unicodedata.normalize("NFC", display.casefold()).split())

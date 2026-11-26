@@ -94,15 +94,21 @@ def _valid_collections_bootstrap(value):
 
 
 def _valid_algorithm_results_projection(value):
+    required = {"summary", "items", "limit"}
+    allowed = required | {"total", "offset", "next_offset"}
     return (
         isinstance(value, dict)
-        and set(value) == {"summary", "items", "limit"}
+        and required <= set(value) <= allowed
         and isinstance(value.get("summary"), list)
         and all(isinstance(item, dict) for item in value["summary"])
         and isinstance(value.get("items"), list)
         and all(isinstance(item, dict) for item in value["items"])
         and type(value.get("limit")) is int
         and 1 <= value["limit"] <= 500
+        and ("total" not in value or type(value["total"]) is int and value["total"] >= 0)
+        and ("offset" not in value or type(value["offset"]) is int and value["offset"] >= 0)
+        and ("next_offset" not in value or value["next_offset"] is None
+             or type(value["next_offset"]) is int and value["next_offset"] >= 0)
     )
 
 

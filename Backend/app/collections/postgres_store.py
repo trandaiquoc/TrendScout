@@ -34,11 +34,30 @@ class PostgresAlgorithmAnalysisSession:
         self._table = table
         self._data_mode_scope = data_mode_scope
 
-    def eligible_keywords(self):
-        scope = sql.SQL("AND data_mode=%s") if self._data_mode_scope else sql.SQL("")
-        parameters = (self._data_mode_scope,) if self._data_mode_scope else ()
-        rows = self._db.execute(sql.SQL("SELECT * FROM {} WHERE eligible=1 {} ORDER BY id")
-                                .format(self._table("keywords"), scope), parameters).fetchall()
+    def eligible_keywords(self, *, source=None, observed_from=None, observed_to=None, ids=None):
+        clauses = [sql.SQL("eligible=1")]
+        parameters = []
+        if self._data_mode_scope:
+            clauses.append(sql.SQL("data_mode=%s"))
+            parameters.append(self._data_mode_scope)
+        if source:
+            clauses.append(sql.SQL("source=%s"))
+            parameters.append(source)
+        if observed_from:
+            clauses.append(sql.SQL("left(observed_at,10)>=%s"))
+            parameters.append(observed_from)
+        if observed_to:
+            clauses.append(sql.SQL("left(observed_at,10)<=%s"))
+            parameters.append(observed_to)
+        if ids is not None:
+            identifiers = tuple(dict.fromkeys(ids))
+            if not identifiers:
+                return []
+            clauses.append(sql.SQL("id=ANY(%s)"))
+            parameters.append(list(identifiers))
+        rows = self._db.execute(sql.SQL("SELECT * FROM {} WHERE {} ORDER BY id")
+                                .format(self._table("keywords"), sql.SQL(" AND ").join(clauses)),
+                                parameters).fetchall()
         records = [dict(row) for row in rows]
         for record in records:
             evidence = record["evidence"]
@@ -55,10 +74,14 @@ class PostgresAlgorithmAnalysisSession:
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(keyword_id,source,observation_date,metric,unit) DO UPDATE SET
                 value=EXCLUDED.value,rank=EXCLUDED.rank,status=EXCLUDED.status,
+                country=EXCLUDED.country,access=EXCLUDED.access,project=EXCLUDED.project,
                 snapshot_status=EXCLUDED.snapshot_status,input_digest=EXCLUDED.input_digest
                 WHERE algorithm_observations.value IS DISTINCT FROM EXCLUDED.value
                    OR algorithm_observations.rank IS DISTINCT FROM EXCLUDED.rank
                    OR algorithm_observations.status IS DISTINCT FROM EXCLUDED.status
+                   OR algorithm_observations.country IS DISTINCT FROM EXCLUDED.country
+                   OR algorithm_observations.access IS DISTINCT FROM EXCLUDED.access
+                   OR algorithm_observations.project IS DISTINCT FROM EXCLUDED.project
                    OR algorithm_observations.snapshot_status IS DISTINCT FROM EXCLUDED.snapshot_status
                    OR algorithm_observations.input_digest IS DISTINCT FROM EXCLUDED.input_digest""")
                 .format(self._table("algorithm_observations")), observations)
@@ -81,17 +104,59 @@ class PostgresAlgorithmAnalysisSession:
                                .format(self._table("settings")), (key,)).fetchone()
         return row["value"] if row else None
 
-    def history(self, keyword_id, source, before_date, metric, unit):
-        return self._db.execute(sql.SQL("""SELECT observation_date,status,value,snapshot_status
-            FROM {} WHERE keyword_id=%s AND source=%s AND observation_date<%s
-            AND metric=%s AND unit=%s ORDER BY observation_date""")
-            .format(self._table("algorithm_observations")),
-            (keyword_id, source, before_date, metric, unit)).fetchall()
+    def history(self, keyword_id, source, before_date, metric, unit, *, after_date=None,
+                country=None, access=None, project=None):
+        clauses = [sql.SQL("keyword_id=%s"), sql.SQL("source=%s"),
+                   sql.SQL("observation_date<%s"), sql.SQL("metric=%s"), sql.SQL("unit=%s")]
+        parameters = [keyword_id, source, before_date, metric, unit]
+        if after_date:
+            clauses.append(sql.SQL("observation_date>=%s"))
+            parameters.append(after_date)
+        for column, value in (("country", country), ("access", access), ("project", project)):
+            if value is not None:
+                clauses.append(sql.SQL("{}=%s").format(sql.Identifier(column)))
+                parameters.append(value)
+        return self._db.execute(sql.SQL("""SELECT observation_date,status,value,snapshot_status,input_digest
+            FROM {} WHERE {} ORDER BY observation_date""")
+            .format(self._table("algorithm_observations"), sql.SQL(" AND ").join(clauses)),
+            parameters).fetchall()
+
+    def histories(self, keyword_ids, source, before_date, metric, unit, *, after_date=None,
+                  country=None, access=None, project=None):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return []
+        clauses = [sql.SQL("keyword_id=ANY(%s)"), sql.SQL("source=%s"),
+                   sql.SQL("observation_date<%s"), sql.SQL("metric=%s"), sql.SQL("unit=%s")]
+        parameters = [identifiers, source, before_date, metric, unit]
+        if after_date:
+            clauses.append(sql.SQL("observation_date>=%s"))
+            parameters.append(after_date)
+        for column, value in (("country", country), ("access", access), ("project", project)):
+            if value is not None:
+                clauses.append(sql.SQL("{}=%s").format(sql.Identifier(column)))
+                parameters.append(value)
+        return self._db.execute(sql.SQL("""SELECT keyword_id,observation_date,status,value,snapshot_status,
+            input_digest FROM {} WHERE {} ORDER BY keyword_id,observation_date""")
+            .format(self._table("algorithm_observations"), sql.SQL(" AND ").join(clauses)),
+            parameters).fetchall()
 
     def result_digests(self, keyword_id):
         rows = self._db.execute(sql.SQL("SELECT algorithm_id,input_digest FROM {} WHERE keyword_id=%s")
                                 .format(self._table("algorithm_results")), (keyword_id,)).fetchall()
         return {row["algorithm_id"]: row["input_digest"] for row in rows}
+
+    def result_digests_for(self, keyword_ids):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {}
+        rows = self._db.execute(sql.SQL("SELECT keyword_id,algorithm_id,input_digest FROM {} "
+                                        "WHERE keyword_id=ANY(%s)")
+                                .format(self._table("algorithm_results")), (identifiers,)).fetchall()
+        result = {}
+        for row in rows:
+            result.setdefault(row["keyword_id"], {})[row["algorithm_id"]] = row["input_digest"]
+        return result
 
     def upsert_results(self, results):
         if not results:

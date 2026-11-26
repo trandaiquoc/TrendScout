@@ -41,10 +41,10 @@ def _result(item, strategy, value, metric, unit, baseline, evidence, flags=()):
     return AlgorithmResult(item.keyword_id, strategy.metadata.algorithm_id,
         strategy.metadata.version, 'COMPLETED', value, metric, unit, item.current_value,
         baseline, item.window_days, len(item.history),
-        (('history', tuple((p.date.isoformat(), p.value) for p in sorted(item.history, key=lambda p:p.date))),
+        (('history_dates', tuple(p.date.isoformat() for p in sorted(item.history, key=lambda p:p.date))),
          ('evidence_url', item.evidence_url), *evidence), flags,
         minimum_samples=strategy.metadata.minimum_samples,
-        config_version=f'{strategy.metadata.algorithm_id}-config-v1')
+        config_version=f'{strategy.metadata.algorithm_id}-config-{strategy.metadata.version}')
 
 
 class _SeriesAlgorithm:
@@ -115,7 +115,7 @@ def _current_point(item):
 
 
 class KendallTrend(_SeriesAlgorithm):
-    metadata = AlgorithmMetadata('kendall-trend', 'v1', 'Kendall monotonic trend', '*',
+    metadata = AlgorithmMetadata('kendall-trend', 'v2', 'Kendall monotonic trend', '*',
         'kendall_tau', 'dimensionless', 3, 30, '*', '*',
         'Kendall tau-b across the preceding window and current observation.', 'direction',
         ('daily_numeric_series',), (7, 14, 30),
@@ -134,9 +134,8 @@ class KendallTrend(_SeriesAlgorithm):
                 else:
                     concordant += right > left
                     discordant += right < left
-        n = len(values)
-        denominator = ((n * (n - 1) // 2) *
-                       (concordant + discordant + ties_y)) ** 0.5
+        denominator = ((concordant + discordant + ties_y) *
+                       (concordant + discordant)) ** 0.5
         tau = (concordant - discordant) / denominator if denominator else 0.0
         return _result(item, self, tau, 'kendall_tau', 'dimensionless', None,
                        (('concordant_pairs', concordant), ('discordant_pairs', discordant),

@@ -19,6 +19,66 @@ from app.taxonomy.registry import TAXONOMY_VERSION
 router = APIRouter()
 
 
+def _source_role_profiles(source_rows=None, verification_rows=None):
+    """Describe each provider by its actual role and keep unlike measures separate."""
+    ledger_available = source_rows is not None
+    counts = {row.get("source"): int(row.get("keywords") or 0)
+              for row in (source_rows or ()) if isinstance(row, dict)}
+    verification_rows = verification_rows if isinstance(verification_rows, dict) else {}
+
+    def count(name):
+        value = verification_rows.get(name)
+        return int(value) if isinstance(value, (int, float)) else None
+
+    return [
+        {
+            "source_id": "wikimedia_pageviews_top_per_country",
+            "role": "OBSERVED_ACTIVITY",
+            "measurement": "APPROXIMATE_PAGEVIEWS_FOR_LISTED_PAGES",
+            "keyword_records": (counts.get("wikimedia_pageviews_top_per_country", 0)
+                                if ledger_available else None),
+            "verification_candidate_records": None,
+            "persisted_algorithm_ids": ["growth-ratio", "median-baseline",
+                                        "observed-volume-rank", "observed-percentile-rank"],
+            "market_scope": "US country-scoped Wikimedia daily top list",
+            "limitations": ["TOP_LIST_CENSORED", "APPROXIMATE_VALUE",
+                            "NOT_GENERAL_US_DEMAND"],
+        },
+        {
+            "source_id": "google_web_serp",
+            "role": "DISCOVERY_AND_OPTIONAL_VERIFICATION",
+            "measurement": "GOOGLE_TRENDS_PROVIDER_REPORTED_BUCKET",
+            "keyword_records": count("google_trends_candidates"),
+            "verification_candidate_records": count("google_search_candidates"),
+            "persisted_algorithm_ids": [],
+            "market_scope": "Google Trends US discovery; Google Search is query-scoped verification",
+            "limitations": ["PROVIDER_BUCKET_NOT_EXACT_SEARCH_COUNT",
+                            "NO_APPLICATION_BASELINE", "SERP_RANK_NOT_SEARCH_VOLUME"],
+        },
+        {
+            "source_id": "bing_web_serp",
+            "role": "CANDIDATE_VERIFICATION",
+            "measurement": "QUERY_SCOPED_WEB_RESULT_RANK",
+            "keyword_records": 0,
+            "verification_candidate_records": count("bing_search_candidates"),
+            "persisted_algorithm_ids": [],
+            "market_scope": "Bing en-US localization filter; attached to Google Trends candidates",
+            "limitations": ["NOT_INDEPENDENT_DISCOVERY", "SERP_RANK_NOT_SEARCH_VOLUME"],
+        },
+        {
+            "source_id": "youtube_video_search",
+            "role": "VIDEO_EVIDENCE_ONLY",
+            "measurement": "QUERY_SCOPED_VIDEO_SEARCH_RESULT",
+            "keyword_records": 0,
+            "verification_candidate_records": None,
+            "persisted_algorithm_ids": [],
+            "market_scope": "US regionCode filter does not prove creator or viewer residence",
+            "limitations": ["NO_KEYWORD_EXTRACTION", "NO_DERIVED_METRICS",
+                            "SEARCH_POSITION_NOT_VIEWS_OR_DEMAND"],
+        },
+    ]
+
+
 def refresh_analytics_projection_ages(payload):
     """Recalculate display age for the timestamped success record in a projection."""
     value = deepcopy(payload)
@@ -165,7 +225,11 @@ def overview(request: Request):
                 "multi_source_coverage": {
                     "status": "INSUFFICIENT_SOURCES", "sources": [],
                     "shared_keyword_overlap": None,
+                    "source_roles": _source_role_profiles(),
+                    "composition_status": "NOT_COMPUTED_INCOMPATIBLE_METRICS",
+                    "composite_score": None,
                 },
+                "source_roles": _source_role_profiles(),
                 "observations_over_time": [],
                 "top_observed": [],
                 "top_observed_context": None,
@@ -192,6 +256,7 @@ def overview(request: Request):
     totals = overview_inputs["totals"]
     classifications = overview_inputs["classifications"]
     source_rows = overview_inputs["source_rows"]
+    verification_rows = overview_inputs.get("verification_rows") or {}
     algorithm_rows = overview_inputs["algorithm_rows"]
     observations = overview_inputs["observations"]
     top = overview_inputs["top"]
@@ -199,6 +264,9 @@ def overview(request: Request):
     history = overview_inputs["history"]
     successful = overview_inputs["successful"]
     membership_count = overview_inputs["membership_count"]
+    source_roles = _source_role_profiles(
+        [dict(row) for row in source_rows], dict(verification_rows),
+    )
     unassigned_topic_count = overview_inputs["unassigned_topic_count"]
     classified = sum(
         int(row["count"]) for row in classifications if row["classification_status"] == "CLASSIFIED"
@@ -346,7 +414,11 @@ def overview(request: Request):
             "status": "INSUFFICIENT_SOURCES" if len(source_rows) < 2 else "SOURCE_LEDGER_ONLY",
             "sources": [dict(row) for row in source_rows],
             "shared_keyword_overlap": None,
+            "source_roles": source_roles,
+            "composition_status": "NOT_COMPUTED_INCOMPATIBLE_METRICS",
+            "composite_score": None,
         },
+        "source_roles": source_roles,
         "observations_over_time": [dict(row) for row in observations],
         "top_observed": top_items,
         "top_observed_context": top_context,

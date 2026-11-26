@@ -341,6 +341,7 @@ button:disabled { cursor: not-allowed; }
 .chart-bar--unavailable { background: var(--muted); }
 .chart-row--stacked { grid-template-columns: minmax(92px, 1.15fr) minmax(45px, 1fr) minmax(38px, auto); }
 .chart-segment--completed { background: var(--green); }
+.chart-segment--insufficient_data { background: var(--amber); }
 .chart-segment--skipped { background: var(--amber); }
 .chart-segment--failed { background: var(--red); }
 .chart-segment--unavailable { background: var(--muted); }

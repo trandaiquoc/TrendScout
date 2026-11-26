@@ -430,33 +430,59 @@ class PostgresCollectionReader:
             .format(self._table("settings")), (key,)).fetchone())
         return row["value"] if row else default
 
-    def algorithm_results_overview(self, *, limit=100):
-        scope = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
-        parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+    def algorithm_results_overview(self, *, limit=100, offset=0, source="",
+                                   algorithm_id="", status=""):
+        base_filters = [sql.SQL("COALESCE(cr.classification_status,'')<>'INELIGIBLE'")]
+        base_parameters = []
+        if self.data_mode_scope:
+            base_filters.append(sql.SQL("k.data_mode=%s"))
+            base_parameters.append(self.data_mode_scope)
+        if source:
+            base_filters.append(sql.SQL("k.source=%s"))
+            base_parameters.append(source)
+        summary_filters = list(base_filters)
+        summary_parameters = list(base_parameters)
+        if algorithm_id:
+            summary_filters.append(sql.SQL("r.algorithm_id=%s"))
+            summary_parameters.append(algorithm_id)
+        item_filters = list(summary_filters)
+        item_parameters = list(summary_parameters)
+        if status:
+            item_filters.append(sql.SQL("r.status=%s"))
+            item_parameters.append(status)
+        summary_where = sql.SQL(" AND ").join(summary_filters)
+        item_where = sql.SQL("k.eligible=TRUE AND ") + sql.SQL(" AND ").join(item_filters)
 
         def read(db):
             counts = db.execute(sql.SQL("""SELECT r.algorithm_id,r.version,
                 count(*) FILTER (WHERE r.status='COMPLETED') AS completed,
                 count(*) FILTER (WHERE r.status='SKIPPED') AS skipped,
+                count(*) FILTER (WHERE r.status='INSUFFICIENT_DATA') AS insufficient_data,
                 count(*) FILTER (WHERE r.status='FAILED') AS failed,count(*) AS total,
                 max(r.updated_at) AS updated_at FROM {} r JOIN {} k ON k.id=r.keyword_id
-                LEFT JOIN {} cr ON cr.keyword_id=k.id
-                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' {}
+                LEFT JOIN {} cr ON cr.keyword_id=k.id WHERE {}
                 GROUP BY r.algorithm_id,r.version ORDER BY r.algorithm_id""").format(
                     self._table("algorithm_results"), self._table("keywords"),
-                    self._table("classification_results"), scope), parameters).fetchall()
-            rows = db.execute(sql.SQL("""SELECT r.keyword_id,k.keyword,r.algorithm_id,r.version,
-                r.status,r.reason_code,r.value,r.metric,r.unit,r.result_json,r.updated_at
-                FROM {} r JOIN {} k ON k.id=r.keyword_id
-                LEFT JOIN {} cr ON cr.keyword_id=k.id
-                WHERE k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' {}
-                ORDER BY r.updated_at DESC,
-                translate(k.keyword,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') COLLATE "C",
-                k.keyword COLLATE "C",r.algorithm_id LIMIT %s""").format(
+                    self._table("classification_results"), summary_where),
+                summary_parameters).fetchall()
+            total = db.execute(sql.SQL("""SELECT count(*) AS total FROM {} r JOIN {} k ON k.id=r.keyword_id
+                LEFT JOIN {} cr ON cr.keyword_id=k.id WHERE {}""").format(
                     self._table("algorithm_results"), self._table("keywords"),
-                    self._table("classification_results"), scope), (*parameters, limit)).fetchall()
+                    self._table("classification_results"), item_where),
+                item_parameters).fetchone()["total"]
+            rows = db.execute(sql.SQL("""SELECT r.keyword_id,k.keyword,r.algorithm_id,r.version,
+                r.status,r.reason_code,r.value,r.metric,r.unit,r.input_digest,r.result_json,r.updated_at
+                FROM {} r JOIN {} k ON k.id=r.keyword_id LEFT JOIN {} cr ON cr.keyword_id=k.id
+                WHERE {} ORDER BY r.updated_at DESC,
+                translate(k.keyword,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') COLLATE "C",
+                k.keyword COLLATE "C",r.algorithm_id LIMIT %s OFFSET %s""").format(
+                    self._table("algorithm_results"), self._table("keywords"),
+                    self._table("classification_results"), item_where),
+                (*item_parameters, limit, offset)).fetchall()
             return {"summary": [_json_result(row) for row in counts],
-                    "items": [_json_result(row) for row in rows], "limit": limit}
+                    "items": [_json_result(row) for row in rows], "total": total,
+                    "limit": limit, "offset": offset,
+                    "next_offset": offset + limit if offset + limit < total else None}
         return self._read(read)
 
     def runtime_storage_metrics(self, model_version):
@@ -530,6 +556,12 @@ class PostgresCollectionReader:
                 min(left(observed_at,10)) AS first_seen,max(left(observed_at,10)) AS last_seen
                 FROM {} k WHERE TRUE {} GROUP BY source ORDER BY keywords DESC,source""")
                 .format(self._table("keywords"), scope), parameters).fetchall()
+            verification_rows = db.execute(sql.SQL("""SELECT
+                count(*) FILTER (WHERE evidence->>'data_source'='GOOGLE_TRENDS') AS google_trends_candidates,
+            count(*) FILTER (WHERE jsonb_typeof(evidence->'serp_verification')='object') AS google_search_candidates,
+            count(*) FILTER (WHERE jsonb_typeof(evidence->'bing_verification')='object') AS bing_search_candidates
+                FROM {} k WHERE k.source='google_web_serp' {}""").format(
+                    self._table("keywords"), scope), parameters).fetchone()
             algorithm_rows = db.execute(sql.SQL("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
                 FROM {} r JOIN {} k ON k.id=r.keyword_id LEFT JOIN {} cr ON cr.keyword_id=k.id
                 WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' {}
@@ -584,6 +616,7 @@ class PostgresCollectionReader:
                 "totals": dict(totals),
                 "classifications": [dict(row) for row in classifications],
                 "source_rows": [dict(row) for row in source_rows],
+                "verification_rows": _json_result(verification_rows) if verification_rows else {},
                 "algorithm_rows": [dict(row) for row in algorithm_rows],
                 "observations": [dict(row) for row in observations],
                 "top": [_json_result(row) for row in top],
@@ -812,7 +845,7 @@ class PostgresCollectionReader:
 
     def _keyword_search_plan(self, *, query="", state="all", collection_ids=(), source="",
                              sort="recent", classification="all", evidence="all",
-                             date_from="", date_to="", keyword_id=None):
+                             date_from="", date_to="", keyword_id=None, evidence_source=""):
         normalized = " ".join(query.casefold().split())
         clauses, parameters = [], []
         if self.data_mode_scope:
@@ -828,6 +861,18 @@ class PostgresCollectionReader:
         if source:
             clauses.append("k.source=%s")
             parameters.append(source)
+        if evidence_source == "wikimedia_pageviews_top_per_country":
+            clauses.append("k.source='wikimedia_pageviews_top_per_country'")
+        elif evidence_source == "google_trends":
+            clauses.append("k.source='google_web_serp' AND k.evidence->>'data_source'='GOOGLE_TRENDS'")
+        elif evidence_source == "google_web_serp":
+            clauses.append("k.source='google_web_serp' AND jsonb_typeof(k.evidence->'serp_verification')='object'")
+        elif evidence_source == "bing_web_serp":
+            clauses.append("k.source='google_web_serp' AND jsonb_typeof(k.evidence->'bing_verification')='object'")
+        elif evidence_source == "youtube_video_search":
+            clauses.append("FALSE")
+        elif evidence_source:
+            raise ValueError("INVALID_EVIDENCE_SOURCE")
         if keyword_id:
             clauses.append("k.id=%s")
             parameters.append(keyword_id)
@@ -906,11 +951,11 @@ class PostgresCollectionReader:
     def search_keywords(self, *, query="", state="all", collection_ids=(), source="",
                         sort="recent", limit=50, offset=0, ids_only=False,
                         classification="all", evidence="all", date_from="", date_to="",
-                        keyword_id=None, include_algorithm_results=True):
+                        keyword_id=None, evidence_source="", include_algorithm_results=True):
         base, where, parameters, ordering = self._keyword_search_plan(
             query=query, state=state, collection_ids=collection_ids, source=source, sort=sort,
             classification=classification, evidence=evidence, date_from=date_from,
-            date_to=date_to, keyword_id=keyword_id)
+            date_to=date_to, keyword_id=keyword_id, evidence_source=evidence_source)
         memberships = self._table("memberships").as_string()
         algorithms = self._table("algorithm_results").as_string()
         collections = self._table("collections").as_string()

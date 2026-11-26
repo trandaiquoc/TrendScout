@@ -87,6 +87,14 @@ class EvaluationTests(unittest.TestCase):
         for k in (0,-1,True):
             with self.assertRaises(ValueError): self.report(k)
 
+    def test_insufficient_data_is_a_distinct_exclusion_status(self):
+        p=deepcopy(self.p)
+        p[0].update(status='INSUFFICIENT_DATA',value=None,reason='MISSING_DAYS')
+        report=evaluate(self.data,{self.key:p},1,'insufficient-test')['algorithms'][self.key]
+        self.assertEqual((report['completed'],report['insufficient_data'],report['skipped'],report['failed']),(4,1,1,0))
+        self.assertEqual(report['insufficient_data_rate'],1/6)
+        self.assertIn('INSUFFICIENT_DATA:MISSING_DAYS',report['exclusion_reasons'])
+
     def test_precision_at_five_and_ten_and_no_positives(self):
         d=deepcopy(self.data)
         for i in range(6,10):
@@ -105,12 +113,12 @@ class EvaluationTests(unittest.TestCase):
     def test_same_universe_and_uncomparable(self):
         key='wikimedia-trend@v0.1'; other=predictions(self.data,key)
         other[0].update(status='FAILED',value=None,reason='ERROR')
-        report=evaluate(self.data,{self.key:self.p,key:other,'median-baseline@v0.1':[],'ewma@v0.1':[],'robust-z-mad@v0.1':[]},3,'test')
+        report=evaluate(self.data,{self.key:self.p,key:other,'median-baseline@v0.1':[],'ewma@v0.2':[],'robust-z-mad@v0.2':[]},3,'test')
         self.assertEqual(report['common_universe'],['B','C','D','E'])
         self.assertEqual(report['algorithms'][key]['failed'],1)
         self.assertEqual(report['algorithms'][self.key]['precision_at_k'],1/3)
-        self.assertEqual(report['algorithms']['ewma@v0.1']['status'],'NOT_COMPARABLE')
-        self.assertEqual(report,evaluate(self.data,{self.key:self.p,key:other,'median-baseline@v0.1':[],'ewma@v0.1':[],'robust-z-mad@v0.1':[]},3,'test'))
+        self.assertEqual(report['algorithms']['ewma@v0.2']['status'],'NOT_COMPARABLE')
+        self.assertEqual(report,evaluate(self.data,{self.key:self.p,key:other,'median-baseline@v0.1':[],'ewma@v0.2':[],'robust-z-mad@v0.2':[]},3,'test'))
 
     def test_bad_results_and_context(self):
         for mutation in (lambda p:p[0].update(unit='likes'),lambda p:p[0].update(value=None),
@@ -132,7 +140,7 @@ class EvaluationTests(unittest.TestCase):
     def test_adapter_preserves_result(self):
         result=run(RobustZMad(RobustConfig(allow_top_censored=True)),series(list(range(1,16)),15))
         adapted=prediction_from_result(result,scope=self.data['scope'],evaluation_date='2026-01-31',feature_dates=['2026-01-30'])
-        self.assertEqual((adapted['algorithm'],adapted['value']),('robust-z-mad@v0.1',result.value))
+        self.assertEqual((adapted['algorithm'],adapted['value']),('robust-z-mad@v0.2',result.value))
 
 
 if __name__=='__main__': unittest.main()
