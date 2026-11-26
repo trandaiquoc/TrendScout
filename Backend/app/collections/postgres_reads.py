@@ -277,6 +277,115 @@ class PostgresCollectionReader:
 
         return self._read(read)
 
+    def ai_classification_context(self, identifiers, *, allowed_sources):
+        """Load only normalized keyword text, override state, approved evidence IDs, and Collections."""
+        identifiers = list(dict.fromkeys(identifiers))
+        if not identifiers or len(identifiers) > 200 or any(
+                not isinstance(value, str) or not value or len(value) > 64 for value in identifiers):
+            raise ValueError("AI_KEYWORD_NOT_FOUND")
+        sources = sorted(set(allowed_sources))
+        if any(not isinstance(value, str) or not value or len(value) > 100 for value in sources):
+            raise ValueError("AI_POLICY_DENIED")
+        mode_filter = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+        parameters = [identifiers, sources]
+        if self.data_mode_scope:
+            parameters.append(self.data_mode_scope)
+
+        def read(db):
+            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.observed_at,
+                k.data_mode,k.eligible,COALESCE(kd.decision,'') AS decision,
+                COALESCE(cr.classification_status,'') AS classification_status,
+                COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
+                    FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                COALESCE((SELECT jsonb_object_agg(se.id,se.expires_at::text)
+                    FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '{{}}'::jsonb) AS evidence_expiry,
+                EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
+                EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
+                COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
+                    FROM {} f WHERE f.keyword_id=k.id AND f.action='REMOVE'), '[]'::jsonb) AS removed_collection_ids,
+                COALESCE(kd.updated_at::text,'') AS override_updated_at
+                FROM {} k LEFT JOIN {} kd ON kd.keyword_id=k.id
+                LEFT JOIN {} cr ON cr.keyword_id=k.id WHERE k.id=ANY(%s) {}""").format(
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("memberships"), self._table("memberships"), self._table("feedback"),
+                    self._table("keywords"),
+                    self._table("keyword_decisions"), self._table("classification_results"),
+                    mode_filter), [sources, sources, identifiers, *parameters[2:]] if self.data_mode_scope
+                    else [sources, sources, identifiers]).fetchall()
+            found = {row["id"] for row in rows}
+            if found != set(identifiers):
+                raise ValueError("AI_KEYWORD_NOT_FOUND")
+            collections = db.execute(sql.SQL("""SELECT id,name,description,version,auto_match
+                FROM {} WHERE status='ACTIVE' AND category_id IS NULL
+                ORDER BY id COLLATE "C"""").format(self._table("collections"))).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                if not isinstance(item.get("evidence_ids"), list):
+                    raise CollectionReadError("stored AI evidence references are invalid")
+                result.append(item)
+            return {"keywords": result, "collections": [dict(item) for item in collections]}
+
+        return self._read(read)
+
+    def ai_recommendation_context(self, identifiers, *, allowed_sources):
+        """Load bounded business context without source payloads or credentials."""
+        identifiers = list(dict.fromkeys(identifiers))
+        if not identifiers or len(identifiers) > 20 or any(
+                not isinstance(value, str) or not value or len(value) > 64 for value in identifiers):
+            raise ValueError("AI_KEYWORD_NOT_FOUND")
+        sources = sorted(set(allowed_sources))
+        if not sources:
+            return {"keywords": [], "collections": []}
+        if any(not isinstance(value, str) or not value or len(value) > 100 for value in sources):
+            raise ValueError("AI_POLICY_DENIED")
+        mode_filter = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+        params = (sources, sources, sources, identifiers, self.data_mode_scope) if self.data_mode_scope else (
+            sources, sources, sources, identifiers)
+
+        def read(db):
+            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.project,
+                k.observed_at,k.data_mode,k.eligible,COALESCE(kd.decision,'') AS decision,
+                COALESCE(cr.classification_status,'') AS classification_status,
+                COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
+                    FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                COALESCE((SELECT jsonb_object_agg(se.id,se.expires_at::text)
+                    FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '{{}}'::jsonb) AS evidence_expiry,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('evidence_id',e.id,
+                    'source_id',e.source_id,'geography',e.geography,'observed_at',e.observed_at,
+                    'collected_at',e.collected_at) ORDER BY e.collected_at DESC,e.id)
+                    FROM (SELECT se.id,se.source_id,se.geography,se.observed_at,se.collected_at
+                        FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                        ORDER BY se.collected_at DESC,se.id LIMIT 20) e), '[]'::jsonb) AS evidence_context,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('algorithm_id',ar.algorithm_id,
+                    'version',ar.version,'status',ar.status,'reason_code',ar.reason_code,
+                    'value',ar.value,'metric',ar.metric,'unit',ar.unit) ORDER BY ar.algorithm_id)
+                    FROM {} ar WHERE ar.keyword_id=k.id), '[]'::jsonb) AS algorithm_results,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'name',c.name)
+                    ORDER BY c.name COLLATE "C") FROM {} m JOIN {} c ON c.id=m.collection_id
+                    WHERE m.keyword_id=k.id AND c.status='ACTIVE'), '[]'::jsonb) AS collections
+                FROM {} k LEFT JOIN {} kd ON kd.keyword_id=k.id
+                LEFT JOIN {} cr ON cr.keyword_id=k.id WHERE k.id=ANY(%s) {}""").format(
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("algorithm_results"), self._table("memberships"),
+                    self._table("collections"), self._table("keywords"),
+                    self._table("keyword_decisions"), self._table("classification_results"),
+                    mode_filter), params).fetchall()
+            found = {row["id"] for row in rows}
+            if found != set(identifiers):
+                raise ValueError("AI_KEYWORD_NOT_FOUND")
+            return {"keywords": [dict(row) for row in rows], "collections": []}
+
+        return self._read(read)
+
     def load_keywords_for_fetch(self, source_ids=None):
         mode_filter = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
         mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()

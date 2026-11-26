@@ -1876,7 +1876,14 @@ class CollectionStore:
                 + "ORDER BY p.created_at DESC",
                 (self.data_mode_scope,) if self.data_mode_scope else ())]
 
-    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None):
+    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None,
+                         allowed_sources=None):
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80):
+            raise ValueError("INVALID_PROPOSAL_NAME")
+        if description is not None and (not isinstance(description, str) or len(description) > 1200):
+            raise ValueError("INVALID_PROPOSAL_DESCRIPTION")
+        name = name.strip() if name is not None else None
+        description = description.strip() if description is not None else None
         with self.connect() as db:
             row = db.execute("SELECT * FROM proposals WHERE id=? AND status='PENDING'", (proposal_id,)).fetchone()
             if row is None:
@@ -1887,6 +1894,17 @@ class CollectionStore:
                 supported = db.execute(f"SELECT count(*) FROM keywords WHERE id IN ({placeholders}) AND data_mode=?",
                     (*support_ids, self.data_mode_scope)).fetchone()[0]
                 if supported != len(set(support_ids)):
+                    return None
+            collection_name = name if name is not None else row["name"]
+            if accept and name is not None:
+                name_fingerprint = fingerprint(collection_name)
+                suppressed = db.execute("SELECT 1 FROM suppression WHERE fingerprint=?",
+                                        (name_fingerprint,)).fetchone()
+                duplicate = db.execute("SELECT 1 FROM collections WHERE status='ACTIVE' AND lower(name)=lower(?) "
+                    "UNION ALL SELECT 1 FROM proposals WHERE status='PENDING' AND id<>? "
+                    "AND lower(name)=lower(?) LIMIT 1",
+                    (collection_name, proposal_id, collection_name)).fetchone()
+                if suppressed or duplicate:
                     return None
             status = "ACCEPTED" if accept else "REJECTED"
             db.execute("UPDATE proposals SET status=?,updated_at=? WHERE id=?", (status, now(), proposal_id))

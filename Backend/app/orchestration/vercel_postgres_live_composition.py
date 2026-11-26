@@ -30,12 +30,15 @@ async def vercel_postgres_live_composition(
 
     from app.collections.entity_context import WikimediaEntityContextResolver
     from app.collections.service import CollectionService
+    from app.ai.openrouter import OpenRouterAdapter
+    from app.ai.runtime import AIConfig, AIService
     from app.google_live_settings import GoogleLiveSettings
     from app.orchestration.normal_google_live_composition import (
         normal_google_live_composition,
     )
     from app.orchestration.vercel_credentials import VercelEnvironmentCredentialProvider
     from app.scheduling.postgres import PostgresScheduleStore
+    from app.storage.postgres_atomic_state import PostgresAtomicStateStore
     from app.storage.postgres_analysis import PostgresAnalysisStorage
 
     google = GoogleLiveSettings.from_environment()
@@ -57,6 +60,13 @@ async def vercel_postgres_live_composition(
         postgres_schema=postgres_schema,
     ) as facade:
         facade.available_sources = frozenset(facade.admission.policy.enabled_sources)
+        ai_config = AIConfig.from_environment()
+        ai_provider = OpenRouterAdapter(os.environ.get("OPENROUTER_API_KEY"))
+        facade.ai_service = AIService(
+            PostgresAtomicStateStore(postgres_environment, schema=postgres_schema),
+            config=ai_config,
+            provider=ai_provider,
+        )
         facade.collection_service = CollectionService(
             facade.collection_store,
             entity_context_resolver=WikimediaEntityContextResolver(
@@ -64,6 +74,7 @@ async def vercel_postgres_live_composition(
                 before_request=facade.entity_lookup_before_request,
             ),
             fetch_model_inference_enabled=False,
+            ai_engine=facade.ai_service,
         )
         facade.analysis_storage = PostgresAnalysisStorage(
             postgres_environment, schema=postgres_schema
@@ -89,4 +100,7 @@ async def vercel_postgres_live_composition(
             ),
             "runtime_mode": "VERCEL_OWNER_TRIGGERED",
         }
-        yield facade
+        try:
+            yield facade
+        finally:
+            ai_provider.close()

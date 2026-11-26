@@ -56,6 +56,19 @@ class LocalLiveGuard:
             "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/sources/library",
             "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
         }
+        ai_read = method == "GET" and (
+            path == "/api/v1/ai/capabilities"
+            or re.fullmatch(r"/api/v1/ai/jobs/[A-Za-z0-9_-]{1,80}", path)
+        )
+        ai_write = (
+            method == "POST" and path in {
+                "/api/v1/ai/classifications/reclassify", "/api/v1/ai/recommendations",
+            }
+        ) or (method == "POST" and re.fullmatch(
+            r"/api/v1/ai/jobs/[A-Za-z0-9_-]{1,80}/resume", path
+        )) or (method == "PATCH" and re.fullmatch(
+            r"/api/v1/ai/proposals/[A-Za-z0-9_-]{1,128}", path
+        ))
         run_history_detail = method == "GET" and re.fullmatch(
             r"/api/v1/runs/history/[A-Za-z0-9_-]{1,64}", path
         )
@@ -74,7 +87,7 @@ class LocalLiveGuard:
                 "/api/v1/collections/reclassify-cached",
             }
         ) or (method == "POST" and re.fullmatch(
-            rf"/api/v1/collections/(?:reconciliation/reconcile-[0-9a-f-]{{36}}/rollback|[^/]{{1,64}}/merge|{collection_id}/keywords|suggestions/[0-9a-f-]{{36}}/(?:accept|reject))", path
+            rf"/api/v1/collections/(?:reconciliation/reconcile-[0-9a-f-]{{36}}/rollback|[^/]{{1,64}}/merge|{collection_id}/keywords|suggestions/(?:[0-9a-f-]{{36}}|prop_[0-9a-f]{{32}})/(?:accept|reject))", path
         )) or (method == "PATCH" and re.fullmatch(
             rf"/api/v1/collections/{collection_id}", path
         )) or (method == "DELETE" and re.fullmatch(
@@ -104,6 +117,7 @@ class LocalLiveGuard:
             or (method == "GET" and path.startswith("/api/v1/fetches/"))
             or collection_read or collection_write or algorithm_read or dataset_read
             or product_read or run_history_detail or research_write or scheduler_write
+            or ai_read or ai_write
         )
         if not allowed:
             status = 405 if path in {
@@ -130,8 +144,9 @@ class CollectionBodySizeLimit:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
         if (scope.get("type") != "http" or scope.get("method", "").upper() not in {"POST", "PATCH"}
-                or not scope.get("path", "").startswith("/api/v1/collections")):
+                or not (path.startswith("/api/v1/collections") or path.startswith("/api/v1/ai/"))):
             await self.app(scope, receive, send)
             return
         content_length = None

@@ -56,25 +56,43 @@ def runtime_status(request: Request):
         except OSError:
             database_size_bytes = None
     integrity_status = "OK" if integrity == "ok" else "NOT_CHECKED" if integrity is None else "CHECK_REQUIRED"
+    ai_service = (getattr(getattr(request, "state", None), "ai_service", None)
+                  or getattr(request.app.state, "ai_service", None)
+                  or getattr(service, "ai_engine", None))
+    ai_config = getattr(ai_service, "config", None)
+    if ai_config is None:
+        llm = {"status": "NOT_CONFIGURED", "provider": None, "usage_instrumented": False}
+    else:
+        if not ai_config.enabled:
+            llm_status = "DISABLED"
+        elif ai_config.config_error or not ai_config.allowed_sources or not ai_config.api_key_present:
+            llm_status = "INCOMPLETE"
+        else:
+            llm_status = "CONFIGURED"
+        llm = {
+            "status": llm_status,
+            "provider": "OpenRouter",
+            "usage_instrumented": True,
+            "classification_model": ai_config.collection_model or None,
+            "recommendation_model": ai_config.recommendation_model or None,
+        }
     return {
         "embedding": {
-            "package": "fastembed",
+            "package": "FastEmbed (legacy optional)",
             "package_version": fastembed_version,
             "model": embeddings.MODEL_NAME,
             "model_version": embeddings.MODEL_VERSION,
             "inference_device": "CPU",
             "adapter_installed": bool(fastembed_version),
+            "active_for_classification": False,
             "cache_vectors": storage_metrics["cache_vectors"],
             "cached_dimensions_total": storage_metrics["cached_dimensions_total"],
             "vector_dimensions": storage_metrics["vector_dimensions"],
-            "model_load_status": (
-                "DISABLED_FOR_FETCH" if not service.fetch_model_inference_enabled
-                else "LAZY_ON_DEMAND"
-            ),
+            "model_load_status": "LEGACY_CACHE_ONLY",
             "classification_policy_version": CLASSIFICATION_POLICY_VERSION,
             "taxonomy_version": TAXONOMY_VERSION,
         },
-        "llm": {"status": "NOT_CONFIGURED", "provider": None, "usage_instrumented": False},
+        "llm": llm,
         "scheduler": _scheduler_status(request),
         "system": {
             "status": "AVAILABLE",

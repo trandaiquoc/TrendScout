@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 
@@ -28,6 +29,20 @@ from app.storage.postgres_connection import PostgresConnectionError, postgres_co
 
 class CollectionWriteError(RuntimeError):
     """A collection mutation could not be safely completed."""
+
+
+_AI_PROPOSAL_REASON_PREFIX = "TRENDSCOUT_AI_PROPOSAL_V1:"
+_AI_TARGETED_RUN_PREFIX = "TRENDSCOUT_AI_TARGETED_V1:"
+
+
+def _decode_ai_proposal_reason(value):
+    if not isinstance(value, str) or not value.startswith(_AI_PROPOSAL_REASON_PREFIX):
+        return {"reason": value if isinstance(value, str) else ""}
+    try:
+        payload = json.loads(value[len(_AI_PROPOSAL_REASON_PREFIX):])
+    except (TypeError, ValueError):
+        return {"reason": "AI generated Collection proposal"}
+    return payload if isinstance(payload, dict) else {"reason": "AI generated Collection proposal"}
 
 
 class PostgresAlgorithmAnalysisSession:
@@ -1121,7 +1136,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
 
     def rollback_membership_reconciliation(self, run_id: str):
         def operation(db):
-            run = db.execute(sql.SQL("SELECT status,created_at FROM {} WHERE id=%s")
+            run = db.execute(sql.SQL("SELECT status,created_at,reason FROM {} WHERE id=%s")
                              .format(self._table("membership_reconciliation_runs")), (run_id,)).fetchone()
             if not run or run["status"] != "APPLIED":
                 return False
@@ -1130,6 +1145,33 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 (run["created_at"],)).fetchone()
             if later:
                 return False
+
+            reason = run.get("reason", "")
+            if isinstance(reason, str) and reason.startswith(_AI_TARGETED_RUN_PREFIX):
+                try:
+                    targeted = json.loads(reason[len(_AI_TARGETED_RUN_PREFIX):]).get("keyword_ids")
+                except (TypeError, ValueError, AttributeError):
+                    return False
+                if (not isinstance(targeted, list) or not targeted
+                        or any(not isinstance(value, str) or not value for value in targeted)):
+                    return False
+                live_scope = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+                parameters = (targeted, self.data_mode_scope) if self.data_mode_scope else (targeted,)
+                db.execute(sql.SQL("DELETE FROM {} m USING {} k WHERE m.keyword_id=k.id "
+                    "AND m.origin='LOCAL_AI' AND m.pinned=0 AND m.keyword_id=ANY(%s)").format(
+                        self._table("memberships"), self._table("keywords")) + live_scope, parameters)
+                restore_parameters = (run_id, self.data_mode_scope) if self.data_mode_scope else (run_id,)
+                db.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                    SELECT i.collection_id,i.keyword_id,i.origin,i.pinned,i.score,i.reason,i.created_at
+                    FROM {} i JOIN {} c ON c.id=i.collection_id JOIN {} k ON k.id=i.keyword_id
+                    WHERE i.run_id=%s""").format(self._table("memberships"),
+                        self._table("membership_reconciliation_items"), self._table("collections"),
+                        self._table("keywords"))
+                    + (sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL(""))
+                    + sql.SQL(" ON CONFLICT(collection_id,keyword_id) DO NOTHING"), restore_parameters)
+                db.execute(sql.SQL("UPDATE {} SET status='ROLLED_BACK' WHERE id=%s")
+                           .format(self._table("membership_reconciliation_runs")), (run_id,))
+                return True
 
             created = db.execute(sql.SQL("""SELECT id FROM {} WHERE created_by='AI' AND reason LIKE %s""")
                                  .format(self._table("collections")), (f"%{run_id}%",)).fetchall()
@@ -1241,6 +1283,241 @@ class PostgresCollectionStore(PostgresCollectionReader):
                             self._table("feedback"), self._table("memberships")), params).fetchall()
                 inserted += len(rows)
             return inserted
+
+        return self._write(operation)
+
+    def persist_ai_classification(self, run_id, keyword_ids, assignments, proposals, *, job_id,
+                                  expected_collection_versions=None, expected_keyword_texts=None,
+                                  expected_collection_auto_match=None, expected_keyword_states=None,
+                                  allowed_sources=None):
+        """Atomically reconcile only the submitted keywords and create pending proposals."""
+        identifiers = list(dict.fromkeys(keyword_ids))
+        assignments = list(assignments)
+        proposals = list(proposals)
+        expected_collection_versions = dict(expected_collection_versions or {})
+        expected_keyword_texts = dict(expected_keyword_texts or {})
+        expected_collection_auto_match = dict(expected_collection_auto_match or {})
+        expected_keyword_states = dict(expected_keyword_states or {})
+        if (not isinstance(run_id, str) or not run_id or len(run_id) > 128
+                or not isinstance(job_id, str) or not job_id or len(job_id) > 128
+                or not identifiers or len(identifiers) > 200
+                or any(not isinstance(value, str) or not value or len(value) > 64 for value in identifiers)):
+            raise ValueError("AI_INPUT_CHANGED")
+        if (any(not isinstance(row, (tuple, list)) or len(row) != 4
+                or row[1] not in identifiers or not isinstance(row[0], str) or not row[0].strip()
+                or type(row[2]) not in (int, float) or not math.isfinite(row[2])
+                or not 0 <= row[2] <= 1 or not isinstance(row[3], str) for row in assignments)
+                or len({row[1] for row in assignments}) != len(assignments)):
+            raise ValueError("AI_INPUT_CHANGED")
+        stamp = datetime.now(timezone.utc)
+        reason_payload = {"job_id": job_id, "keyword_ids": identifiers,
+                          "reason": "OpenRouter AI classification re-run"}
+        run_reason = _AI_TARGETED_RUN_PREFIX + json.dumps(
+            reason_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+        def operation(db):
+            existing_run = db.execute(sql.SQL("SELECT status FROM {} WHERE id=%s FOR UPDATE")
+                                      .format(self._table("membership_reconciliation_runs")),
+                                      (run_id,)).fetchone()
+            proposal_ids = [proposal.get("id") for proposal in proposals
+                            if isinstance(proposal, dict) and isinstance(proposal.get("id"), str)]
+            if existing_run:
+                if existing_run["status"] != "APPLIED":
+                    raise ValueError("AI_INPUT_CHANGED")
+                present = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s)")
+                                     .format(self._table("proposals")), (proposal_ids,)).fetchall() if proposal_ids else []
+                scope = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+                parameters = (identifiers, self.data_mode_scope) if self.data_mode_scope else (identifiers,)
+                current_assignments = db.execute(sql.SQL("""SELECT m.collection_id,m.keyword_id,m.score,m.reason
+                    FROM {} m JOIN {} k ON k.id=m.keyword_id WHERE m.origin='LOCAL_AI'
+                    AND m.keyword_id=ANY(%s)""").format(self._table("memberships"),
+                        self._table("keywords")) + scope, parameters).fetchall()
+                return {"assigned": len(current_assignments),
+                        "assignments": [dict(row) for row in current_assignments],
+                        "proposal_ids": [row["id"] for row in present],
+                        "membership_reconciliation_id": run_id}
+
+            # Lock the keyword and candidate Collection versions used by the prompt.
+            keywords = db.execute(sql.SQL("SELECT id,normalized,eligible,data_mode FROM {} "
+                "WHERE id=ANY(%s) FOR UPDATE").format(self._table("keywords")), (identifiers,)).fetchall()
+            if len(keywords) != len(identifiers):
+                raise ValueError("AI_KEYWORD_NOT_FOUND")
+            if self.data_mode_scope and any(row["data_mode"] != self.data_mode_scope for row in keywords):
+                raise ValueError("AI_KEYWORD_NOT_FOUND")
+            if any(not row["eligible"] or row["normalized"] != expected_keyword_texts.get(row["id"], row["normalized"])
+                   for row in keywords):
+                raise ValueError("AI_INPUT_CHANGED")
+            if expected_keyword_states:
+                sources = sorted(set(allowed_sources or ()))
+                states = db.execute(sql.SQL("""SELECT k.id,k.normalized,k.source,k.eligible,
+                    COALESCE(kd.decision,'') AS decision,
+                    COALESCE(cr.classification_status,'') AS classification_status,
+                    COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
+                        FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                    EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
+                    EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
+                    COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
+                        FROM {} f WHERE f.keyword_id=k.id AND f.action='REMOVE'), '[]'::jsonb)
+                        AS removed_collection_ids,
+                    COALESCE(kd.updated_at::text,'') AS override_updated_at
+                    FROM {} k LEFT JOIN {} kd ON kd.keyword_id=k.id
+                    LEFT JOIN {} cr ON cr.keyword_id=k.id
+                    WHERE k.id=ANY(%s)""").format(
+                        self._table("evidence_keywords"), self._table("source_evidence"),
+                        self._table("memberships"), self._table("memberships"),
+                        self._table("feedback"), self._table("keywords"),
+                        self._table("keyword_decisions"), self._table("classification_results")),
+                    (sources, identifiers)).fetchall()
+                actual_states = {row["id"]: row for row in states}
+                if set(actual_states) != set(identifiers):
+                    raise ValueError("AI_INPUT_CHANGED")
+                for identifier, expected in expected_keyword_states.items():
+                    actual = actual_states.get(identifier)
+                    if not isinstance(expected, dict) or actual is None or any(
+                            actual.get(field) != expected.get(field) for field in (
+                                "normalized", "source", "eligible", "decision", "classification_status",
+                                "evidence_ids", "user_assigned", "user_pinned", "removed_collection_ids",
+                                "override_updated_at")):
+                        raise ValueError("AI_INPUT_CHANGED")
+            if expected_collection_versions:
+                collection_ids = list(expected_collection_versions)
+                versions = db.execute(sql.SQL("SELECT id,version,status,auto_match FROM {} "
+                    "WHERE id=ANY(%s) FOR SHARE").format(self._table("collections")),
+                    (collection_ids,)).fetchall()
+                actual = {row["id"]: row for row in versions}
+                if (set(actual) != set(expected_collection_versions)
+                        or any(actual[identifier]["version"] != expected_collection_versions[identifier]
+                               or actual[identifier]["status"] != "ACTIVE"
+                               or (identifier in expected_collection_auto_match
+                                   and bool(actual[identifier]["auto_match"])
+                                   != expected_collection_auto_match[identifier])
+                               for identifier in expected_collection_versions)):
+                    raise ValueError("AI_INPUT_CHANGED")
+            scope = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+            scope_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
+            current_rows = db.execute(sql.SQL("""SELECT m.collection_id,m.keyword_id,m.score,m.reason
+                FROM {} m JOIN {} k ON k.id=m.keyword_id
+                WHERE m.origin='LOCAL_AI' AND m.pinned=0 AND m.keyword_id=ANY(%s)""").format(
+                    self._table("memberships"), self._table("keywords")) + scope,
+                (identifiers, *scope_parameters)).fetchall()
+            current_assignments = {(row["collection_id"], row["keyword_id"]):
+                                   (float(row["score"]) if row["score"] is not None else None,
+                                    row["reason"]) for row in current_rows}
+            desired_assignments = {(collection_id, keyword_id): (float(score), str(reason)[:500])
+                                   for collection_id, keyword_id, score, reason in assignments}
+            reconcile = current_assignments != desired_assignments
+            if reconcile:
+                db.execute(sql.SQL("""INSERT INTO {}(id,created_at,reason,status)
+                    VALUES (%s,%s,%s,'APPLYING')""").format(self._table("membership_reconciliation_runs")),
+                    (run_id, stamp, run_reason))
+                db.execute(sql.SQL("""INSERT INTO {}(run_id,collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                    SELECT %s,m.collection_id,m.keyword_id,m.origin,m.pinned,m.score,m.reason,m.created_at
+                    FROM {} m JOIN {} k ON k.id=m.keyword_id
+                    WHERE m.origin='LOCAL_AI' AND m.pinned=0 AND m.keyword_id=ANY(%s)""").format(
+                        self._table("membership_reconciliation_items"), self._table("memberships"),
+                        self._table("keywords")) + scope,
+                    (run_id, identifiers, *scope_parameters))
+                db.execute(sql.SQL("DELETE FROM {} m USING {} k WHERE m.keyword_id=k.id "
+                    "AND m.origin='LOCAL_AI' AND m.pinned=0 AND m.keyword_id=ANY(%s)").format(
+                        self._table("memberships"), self._table("keywords")) + scope,
+                    (identifiers, *scope_parameters))
+
+                for offset in range(0, len(assignments), 500):
+                    batch = assignments[offset:offset + 500]
+                    if not batch:
+                        continue
+                    values = sql.SQL(",").join(sql.SQL("(%s,%s,%s::double precision,%s,%s::timestamptz)")
+                                               for _ in batch)
+                    params = [value for collection_id, keyword_id, score, reason in batch
+                              for value in (collection_id, keyword_id, score, str(reason)[:500], stamp)]
+                    db.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,score,reason,created_at)
+                        SELECT v.collection_id,v.keyword_id,'LOCAL_AI',0,v.score,v.reason,v.created_at
+                        FROM (VALUES {}) AS v(collection_id,keyword_id,score,reason,created_at)
+                        JOIN {} c ON c.id=v.collection_id AND c.status='ACTIVE' AND c.auto_match=1
+                        JOIN {} k ON k.id=v.keyword_id AND k.eligible=1
+                        WHERE NOT EXISTS(SELECT 1 FROM {} f WHERE f.collection_id=v.collection_id
+                            AND f.keyword_id=v.keyword_id AND f.action='REMOVE')
+                        AND NOT EXISTS(SELECT 1 FROM {} manual WHERE manual.keyword_id=v.keyword_id
+                            AND manual.origin='USER')
+                        AND NOT EXISTS(SELECT 1 FROM {} kd WHERE kd.keyword_id=v.keyword_id
+                            AND kd.decision='EXCLUDED')
+                        AND NOT EXISTS(SELECT 1 FROM {} pinned WHERE pinned.keyword_id=v.keyword_id
+                            AND pinned.pinned=1)
+                        ON CONFLICT(collection_id,keyword_id) DO NOTHING""").format(
+                            self._table("memberships"), values, self._table("collections"),
+                            self._table("keywords"), self._table("feedback"), self._table("memberships"),
+                            self._table("keyword_decisions"), self._table("memberships")),
+                            params)
+                db.execute(sql.SQL("UPDATE {} SET status='APPLIED' WHERE id=%s")
+                           .format(self._table("membership_reconciliation_runs")), (run_id,))
+
+            persisted_assignments = db.execute(sql.SQL("""SELECT m.collection_id,m.keyword_id,m.score,m.reason
+                FROM {} m JOIN {} k ON k.id=m.keyword_id
+                WHERE m.origin='LOCAL_AI' AND m.keyword_id=ANY(%s)""").format(
+                    self._table("memberships"), self._table("keywords")) + scope,
+                (identifiers, *scope_parameters)).fetchall()
+
+            created_proposals = []
+            for proposal in proposals:
+                if not isinstance(proposal, dict):
+                    continue
+                proposal_id = proposal.get("id")
+                name = proposal.get("name")
+                description = proposal.get("description")
+                support_ids = proposal.get("support_ids")
+                if (not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128
+                        or not isinstance(name, str) or not 3 <= len(name.strip()) <= 80
+                        or not isinstance(description, str) or len(description) > 1200
+                        or not isinstance(support_ids, list) or len(support_ids) < 2
+                        or any(not isinstance(value, str) for value in support_ids)
+                        or len(support_ids) != len(set(support_ids))
+                        or any(value not in identifiers for value in support_ids)):
+                    continue
+                eligible_support = db.execute(sql.SQL("""SELECT k.id FROM {} k
+                    WHERE k.id=ANY(%s) AND k.eligible=1
+                    AND NOT EXISTS(SELECT 1 FROM {} kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')
+                    AND NOT EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id
+                        AND (m.origin='USER' OR m.pinned=1))""").format(
+                        self._table("keywords"), self._table("keyword_decisions"),
+                        self._table("memberships")), (support_ids,)).fetchall()
+                if len(eligible_support) != len(support_ids):
+                    continue
+                name_fingerprint = fingerprint(name)
+                suppressed = db.execute(sql.SQL("SELECT 1 FROM {} WHERE fingerprint=%s")
+                                        .format(self._table("suppression")),
+                                        (name_fingerprint,)).fetchone()
+                if suppressed:
+                    continue
+                labels = db.execute(sql.SQL("SELECT name FROM {} WHERE status='ACTIVE' "
+                    "UNION ALL SELECT name FROM {} WHERE status='PENDING'")
+                    .format(self._table("collections"), self._table("proposals"))).fetchall()
+                if any(fingerprint(row["name"]) == name_fingerprint for row in labels):
+                    continue
+                metadata = {
+                    "reason": str(proposal.get("reason", ""))[:500],
+                    "score": proposal.get("score"),
+                    "uncertainty": str(proposal.get("uncertainty", ""))[:500],
+                    "evidence_ids": proposal.get("evidence_ids", []),
+                    "source_ids": proposal.get("source_ids", []),
+                    "model_id": str(proposal.get("model_id", ""))[:200],
+                    "job_id": job_id,
+                }
+                stored_reason = _AI_PROPOSAL_REASON_PREFIX + json.dumps(
+                    metadata, ensure_ascii=False, sort_keys=True, allow_nan=False,
+                    separators=(",", ":"))
+                db.execute(sql.SQL("""INSERT INTO {}(id,name,description,support_ids,reason,status,created_at,updated_at)
+                    VALUES (%s,%s,%s,%s,%s,'PENDING',%s,%s) ON CONFLICT(id) DO NOTHING""").format(
+                        self._table("proposals")),
+                    (proposal_id, name.strip(), description, Jsonb(support_ids), stored_reason, stamp, stamp))
+                found = db.execute(sql.SQL("SELECT id FROM {} WHERE id=%s AND status='PENDING'")
+                                   .format(self._table("proposals")), (proposal_id,)).fetchone()
+                if found:
+                    created_proposals.append(proposal_id)
+            return {"assigned": len(persisted_assignments),
+                    "assignments": [dict(row) for row in persisted_assignments],
+                    "proposal_ids": created_proposals,
+                    "membership_reconciliation_id": run_id if reconcile else None}
 
         return self._write(operation)
 
@@ -1466,10 +1743,107 @@ class PostgresCollectionStore(PostgresCollectionReader):
             parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
             rows = db.execute(sql.SQL("SELECT p.* FROM {} p WHERE p.status='PENDING' ").format(
                 self._table("proposals")) + scope + sql.SQL(" ORDER BY p.created_at DESC"), parameters).fetchall()
-            return rows
+            result = []
+            for row in rows:
+                item = dict(row)
+                metadata = _decode_ai_proposal_reason(item.get("reason"))
+                item["reason"] = metadata.get("reason", "")
+                for field in ("score", "uncertainty", "evidence_ids", "model_id"):
+                    if field in metadata:
+                        item["model_" + field if field == "score" else field] = metadata[field]
+                result.append(item)
+            return result
         return self._read(operation)
 
-    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None):
+    def patch_proposal(self, proposal_id, *, name=None, description=None, support_ids=None,
+                       allowed_sources=None):
+        if not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128:
+            return False
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80):
+            raise ValueError("INVALID_PROPOSAL_NAME")
+        if description is not None and (not isinstance(description, str) or len(description) > 1200):
+            raise ValueError("INVALID_PROPOSAL_DESCRIPTION")
+        if support_ids is not None and (not isinstance(support_ids, list) or len(support_ids) < 2
+                or len(support_ids) > 200
+                or any(not isinstance(value, str) or not value or len(value) > 64 for value in support_ids)
+                or len(support_ids) != len(set(support_ids))):
+            raise ValueError("INVALID_PROPOSAL_KEYWORDS")
+        stamp = datetime.now(timezone.utc)
+
+        def operation(db):
+            row = db.execute(sql.SQL("SELECT * FROM {} WHERE id=%s AND status='PENDING' FOR UPDATE")
+                             .format(self._table("proposals")), (proposal_id,)).fetchone()
+            if row is None:
+                return False
+            assignments, parameters = [], []
+            if name is not None:
+                assignments.append("name=%s")
+                parameters.append(name.strip())
+            if description is not None:
+                assignments.append("description=%s")
+                parameters.append(description.strip())
+            if support_ids is not None:
+                sources = sorted(set(allowed_sources or ()))
+                if not sources:
+                    raise ValueError("AI_POLICY_DENIED")
+                mode_filter = sql.SQL(" AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
+                mode_params = (self.data_mode_scope,) if self.data_mode_scope else ()
+                found = db.execute(sql.SQL("""SELECT k.id FROM {} k WHERE k.id=ANY(%s)
+                    AND k.eligible=1 AND k.source=ANY(%s)
+                    AND NOT EXISTS(SELECT 1 FROM {} kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')
+                    AND NOT EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER')
+                    AND EXISTS(SELECT 1 FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s))""").format(
+                            self._table("keywords"), self._table("keyword_decisions"),
+                            self._table("memberships"), self._table("evidence_keywords"),
+                            self._table("source_evidence")) + mode_filter,
+                    (support_ids, sources, sources, *mode_params)).fetchall()
+                if len(found) != len(support_ids):
+                    raise ValueError("AI_KEYWORD_NOT_FOUND")
+                if isinstance(row.get("reason"), str) and row["reason"].startswith(_AI_PROPOSAL_REASON_PREFIX):
+                    metadata = _decode_ai_proposal_reason(row["reason"])
+                    evidence = db.execute(sql.SQL("""SELECT DISTINCT se.id,se.source_id FROM {} ek
+                        JOIN {} se ON se.id=ek.evidence_id WHERE ek.keyword_id=ANY(%s)
+                        AND se.source_id=ANY(%s) ORDER BY se.id""").format(
+                            self._table("evidence_keywords"), self._table("source_evidence")),
+                        (support_ids, sources)).fetchall()
+                    metadata["evidence_ids"] = [item["id"] for item in evidence]
+                    metadata["source_ids"] = sorted({item["source_id"] for item in evidence})
+                    assignments.append("reason=%s")
+                    parameters.append(_AI_PROPOSAL_REASON_PREFIX + json.dumps(
+                        metadata, ensure_ascii=False, sort_keys=True, allow_nan=False,
+                        separators=(",", ":")))
+                assignments.append("support_ids=%s")
+                parameters.append(Jsonb(support_ids))
+            if name is not None:
+                name_fingerprint = fingerprint(name.strip())
+                suppressed = db.execute(sql.SQL("SELECT 1 FROM {} WHERE fingerprint=%s")
+                    .format(self._table("suppression")), (name_fingerprint,)).fetchone()
+                duplicate = db.execute(sql.SQL("SELECT 1 FROM {} WHERE status='ACTIVE' AND id<>%s "
+                    "AND lower(name)=lower(%s) UNION ALL SELECT 1 FROM {} WHERE status='PENDING' "
+                    "AND id<>%s AND lower(name)=lower(%s) LIMIT 1").format(
+                        self._table("collections"), self._table("proposals")),
+                    (proposal_id, name.strip(), proposal_id, name.strip())).fetchone()
+                if suppressed or duplicate:
+                    raise ValueError("COLLECTION_NAME_CONFLICT")
+            if not assignments:
+                raise ValueError("EMPTY_UPDATE")
+            assignments.append("updated_at=%s")
+            parameters.extend((stamp, proposal_id))
+            db.execute(sql.SQL("UPDATE {} SET " + ",".join(assignments) + " WHERE id=%s")
+                       .format(self._table("proposals")), parameters)
+            return True
+        return self._write(operation)
+
+    def resolve_proposal(self, proposal_id, accept, *, name=None, description=None,
+                         allowed_sources=None):
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80):
+            raise ValueError("INVALID_PROPOSAL_NAME")
+        if description is not None and (not isinstance(description, str) or len(description) > 1200):
+            raise ValueError("INVALID_PROPOSAL_DESCRIPTION")
+        name = name.strip() if name is not None else None
+        description = description.strip() if description is not None else None
+
         def operation(db):
             row = db.execute(sql.SQL("SELECT * FROM {} WHERE id=%s AND status='PENDING' FOR UPDATE")
                              .format(self._table("proposals")), (proposal_id,)).fetchone()
@@ -1478,16 +1852,60 @@ class PostgresCollectionStore(PostgresCollectionReader):
             support_ids = row["support_ids"]
             if isinstance(support_ids, str):
                 support_ids = json.loads(support_ids)
-            if not isinstance(support_ids, list) or not all(isinstance(item, str) for item in support_ids):
+            if (not isinstance(support_ids, list) or not all(isinstance(item, str) for item in support_ids)
+                    or len(support_ids) != len(set(support_ids))):
                 return None
-            if self.data_mode_scope and support_ids:
-                supported = db.execute(sql.SQL("SELECT count(*) AS n FROM {} WHERE id=ANY(%s) AND data_mode=%s")
-                                       .format(self._table("keywords")),
-                                       (list(set(support_ids)), self.data_mode_scope)).fetchone()["n"]
-                if supported != len(set(support_ids)):
+            ai_proposal = (isinstance(row.get("reason"), str)
+                           and row["reason"].startswith(_AI_PROPOSAL_REASON_PREFIX))
+            if accept and ai_proposal and len(support_ids) < 2:
+                return None
+            ai_metadata = _decode_ai_proposal_reason(row.get("reason")) if ai_proposal else {}
+            if accept and ai_proposal:
+                sources = ai_metadata.get("source_ids")
+                evidence_ids = ai_metadata.get("evidence_ids")
+                allowed = set(allowed_sources or ())
+                if (not allowed or not isinstance(sources, list) or not sources
+                        or any(source not in allowed for source in sources)
+                        or not isinstance(evidence_ids, list) or not evidence_ids
+                        or any(not isinstance(value, str) for value in evidence_ids)):
+                    return None
+            if support_ids:
+                mode_filter = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+                mode_params = (self.data_mode_scope,) if self.data_mode_scope else ()
+                supported = db.execute(sql.SQL("""SELECT count(*) AS n FROM {} k
+                    WHERE k.id=ANY(%s) AND k.eligible=1
+                    AND NOT EXISTS(SELECT 1 FROM {} kd WHERE kd.keyword_id=k.id AND kd.decision='EXCLUDED')""").format(
+                        self._table("keywords"), self._table("keyword_decisions")) + mode_filter,
+                    (support_ids, *mode_params)).fetchone()["n"]
+                if supported != len(support_ids):
+                    return None
+            if accept and ai_proposal:
+                allowed = set(allowed_sources or ())
+                supported = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s) "
+                    "AND eligible=1 AND source=ANY(%s)").format(self._table("keywords")),
+                    (support_ids, sorted(allowed))).fetchall()
+                if not allowed or len(supported) != len(support_ids):
+                    return None
+                references = db.execute(sql.SQL("""SELECT DISTINCT se.id FROM {} ek
+                    JOIN {} se ON se.id=ek.evidence_id WHERE ek.keyword_id=ANY(%s)
+                    AND se.id=ANY(%s) AND se.source_id=ANY(%s) ORDER BY se.id""").format(
+                        self._table("evidence_keywords"), self._table("source_evidence")),
+                    (support_ids, ai_metadata["evidence_ids"], sorted(allowed))).fetchall()
+                if {item["id"] for item in references} != set(ai_metadata["evidence_ids"]):
                     return None
             stamp = datetime.now(timezone.utc)
             status = "ACCEPTED" if accept else "REJECTED"
+            collection_name = name if name is not None else row["name"]
+            if accept and (ai_proposal or name is not None):
+                name_fingerprint = fingerprint(collection_name)
+                suppressed = db.execute(sql.SQL("SELECT 1 FROM {} WHERE fingerprint=%s")
+                    .format(self._table("suppression")), (name_fingerprint,)).fetchone()
+                labels = db.execute(sql.SQL("SELECT name FROM {} WHERE status='ACTIVE' "
+                    "UNION ALL SELECT name FROM {} WHERE status='PENDING' AND id<>%s").format(
+                        self._table("collections"), self._table("proposals")),
+                    (proposal_id,)).fetchall()
+                if suppressed or any(fingerprint(item["name"]) == name_fingerprint for item in labels):
+                    return None
             db.execute(sql.SQL("UPDATE {} SET status=%s,updated_at=%s WHERE id=%s")
                        .format(self._table("proposals")), (status, stamp, proposal_id))
             if not accept:
@@ -1499,9 +1917,10 @@ class PostgresCollectionStore(PostgresCollectionReader):
             identifier = str(uuid.uuid4())
             collection_name = name if name is not None else row["name"]
             collection_description = description if description is not None else row["description"]
+            reason = _decode_ai_proposal_reason(row["reason"]).get("reason", "")
             db.execute(sql.SQL("""INSERT INTO {}(id,name,description,created_by,reason,created_at,updated_at)
                 VALUES (%s,%s,%s,'AI',%s,%s,%s)""").format(self._table("collections")),
-                (identifier, collection_name, collection_description, row["reason"], stamp, stamp))
+                (identifier, collection_name, collection_description, reason, stamp, stamp))
             if support_ids:
                 with db.cursor() as cursor:
                     cursor.executemany(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,

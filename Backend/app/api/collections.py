@@ -445,9 +445,13 @@ def set_mode(value: ModeInput, request: Request):
 @router.post("/collections/suggestions/{proposal_id}/accept")
 def accept_suggestion(proposal_id: str, request: Request, value: ProposalAcceptInput | None = None):
     _mutating(request)
+    service = _service(request)
+    ai_service = (getattr(getattr(request, "state", None), "ai_service", None)
+                  or getattr(request.app.state, "ai_service", None))
     overrides = value.model_dump(exclude_unset=True) if value is not None else {}
-    identifier = _service(request).store.resolve_proposal(
+    identifier = service.store.resolve_proposal(
         proposal_id, True, name=overrides.get("name"), description=overrides.get("description"),
+        allowed_sources=getattr(ai_service, "_allowed_sources", None),
     )
     if identifier is None:
         raise HTTPException(404, {"code": "SUGGESTION_NOT_FOUND"})
