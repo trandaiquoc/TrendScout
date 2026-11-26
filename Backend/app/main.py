@@ -19,8 +19,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
-from app.api.algorithms import router as algorithms_router
 from app.api.ai import router as ai_router
+from app.api.algorithms import router as algorithms_router
 from app.api.analytics import router as analytics_router
 from app.api.capabilities import router as capabilities_router
 from app.api.collections import router as collections_router
@@ -1073,9 +1073,9 @@ def create_app(
                     collection_store = getattr(local_live_fetch, "collection_store", None)
                     if postgres_environment is not None and collection_store is not None:
                         try:
-                            from app.collections.postgres_store import PostgresCollectionStore
                             from app.ai.openrouter import OpenRouterAdapter
                             from app.ai.runtime import AIConfig, AIService
+                            from app.collections.postgres_store import PostgresCollectionStore
                             from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 
                             if not isinstance(collection_store, PostgresCollectionStore):

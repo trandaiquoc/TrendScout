@@ -420,11 +420,17 @@ async def normal_google_live_composition(*, user_agent,
     admission = PublicAdmission(
         store, policy, state_key=GOOGLE_STATE_KEY,
         owner_manual_youtube_live=youtube_manual_live,
+        require_quota_evidence=uses_postgres,
     )
     if uses_postgres:
-        # Empty business tables are valid for Fresh Start. Read the durable
-        # operational ledger without creating defaults; its absence disables
-        # Fetch while the read-only APIs remain available.
+        # Initialize only the admission shape. Missing quota evidence remains
+        # UNKNOWN and is checked per source before admission or reservation.
+        try:
+            admission.initialize_operational_state(now=utcnow())
+        except AdmissionDenied:
+            # Malformed or mismatched operational state remains unchanged and
+            # will be reported by the fail-closed readiness check below.
+            pass
         existing_state = store.read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
     elif uses_firestore:
         existing_state = (
@@ -438,7 +444,8 @@ async def normal_google_live_composition(*, user_agent,
 
     postgres_live_block_reason = (
         postgres_live_state_block_reason(
-            existing_state, policy_digest=admission.policy_digest
+            existing_state, policy_digest=admission.policy_digest,
+            required_quota_pools=tuple(policy.pools),
         ) if uses_postgres else None
     )
     # First launch has no quota state to migrate; any populated ledger must
@@ -707,7 +714,8 @@ async def normal_google_live_composition(*, user_agent,
                             snapshot={key: value for key, value in snapshot.items()
                                       if key != "budget_status"},
                         )
-                        if policy.source_allocations and snapshot.get("budget_status") != "UNAVAILABLE":
+                        if ((policy.source_allocations or uses_postgres)
+                                and snapshot.get("budget_status") != "UNAVAILABLE"):
                             renewal = snapshot.get("plan_renewal_date")
                             monthly_limit = snapshot.get("monthly_limit")
                             monthly_remaining = snapshot.get("monthly_remaining")
@@ -820,6 +828,9 @@ async def normal_google_live_composition(*, user_agent,
 
         def remaining_paid_attempts():
             snapshot = admission.quota_snapshot("serpapi", now=utcnow())
+            if (snapshot["daily"].get("status") == "UNKNOWN"
+                    or snapshot["monthly"].get("status") == "UNKNOWN"):
+                return 0
             return min(snapshot["daily"]["remaining"], snapshot["monthly"]["remaining"])
 
         paid_budget_preflight = (
@@ -901,6 +912,9 @@ async def normal_google_live_composition(*, user_agent,
                 quota = admission.quota_snapshot("youtube", now=now)
             except Exception:
                 return {"allowed": False, "error_code": "QUOTA_STATE_UNAVAILABLE"}
+            if (quota["daily"].get("status") == "UNKNOWN"
+                    or quota["monthly"].get("status") == "UNKNOWN"):
+                return {"allowed": False, "error_code": "QUOTA_UNKNOWN"}
             daily_quota_exhausted = (
                 quota["daily"]["remaining"] <= 0
                 or quota["daily"]["units_remaining"] <= 0
@@ -1209,6 +1223,15 @@ async def normal_google_live_composition(*, user_agent,
                        if isinstance(state_snapshot, dict)
                        and GOOGLE_STATE_KEY in state_snapshot else {}),
                 )
+                unknown_quota_pools = (
+                    admission.quota_unknown_pools(
+                        source_ids=tuple(sorted(policy.enabled_sources)),
+                        now=utcnow(),
+                        **({"state_snapshot": state_snapshot[GOOGLE_STATE_KEY]}
+                           if isinstance(state_snapshot, dict)
+                           and GOOGLE_STATE_KEY in state_snapshot else {}),
+                    ) if uses_postgres else ()
+                )
                 pools = runtime["pools"]
                 google = {
                     "provider_account": quota_state.get("snapshot"),
@@ -1241,6 +1264,7 @@ async def normal_google_live_composition(*, user_agent,
                 return {
                     "admission_status": "AVAILABLE",
                     "operational_enabled": runtime["operational_enabled"],
+                    "quota_unknown_pools": list(unknown_quota_pools),
                     "google": google,
                     "youtube": youtube,
                 }

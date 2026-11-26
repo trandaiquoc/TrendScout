@@ -136,7 +136,7 @@ def test_schema_checksum_failure_is_not_cached():
         assert verify_schema.call_count == 2
 
 
-def test_live_state_readiness_requires_verified_quota_and_cooldown_state():
+def test_live_state_readiness_accepts_initialized_unknown_quota_windows():
     digest = "verified-policy"
     assert postgres_live_state_block_reason({}, policy_digest=digest) == (
         "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
@@ -148,10 +148,20 @@ def test_live_state_readiness_requires_verified_quota_and_cooldown_state():
         "jobs": {},
         "keys": {},
         "starts": [],
-        "quota": {"pool:day:2026-11-26": {"requests": 0, "cost": 0}},
+        "quota": {},
         "inflight": {},
+        "quota_verification": {
+            "serpapi": {
+                "daily": {"window": "serpapi:day:2026-11-26", "status": "UNKNOWN"},
+                "monthly": {"window": "serpapi:month:2026-11", "status": "UNKNOWN"},
+            },
+        },
     }
     assert postgres_live_state_block_reason(state, policy_digest=digest) is None
+    assert postgres_live_state_block_reason(
+        {key: value for key, value in state.items() if key != "quota_verification"},
+        policy_digest=digest,
+    ) == "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
     assert postgres_live_state_block_reason(state, policy_digest="other") == (
         "POSTGRES_OPERATIONAL_STATE_POLICY_MISMATCH"
     )

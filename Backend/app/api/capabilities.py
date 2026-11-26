@@ -499,6 +499,10 @@ async def capabilities(request: Request, response: Response):
                             shared_policy_reconciliation_required = True
                         elif sync_status == "POLICY_MISMATCH":
                             block_reason = "POLICY_MISMATCH"
+                elif (isinstance(runtime_metadata, dict)
+                      and runtime_metadata.get("quota_unknown_pools")):
+                    enabled = False
+                    block_reason = "QUOTA_UNKNOWN"
             except Exception:
                 enabled = False
                 block_reason = "ADMISSION_STATE_UNAVAILABLE"

@@ -64,25 +64,20 @@ def _seed_cutover_readiness(connection, environment, schema, *, now):
         youtube_enabled=True,
     )
     store = PostgresAtomicStateStore(environment, schema=schema)
-    admission = PublicAdmission(store, policy, state_key=GOOGLE_STATE_KEY)
-    quota = {}
+    admission = PublicAdmission(
+        store, policy, state_key=GOOGLE_STATE_KEY, require_quota_evidence=True
+    )
+    admission.initialize_operational_state(now=now)
     for pool_name in policy.pools:
-        pool_day = admission._quota_day(pool_name, now).isoformat()
-        quota[f"{pool_name}:day:{pool_day}"] = {"requests": 0, "cost": 0}
-        quota[f"{pool_name}:month:{now.strftime('%Y-%m')}"] = {
-            "requests": 0, "cost": 0,
-        }
-    state = {
-        "schema": 1,
-        "policy_digest": admission.policy_digest,
-        "operational_enabled": True,
-        "jobs": {},
-        "keys": {},
-        "starts": [],
-        "quota": quota,
-        "inflight": {},
-    }
-    store.transact(GOOGLE_STATE_KEY, lambda _current: (state, None))
+        for period in ("daily", "monthly"):
+            admission.record_quota_window_evidence(
+                pool_name,
+                period,
+                requests=0,
+                cost=0,
+                evidence_source="isolated_postgres_test_seed",
+                now=now,
+            )
 
 
 class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
@@ -189,12 +184,12 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(capabilities.json()["fetch_enabled"])
                         self.assertEqual(
                             capabilities.json()["fetch_block_reason"],
-                            "POSTGRES_OPERATIONAL_STATE_UNVERIFIED",
+                            "QUOTA_UNKNOWN",
                         )
 
                         blocked_fetch = client.post(
                             "/api/v1/fetches",
-                            json={},
+                            json={"sources": [GOOGLE_SOURCE_ID]},
                             headers={
                                 "Origin": base_url,
                                 "Idempotency-Key": "db02-fresh-start-blocked-001",
@@ -203,13 +198,10 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(blocked_fetch.status_code, 503)
                         self.assertEqual(
                             blocked_fetch.json()["detail"]["code"],
-                            "POSTGRES_OPERATIONAL_STATE_UNVERIFIED",
+                            "QUOTA_UNKNOWN",
                         )
 
-                for table in (
-                    "keywords", "dataset_snapshots", "coordination_fields",
-                    "coordination_entries", "fetch_jobs",
-                ):
+                for table in ("keywords", "dataset_snapshots", "fetch_jobs"):
                     self.assertEqual(
                         connection.execute(
                             sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
@@ -219,6 +211,17 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                         0,
                         f"Fresh Start must leave {table} empty",
                     )
+                state = PostgresAtomicStateStore(
+                    environment, schema=schema
+                ).read_many([GOOGLE_STATE_KEY])[GOOGLE_STATE_KEY]
+                self.assertEqual(state["jobs"], {})
+                self.assertEqual(state["quota"], {})
+                self.assertEqual(state["starts"], [])
+                self.assertTrue(all(
+                    value["daily"]["status"] == "UNKNOWN"
+                    and value["monthly"]["status"] == "UNKNOWN"
+                    for value in state["quota_verification"].values()
+                ))
             finally:
                 if schema_created:
                     connection.execute(

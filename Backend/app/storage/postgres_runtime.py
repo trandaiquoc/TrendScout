@@ -99,12 +99,15 @@ def initialize_postgres_runtime_defaults(
         ) from None
 
 
-def postgres_live_state_block_reason(state, *, policy_digest: str) -> str | None:
+def postgres_live_state_block_reason(
+    state, *, policy_digest: str, required_quota_pools=()
+) -> str | None:
     """Return why a PostgreSQL LIVE Fetch must remain disabled.
 
-    This checks only durable admission shape and its policy identity. The
-    admission transactions still enforce quotas, cooldowns, leases, and writer
-    fencing for every actual operation.
+    UNKNOWN quota windows are a valid initialized state: the application may
+    start, while admission rejects sources until their exact windows are
+    verified. Transactions continue to enforce quotas, cooldowns, leases, and
+    writer fencing for every actual operation.
     """
     if not isinstance(state, Mapping) or not state:
         return "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
@@ -118,8 +121,43 @@ def postgres_live_state_block_reason(state, *, policy_digest: str) -> str | None
     for name in ("jobs", "keys", "quota", "inflight"):
         if not isinstance(state.get(name), Mapping):
             return "POSTGRES_OPERATIONAL_STATE_INVALID"
-    if not state["quota"]:
+    if (not isinstance(required_quota_pools, (tuple, list, set, frozenset))
+            or any(not isinstance(pool, str) or not pool for pool in required_quota_pools)):
+        return "POSTGRES_OPERATIONAL_STATE_INVALID"
+    verifications = state.get("quota_verification")
+    if not isinstance(verifications, Mapping):
         return "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
+    required = set(required_quota_pools) or set(verifications)
+    if not required or not required <= set(verifications):
+        return "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
+
+    for pool in required:
+        pool_state = verifications.get(pool)
+        if not isinstance(pool_state, Mapping):
+            return "POSTGRES_OPERATIONAL_STATE_INVALID"
+        for period in ("daily", "monthly"):
+            window_state = pool_state.get(period)
+            if not isinstance(window_state, Mapping):
+                return "POSTGRES_OPERATIONAL_STATE_UNVERIFIED"
+            status = window_state.get("status")
+            window = window_state.get("window")
+            if status not in {"UNKNOWN", "VERIFIED"}:
+                return "POSTGRES_OPERATIONAL_STATE_INVALID"
+            if window is not None and not isinstance(window, str):
+                return "POSTGRES_OPERATIONAL_STATE_INVALID"
+            if status == "VERIFIED":
+                evidence_at = window_state.get("verified_at")
+                evidence_source = window_state.get("evidence_source")
+                if (not isinstance(window, str) or window not in state["quota"]
+                        or not isinstance(evidence_source, str)
+                        or not evidence_source.strip()):
+                    return "POSTGRES_OPERATIONAL_STATE_INVALID"
+                try:
+                    parsed = datetime.fromisoformat(evidence_at.replace("Z", "+00:00"))
+                except (AttributeError, TypeError, ValueError):
+                    return "POSTGRES_OPERATIONAL_STATE_INVALID"
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    return "POSTGRES_OPERATIONAL_STATE_INVALID"
 
     starts = state.get("starts")
     if not isinstance(starts, list):

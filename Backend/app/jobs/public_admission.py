@@ -149,14 +149,17 @@ class PublicAdmission:
     """Atomic coalescing, fencing and conservative shared quota accounting."""
 
     def __init__(self, store: AtomicStateStore, policy: AdmissionPolicy, *, state_key: str,
-                 owner_manual_youtube_live: bool = False):
+                 owner_manual_youtube_live: bool = False,
+                 require_quota_evidence: bool = False):
         if not callable(getattr(store, "transact", None)):
             raise TypeError("atomic state store required")
         if (not isinstance(policy, AdmissionPolicy) or not _OWNER.fullmatch(state_key)
                 or type(owner_manual_youtube_live) is not bool
+                or type(require_quota_evidence) is not bool
                 or owner_manual_youtube_live and YOUTUBE_SOURCE_ID not in policy.enabled_sources):
             raise ValueError("validated server policy and state key required")
         self.store, self.policy, self.state_key = store, policy, state_key
+        self.require_quota_evidence = require_quota_evidence
         # Runtime-only owner authorization; intentionally excluded from policy state/digest.
         self.owner_manual_youtube_live = owner_manual_youtube_live
         self._pools = MappingProxyType(dict(policy.pools))
@@ -577,6 +580,227 @@ class PublicAdmission:
             return state, fn(state)
         return self.store.transact(self.state_key, mutate)
 
+    def _quota_window_keys(self, state, pool_name: str, now: datetime):
+        day = self._quota_day(pool_name, now).isoformat()
+        daily_key = f"{pool_name}:day:{day}"
+        uses_provider_cycle = (
+            pool_name == "serpapi" or pool_name in self.policy.source_allocations.values()
+        ) and (bool(self.policy.source_allocations) or state.get("serpapi_cycle_ends_at") is not None)
+        if uses_provider_cycle:
+            cycle_end = state.get("serpapi_cycle_ends_at")
+            try:
+                cycle_date = date.fromisoformat(cycle_end) if cycle_end else None
+            except (TypeError, ValueError):
+                cycle_date = None
+            if (cycle_date is None or cycle_date.isoformat() != cycle_end
+                    or cycle_date < now.date()):
+                raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+            monthly_key = f"{pool_name}:cycle:{cycle_end}"
+        else:
+            monthly_key = f"{pool_name}:month:{now.strftime('%Y-%m')}"
+        return daily_key, monthly_key
+
+    @staticmethod
+    def _quota_window_status(state, pool_name: str, period: str, window_key: str | None):
+        if window_key is None:
+            return "UNKNOWN"
+        verifications = state.get("quota_verification")
+        pool_state = verifications.get(pool_name) if isinstance(verifications, dict) else None
+        period_state = pool_state.get(period) if isinstance(pool_state, dict) else None
+        if not isinstance(period_state, dict) or period_state.get("window") != window_key:
+            return "UNKNOWN"
+        if period_state.get("status") != "VERIFIED":
+            return "UNKNOWN"
+        evidence_at, evidence_source = (
+            period_state.get("verified_at"), period_state.get("evidence_source")
+        )
+        try:
+            _parse(evidence_at)
+        except (TypeError, ValueError):
+            raise AdmissionDenied("STATE_INVALID") from None
+        if (not isinstance(evidence_source, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{1,63}", evidence_source)):
+            raise AdmissionDenied("STATE_INVALID")
+        quota = state.get("quota")
+        if not isinstance(quota, dict) or window_key not in quota:
+            return "UNKNOWN"
+        usage = quota[window_key]
+        if (not isinstance(usage, dict)
+                or type(usage.get("requests")) is not int
+                or type(usage.get("cost")) is not int
+                or usage["requests"] < 0 or usage["cost"] < 0):
+            raise AdmissionDenied("STATE_INVALID")
+        return "VERIFIED"
+
+    @staticmethod
+    def _store_quota_window_evidence(state, pool_name: str, period: str,
+                                     window_key: str, requests: int, cost: int,
+                                     evidence_source: str, now: datetime) -> None:
+        quota = state.get("quota")
+        verifications = state.get("quota_verification")
+        pool_state = verifications.get(pool_name) if isinstance(verifications, dict) else None
+        if not isinstance(quota, dict) or not isinstance(pool_state, dict):
+            raise AdmissionDenied("STATE_INVALID")
+        current = quota.get(window_key)
+        if current is not None and (
+                not isinstance(current, dict)
+                or type(current.get("requests")) is not int
+                or type(current.get("cost")) is not int
+                or current["requests"] < 0 or current["cost"] < 0):
+            raise AdmissionDenied("STATE_INVALID")
+        if (current is not None
+                and (requests < current["requests"] or cost < current["cost"])):
+            raise AdmissionDenied("QUOTA_EVIDENCE_REGRESSION")
+        quota[window_key] = {"requests": requests, "cost": cost}
+        pool_state[period] = {
+            "window": window_key,
+            "status": "VERIFIED",
+            "evidence_source": evidence_source,
+            "verified_at": now.isoformat(),
+        }
+
+    def initialize_operational_state(self, *, now: datetime) -> dict:
+        """Create or complete only PostgreSQL admission metadata, fail-closed.
+
+        Missing quota counters stay absent. The verifier records UNKNOWN for
+        current windows until an exact ledger or provider observation proves
+        their usage; existing jobs, leases, fences, cooldowns and counters are
+        retained byte-for-byte at the value level.
+        """
+        now = _utc(now)
+
+        def initialize(state):
+            if not state:
+                state = {
+                    "schema": 1,
+                    "policy_digest": self.policy_digest,
+                    "operational_enabled": self.policy.enabled,
+                    "jobs": {},
+                    "keys": {},
+                    "starts": [],
+                    "quota": {},
+                    "inflight": {},
+                    "quota_verification": {},
+                }
+            elif (state.get("schema") != 1
+                  or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("POLICY_MISMATCH")
+
+            for name in ("jobs", "keys", "quota", "inflight"):
+                if not isinstance(state.get(name), dict):
+                    raise AdmissionDenied("STATE_INVALID")
+            if (not isinstance(state.get("starts"), list)
+                    or type(state.get("operational_enabled")) is not bool):
+                raise AdmissionDenied("STATE_INVALID")
+            verifications = state.get("quota_verification")
+            if verifications is None:
+                verifications = {}
+                state["quota_verification"] = verifications
+            if not isinstance(verifications, dict):
+                raise AdmissionDenied("STATE_INVALID")
+
+            for pool_name in self._pools:
+                daily_key = f"{pool_name}:day:{self._quota_day(pool_name, now).isoformat()}"
+                try:
+                    _, monthly_key = self._quota_window_keys(state, pool_name, now)
+                except AdmissionDenied as exc:
+                    if exc.code != "QUOTA_CYCLE_UNKNOWN":
+                        raise
+                    monthly_key = None
+                pool_state = verifications.setdefault(pool_name, {})
+                if not isinstance(pool_state, dict):
+                    raise AdmissionDenied("STATE_INVALID")
+                for period, key in (("daily", daily_key), ("monthly", monthly_key)):
+                    current = pool_state.get(period)
+                    if current is None:
+                        pool_state[period] = {"window": key, "status": "UNKNOWN"}
+                    elif not isinstance(current, dict):
+                        raise AdmissionDenied("STATE_INVALID")
+                    elif current.get("window") != key:
+                        pool_state[period] = {"window": key, "status": "UNKNOWN"}
+                    elif current.get("status") not in {"UNKNOWN", "VERIFIED"}:
+                        raise AdmissionDenied("STATE_INVALID")
+                    elif current.get("status") == "VERIFIED":
+                        evidence_at = current.get("verified_at")
+                        evidence_source = current.get("evidence_source")
+                        if (not isinstance(evidence_at, str)
+                                or not isinstance(evidence_source, str)
+                                or key not in state["quota"]):
+                            raise AdmissionDenied("STATE_INVALID")
+
+            # Existing counters without matching verification remain preserved
+            # but cannot be used as proof that the ledger is complete.
+            return state, state
+
+        return self.store.transact(self.state_key, initialize)
+
+    def record_quota_window_evidence(self, pool_name: str, period: str, *,
+                                     requests: int, cost: int, evidence_source: str,
+                                     now: datetime) -> None:
+        """Persist exact, window-scoped quota evidence without lowering usage."""
+        now = _utc(now)
+        if (pool_name not in self._pools or period not in {"daily", "monthly"}
+                or type(requests) is not int or not 0 <= requests <= 1_000_000
+                or type(cost) is not int or not 0 <= cost <= 1_000_000
+                or not isinstance(evidence_source, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{1,63}", evidence_source)):
+            raise AdmissionDenied("QUOTA_EVIDENCE_INVALID")
+
+        def record(state):
+            nonlocal now
+            now = self._guard_clock(state, now)
+            daily_key, monthly_key = self._quota_window_keys(state, pool_name, now)
+            key = daily_key if period == "daily" else monthly_key
+            self._store_quota_window_evidence(
+                state, pool_name, period, key, requests, cost,
+                evidence_source, now,
+            )
+
+        self._transaction(record)
+
+    def quota_unknown_pools(self, *, source_ids, now: datetime,
+                            state_snapshot=_NO_STATE_SNAPSHOT) -> tuple[str, ...]:
+        """Return source quota pools lacking exact current-window evidence."""
+        now = _utc(now)
+        if (not isinstance(source_ids, (tuple, list)) or not source_ids
+                or any(source not in self.policy.enabled_sources for source in source_ids)
+                or len(source_ids) != len(set(source_ids))):
+            raise ValueError("unique enabled sources required")
+        def inspect(state):
+            if (not state or state.get("schema") != 1
+                    or state.get("policy_digest") != self.policy_digest):
+                raise AdmissionDenied("STATE_INVALID")
+            return state, self._unknown_quota_pools_for_state(state, source_ids, now)
+
+        if state_snapshot is not _NO_STATE_SNAPSHOT:
+            if not isinstance(state_snapshot, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            return inspect(state_snapshot)[1]
+        return self.store.transact(self.state_key, inspect)
+
+    def _unknown_quota_pools_for_state(self, state, source_ids, now):
+        required = set()
+        for source_id in source_ids:
+            required.add(SOURCE_POOLS[source_id])
+            allocation = self.policy.source_allocations.get(source_id)
+            if allocation:
+                required.add(allocation)
+        unknown = []
+        for pool_name in sorted(required):
+            try:
+                daily_key, monthly_key = self._quota_window_keys(state, pool_name, now)
+            except AdmissionDenied as exc:
+                if exc.code == "QUOTA_CYCLE_UNKNOWN":
+                    unknown.append(pool_name)
+                    continue
+                raise
+            if (self._quota_window_status(state, pool_name, "daily", daily_key)
+                    != "VERIFIED"
+                    or self._quota_window_status(state, pool_name, "monthly", monthly_key)
+                    != "VERIFIED"):
+                unknown.append(pool_name)
+        return tuple(unknown)
+
     def _pool_name(self, source_id: str, pool_name: str | None = None) -> str:
         if source_id not in self.policy.enabled_sources:
             raise AdmissionDenied("SOURCE_OR_ATTEMPT_INVALID")
@@ -702,13 +926,18 @@ class PublicAdmission:
             day_date = self._quota_day(pool_name, now)
             day, month = day_date.isoformat(), now.strftime("%Y-%m")
             uses_provider_cycle = (
-                bool(self.policy.source_allocations)
-                and (pool_name == "serpapi"
-                     or pool_name in self.policy.source_allocations.values())
-            )
+                pool_name == "serpapi"
+                or pool_name in self.policy.source_allocations.values()
+            ) and (bool(self.policy.source_allocations)
+                   or state.get("serpapi_cycle_ends_at") is not None)
 
-            def usage(key):
-                value = state.get("quota", {}).get(key, {"requests": 0, "cost": 0})
+            def usage(key, status):
+                if self.require_quota_evidence and status != "VERIFIED":
+                    return None
+                quota = state.get("quota", {})
+                value = quota.get(key) if self.require_quota_evidence else quota.get(
+                    key, {"requests": 0, "cost": 0}
+                )
                 if (not isinstance(value, dict)
                         or type(value.get("requests")) is not int
                         or type(value.get("cost")) is not int
@@ -716,7 +945,7 @@ class PublicAdmission:
                     raise AdmissionDenied("STATE_INVALID")
                 return value
 
-            daily = usage(f"{pool_name}:day:{day}")
+            daily_key = f"{pool_name}:day:{day}"
             cycle_end = state.get("serpapi_cycle_ends_at") if uses_provider_cycle else None
             if cycle_end is not None:
                 try:
@@ -729,32 +958,54 @@ class PublicAdmission:
                     cycle_end = None
             monthly_key = (f"{pool_name}:cycle:{cycle_end}" if cycle_end
                            else f"{pool_name}:month:{month}")
-            monthly = usage(monthly_key)
+            daily_status = self._quota_window_status(
+                state, pool_name, "daily", daily_key
+            ) if self.require_quota_evidence else "VERIFIED"
+            monthly_status = (
+                self._quota_window_status(state, pool_name, "monthly", monthly_key)
+                if self.require_quota_evidence and not (uses_provider_cycle and not cycle_end)
+                else "UNKNOWN" if self.require_quota_evidence else "VERIFIED"
+            )
+            daily = usage(daily_key, daily_status)
+            monthly = usage(monthly_key, monthly_status)
             unattributed = (self._serpapi_unattributed_usage(state, cycle_end)
                             if pool_name == "serpapi" else None)
             monthly_value = {
                 "limit": limit.monthly_requests,
-                "used": monthly["requests"],
-                "remaining": max(0, limit.monthly_requests - monthly["requests"]),
+                "used": monthly["requests"] if monthly is not None else None,
+                "remaining": (max(0, limit.monthly_requests - monthly["requests"])
+                              if monthly is not None else None),
                 "units_limit": limit.monthly_cost_units,
-                "units_reserved": monthly["cost"],
-                "units_remaining": max(0, limit.monthly_cost_units - monthly["cost"]),
+                "units_reserved": monthly["cost"] if monthly is not None else None,
+                "units_remaining": (max(0, limit.monthly_cost_units - monthly["cost"])
+                                    if monthly is not None else None),
                 "timezone": "UTC",
+                "status": monthly_status,
             }
             if pool_name == "serpapi":
                 external = unattributed or {"requests": 0, "cost": 0}
-                monthly_value["unattributed_external_requests"] = external["requests"]
-                monthly_value["unattributed_external_cost_units"] = external["cost"]
+                monthly_value["unattributed_external_requests"] = (
+                    external["requests"] if monthly is not None else None
+                )
+                monthly_value["unattributed_external_cost_units"] = (
+                    external["cost"] if monthly is not None else None
+                )
             if uses_provider_cycle and not cycle_end:
-                monthly_value.update(used=None, remaining=None)
+                monthly_value.update(
+                    used=None, remaining=None, units_reserved=None,
+                    units_remaining=None, status="UNKNOWN",
+                )
             value = {
                 "daily": {
                     "limit": limit.daily_requests,
-                    "used": daily["requests"],
-                    "remaining": max(0, limit.daily_requests - daily["requests"]),
+                    "used": daily["requests"] if daily is not None else None,
+                    "remaining": (max(0, limit.daily_requests - daily["requests"])
+                                  if daily is not None else None),
                     "units_limit": limit.daily_cost_units,
-                    "units_reserved": daily["cost"],
-                    "units_remaining": max(0, limit.daily_cost_units - daily["cost"]),
+                    "units_reserved": daily["cost"] if daily is not None else None,
+                    "units_remaining": (max(0, limit.daily_cost_units - daily["cost"])
+                                        if daily is not None else None),
+                    "status": daily_status,
                     "timezone": (str(YOUTUBE_PROVIDER_TIMEZONE)
                                  if pool_name in {SOURCE_POOLS[YOUTUBE_SOURCE_ID],
                                                   YOUTUBE_OTHER_POOL}
@@ -837,8 +1088,7 @@ class PublicAdmission:
     def set_serpapi_billing_cycle(self, cycle_ends_at: str, *, now: datetime) -> None:
         """Pin combined Google/Bing reservations to the provider renewal boundary."""
         now = _utc(now)
-        if (not self.policy.source_allocations
-                or not isinstance(cycle_ends_at, str)):
+        if not isinstance(cycle_ends_at, str):
             raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
         try:
             cycle_date = date.fromisoformat(cycle_ends_at)
@@ -856,9 +1106,11 @@ class PublicAdmission:
             if previous_cycle == cycle_ends_at:
                 return
             quota = state["quota"]
+            if not isinstance(quota, dict):
+                raise AdmissionDenied("STATE_INVALID")
             if previous_cycle is None:
-                # Conservatively carry the pre-migration UTC-month ledger into
-                # the first provider cycle. Later renewal cycles start fresh.
+                # Carry existing counters into the provider cycle, but never
+                # synthesize a zero bucket when no legacy counter exists.
                 legacy_month = now.strftime("%Y-%m")
                 cycle_keys = [f"serpapi:cycle:{cycle_ends_at}"] + [
                     f"{allocation_pool}:cycle:{cycle_ends_at}"
@@ -866,26 +1118,45 @@ class PublicAdmission:
                 ]
                 if any(key in quota for key in cycle_keys):
                     raise AdmissionDenied("STATE_INVALID")
-                if len(quota) + len(cycle_keys) > self.policy.max_records:
-                    raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
-                source_usage = quota.get(
-                    f"serpapi:month:{legacy_month}", {"requests": 0, "cost": 0}
-                )
-                if (not isinstance(source_usage, dict)
-                        or type(source_usage.get("requests")) is not int
-                        or type(source_usage.get("cost")) is not int
-                        or source_usage["requests"] < 0 or source_usage["cost"] < 0):
-                    raise AdmissionDenied("STATE_INVALID")
-                quota[f"serpapi:cycle:{cycle_ends_at}"] = dict(source_usage)
-                for source_id, allocation_pool in self.policy.source_allocations.items():
-                    existing = quota.get(f"{allocation_pool}:month:{legacy_month}",
-                                         {"requests": 0, "cost": 0})
+                legacy_key = f"serpapi:month:{legacy_month}"
+                source_usage = quota.get(legacy_key)
+                copies = []
+                if source_usage is not None:
+                    if (not isinstance(source_usage, dict)
+                            or type(source_usage.get("requests")) is not int
+                            or type(source_usage.get("cost")) is not int
+                            or source_usage["requests"] < 0 or source_usage["cost"] < 0):
+                        raise AdmissionDenied("STATE_INVALID")
+                    copies.append((f"serpapi:cycle:{cycle_ends_at}", source_usage))
+                for allocation_pool in self.policy.source_allocations.values():
+                    existing = quota.get(f"{allocation_pool}:month:{legacy_month}")
+                    if existing is None:
+                        continue
                     if (not isinstance(existing, dict)
                             or type(existing.get("requests")) is not int
                             or type(existing.get("cost")) is not int
                             or existing["requests"] < 0 or existing["cost"] < 0):
                         raise AdmissionDenied("STATE_INVALID")
-                    quota[f"{allocation_pool}:cycle:{cycle_ends_at}"] = dict(existing)
+                    copies.append((f"{allocation_pool}:cycle:{cycle_ends_at}", existing))
+                if len(quota) + len(copies) > self.policy.max_records:
+                    raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
+                for key, usage in copies:
+                    quota[key] = dict(usage)
+            cycle_pools = {"serpapi", *self.policy.source_allocations.values()}
+            verifications = state.get("quota_verification")
+            if self.require_quota_evidence and not isinstance(verifications, dict):
+                raise AdmissionDenied("STATE_INVALID")
+            if isinstance(verifications, dict):
+                for pool_name in cycle_pools:
+                    pool_state = verifications.get(pool_name)
+                    if not isinstance(pool_state, dict):
+                        if self.require_quota_evidence:
+                            raise AdmissionDenied("STATE_INVALID")
+                        continue
+                    pool_state["monthly"] = {
+                        "window": f"{pool_name}:cycle:{cycle_ends_at}",
+                        "status": "UNKNOWN",
+                    }
             state["serpapi_cycle_ends_at"] = cycle_ends_at
         self._transaction(op)
 
@@ -900,7 +1171,7 @@ class PublicAdmission:
         either source allocation. Account usage regression remains fail-closed.
         """
         now = _utc(now)
-        if (not self.policy.source_allocations or not isinstance(cycle_ends_at, str)
+        if (not isinstance(cycle_ends_at, str)
                 or type(monthly_used) is not int or not 0 <= monthly_used <= 1_000_000):
             raise AdmissionDenied("QUOTA_ACCOUNT_USAGE_INVALID")
         try:
@@ -910,6 +1181,41 @@ class PublicAdmission:
         if cycle_date.isoformat() != cycle_ends_at or cycle_date < now.date():
             raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
         allocations = self.policy.source_allocations
+        if not allocations:
+            def reconcile_unallocated(state):
+                nonlocal now
+                now = self._guard_clock(state, now)
+                if state.get("serpapi_cycle_ends_at") != cycle_ends_at:
+                    raise AdmissionDenied("QUOTA_CYCLE_UNKNOWN")
+                quota = state.get("quota")
+                if not isinstance(quota, dict):
+                    raise AdmissionDenied("STATE_INVALID")
+                key = f"serpapi:cycle:{cycle_ends_at}"
+                current = quota.get(key)
+                if current is not None and (
+                        not isinstance(current, dict)
+                        or type(current.get("requests")) is not int
+                        or type(current.get("cost")) is not int
+                        or current["requests"] < 0 or current["cost"] < 0):
+                    raise AdmissionDenied("STATE_INVALID")
+                if current is not None and (
+                        monthly_used < current["requests"]
+                        or monthly_used < current["cost"]):
+                    raise AdmissionDenied("QUOTA_EXTERNAL_USAGE_UNRECONCILED")
+                if self.require_quota_evidence:
+                    self._store_quota_window_evidence(
+                        state, "serpapi", "monthly", key, monthly_used,
+                        monthly_used, "serpapi_account_api", now,
+                    )
+                else:
+                    quota[key] = {"requests": monthly_used, "cost": monthly_used}
+                state["serpapi_account_usage_baseline_cycle"] = cycle_ends_at
+                state["serpapi_account_usage_last_observed"] = monthly_used
+                state["serpapi_account_usage_checked_at"] = now.isoformat()
+
+            self._transaction(reconcile_unallocated)
+            return
+
         google_pool = allocations.get(GOOGLE_SOURCE_ID)
         if (google_pool != "serpapi_google"
                 or allocations.get(BING_SOURCE_ID) != "serpapi_bing"
@@ -1014,6 +1320,12 @@ class PublicAdmission:
                     "cost": external["cost"],
                 }
 
+            if self.require_quota_evidence:
+                self._store_quota_window_evidence(
+                    state, "serpapi", "monthly", shared_key,
+                    shared["requests"], shared["cost"],
+                    "serpapi_account_api", now,
+                )
             state[last_used_key] = monthly_used
             state["serpapi_account_usage_checked_at"] = now.isoformat()
 
@@ -1411,6 +1723,16 @@ class PublicAdmission:
                     == OWNER_FRESH_ACCEPTANCE_MARKER
                 )
             else:
+                if self.require_quota_evidence and not request_metadata.get("cache_only"):
+                    selected_sources = (
+                        [WIKIMEDIA_SOURCE_ID]
+                        if request_metadata.get("kind") == "WIKIMEDIA_HISTORY"
+                        else request_metadata.get("sources")
+                        or sorted(self.policy.enabled_sources)
+                    )
+                    if self._unknown_quota_pools_for_state(
+                            state, selected_sources, now):
+                        raise AdmissionDenied("QUOTA_UNKNOWN")
                 starts = [value for value in state["starts"]
                           if _parse(value) > now - timedelta(seconds=self.policy.window_seconds)]
                 state["starts"] = starts
@@ -1763,6 +2085,8 @@ class PublicAdmission:
             day_date = self._quota_day(pool, now)
             day, month = day_date.isoformat(), now.strftime("%Y-%m")
             quota = state["quota"]
+            if not isinstance(quota, dict):
+                raise AdmissionDenied("STATE_INVALID")
             cycle_end = state.get("serpapi_cycle_ends_at")
             if self.policy.source_allocations and pool == "serpapi":
                 try:
@@ -1776,6 +2100,25 @@ class PublicAdmission:
             daily_key = f"{pool}:day:{day}"
             monthly_key = (f"{pool}:cycle:{cycle_end}" if pool == "serpapi" and cycle_end
                            else f"{pool}:month:{month}")
+            allocation_monthly_key = (f"{allocation_pool}:cycle:{cycle_end}"
+                                      if allocation is not None and cycle_end
+                                      else f"{allocation_pool}:month:{month}")
+            allocation_keys = (() if allocation is None else (
+                f"{allocation_pool}:day:{day}", allocation_monthly_key,
+            ))
+            required_keys = (daily_key, monthly_key, *allocation_keys)
+            if self.require_quota_evidence:
+                verification_periods = [(pool, "daily", daily_key),
+                                        (pool, "monthly", monthly_key)]
+                if allocation is not None:
+                    verification_periods.extend((
+                        (allocation_pool, "daily", allocation_keys[0]),
+                        (allocation_pool, "monthly", allocation_keys[1]),
+                    ))
+                if any(self._quota_window_status(state, pool_name, period, key)
+                       != "VERIFIED"
+                       for pool_name, period, key in verification_periods):
+                    raise AdmissionDenied("QUOTA_UNKNOWN")
             # Once the server clock has advanced, older windows can no longer
             # affect admission; prune
             # only canonical, known-pool keys strictly before the active window.
@@ -1806,13 +2149,6 @@ class PublicAdmission:
                             del quota[key]
                 except ValueError:
                     continue
-            allocation_monthly_key = (f"{allocation_pool}:cycle:{cycle_end}"
-                                      if allocation is not None and cycle_end
-                                      else f"{allocation_pool}:month:{month}")
-            allocation_keys = (() if allocation is None else (
-                f"{allocation_pool}:day:{day}", allocation_monthly_key,
-            ))
-            required_keys = (daily_key, monthly_key, *allocation_keys)
             if len(quota) + sum(key not in quota for key in required_keys) > self.policy.max_records:
                 raise AdmissionDenied("QUOTA_LEDGER_CAPACITY")
             daily = quota.setdefault(daily_key, {"requests": 0, "cost": 0})
