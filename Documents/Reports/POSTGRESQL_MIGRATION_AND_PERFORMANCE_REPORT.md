@@ -77,6 +77,48 @@ This reconfirms the incident; it does not identify the exact client-construction
 exception. No Fetch, provider request, IAM change, deployment, or alias change
 was made.
 
+## Production dependency investigation — 26 November 2026
+
+Fresh deployment metadata confirms `trend-scout-mu.vercel.app` aliases to
+READY deployment `dpl_AizETu6tMZXvScnxWTSLa22GXW8j`, built from
+`cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4`. Deployment
+`dpl_8khsVQLtwEmBqapb2Gum3k4nJmXx` is also READY from the same SHA but has no
+Production alias. Authenticated, GET-only requests at 03:21 UTC returned JSON
+HTTP 200 for `/api/health`, and JSON HTTP 403
+`FIRESTORE_IDENTITY_REJECTED` for `/api/v1/capabilities` and
+`/api/v1/datasets/latest`. The API responses were `no-store` cache misses with
+`x-vercel-id` showing the `sin1` edge and `iad1` function route. An unauthenticated
+direct request instead returned cached HTML (`text/html`, `HIT`), so it is not
+valid evidence about the API and is excluded from the status assessment.
+
+The deployment build log says Vercel installed required dependencies from
+`pyproject.toml`; it does not show a custom package-install override. The exact
+`cf09b2e` source confirms that its `Backend/vercel.json` had no
+`installCommand`, while `google-cloud-firestore` was absent from the default
+`project.dependencies` and present only in `project.optional-dependencies` as
+`legacy-firestore`. The deployed legacy path imports
+`google.cloud.firestore` while constructing its request-scoped client, and the
+middleware maps any client-construction exception to the observed 403. This
+build/configuration evidence makes omission of the optional Firestore SDK the
+leading and concrete regression cause; the exact runtime exception remains
+unproven because Vercel Hobby log retention rejected the wider query and a
+bounded query after reproduction returned no matching log records. Vercel's
+official [Python runtime dependency documentation](https://vercel.com/docs/functions/runtimes/python)
+and [Install Command configuration](https://vercel.com/docs/builds/configure-a-build)
+were checked on 26 November 2026.
+
+The current feature branch adds this install command to `Backend/vercel.json`:
+
+```text
+python3 -m pip install -e '.[legacy-firestore]'
+```
+
+The existing packaging tests assert the command and extra. The focused
+packaging and legacy Vercel path suite passed 55 tests and 59 subtests. This
+correction remains unbuilt and undeployed. No deployment, alias change, IAM
+change, Fetch, or provider request was made; Production still returns the two
+403 responses.
+
 ## Rolling retention implementation — G6 subcriterion, not a new gate
 
 The owner's seven-local-calendar-day policy is defined in
@@ -1199,9 +1241,9 @@ and the overall score remains **3 / 12 (25%)**.
 | G7 | Open | PostgreSQL cached continuation, terminal checkpoint readback, compact manifest reuse, Collections no-op, same-key replay, lease fencing and recovery after a simulated interruption have focused regression coverage (110 tests, 46 subtests; isolated Neon atomic-state, composition and collection-read integration passed). A new offline SQLite case confirms that cancellation after a synthetic dispatch preserves the same attempt receipt and one quota reservation across worker recovery. The matching isolated PostgreSQL test is added but skipped until `TRENDSCOUT_TEST_POSTGRES_URL` is supplied. Offline Chrome verifies continuation after transient status failures, single recovery and reload without repeat POST using a stubbed API. PostgreSQL cancellation/replay, provider reliability and end-to-end latency acceptance remain. |
 | G8 | **PASS** | Explicit cache-only API/UI and separate worker registry; provider/cache tests and isolated Neon composition prove no LIVE handler invocation and zero reported provider requests, with cache misses failing closed. Same-Fetch checkpoint replay, exact keyword filtering, concurrent retry protection, and offline inference with the installed local model passed. Production availability/timing is not claimed; latency belongs to G12. |
 | G9 | **PASS** | PostgreSQL read routes and the five-minute identity/schema validation cache; PostgreSQL request-timing and credential-safe route logging; 9 frontend API tests for in-flight coalescing/cache invalidation, 32 Fetch-controller tests and offline Chrome workflow; isolated Neon scheduler claim/recovery/fencing; PostgreSQL-only core dependency profile with legacy/local extras and function file exclusions. Production latency and browser measurements are G12. |
-| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. The retention update's focused suite passed 80 tests and 59 subtests with 4 skips, and this guarded-attempt update's focused suite passed 65 tests and 23 subtests with 2 PostgreSQL environment-gated skips; the isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
+| G10 | Open | Full local core suite: 1,207 tests and 1,115 subtests passed, 27 skipped. The preceding Neon-configured full run had 1,231 passed, 1,115 subtests, 2 skipped and one Windows SQLite cleanup failure; the affected gateway file then passed all 22 tests and 18 subtests. The retention update's focused suite passed 80 tests and 59 subtests with 4 skips; guarded-attempt coverage passed 65 tests and 23 subtests with 2 PostgreSQL environment-gated skips; and the packaging/legacy Vercel check passed 55 tests and 59 subtests. The isolated Neon retention test passed separately. Nine Neon migration checksums were verified. The isolated Firestore emulator suite remains unrun, so consolidated regression is not yet a full gate pass. |
 | G11 | Open | Fenced cutover, proven rollback, release and exact deployed SHA. |
-| G12 | Open | The current alias still serves `cf09b2e`: health GET returns 200, while capabilities and latest dataset return 403 `FIRESTORE_IDENTITY_REJECTED`. The compatible `7faacb8` deployment returns 200 for those direct GETs, but the alias was not changed under the current no-deploy instruction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
+| G12 | Open | Current alias `trend-scout-mu.vercel.app` points to `dpl_AizETu6tMZXvScnxWTSLa22GXW8j` on `cf09b2e`: authenticated JSON health GET returns 200, while capabilities and latest dataset return 403 `FIRESTORE_IDENTITY_REJECTED`. Build evidence shows the deployed SHA auto-installed `pyproject.toml` dependencies without the Firestore optional extra; the current branch configures that extra, but it has not been built or deployed. The compatible `7faacb8` deployment returned 200 for the same API GETs. No deployment or alias change was made under the current restriction. No request exposed function TTFB; PostgreSQL data integrity, provider-free cache-only acceptance, cold/warm timings and Vercel-to-Neon latency remain. |
 
 No business-data migration, runtime cutover, Production deployment, live
 provider request, quota reset or business-row modification has been performed.
