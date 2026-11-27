@@ -6,21 +6,22 @@ param(
 
 # Native Uvicorn output and Ctrl+C are passed through to the one foreground worker.
 $ErrorActionPreference = 'Continue'
-if (-not $PSBoundParameters.ContainsKey('Port')) {
-    if ($env:TREND_SCOUT_DEMO_PORT) {
-        $environmentPort = 0
-        if (-not [int]::TryParse($env:TREND_SCOUT_DEMO_PORT, [ref]$environmentPort)) {
-            throw 'TREND_SCOUT_DEMO_PORT must be an integer from 1 to 65535.'
-        }
-        $Port = $environmentPort
-    } else {
-        $Port = 8000
-    }
-}
-if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root 'Backend'
 $venvPython = Join-Path $backend '.venv\Scripts\python.exe'
+$explicitPort = $PSBoundParameters.ContainsKey('Port')
+if ($explicitPort -and ($Port -lt 1 -or $Port -gt 65535)) {
+    throw 'Port must be between 1 and 65535.'
+}
+if (-not $explicitPort -and $env:TREND_SCOUT_DEMO_PORT) {
+    $environmentPort = 0
+    if (-not [int]::TryParse($env:TREND_SCOUT_DEMO_PORT, [ref]$environmentPort) -or
+        $environmentPort -lt 1 -or $environmentPort -gt 65535) {
+        throw 'TREND_SCOUT_DEMO_PORT must be an integer from 1 to 65535.'
+    }
+    $Port = $environmentPort
+    $explicitPort = $true
+}
 if (-not (Test-Path -LiteralPath $venvPython)) {
     & (Join-Path $root 'setup.ps1')
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPython)) {
@@ -37,7 +38,8 @@ $youtubeHost = (& $venvPython -c 'import socket; print(socket.gethostname())').T
 if ($LASTEXITCODE -ne 0 -or -not $youtubeHost) {
     throw 'Could not identify this Windows machine for the local YouTube LIVE runtime.'
 }
-$launcherArguments = @('--port', [string]$Port)
+$launcherArguments = @('--root-env-file', (Join-Path $root '.env'))
+if ($explicitPort) { $launcherArguments += @('--port', [string]$Port) }
 if ($YoutubeOwnerManualLive) {
     if ($env:VERCEL) {
         throw 'Owner manual YouTube LIVE is restricted to local Windows 2 development.'

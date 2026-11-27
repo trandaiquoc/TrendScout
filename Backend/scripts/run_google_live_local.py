@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 
 from app.google_live_settings import GoogleLiveSettings
+from app.local_environment import LocalEnvironmentError, load_local_environment
 from app.main import create_normal_google_live_app, run_normal_google_live
 from app.orchestration.normal_google_live_composition import (
     normal_google_live_composition,
@@ -70,12 +71,28 @@ def local_live_settings():
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    env_parser = argparse.ArgumentParser(add_help=False)
+    env_parser.add_argument(
+        "--root-env-file",
+        type=Path,
+        default=Path(__file__).resolve().parents[2] / ".env",
+    )
+    env_arguments, argv = env_parser.parse_known_args(argv)
+    # Vercel owns its runtime environment. This loader is deliberately limited
+    # to the local launcher and never overrides variables already in Process.
+    if not os.environ.get("VERCEL"):
+        try:
+            load_local_environment(env_arguments.root_env_file)
+        except LocalEnvironmentError as error:
+            env_parser.error(str(error))
+
     parser = argparse.ArgumentParser(
         description="Run the local multi-source LIVE web application."
     )
     parser.add_argument(
         "--port", type=int,
-        default=int(os.environ.get("TREND_SCOUT_DEMO_PORT", "8000")),
+        default=os.environ.get("TREND_SCOUT_DEMO_PORT", "8000"),
     )
     parser.add_argument(
         "--firestore-shared-live", action="store_true",

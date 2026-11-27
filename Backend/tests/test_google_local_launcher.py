@@ -1,13 +1,36 @@
 import os
 import sys
+import tempfile
 import unittest
 from functools import partial
+from pathlib import Path
 from unittest.mock import patch
 
 import scripts.run_google_live_local as local_launcher
 
 
 class LocalWebLauncherTests(unittest.TestCase):
+    def setUp(self):
+        loader = patch.object(local_launcher, "load_local_environment")
+        self.addCleanup(loader.stop)
+        self.local_env_loader = loader.start()
+
+    def test_launcher_uses_explicit_repository_root_env_file(self):
+        env_file = Path(tempfile.gettempdir()) / "trendscout-dummy-root.env"
+        with patch.object(local_launcher, "create_normal_google_live_app", return_value=object()), \
+             patch.object(local_launcher, "run_normal_google_live"):
+            local_launcher.main(["--root-env-file", str(env_file), "--port", "8125"])
+
+        self.local_env_loader.assert_called_once_with(env_file)
+
+    def test_vercel_runtime_does_not_load_local_env_file(self):
+        with patch.dict(os.environ, {"VERCEL": "1"}, clear=False), \
+             patch.object(local_launcher, "create_normal_google_live_app", return_value=object()), \
+             patch.object(local_launcher, "run_normal_google_live"):
+            local_launcher.main(["--port", "8125"])
+
+        self.local_env_loader.assert_not_called()
+
     def test_owner_manual_runtime_is_limited_to_linux_or_windows_2(self):
         self.assertTrue(local_launcher.owner_manual_runtime_supported("win32", "DESKTOP-ICECOET"))
         self.assertTrue(local_launcher.owner_manual_runtime_supported("linux", "another-linux-host"))
