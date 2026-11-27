@@ -2994,7 +2994,11 @@ function setDashboardTab(tab, updateRoute = true, focus = false) {
       renderRoute(route, { refresh: false });
     }
   }
-  $('#breadcrumb-current').textContent = t(`dashboard.${selected}`);
+  $('#breadcrumb-current').textContent = t(
+    state.activeNav === 'overview' && state.activeView === 'overview'
+      ? `dashboard.${selected}`
+      : 'nav.' + (state.activeNav || 'overview'),
+  );
 }
 
 function updateNavigationLabels() {

@@ -1,6 +1,6 @@
 # AI Source Policy Matrix
 
-**Reviewed:** 2026-11-27. This is the current TrendScout transfer decision for AI inputs. It does not grant permission to fetch, store, derive, or publish data; those permissions remain governed by each source adapter and its own policies. A public URL alone is not a transfer grant.
+**Reviewed:** 2026-11-28 for the Wikimedia Analytics Pageviews access-policy entry; other provider disclosures below remain as reviewed on 2026-11-27. This is the current TrendScout transfer decision for AI inputs. It does not grant permission to fetch, store, derive, or publish data; those permissions remain governed by each source adapter and its own policies. A public URL alone is not a transfer grant.
 
 ## Decisions
 

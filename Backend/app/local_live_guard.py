@@ -53,8 +53,9 @@ class LocalLiveGuard:
             "/api/v1/datasets/latest", "/api/v1/datasets/latest/keywords",
         }
         product_read = method == "GET" and path in {
-            "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/sources/library",
-            "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
+            "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/dashboard/bootstrap",
+            "/api/v1/sources/library", "/api/v1/research", "/api/v1/research/bootstrap",
+            "/api/v1/scheduler", "/api/v1/runs/history",
         }
         ai_read = method == "GET" and (
             path == "/api/v1/ai/capabilities"

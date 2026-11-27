@@ -14,8 +14,10 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
 
         @app.get("/api/v1/runtime")
         @app.get("/api/v1/analytics/overview")
+        @app.get("/api/v1/dashboard/bootstrap")
         @app.get("/api/v1/sources/library")
         @app.get("/api/v1/research")
+        @app.get("/api/v1/research/bootstrap")
         @app.get("/api/v1/scheduler")
         @app.get("/api/v1/runs/history")
         @app.get("/api/v1/runs/history/{item_id}")
@@ -37,8 +39,9 @@ class LocalLiveProductRouteTests(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=guarded, client=("127.0.0.1", 12000))
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             for path in (
-                "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/sources/library",
-                "/api/v1/research", "/api/v1/scheduler", "/api/v1/runs/history",
+                "/api/v1/runtime", "/api/v1/analytics/overview", "/api/v1/dashboard/bootstrap",
+                "/api/v1/sources/library", "/api/v1/research", "/api/v1/research/bootstrap",
+                "/api/v1/scheduler", "/api/v1/runs/history",
                 "/api/v1/runs/history/" + "a" * 32,
                 "/api/v1/runs/history/context-classification-preview",
                 "/api/v1/runs/history/organize-7b406cfd-e1c5-46b3-b592-53e5cbb9eaf4",

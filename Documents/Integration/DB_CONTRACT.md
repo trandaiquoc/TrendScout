@@ -1,10 +1,9 @@
 # TrendScout shared database contract
 
-**Status:** Initial Database Goal contract, 26 November 2026. This records the
-Database Goal's current ownership boundary and integration requirements for
-the parallel AI, Algorithms, and Frontend goals. It is not evidence that those
-goals have implemented or accepted these interfaces. Reconcile this document
-with their contracts when those branches publish them.
+**Status:** Reconciled integration contract, 28 November 2026. This records
+the shared database ownership boundary and the current integration with AI,
+Algorithms, and Frontend. It describes checked-in behavior and known gaps; it
+does not establish which migrations are applied in Production.
 
 ## Ownership
 
@@ -72,9 +71,14 @@ storage, and runtime composition. The other goals own their domain behavior:
 
 ## Existing schema ownership map
 
-The PostgreSQL target has migration versions 1–9 applied and checksum-verified.
-Version 9 adds retention audit summaries. All 35 non-ledger tables may remain
-empty for Fresh Start; this does not represent migrated historical data.
+The checked-in PostgreSQL migration bundle contains the consecutive versions
+`0001`–`0014`, including retention lineage, dataset-processing status,
+classification input digests, Fetch-to-AI linkage, and proposal lifecycle.
+Runtime verification requires the target schema's exact migration ledger and
+checksums. The bundled chain and isolated test schemas do not prove the
+Production-applied version; establish that through the read-only FINAL01
+preflight. An empty business schema is a supported Fresh Start, not imported
+historical data.
 
 | Data | Current table(s) | Owner and notes |
 | --- | --- | --- |
@@ -165,25 +169,24 @@ as proof that all provider content copies have expired.
   LIVE Fetch while the application and read APIs remain available. Startup
   must not reset quota or create operational admission state.
 
-## DB03 operational-state amendment (26 November 2026)
+## DB03 operational-state implementation status (28 November 2026)
 
-This amendment supersedes the DB02 startup rule above only for the minimal
-PostgreSQL admission ledger:
-
-- Startup creates the operational-state shape in one idempotent transaction.
-  It preserves existing quota counters, jobs, idempotency receipts, cooldown
-  starts, active leases, inflight reservations, and fencing values. It does not
-  create a quota usage bucket when no exact evidence exists.
-- Each configured pool's current daily and monthly windows carry an explicit
-  `UNKNOWN` or `VERIFIED` status. `UNKNOWN` remains fail-closed for admission;
-  quota reads expose unknown usage as null, not zero. A window becomes
-  `VERIFIED` only with exact evidence for that window, including an observed
-  provider billing cycle when applicable. A missing row alone is not evidence
-  that a quota cycle ended.
-- Idempotency, cooldown, leases, and writer fencing continue through the
-  PostgreSQL atomic state store. Startup does not enable or start the
-  Production scheduler. Historical trend, keyword, cache, and analysis data
-  remain outside this operational-state initialization.
+- PostgreSQL startup verifies the schema and inserts static source metadata;
+  it does not initialize an AI quota ledger, provider cooldown, or reservation
+  state. `PostgresAtomicStateStore` serializes transactions, but an absent AI
+  scope currently loads as an empty map and `AIService` normalizes that to an
+  empty attempts list. Until an explicit verified-ledger admission guard is in
+  place, this must not be interpreted as evidence of zero usage or safe first
+  admission. This is a cutover blocker recorded in FINAL01.
+- Safe admission remains the required design: preserve every existing attempt,
+  cooldown, job, idempotency receipt, lease, and fencing value; represent
+  unverified daily/rolling windows as `UNKNOWN` with null usage; admit only
+  after exact quota and cooldown evidence is atomically recorded in the shared
+  PostgreSQL state. A missing row alone is never evidence of zero or of a
+  completed provider cycle.
+- Startup does not enable or start the Production scheduler. Historical trend,
+  keyword, cache, and analysis data remain outside operational-state
+  initialization.
 
 ## DB03B quota-verification amendment (26 November 2026)
 
@@ -209,9 +212,8 @@ PostgreSQL admission ledger:
 
 ## Current coordination status
 
-At this contract's creation, only `origin/main` and the existing
-`origin/codex/fix-d6-fetch1-recovery` branch were present remotely; the latter
-is already contained in `origin/main`. No AI, Algorithms, or Frontend remote
-branch contract was available to review. Local goal worktrees existed at the
-`cf09b2e` baseline without uncommitted changes. Update this status after each
-safe fetch and reconcile new contracts before merging shared interfaces.
+The DB, AI, UI, and AI source-policy contracts have been reconciled against the
+checked-in `integration/demo-final` implementation and its current API and
+composition boundaries. FINAL01 separately records read-only Production
+identity, applied migration checksums, and operational cutover evidence. This
+contract does not claim a remote merge or Production migration application.

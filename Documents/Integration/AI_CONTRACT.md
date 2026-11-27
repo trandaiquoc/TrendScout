@@ -3,9 +3,9 @@
 **Version:** 1.7-draft
 **Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, AI03 automatic Collection matching, AI04 proposal review, and AI05 preview/apply reclassification are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
 **Owner:** AI goal
-**Updated:** 2026-11-27
+**Updated:** 2026-11-28
 
-The AI boundary is implemented in this branch. The Database goal owns the general PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. AI03 adds migration `0013_fetch_job_ai_work.sql` for durable Fetch-to-AI batch linkage; AI04 adds migration `0014_collection_proposal_lifecycle.sql` for proposal expiry and idempotent acceptance. These migrations are versioned and operator-applied, never applied by an application request.
+The AI boundary is implemented on `integration/demo-final` and reconciled with `Documents/Integration/DB_CONTRACT.md`. The checked-in PostgreSQL migration bundle ends at `0014_collection_proposal_lifecycle.sql`; migrations remain versioned and operator-applied, never applied by an application request. This does not prove the Production schema has applied them. AI03 adds `0013_fetch_job_ai_work.sql` for durable Fetch-to-AI batch linkage; AI04 adds `0014_collection_proposal_lifecycle.sql` for proposal expiry and idempotent acceptance.
 
 ## 1. Responsibilities and boundaries
 
@@ -62,9 +62,9 @@ AI runtime requires PostgreSQL Neon and does not use SQLite, Firestore, Redis, i
 - Collection assignments, proposals, review, and rollback use the existing PostgresCollectionStore business tables.
 - `fetch_jobs.ai_jobs` stores the stable AI job ID and keyword IDs for each automatic Fetch batch. Migration `0013_fetch_job_ai_work.sql` adds this JSONB field; the Local SQLite store has a corresponding additive column migration.
 - PostgreSQL proposals store their active-evidence expiry and accepted Collection ID. Local SQLite adds compatible proposal-edit, expiry, and accepted-ID columns additively.
-- Shared attempts, quota, jobs, idempotency records, model verification metadata, classification cache, and recommendation cache use AtomicStateStore through PostgresAtomicStateStore, under scope trendscout-ai-engine-v1.
-- The current atomic state store reads/writes coordination_fields, coordination_entries, coordination_checkpoints, source_payload_blobs, and source_payload_references. This requires existing migrations 0003_coordination.sql, 0004_source_payloads.sql, and 0008_payload_references.sql, as well as the existing business schema. The Database goal must confirm this compatibility boundary.
-- The atomic-state port must serialize concurrent quota reservations across hosts. Local test doubles are not authoritative.
+- Shared attempts, quota, jobs, idempotency records, model verification metadata, classification cache, and recommendation cache use AtomicStateStore through PostgresAtomicStateStore, under scope `trendscout-ai-engine-v1`.
+- The current atomic state store reads/writes `coordination_fields`, `coordination_entries`, `coordination_checkpoints`, `source_payload_blobs`, and `source_payload_references`. This requires the bundled migrations `0003_coordination.sql`, `0004_source_payloads.sql`, and `0008_payload_references.sql`, as well as the business schema; this boundary is reconciled with `DB_CONTRACT.md`.
+- The atomic-state port serializes concurrent updates across hosts. **Admission gap:** a missing AI scope currently normalizes to an empty attempts list and is reported as zero use. That is not evidence of zero historical/provider usage. AI inference must remain disabled until a verified shared ledger/cooldown state exists; FINAL01 records this as a first-admission blocker. Local test doubles are not authoritative.
 - PostgreSQL configuration failure blocks writes and inference. An ambiguous transaction outcome blocks the guarded external request.
 - Job and cache retention are bounded. Expired caches may trigger recomputation; old results are not presented as fresh.
 - The proposal acceptance transaction creates the Collection and selected memberships together. Rejection records name suppression. Reclassification membership changes are scoped to submitted keywords and can be rolled back through the existing reconciliation route.
@@ -216,15 +216,15 @@ Repository-root `.env.example` is the only local environment template. The check
 | TRENDSCOUT_AI_ENABLED | Explicit feature switch; defaults to false. |
 | TRENDSCOUT_AI_COLLECTION_MODEL | Exact currently verified :free model ID for classification; the checked-in example uses the reviewed Particle AI candidate while AI remains disabled. |
 | TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; the checked-in example uses the same reviewed Particle AI candidate. |
-| TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated allowlist of Wikimedia, Google, and Bing source IDs; defaults to empty. YouTube is always denied. |
-| TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate comma-separated approval for transferring those source records/evidence to the configured AI provider; defaults to empty and never grants extraction permission. YouTube is always denied. |
+| TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated source IDs; defaults to empty. Current live AI transfer policy permits only `wikimedia_pageviews_top_per_country`; other sources remain denied by policy even if configured. |
+| TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate transfer approval; defaults to empty and never grants extraction permission. Current live AI transfer policy permits only `wikimedia_pageviews_top_per_country`; YouTube is always denied. |
 | TRENDSCOUT_AI_DATA_PROFILE | Server-side `PUBLIC_DATA` runtime default; `STRICT_PRIVATE` is an explicit private-data profile requiring deny/ZDR; `PUBLIC_DEMO` is restricted to local/test synthetic data. Never a request-body field. |
 | TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA | Dedicated local/test schema matching `ts_test_ai_demo_<hex>`; it must be distinct from the primary schema and carry the server-set synthetic provenance marker. |
 | TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS | Server-side IDs of Collections reviewed and classified public for AI context. Defaults to empty; unlisted Collection text is omitted. |
 
 ## 9. Provider references
 
-Provider and source policies were reviewed on **2026-11-27**. The Wikimedia Pageviews Analytics API states its data is CC0. Google/Bing search and Google Trends transfers remain denied because the current retrieval paths do not establish the required permission; YouTube and Wikimedia entity text remain denied. OpenRouter's provider directory currently labels Particle AI no-training/zero-retention; Particle's current Terms and Privacy Policy describe standard synchronous inference as zero-retention and no-training. OpenRouter says prompt/completion text is not logged by default, though request metadata may be retained. See the dated source matrix for direct policy references and restrictions. The AI01G synthetic smoke completed one expected classification and one recommendation with valid references; generation metadata confirmed Particle AI, the resolved free model, and zero cost for both. This is a narrow contract smoke, not a task-quality benchmark. PUBLIC_DATA real-source acceptance and production activation are tracked separately; provider/source policies can change.
+Provider and source policy details below remain a **2026-11-27** snapshot, except Wikimedia Analytics Pageviews access policy, rechecked in AI01H on **2026-11-28**. Only `wikimedia_pageviews_top_per_country` is currently approved for live AI input. Google/Bing search and Google Trends, YouTube, and Wikimedia entity text remain denied. OpenRouter/Particle disclosures are not evidence of current account quota, cooldown, or ledger state. The AI01G synthetic smoke completed one expected classification and one recommendation with valid references; generation metadata confirmed Particle AI, the resolved free model, and zero cost for both. This is a narrow contract smoke, not a task-quality benchmark. PUBLIC_DATA real-source acceptance and production activation are tracked separately; provider/source policies can change.
 
 - [Models API and pricing fields](https://openrouter.ai/docs/api/api-reference/models/get-models)
 - [Per-model provider endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)

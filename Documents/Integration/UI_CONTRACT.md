@@ -1,13 +1,13 @@
 # TrendScout UI integration contract
 
-- **Status:** UI contract integrated from `origin/main` into `feature/postgresql` for compatibility review
-- **Date:** 26 November 2026
-- **Branch:** `feature/ui-overhaul`
+- **Status:** Integrated UI/API contract reconciled on `integration/demo-final`; FINAL01 runtime verification is tracked in the cutover report.
+- **Date:** 28 November 2026
+- **Branch:** `integration/demo-final`
 **Scope:** Frontend behavior and the existing same-origin APIs it consumes. This document records observable contracts and UI requirements; it does not approve a permanent source, scoring model, runtime, or hosting choice.
 
 ## 1. Route and navigation contract
 
-The browser uses clean paths. The application and Vercel configuration serve the single page at those paths; the FastAPI app serves its root page and retains backward redirects for old `/dashboard` URLs. Vercel keeps the Database Goal's existing install behavior with no custom `installCommand`: Firestore is a core dependency while the legacy Firestore runtime remains active. The UI integration adds clean-path rewrites without changing dependency installation.
+The browser uses clean paths. The Frontend static app serves those paths; FastAPI also serves the app root and retains backward redirects for old `/dashboard` URLs. The repository has both the legacy Firestore runtime and an explicit PostgreSQL LIVE composition for Local/Vercel. Selecting the PostgreSQL runtime is configuration-gated and must use the same PostgreSQL database/schema identity; this contract does not claim that a deployed Vercel runtime currently uses it. Route and install behavior remain subject to deployment configuration.
 
 | Path | View | Behavior |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ The browser uses clean paths. The application and Vercel configuration serve the
 | `/keywords` | Keywords | Opens the saved-keyword explorer and focuses its results heading |
 | `/collections` | Collections | Collection tree, saved topics, suggestions, and keyword workbench |
 | `/collections/{id}` | Collection detail | Selects a Collection in the workbench; can be reloaded |
-| `/products` | Product ideas | Honest unavailable state for automated recommendations; links to saved evidence and manual Research |
+| `/products` | Product ideas | AI recommendation workspace for explicitly selected saved keywords; exposes evidence/lineage, job progress, cache and recovery state, with a clear unavailable/deferred state when the AI runtime cannot admit work |
 | `/trends` | Trends | Overview's analysis tab; no per-trend detail route is claimed |
 | `/sources` | Source Center | Current runtime source capabilities and the separate research inventory |
 | `/sources/{source_id}` | Source detail | Opens the matching runtime source details; can be reloaded |
@@ -85,11 +85,11 @@ Other public statuses and retry codes remain localized only when a known semanti
 - `GET /api/v1/collections/keywords/{keyword_id}` is loaded on demand for keyword details and proposal evidence previews. Proposal evidence previews are capped at five saved keywords in the UI.
 - Existing saved Collection suggestions can be reviewed, edited locally, accepted, or rejected. `POST /api/v1/collections/suggestions/{proposal_id}/accept` accepts an optional JSON object with `name` (1–80 non-blank characters) and `description` (up to 1,200 characters); unknown fields are rejected. `POST /api/v1/collections/suggestions/{proposal_id}/reject` records the explicit rejection action. Neither action silently accepts on view.
 - Other implemented workbench actions include user-created Collection CRUD, merge review, bounded bulk membership changes, and `POST /api/v1/collections/reclassify` for the existing cached/reclassification workflow. These are not model-powered AI claims.
-- Parallel AI contract v1.1-draft describes additional `/api/v1/ai/...` classification/proposal endpoints in the AI worktree. Those endpoints are absent from this UI branch's API/router and are not called here. Current suggestion provenance must be taken from the returned backend response, not inferred from an `AI` label or from the reference product.
+- AI classification and proposal-edit routes are implemented in the shared API/router and consumed by the keyword workbench. `POST /api/v1/ai/classifications/reclassify` creates a bounded preview; `POST /api/v1/ai/classifications/previews/{preview_job_id}/apply` applies a completed preview. AI Collection proposals are read/edited through `PATCH /api/v1/ai/proposals/{proposal_id}` and accepted/rejected through the Collection suggestion routes. Current suggestion provenance must come from backend responses, not an `AI` label.
 
 ## 6. Products and manual Research
 
-No product-recommendation endpoint is present in this branch. `/products` therefore shows an explicit unavailable state, links to saved keyword evidence and manual Research, and does not invent product names, market evidence, AI rationale, images, demand, or export feasibility.
+`POST /api/v1/ai/recommendations` powers `/products`. It requires an `Idempotency-Key` and 1–20 explicitly selected saved `keyword_ids`; optional `research_constraints` are bounded and profile-gated, and `regenerate` is an explicit new action. The response is an AI hypothesis linked to evidence and lineage, not measured demand or a validated commercial recommendation. The page displays cached/job/error/deferred states and does not invent product names, market evidence, images, demand, or export feasibility.
 
 Existing Research APIs are:
 
@@ -111,7 +111,7 @@ Saved Research is a user-authored hypothesis/assessment. It is not provider meas
 
 The Run History UI states the Database Goal contract target, not runtime proof: keep rolling local calendar dates D−6 through D in `Asia/Ho_Chi_Minh`; a shorter provider content limit wins. Records without trustworthy collection timestamps or source lineage are to remain visible as unresolved/retained until reconciled. Collection text, user Research, settings, assignments, and operational ledgers have separate retention rules. The UI does not perform cleanup or claim cleanup is active.
 
-The read-only Database contract dated 26 November 2026 says migrations 1–9 are present in the target schema but all 35 non-ledger business tables are empty; PostgreSQL is not cutover-ready. It also records a lineage gap for legacy derived/provider content. This is context from the Database worktree, not an implementation change in the UI branch.
+The reconciled Database contract lists bundled migrations `0001`–`0014` and explicitly leaves Production's applied version/checksums to read-only cutover verification. An empty business schema is a supported Fresh Start, but does not by itself prove operational quota/cooldown readiness or cutover approval.
 
 ## 9. Typed UI adapters and errors
 
@@ -121,4 +121,4 @@ All user-facing calls use the shared `Frontend/public/modules/api.js` client for
 
 ## 10. Verification boundary
 
-Offline browser fixtures are synthetic test-only responses and are not shown as LIVE provider data. No production provider, Google, Wikimedia, Bing, YouTube, OpenRouter, or other paid/quota API calls are part of this UI verification. Backend integration, actual credentials, third-party quota, production routing, production retention execution, and AI recommendation quality remain unverified from this branch.
+Earlier AI07 UI acceptance used synthetic API responses; it did not verify a running backend. FINAL01's local browser acceptance used the actual backend API with isolated PostgreSQL and mock AI provider; it did not call live inference or source Fetch. It cannot establish deployed Vercel routing, Production retention execution, third-party quota, or recommendation quality. The AI first-admission ledger gap remains a deferred/error state and must not be rendered as zero quota.
