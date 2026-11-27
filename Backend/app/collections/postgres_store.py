@@ -355,26 +355,30 @@ class PostgresCollectionStore(PostgresCollectionReader):
         def operation(db):
             persisted_source_evidence_ids = ()
             identifiers = list(dict.fromkeys(record["id"] for record in records))
-            existing_modes = {}
+            existing_by_id = {}
             id_remap = {}
+            if identifiers:
+                rows = db.execute(sql.SQL("""SELECT id,data_mode,keyword,observed_at,evidence,context
+                    FROM {} WHERE id=ANY(%s)""").format(self._table("keywords")),
+                    (identifiers,)).fetchall()
+                existing_by_id = {row["id"]: row for row in rows}
             if self.data_mode_scope and identifiers:
-                rows = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
-                                  .format(self._table("keywords")), (identifiers,)).fetchall()
-                existing_modes = {row["id"]: row["data_mode"] for row in rows}
                 for record in records:
-                    if (record["id"] in existing_modes
-                            and existing_modes[record["id"]] != self.data_mode_scope):
+                    existing = existing_by_id.get(record["id"])
+                    if existing is not None and existing["data_mode"] != self.data_mode_scope:
                         original_id = record["id"]
                         record["id"] = hashlib.sha256(
                             f"{self.data_mode_scope}:{record['id']}".encode("utf-8")
                         ).hexdigest()
                         id_remap[original_id] = record["id"]
-                resolved_ids = list(dict.fromkeys(record["id"] for record in records))
-                collisions = db.execute(sql.SQL("SELECT id,data_mode FROM {} WHERE id=ANY(%s)")
-                                        .format(self._table("keywords")),
-                                        (resolved_ids,)).fetchall()
-                if any(row["data_mode"] != self.data_mode_scope for row in collisions):
-                    raise CollectionWriteError("cross-mode keyword identity collision")
+                if id_remap:
+                    resolved_ids = list(dict.fromkeys(record["id"] for record in records))
+                    collisions = db.execute(sql.SQL("""SELECT id,data_mode,keyword,observed_at,
+                        evidence,context FROM {} WHERE id=ANY(%s)""").format(
+                            self._table("keywords")), (resolved_ids,)).fetchall()
+                    if any(row["data_mode"] != self.data_mode_scope for row in collisions):
+                        raise CollectionWriteError("cross-mode keyword identity collision")
+                    existing_by_id.update({row["id"]: row for row in collisions})
 
             if rejected:
                 rejected_by_id = {}
@@ -397,7 +401,47 @@ class PostgresCollectionStore(PostgresCollectionReader):
             last_by_id = {}
             for record in records:
                 last_by_id[record["id"]] = record
-            upsert_records = list(last_by_id.values())
+            keyword_stats = {
+                "keyword_new_rows": 0,
+                "keyword_content_changed_rows": 0,
+                "keyword_observation_only_rows": 0,
+                "keyword_unchanged_rows": 0,
+                "keyword_new_observation_rows": 0,
+            }
+            upsert_records = []
+            evidence_objects = {}
+            for identifier, record in last_by_id.items():
+                evidence = record["evidence"]
+                if isinstance(evidence, str):
+                    def reject_constant(_value):
+                        raise ValueError("non-finite JSON number")
+                    evidence = json.loads(evidence, parse_constant=reject_constant)
+                if not isinstance(evidence, dict):
+                    raise ValueError("keyword evidence must be a JSON object")
+                json.dumps(evidence, ensure_ascii=False, allow_nan=False)
+                evidence_objects[identifier] = evidence
+
+                existing = existing_by_id.get(identifier)
+                if existing is None:
+                    keyword_stats["keyword_new_rows"] += 1
+                    upsert_records.append(record)
+                    continue
+                if existing["observed_at"] != record["observed_at"]:
+                    keyword_stats["keyword_new_observation_rows"] += 1
+                content_changed = (
+                    existing["keyword"] != record["keyword"]
+                    or existing["evidence"] != evidence
+                    or existing["context"] != record["context"]
+                )
+                if content_changed:
+                    keyword_stats["keyword_content_changed_rows"] += 1
+                    upsert_records.append(record)
+                elif existing["observed_at"] != record["observed_at"]:
+                    keyword_stats["keyword_observation_only_rows"] += 1
+                    upsert_records.append(record)
+                else:
+                    keyword_stats["keyword_unchanged_rows"] += 1
+
             columns = ("id", "keyword", "normalized", "source", "project", "observed_at",
                        "data_mode", "evidence", "context")
             for offset in range(0, len(upsert_records), 500):
@@ -407,21 +451,12 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 )
                 params = []
                 for record in batch:
-                    evidence = record["evidence"]
-                    if isinstance(evidence, str):
-                        def reject_constant(_value):
-                            raise ValueError("non-finite JSON number")
-                        evidence = json.loads(evidence, parse_constant=reject_constant)
-                    if not isinstance(evidence, dict):
-                        raise ValueError("keyword evidence must be a JSON object")
-                    # Ensure the JSONB adapter rejects NaN and non-serializable
-                    # values before sending a partially processed batch.
-                    json.dumps(evidence, ensure_ascii=False, allow_nan=False)
                     params.extend(record[key] for key in columns[:7])
-                    params.extend((Jsonb(evidence), record["context"]))
+                    params.extend((Jsonb(evidence_objects[record["id"]]), record["context"]))
                 db.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,observed_at,
                     data_mode,evidence,context) VALUES {} ON CONFLICT(id) DO UPDATE SET
                     keyword=EXCLUDED.keyword,observed_at=EXCLUDED.observed_at,evidence=EXCLUDED.evidence,
+                    context=EXCLUDED.context,
                     eligible=COALESCE((SELECT CASE decision WHEN 'EXCLUDED' THEN 0 ELSE 1 END
                         FROM {} WHERE keyword_id=EXCLUDED.id),1),
                     rejection_reason=CASE WHEN (SELECT decision FROM {} WHERE keyword_id=EXCLUDED.id)
@@ -429,6 +464,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     WHERE {}.keyword IS DISTINCT FROM EXCLUDED.keyword
                        OR {}.observed_at IS DISTINCT FROM EXCLUDED.observed_at
                        OR {}.evidence IS DISTINCT FROM EXCLUDED.evidence
+                       OR {}.context IS DISTINCT FROM EXCLUDED.context
                        OR {}.eligible IS DISTINCT FROM COALESCE((SELECT CASE decision
                             WHEN 'EXCLUDED' THEN 0 ELSE 1 END FROM {} WHERE keyword_id=EXCLUDED.id),1)
                        OR {}.rejection_reason IS DISTINCT FROM CASE WHEN (SELECT decision
@@ -437,6 +473,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                 self._table("keywords"), values, self._table("keyword_decisions"),
                                 self._table("keyword_decisions"), self._table("keywords"),
                                 self._table("keywords"), self._table("keywords"),
+                                self._table("keywords"),
                                 self._table("keywords"), self._table("keyword_decisions"),
                                 self._table("keywords"), self._table("keyword_decisions")), params)
 
@@ -531,11 +568,18 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     FROM (VALUES {}) AS v(id,evidence) WHERE k.id=v.id
                       AND k.source='google_web_serp' AND k.data_mode='LIVE'""").format(
                           self._table("keywords"), values), params)
+            source_evidence_stats = {
+                "source_evidence_new_rows": 0,
+                "source_evidence_updated_rows": 0,
+                "source_evidence_existing_rows": 0,
+                "evidence_keyword_links_inserted": 0,
+                "dataset_evidence_links_inserted": 0,
+            }
             if source_evidence_rows:
                 remapped_evidence_rows = remap_source_evidence_keyword_ids(
                     source_evidence_rows, id_remap,
                 )
-                self._persist_source_evidence(
+                source_evidence_stats = self._persist_source_evidence(
                     db, None, remapped_evidence_rows,
                 )
                 persisted_source_evidence_ids = tuple(
@@ -547,6 +591,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 "skipped_bing_updates": skipped_bing,
                 "id_remap": id_remap,
                 "source_evidence_ids": persisted_source_evidence_ids,
+                "persistence_stats": {**keyword_stats, **source_evidence_stats},
             }
 
         return self._write(operation)
@@ -556,15 +601,15 @@ class PostgresCollectionStore(PostgresCollectionReader):
                           "subcategory_ids", "classification_status", "confidence_level",
                           "commercial_relevance", "classification_method", "classification_version",
                           "taxonomy_version", "rule_evidence", "source_evidence", "review_status",
-                          "classified_at", "classification_reason")
+                          "classified_at", "classification_reason", "classification_input_digest")
         json_columns = {"topic_category_ids", "subcategory_ids", "rule_evidence", "source_evidence"}
 
         def operation(db):
             upsert = sql.SQL("""INSERT INTO {}(keyword_id,entity_type,entity_id,entity_description,
                 topic_category_ids,subcategory_ids,classification_status,confidence_level,commercial_relevance,
                 classification_method,classification_version,taxonomy_version,rule_evidence,source_evidence,
-                review_status,classified_at,classification_reason)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                review_status,classified_at,classification_reason,classification_input_digest)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(keyword_id) DO UPDATE SET entity_type=EXCLUDED.entity_type,
                 entity_id=EXCLUDED.entity_id,entity_description=EXCLUDED.entity_description,
                 topic_category_ids=EXCLUDED.topic_category_ids,subcategory_ids=EXCLUDED.subcategory_ids,
@@ -573,14 +618,20 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 classification_version=EXCLUDED.classification_version,taxonomy_version=EXCLUDED.taxonomy_version,
                 rule_evidence=EXCLUDED.rule_evidence,source_evidence=EXCLUDED.source_evidence,
                 review_status=EXCLUDED.review_status,classified_at=EXCLUDED.classified_at,
-                classification_reason=EXCLUDED.classification_reason""").format(self._table("classification_results"))
+                classification_reason=EXCLUDED.classification_reason,
+                classification_input_digest=EXCLUDED.classification_input_digest""").format(
+                    self._table("classification_results"))
             for offset in range(0, len(classification_records), 500):
                 batch = classification_records[offset:offset + 500]
                 values = []
                 for item in batch:
                     result = item["classification_result"]
-                    values.append((item["id"], *(Jsonb(result[key]) if key in json_columns else result[key]
-                                                   for key in result_columns)))
+                    values.append((item["id"], *(
+                        Jsonb(result[key]) if key in json_columns
+                        else result.get(key) if key == "classification_input_digest"
+                        else result[key]
+                        for key in result_columns
+                    )))
                 with db.cursor() as cursor:
                     cursor.executemany(upsert, values)
 
@@ -1035,9 +1086,19 @@ class PostgresCollectionStore(PostgresCollectionReader):
 
     def _persist_source_evidence(self, db, dataset_id, evidence_rows):
         """Write source lineage and keyword links, optionally associating a snapshot."""
-        rows = [row for row in evidence_rows if isinstance(row, dict)]
+        by_id = {
+            row["id"]: row for row in evidence_rows
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
+        rows = list(by_id.values())
         if not rows:
-            return
+            return {
+                "source_evidence_new_rows": 0,
+                "source_evidence_updated_rows": 0,
+                "source_evidence_existing_rows": 0,
+                "evidence_keyword_links_inserted": 0,
+                "dataset_evidence_links_inserted": 0,
+            }
         source_names = {}
         for row in rows:
             source_id = row["source_id"]
@@ -1055,6 +1116,13 @@ class PostgresCollectionStore(PostgresCollectionReader):
             if previous is not None and previous != source_entry:
                 raise ValueError("source evidence has conflicting retention policy metadata")
             source_names[source_id] = source_entry
+        stats = {
+            "source_evidence_new_rows": 0,
+            "source_evidence_updated_rows": 0,
+            "source_evidence_existing_rows": 0,
+            "evidence_keyword_links_inserted": 0,
+            "dataset_evidence_links_inserted": 0,
+        }
         with db.cursor() as cursor:
             cursor.executemany(sql.SQL("""INSERT INTO {} AS stored_source(
                     id,display_name,configuration)
@@ -1071,6 +1139,38 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     for source_id, (display_name, policy) in sorted(source_names.items())
                 ])
 
+            identifiers = list(by_id)
+            existing_rows = db.execute(sql.SQL("""SELECT id,source_id,content_digest,query_scope,
+                geography,observed_at,collected_at,payload,expires_at FROM {}
+                WHERE id=ANY(%s)""").format(self._table("source_evidence")),
+                (identifiers,)).fetchall()
+            existing_by_id = {row["id"]: row for row in existing_rows}
+            rows_to_write = []
+            for row in rows:
+                existing = existing_by_id.get(row["id"])
+                if existing is None:
+                    stats["source_evidence_new_rows"] += 1
+                    rows_to_write.append(row)
+                    continue
+                identity_matches = all((
+                    existing["source_id"] == row["source_id"],
+                    existing["content_digest"] == row["content_digest"],
+                    existing["query_scope"] == row["query_scope"],
+                    existing["geography"] == row.get("geography"),
+                    existing["observed_at"] == row.get("observed_at"),
+                    existing["collected_at"] == row["collected_at"],
+                ))
+                if not identity_matches:
+                    raise CollectionWriteError("source evidence identity conflict")
+                stats["source_evidence_existing_rows"] += 1
+                expiration_tightened = (
+                    existing["expires_at"] is None
+                    or row["expires_at"] < existing["expires_at"]
+                )
+                lineage_missing = existing["payload"] is None and row.get("payload") is not None
+                if expiration_tightened or lineage_missing:
+                    stats["source_evidence_updated_rows"] += 1
+                    rows_to_write.append(row)
             insert_evidence = sql.SQL("""INSERT INTO {} AS stored_evidence(
                 id,source_id,external_id,content_digest,
                 query_scope,geography,observed_at,collected_at,payload,expires_at)
@@ -1079,8 +1179,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     expires_at=LEAST(stored_evidence.expires_at,EXCLUDED.expires_at),
                     payload=COALESCE(stored_evidence.payload,EXCLUDED.payload)""").format(
                         self._table("source_evidence"))
-            for offset in range(0, len(rows), 500):
-                batch = rows[offset:offset + 500]
+            for offset in range(0, len(rows_to_write), 500):
+                batch = rows_to_write[offset:offset + 500]
                 cursor.executemany(insert_evidence, [(
                     row["id"], row["source_id"], row.get("external_id"), row["content_digest"],
                     Jsonb(row["query_scope"]),
@@ -1106,19 +1206,24 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 cursor.executemany(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
                     VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("evidence_keywords")),
                     links[offset:offset + 500])
+                stats["evidence_keyword_links_inserted"] += max(cursor.rowcount, 0)
 
         if dataset_id is not None:
-            self._link_dataset_evidence(db, dataset_id, rows)
+            stats["dataset_evidence_links_inserted"] = self._link_dataset_evidence(
+                db, dataset_id, rows,
+            )
+        return stats
 
     def _link_dataset_evidence(self, db, dataset_id, evidence_rows):
         rows = [row for row in evidence_rows
                 if isinstance(row, dict) and isinstance(row.get("id"), str)]
         if not rows:
-            return
+            return 0
         with db.cursor() as cursor:
             cursor.executemany(sql.SQL("""INSERT INTO {}(dataset_id,evidence_id)
                 VALUES (%s,%s) ON CONFLICT DO NOTHING""").format(self._table("dataset_evidence")),
                 [(dataset_id, row["id"]) for row in rows])
+            return max(cursor.rowcount, 0)
 
     def create(self, data, *, created_by="USER", reason=""):
         identifier = str(uuid.uuid4())

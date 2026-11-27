@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import copy
 import hashlib
 import inspect
 import json
@@ -453,6 +454,7 @@ def install_instrumentation():
         ConnectionPool.connection = observed_pool_connection
 
     import app.storage.postgres_runtime as postgres_runtime_module
+    import app.taxonomy.classifier as classifier_module
     from app.ai.openrouter import OpenRouterAdapter
     from app.collections.service import CollectionService
     from app.jobs.shared_cache import SharedCache
@@ -515,6 +517,51 @@ def install_instrumentation():
     _instrument_method(postgres_runtime_module, "initialize_postgres_runtime_defaults",
                        "runtime_schema_readiness")
     _instrument_method(collection_service_module, "build_source_evidence", "source_evidence_preparation")
+
+    original_persist_keywords = PostgresCollectionStore.persist_cleaned_keywords
+    if not getattr(original_persist_keywords, "_db06_stats_instrumented", False):
+        @wraps(original_persist_keywords)
+        def measured_persist_keywords(self, *args, **kwargs):
+            result = original_persist_keywords(self, *args, **kwargs)
+            stats = result.get("persistence_stats") if isinstance(result, dict) else None
+            if isinstance(stats, dict):
+                for name, value in stats.items():
+                    if type(value) is int:
+                        tracker.count(name, value)
+                tracker.count("keyword_rows_written", sum(
+                    stats.get(name, 0) for name in (
+                        "keyword_new_rows", "keyword_content_changed_rows",
+                        "keyword_observation_only_rows",
+                    )
+                ))
+                tracker.count("keyword_rows_skipped", stats.get("keyword_unchanged_rows", 0))
+            return result
+
+        measured_persist_keywords._db06_stats_instrumented = True
+        PostgresCollectionStore.persist_cleaned_keywords = measured_persist_keywords
+
+    original_classify_contextual = classifier_module.classify_contextual
+    if not getattr(original_classify_contextual, "_db06_instrumented", False):
+        @wraps(original_classify_contextual)
+        def measured_classify_contextual(*args, **kwargs):
+            tracker.count("contextual_classification_calls")
+            return original_classify_contextual(*args, **kwargs)
+
+        measured_classify_contextual._db06_instrumented = True
+        classifier_module.classify_contextual = measured_classify_contextual
+
+    original_link_dataset_evidence = PostgresCollectionStore._link_dataset_evidence
+    if not getattr(original_link_dataset_evidence, "_db06_stats_instrumented", False):
+        @wraps(original_link_dataset_evidence)
+        def measured_link_dataset_evidence(self, db, dataset_id, evidence_rows):
+            rows = list(evidence_rows)
+            inserted = original_link_dataset_evidence(self, db, dataset_id, rows)
+            tracker.count("dataset_evidence_links_inserted", inserted)
+            tracker.count("dataset_evidence_links_skipped", max(0, len(rows) - inserted))
+            return inserted
+
+        measured_link_dataset_evidence._db06_stats_instrumented = True
+        PostgresCollectionStore._link_dataset_evidence = measured_link_dataset_evidence
 
     if not getattr(PostgresSourcePayloads.get, "_db06_instrumented", False):
         original_payload_get = PostgresSourcePayloads.get
@@ -773,11 +820,15 @@ def _fixture_records(count: int, tag: str, revision: int, observed_at: datetime)
     return records
 
 
-def seed_cache(schema: str, count: int, tag: str, revision: int = 0) -> dict:
+def seed_cache(schema: str, count: int, tag: str, revision: int = 0, *,
+               records_override: list[dict] | None = None) -> dict:
     if _runtime_environment is None:
         raise RuntimeError("database configuration is unavailable")
     now = datetime.now(timezone.utc)
-    records = _fixture_records(count, tag, revision, now)
+    records = (copy.deepcopy(records_override) if records_override is not None
+               else _fixture_records(count, tag, revision, now))
+    if len(records) != count or any(not isinstance(record, dict) for record in records):
+        raise ValueError("cache fixture record count or shape is invalid")
     # Match the canonical record shape emitted by GoogleTrendsDiscoveryHandler
     # before its result enters SharedCache, including the no-verification value.
     for record in records:
@@ -837,7 +888,8 @@ def seed_cache(schema: str, count: int, tag: str, revision: int = 0) -> dict:
     }
     return {"count": len(records), "tag": tag, "revision": revision,
             "fetched_at": now.isoformat(), "scope": scope,
-            "source_input_digest": source_input_digest(GOOGLE_SOURCE_ID, cache_only_payload)}
+            "source_input_digest": source_input_digest(GOOGLE_SOURCE_ID, cache_only_payload),
+            "records": records}
 
 
 class _NeverReadCredentials:
@@ -1120,7 +1172,7 @@ def _profile_mode(record_counts=(10, 100, 500)) -> dict:
             "mode": "profile",
             "profile_record_counts": list(record_counts),
             "schema": schema,
-            "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
+            "baseline_commit": "88e0ed452bb23a3921a2a7b0a0bf6a35e7fa04b0",
             "migration_and_fixture_setup_excluded": True,
             "application_startup": tracker.snapshot(startup_measurement),
             "scaling_samples": [
@@ -1246,7 +1298,7 @@ def _acceptance_mode(*, skip_cold: bool = False, skip_changed: bool = False) -> 
         summary = {
             "mode": "acceptance",
             "schema": schema,
-            "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
+            "baseline_commit": "88e0ed452bb23a3921a2a7b0a0bf6a35e7fa04b0",
             "setup_ms_excluded": round(setup_seconds * 1000, 2),
             "cold_samples_skipped_for_resume": skip_cold,
             "changed_samples_skipped_for_resume": skip_changed,
@@ -1291,6 +1343,102 @@ def _stats(values: list[float]) -> dict:
         "median_ms": round(statistics.median(values), 2),
         "max_ms": round(max(values), 2),
     }
+
+
+def _changed_input_case(count: int, change_percent: int) -> dict:
+    schema, setup_seconds = create_isolated_schema()
+    tag = f"changed-{count}-{change_percent}"
+    initial = seed_cache(schema, count, tag=tag, revision=0)
+    tracker.start(f"changed_{count}_application_startup")
+    app, client = _instrumented_app(
+        schema, label=f"changed_{count}_application_startup", include_startup=True
+    )
+    startup_measurement = tracker.stop()
+    heartbeat = Heartbeat()
+    heartbeat.start()
+    try:
+        prime = _run_fetch(
+            client, schema, count, label=f"changed-prime-{count}", warmup=True,
+            fixture_input_digest=initial["source_input_digest"],
+        )
+        membership = _preserve_user_membership(schema, prime["fetch_id"])
+
+        changed_count = max(1, count * change_percent // 100)
+        updated_records = copy.deepcopy(initial["records"])
+        for index, record in enumerate(updated_records[:changed_count]):
+            cluster = record["trend_clusters"][0]
+            cluster["search_volume"] += 1
+            cluster["increase_percentage"] += 1.0
+            cluster["started_at"] = (
+                datetime.fromisoformat(cluster["started_at"].replace("Z", "+00:00"))
+                + timedelta(days=1)
+            ).isoformat()
+            cluster["ended_at"] = (
+                datetime.fromisoformat(cluster["ended_at"].replace("Z", "+00:00"))
+                + timedelta(days=1)
+            ).isoformat()
+            cluster["trend_cluster_id"] = hashlib.sha256(
+                f"{tag}:changed:{index}".encode("utf-8")
+            ).hexdigest()
+        updated = seed_cache(
+            schema, count, tag=tag, revision=0, records_override=updated_records,
+        )
+        if updated["source_input_digest"] == initial["source_input_digest"]:
+            raise RuntimeError("changed CACHE_ONLY fixture did not change its input digest")
+
+        result = _run_fetch(
+            client, schema, count,
+            label=f"warm-changed-{count}-{change_percent}pct",
+            fixture_input_digest=updated["source_input_digest"],
+        )
+        if (result["collection_input_unchanged"] is True
+                or result["dataset_reused"] is True
+                or result["dataset_id"] == prime["dataset_id"]):
+            raise RuntimeError("changed CACHE_ONLY input was incorrectly reused")
+        membership_after = _verify_user_membership(schema, membership)
+        return {
+            "record_count": count,
+            "change_percent": change_percent,
+            "changed_keyword_content_count": changed_count,
+            "unchanged_keyword_content_count": count - changed_count,
+            "new_keyword_count": 0,
+            "new_observation_count": changed_count,
+            "source_payload_bytes_read": result["source_payload_bytes_read"],
+            "sql_dispatches": result["instrumentation"]["sql"]["synchronous_dispatches"],
+            "transactions": result["instrumentation"]["transactions"],
+            "warm_latency_ms": result["end_to_end_ms"],
+            "warm_latency_seconds": round(result["end_to_end_ms"] / 1000, 3),
+            "prime_dataset_id": prime["dataset_id"],
+            "changed_dataset_id": result["dataset_id"],
+            "source_input_changed": result["source_input_digest"] != prime["source_input_digest"],
+            "collection_input_unchanged": result["collection_input_unchanged"],
+            "dataset_reused": result["dataset_reused"],
+            "user_membership": {"before": membership, "after": membership_after},
+            "provider_network_requests_blocked": result["provider_network_requests_blocked"],
+            "openrouter_requests_blocked": result["openrouter_requests_blocked"],
+            "application_startup": tracker.snapshot(startup_measurement),
+            "instrumentation": result["instrumentation"],
+            "sample": result,
+            "setup_ms_excluded": round(setup_seconds * 1000, 2),
+        }
+    finally:
+        tracker.stop()
+        heartbeat.stop()
+        client.__exit__(None, None, None)
+        drop_owned_schema(schema)
+        emit({"event": "changed_input_schema_cleanup", "schema": schema,
+              "cleaned": schema not in _owned_schemas})
+
+
+def _changed_input_mode(*, record_count: int, change_percent: int) -> dict:
+    case = _changed_input_case(record_count, change_percent)
+    summary = {
+        "mode": "changed-input",
+        "baseline_commit": "88e0ed452bb23a3921a2a7b0a0bf6a35e7fa04b0",
+        "case": case,
+    }
+    emit({"event": "changed_input_complete", **summary})
+    return summary
 
 
 def _warm_unchanged_case(count: int, sample_count: int, *, require_fast_path: bool) -> dict:
@@ -1379,7 +1527,7 @@ def _warm_unchanged_mode(*, require_fast_path: bool, warm_case: str,
         ))
     summary = {
         "mode": "warm-unchanged",
-        "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
+        "baseline_commit": "88e0ed452bb23a3921a2a7b0a0bf6a35e7fa04b0",
         "warm_case": warm_case,
         "large_samples_requested": large_samples if warm_case in {"all", "large"} else 0,
         "require_fast_path": require_fast_path,
@@ -1465,7 +1613,8 @@ def _verify_test_url_targets_runtime_database(environment: dict[str, str], test_
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("profile", "acceptance", "warm-unchanged"), default="profile"
+        "--mode", choices=("profile", "acceptance", "warm-unchanged", "changed-input"),
+        default="profile"
     )
     parser.add_argument(
         "--require-fast-path", action="store_true",
@@ -1478,6 +1627,14 @@ def main() -> int:
     parser.add_argument(
         "--large-samples", type=int, choices=(1, 2, 3), default=3,
         help="number of warm unchanged 1500-record samples (default: 3)",
+    )
+    parser.add_argument(
+        "--record-count", type=int, choices=(100, 1500), default=1500,
+        help="record count for the targeted changed-input case",
+    )
+    parser.add_argument(
+        "--change-percent", type=int, choices=(1, 10, 100), default=1,
+        help="percentage of stable keyword identities with changed content",
     )
     parser.add_argument(
         "--profile-count", type=int, choices=(10, 100, 500),
@@ -1504,6 +1661,9 @@ def main() -> int:
         parser.error("--warm-case is only valid with --mode warm-unchanged")
     if arguments.large_samples != 3 and arguments.mode != "warm-unchanged":
         parser.error("--large-samples is only valid with --mode warm-unchanged")
+    if (arguments.record_count != 1500 or arguments.change_percent != 1) \
+            and arguments.mode != "changed-input":
+        parser.error("--record-count and --change-percent are only valid with --mode changed-input")
     if os.environ.get("VERCEL"):
         raise RuntimeError("DB06 local benchmark refuses a Vercel process")
     explicit_test_url = bool(os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL"))
@@ -1519,7 +1679,7 @@ def main() -> int:
     # value is never read from or written to a dotenv file.
     os.environ["OPENROUTER_API_KEY"] = ""
     emit({"event": "benchmark_started", "mode": arguments.mode,
-          "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
+          "baseline_commit": "88e0ed452bb23a3921a2a7b0a0bf6a35e7fa04b0",
           "database_identity_validated": True,
           "schema_prefix": "ts_test_db06_",
           "provider_network": "blocked",
@@ -1529,10 +1689,15 @@ def main() -> int:
     elif arguments.mode == "acceptance":
         _acceptance_mode(skip_cold=arguments.skip_cold,
                          skip_changed=arguments.skip_changed)
-    else:
+    elif arguments.mode == "warm-unchanged":
         _warm_unchanged_mode(
             require_fast_path=arguments.require_fast_path, warm_case=arguments.warm_case,
             large_samples=arguments.large_samples,
+        )
+    else:
+        _changed_input_mode(
+            record_count=arguments.record_count,
+            change_percent=arguments.change_percent,
         )
     cleanup_owned_schemas()
     return 0

@@ -1,4 +1,5 @@
 """Evidence-backed title rules and contextual classification results."""
+import hashlib
 import json
 import re
 import unicodedata
@@ -302,3 +303,50 @@ def classify_contextual(record: dict, context: dict | None = None) -> dict:
         "review_status": review,
         "classified_at": None,
     }
+
+
+def classification_input_digest(record: dict, context: dict | None = None) -> str | None:
+    """Fingerprint only fields consumed by contextual keyword classification."""
+    if not isinstance(record, dict):
+        return None
+    context = context if isinstance(context, dict) else {}
+    evidence = record.get("evidence") or {}
+    if isinstance(evidence, str):
+        try:
+            evidence = json.loads(evidence)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(evidence, dict):
+        return None
+    evidence_scope = {
+        key: evidence.get(key) for key in (
+            "country_scope", "access", "analysis_date", "observation_date", "data_mode",
+            "provider_rank", "views_ceil", "source_quality",
+        ) if evidence.get(key) is not None
+    }
+    context_fields = (
+        "entity_type", "entity_id", "description", "occupations", "instance_types",
+        "category_ids", "source_url", "method", "status", "page_namespace",
+        "is_disambiguation", "is_main_page", "is_main_page_known", "redirected_from",
+        "page_language",
+    )
+    payload = {
+        "classification_version": CLASSIFICATION_VERSION,
+        "taxonomy_version": TAXONOMY_VERSION,
+        "id": record.get("id"),
+        "keyword": record.get("keyword", ""),
+        "source": record.get("source", "") or "unknown",
+        "project": record.get("project", "") or "unknown",
+        "observed_at": record.get("observed_at"),
+        "eligible": record.get("eligible", 1),
+        "evidence_scope": evidence_scope,
+        "context": {key: context.get(key) for key in context_fields},
+    }
+    try:
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        return None
+    return hashlib.sha256(encoded).hexdigest()

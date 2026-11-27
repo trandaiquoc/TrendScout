@@ -420,6 +420,48 @@ class PostgresCollectionReader:
 
         return self._read(read)
 
+    def load_classification_results(self, keyword_ids):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {}
+
+        def read(db):
+            rows = db.execute(sql.SQL("""SELECT keyword_id,classification_input_digest,
+                entity_type,entity_id,entity_description,topic_category_ids,subcategory_ids,
+                classification_status,classification_reason,confidence_level,commercial_relevance,
+                classification_method,classification_version,taxonomy_version,rule_evidence,
+                source_evidence,review_status,classified_at
+                FROM {} WHERE keyword_id=ANY(%s)""").format(
+                    self._table("classification_results")), (identifiers,)).fetchall()
+            result = {}
+            for row in rows:
+                item = dict(row)
+                result[item["keyword_id"]] = {
+                    "input_digest": item["classification_input_digest"],
+                    "result": {
+                        "keyword_id": item["keyword_id"],
+                        "entity_type": item["entity_type"],
+                        "entity_id": item["entity_id"],
+                        "entity_description": item["entity_description"],
+                        "topic_category_ids": item["topic_category_ids"],
+                        "subcategory_ids": item["subcategory_ids"],
+                        "classification_status": item["classification_status"],
+                        "classification_reason": item["classification_reason"],
+                        "confidence_level": item["confidence_level"],
+                        "commercial_relevance": item["commercial_relevance"],
+                        "classification_method": item["classification_method"],
+                        "classification_version": item["classification_version"],
+                        "taxonomy_version": item["taxonomy_version"],
+                        "rule_evidence": item["rule_evidence"],
+                        "source_evidence": item["source_evidence"],
+                        "review_status": item["review_status"],
+                        "classified_at": item["classified_at"],
+                    },
+                }
+            return result
+
+        return self._read(read)
+
     def load_keywords_for_collection_processing(self, *, include_invalid_google=False):
         conditions, parameters = [], []
         if include_invalid_google:

@@ -338,8 +338,14 @@ class CollectionService:
                         page_is_main_page=context.is_main_page,
                         page_is_main_page_known=context.is_main_page_known,
                         redirected_from=context.redirected_from, page_language=context.page_language)
-        from app.taxonomy.classifier import classify_contextual
+        from app.taxonomy.classifier import classification_input_digest, classify_contextual
         classified_at = now()
+        classification_reader = getattr(self.store, "load_classification_results", None)
+        stored_classifications = (
+            classification_reader([record["id"] for record in classification_records])
+            if callable(classification_reader) else {}
+        )
+        classifications_to_persist = []
         for record in classification_records:
             context = {
                 "entity_type": record.get("entity_type", "unknown"),
@@ -358,12 +364,25 @@ class CollectionService:
                 "redirected_from": record.get("redirected_from", ""),
                 "page_language": record.get("page_language", ""),
             }
-            result = classify_contextual(record, context)
-            result["classified_at"] = classified_at
+            input_digest = classification_input_digest(record, context)
+            previous = stored_classifications.get(record["id"])
+            if (input_digest is not None and isinstance(previous, dict)
+                    and previous.get("input_digest") == input_digest
+                    and isinstance(previous.get("result"), dict)
+                    and isinstance(previous["result"].get("topic_category_ids"), list)):
+                result = previous["result"]
+            else:
+                result = classify_contextual(record, context)
+                result["classified_at"] = classified_at
+                result["classification_input_digest"] = input_digest
+                classifications_to_persist.append(record)
             record["classification_result"] = result
             if record.get("eligible", 1):
                 record["entity_category_ids"] = tuple(result["topic_category_ids"])
-        eligible = self.store.persist_classifications(classification_records)
+        eligible = (
+            self.store.persist_classifications(classifications_to_persist)
+            if classifications_to_persist else loaded_keywords["eligible"]
+        )
         category_collection_ids = {}
         initial_roots = [resolve_category(category_id) for category_id in INITIAL_TOPIC_ROOTS]
         ensure_roots = getattr(self.store, "ensure_category_collections", None)

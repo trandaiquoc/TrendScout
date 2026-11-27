@@ -504,6 +504,105 @@ def test_incremental_source_persistence_remaps_lineage_to_live_keyword_id():
                 connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_incremental_keyword_persistence_skips_rows_but_keeps_new_observations_and_evidence():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    created = False
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            created = True
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+
+            def raw(title, observation_date, *, views=8400):
+                return {
+                    "article_display": title,
+                    "article_original": title.replace(" ", "_"),
+                    "project": "en.wikipedia",
+                    "observation_date": observation_date,
+                    "fetched_at": "2026-11-26T12:00:00Z",
+                    "provider_rank": 1,
+                    "views_ceil": views,
+                    "country_scope": "US",
+                    "access": "all-access",
+                }
+
+            initial_raw = [raw("Unchanged topic", "2026-11-25"),
+                           raw("Changed topic", "2026-11-25"),
+                           raw("Observation topic", "2026-11-25")]
+            initial_records = [keyword_record(item, WIKIMEDIA_SOURCE_ID, "LIVE")
+                               for item in initial_raw]
+            initial_evidence = build_source_evidence([{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "records": initial_raw,
+            }])["rows"]
+            first = store.persist_cleaned_keywords(
+                initial_records, source_evidence_rows=initial_evidence,
+            )
+            assert first["persistence_stats"]["keyword_new_rows"] == 3
+            assert first["persistence_stats"]["source_evidence_new_rows"] == 3
+
+            changed_raw = raw("Changed topic", "2026-11-26", views=9200)
+            new_raw = raw("New topic", "2026-11-26", views=16000)
+            changed_record = {
+                **initial_records[1],
+                "observed_at": "2026-11-26",
+                "evidence": json.dumps({**json.loads(initial_records[1]["evidence"]),
+                                        "views_ceil": 9200}),
+            }
+            observation_only_record = {
+                **initial_records[2],
+                "observed_at": "2026-11-26",
+            }
+            new_record = keyword_record(new_raw, WIKIMEDIA_SOURCE_ID, "LIVE")
+            changed_evidence = build_source_evidence([{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "records": [initial_raw[0], changed_raw, initial_raw[2], new_raw],
+            }])["rows"]
+
+            second = store.persist_cleaned_keywords(
+                [initial_records[0], changed_record, observation_only_record, new_record],
+                source_evidence_rows=changed_evidence,
+            )
+            stats = second["persistence_stats"]
+            assert stats["keyword_new_rows"] == 1
+            assert stats["keyword_content_changed_rows"] == 1
+            assert stats["keyword_observation_only_rows"] == 1
+            assert stats["keyword_unchanged_rows"] == 1
+            assert stats["keyword_new_observation_rows"] == 2
+            assert stats["source_evidence_new_rows"] == 2
+            assert stats["source_evidence_existing_rows"] == 2
+            assert stats["evidence_keyword_links_inserted"] == 2
+
+            keyword_table = sql.Identifier(schema, "keywords")
+            evidence_table = sql.Identifier(schema, "source_evidence")
+            links_table = sql.Identifier(schema, "evidence_keywords")
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=ANY(%s)")
+                .format(keyword_table), ([record["id"] for record in second["records"]],)).fetchone()[0] == 4
+            assert connection.execute(sql.SQL("SELECT observed_at FROM {} WHERE id=%s")
+                .format(keyword_table), (initial_records[2]["id"],)).fetchone()[0] == "2026-11-26"
+            assert connection.execute(sql.SQL("SELECT evidence FROM {} WHERE id=%s")
+                .format(keyword_table), (initial_records[1]["id"],)).fetchone()[0]["views_ceil"] == 9200
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(evidence_table)).fetchone()[0] == 5
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {}")
+                .format(links_table)).fetchone()[0] == 5
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_failed_source_batch_retry_reuses_committed_postgres_evidence():
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:

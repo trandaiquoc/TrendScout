@@ -75,6 +75,63 @@ class ClassificationTests(unittest.TestCase):
     def classify(self, title, *, project='en.wikipedia', source=SOURCE):
         return classify('synthetic-keyword-id', title, source=source, project=project)
 
+    def test_classification_input_digest_tracks_only_classifier_inputs(self):
+        from app.taxonomy.classifier import classification_input_digest
+
+        record = {
+            "id": "digest-keyword",
+            "keyword": "Example keyword",
+            "source": SOURCE,
+            "project": "en.wikipedia",
+            "observed_at": "2026-11-25",
+            "eligible": 1,
+            "evidence": '{"views_ceil": 8400, "country_scope": "US", "trend_clusters": [{"search_volume": 10}]}',
+        }
+        context = {
+            "entity_type": "unknown",
+            "entity_id": None,
+            "description": "",
+            "occupations": (),
+            "instance_types": (),
+            "category_ids": (),
+            "source_url": "",
+            "method": "",
+            "status": "",
+            "page_namespace": None,
+            "is_disambiguation": False,
+            "is_main_page": None,
+            "is_main_page_known": False,
+            "redirected_from": "",
+            "page_language": "",
+        }
+        digest = classification_input_digest(record, context)
+
+        self.assertEqual(
+            classification_input_digest(
+                {**record, "evidence": '{"views_ceil": 8400, "country_scope": "US", "trend_clusters": [{"search_volume": 20}]}'},
+                context,
+            ),
+            digest,
+        )
+        self.assertNotEqual(
+            classification_input_digest({**record, "observed_at": "2026-11-26"}, context),
+            digest,
+        )
+        self.assertNotEqual(
+            classification_input_digest(
+                record, {**context, "description": "A public company"},
+            ),
+            digest,
+        )
+        self.assertNotEqual(
+            classification_input_digest(
+                {**record, "evidence": '{"views_ceil": 8400, "country_scope": "CA"}'},
+                context,
+            ),
+            digest,
+        )
+        self.assertIsNone(classification_input_digest({**record, "evidence": "not-json"}, context))
+
     def test_multiple_categories_evidence_and_independent_attributes(self):
         result = self.classify('Café fashion week and washing machine')
         self.assertEqual(result.topic_categories, ('fashion','home_living'))
