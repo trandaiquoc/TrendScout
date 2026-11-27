@@ -101,7 +101,9 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
             f"{project}:{record.get('article_original')}:{observed.date()}".encode("utf-8")
         ).hexdigest()
         scope = f"wikimedia:{country}:{access}:{project}"
-        market = "US_COUNTRY_SCOPED" if country == "US" else "UNKNOWN"
+        market = ("US_COUNTRY_SCOPED" if country == "US" else "GLOBAL"
+                  if isinstance(country, str) and country.strip().casefold()
+                  in {"global", "world", "worldwide"} else "UNKNOWN")
         source_metric_name = capability.metric_name
         source_metric_unit = capability.metric_unit
         source_metric_value = approximate_views
@@ -143,7 +145,7 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         scope = _text(record.get("scope"))
         market_value = record.get("market_evidence")
         market = (market_value if market_value in {
-            "US_COUNTRY_SCOPED", "US_FILTER_ONLY", "UNKNOWN"
+            "US_COUNTRY_SCOPED", "US_FILTER_ONLY", "GLOBAL", "UNKNOWN"
         } else "UNKNOWN")
         reported_geographies = (
             record.get("country_scope"), record.get("region"),
@@ -151,7 +153,7 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         )
         if any(isinstance(value, str) and value.strip().casefold()
                in {"global", "world", "worldwide"} for value in reported_geographies):
-            market = "UNKNOWN"
+            market = "GLOBAL"
         source_metric_name = capability.metric_name
         source_metric_unit = capability.metric_unit
         source_metric_value = record.get("metric_value")

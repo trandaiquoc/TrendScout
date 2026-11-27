@@ -6,6 +6,14 @@ default. List consumers that do not display those results may pass
 omitted, while filtering and pagination remain unchanged. Full algorithm
 evidence remains available from `GET /api/v1/collections/keywords/{keyword_id}`.
 
+PostgreSQL-backed runtimes with retained source lineage also expose
+`GET /api/v1/algorithms/multi-source/{keyword_id}`. The read-only profile groups
+active evidence by canonical keyword identity and data mode, retains each
+source's metrics and ranking separately, and reports geography, freshness,
+coverage, permissions, lineage references, independence, and corroboration.
+It does not compose raw metrics into a score; missing evidence is not negative
+evidence, and source-snapshot population totals are not retained per keyword.
+
 ## Vercel shared Collections snapshot format
 
 Changed SQLite snapshots are backed up and hashed as a complete image, then

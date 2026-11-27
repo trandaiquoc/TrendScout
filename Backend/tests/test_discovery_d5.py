@@ -62,7 +62,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotEqual(by_word["tee shirt"].keyword_id, by_word["t shirt"].keyword_id)
         self.assertEqual(by_word["t shirt"].original_forms, ("t shirt",))
         self.assertIn("technology", by_word["robot coffee"].categories)
-        self.assertEqual(prioritize_for_research(candidates)[0].categories[0], "fashion")
+        self.assertEqual(
+            [item.keyword_id for item in prioritize_for_research(candidates)],
+            sorted(item.keyword_id for item in candidates),
+        )
         self.assertEqual(candidates, extract_candidates(rows, now=NOW))
         self.assertEqual(suggest_category(by_word["robot coffee"]).status, "NO_PRODUCT_SUGGESTION")
 
@@ -120,6 +123,19 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(select_for_verification((candidate,), (result,),
                          last_verified={candidate.keyword_id: NOW}, now=NOW,
                          max_requests=1, freshness=timedelta(days=1)), ())
+
+    def test_global_assessment_is_not_relabelled_or_selected_for_us_verification(self):
+        candidate = keyword([replace(
+            observation(0, "solar generator alpha", "global"),
+            market_evidence="GLOBAL", scope="Global sample",
+        )], "solar generator")
+        result = assess_candidate(candidate, coverage(), as_of=NOW.date(), now=NOW)[0]
+        self.assertEqual(result.market_evidence, "GLOBAL")
+        eligible = replace(result, classification="EMERGING", current_support=2)
+        self.assertEqual(select_for_verification(
+            (candidate,), (eligible,), last_verified={}, now=NOW,
+            max_requests=1, freshness=timedelta(days=1),
+        ), ())
 
     def test_missing_coverage_spikes_and_duplicates(self):
         rows = [observation(0, "linen pants alpha", "1"),

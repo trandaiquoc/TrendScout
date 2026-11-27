@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Literal
 
 DataMode = Literal["SYNTHETIC", "LIVE"]
-MarketEvidence = Literal["US_COUNTRY_SCOPED", "US_FILTER_ONLY", "UNKNOWN"]
+MarketEvidence = Literal["US_COUNTRY_SCOPED", "US_FILTER_ONLY", "GLOBAL", "UNKNOWN"]
 
 
 @dataclass(frozen=True)

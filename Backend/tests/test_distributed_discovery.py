@@ -140,7 +140,7 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertEqual({item["keyword"] for item in candidates},
                          {"linen dress", "portable solar generator"})
 
-    def test_global_wikimedia_scope_stays_unknown_beside_us_filtered_trends(self):
+    def test_global_wikimedia_scope_stays_global_beside_us_filtered_trends(self):
         sources = four_source_results()
         sources[0]["records"][0]["country_scope"] = "GLOBAL"
         result = discover_fetch_results(sources, now=NOW)
@@ -149,11 +149,11 @@ class DistributedDiscoveryTests(unittest.TestCase):
                          if item["keyword"].casefold() == "quiet luxury")
         geography = {item["source_id"]: item["market_evidence"]
                      for item in candidate["evidence"]}
-        self.assertEqual(geography[WIKIMEDIA_SOURCE_ID], "UNKNOWN")
+        self.assertEqual(geography[WIKIMEDIA_SOURCE_ID], "GLOBAL")
         self.assertEqual(geography[GOOGLE_SOURCE_ID], "US_FILTER_ONLY")
         assessments = {item["source_id"]: item["market_evidence"]
                        for item in candidate["assessments"]}
-        self.assertEqual(assessments[WIKIMEDIA_SOURCE_ID], "UNKNOWN")
+        self.assertEqual(assessments[WIKIMEDIA_SOURCE_ID], "GLOBAL")
         self.assertEqual(assessments[GOOGLE_SOURCE_ID], "US_FILTER_ONLY")
 
     def test_invalid_record_is_reported_without_erasing_other_evidence(self):

@@ -54,3 +54,24 @@ def list_algorithm_results(
     algorithm_catalog = catalog()
     return {**result, 'evaluation_status': algorithm_catalog['evaluation_status'],
             'catalog': algorithm_catalog}
+
+
+@router.get('/algorithms/multi-source/{keyword_id}')
+def multi_source_trend_profile(keyword_id: str, request: Request):
+    """Read a canonical-keyword evidence profile from retained PostgreSQL lineage."""
+    validate_public_request_origin(request, request.app.state.settings.environment_profile)
+    request_state = getattr(request, 'state', None)
+    service = (getattr(request_state, 'collection_service', None)
+               or getattr(request.app.state, 'collection_service', None))
+    if service is None:
+        raise HTTPException(503, {'code': 'MULTI_SOURCE_ANALYSIS_UNAVAILABLE'})
+    profile_reader = getattr(service.store, 'multi_source_trend_profile', None)
+    if not callable(profile_reader):
+        raise HTTPException(503, {'code': 'MULTI_SOURCE_LINEAGE_UNAVAILABLE'})
+    try:
+        profile = profile_reader(keyword_id)
+    except ValueError:
+        raise HTTPException(422, {'code': 'INVALID_KEYWORD_ID'}) from None
+    if profile is None:
+        raise HTTPException(404, {'code': 'KEYWORD_NOT_FOUND'})
+    return profile

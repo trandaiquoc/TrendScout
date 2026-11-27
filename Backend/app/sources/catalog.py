@@ -39,6 +39,10 @@ class SourceCapability:
     metric_description: str
     capabilities: tuple[str, ...]
     keyword_extraction_modes: tuple[str, ...] = ()
+    platform_id: str = "unknown"
+    evidence_roles: tuple[str, ...] = ()
+    independence_domain: str | None = None
+    policy_restricted_roles: tuple[str, ...] = ()
 
 
 SOURCE_CAPABILITIES = (
@@ -80,6 +84,9 @@ SOURCE_CAPABILITIES = (
             "top_list_censored",
         ),
         keyword_extraction_modes=("DIRECT_KEYWORD",),
+        platform_id="wikimedia",
+        evidence_roles=("TREND_SIGNAL",),
+        independence_domain="wikimedia_pageviews",
     ),
     SourceCapability(
         source_id=YOUTUBE_SOURCE_ID,
@@ -113,6 +120,10 @@ SOURCE_CAPABILITIES = (
         metric_description="Position in query-scoped YouTube search results",
         capabilities=("query_search", "next_page_token", "region_filter", "language_filter"),
         keyword_extraction_modes=(),
+        platform_id="youtube",
+        evidence_roles=("VIDEO_EVIDENCE_ONLY",),
+        independence_domain="youtube_data_api_search",
+        policy_restricted_roles=("VIDEO_EVIDENCE_ONLY",),
     ),
     SourceCapability(
         source_id=GOOGLE_SOURCE_ID,
@@ -147,6 +158,8 @@ SOURCE_CAPABILITIES = (
         # Google Trends supplies an explicit canonical_keyword; SERP titles and
         # snippets remain ineligible for extraction.
         keyword_extraction_modes=("DIRECT_KEYWORD",),
+        platform_id="google_search",
+        evidence_roles=("VERIFICATION",),
     ),
     SourceCapability(
         source_id=BING_SOURCE_ID,
@@ -179,6 +192,9 @@ SOURCE_CAPABILITIES = (
         metric_description="Position in the returned Bing SERP sample",
         capabilities=("query_search", "offset_pagination", "provider_sample"),
         keyword_extraction_modes=(),
+        platform_id="bing_search",
+        evidence_roles=("VERIFICATION",),
+        independence_domain="serpapi_search_verification",
     ),
 )
 

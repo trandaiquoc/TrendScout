@@ -53,7 +53,8 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
         raise ValueError("Unsupported data mode")
     if observation.delivery_mode not in {"FRESH", "CACHED"}:
         raise ValueError("Unsupported delivery mode")
-    if observation.market_evidence not in {"US_COUNTRY_SCOPED", "US_FILTER_ONLY", "UNKNOWN"}:
+    if observation.market_evidence not in {
+            "US_COUNTRY_SCOPED", "US_FILTER_ONLY", "GLOBAL", "UNKNOWN"}:
         raise ValueError("Unsupported market evidence")
     if observation.extraction_mode not in {"PHRASE_RULES", "DIRECT_KEYWORD"}:
         raise ValueError("Unsupported extraction mode")

@@ -8,10 +8,8 @@ from app.discovery.extraction import _utc
 
 
 def prioritize_for_research(candidates: tuple[Candidate, ...]) -> tuple[Candidate, ...]:
-    """Place Fashion/Home first without changing assessment or excluding other topics."""
-    return tuple(sorted(candidates, key=lambda item: (
-        not bool({"fashion", "home_living"} & set(item.categories)), item.keyword_id
-    )))
+    """Apply only deterministic identity ordering; categories do not imply value."""
+    return tuple(sorted(candidates, key=lambda item: item.keyword_id))
 
 
 def select_for_verification(candidates: tuple[Candidate, ...],
@@ -32,7 +30,7 @@ def select_for_verification(candidates: tuple[Candidate, ...],
         item.keyword_id for item in assessments
         if item.classification in {"EMERGING", "ACCELERATING", "SUSTAINED"}
         and item.current_support is not None and item.current_support >= 2
-        and item.market_evidence != "UNKNOWN"
+        and item.market_evidence in {"US_COUNTRY_SCOPED", "US_FILTER_ONLY"}
     }
     selected = []
     for candidate in prioritize_for_research(candidates):

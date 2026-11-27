@@ -108,6 +108,8 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
             market = "US_COUNTRY_SCOPED"
         elif current_market and current_market <= {"US_COUNTRY_SCOPED", "US_FILTER_ONLY"}:
             market = "US_FILTER_ONLY"
+        elif current_market == {"GLOBAL"}:
+            market = "GLOBAL"
         limits = ("SAMPLE_NOT_US_POPULATION", "RULE_BASED_NOT_PROBABILITY", "COVERAGE_LIMITED")
         if any(item.delivery_mode == "CACHED" for item in evidence_rows):
             limits += ("INCLUDES_CACHED_EVIDENCE",)

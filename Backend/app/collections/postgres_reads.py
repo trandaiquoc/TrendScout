@@ -638,6 +638,73 @@ class PostgresCollectionReader:
                     "next_offset": offset + limit if offset + limit < total else None}
         return self._read(read)
 
+    def multi_source_trend_profile(self, keyword_id, *, now=None):
+        """Project one canonical phrase across active, mode-matched source lineage."""
+        if not isinstance(keyword_id, str) or not keyword_id or len(keyword_id) > 128:
+            raise ValueError("keyword_id is required")
+        observed_now = now or datetime.now(timezone.utc)
+        if (not isinstance(observed_now, datetime) or observed_now.tzinfo is None
+                or observed_now.utcoffset() is None):
+            raise ValueError("aware profile time is required")
+        observed_now = observed_now.astimezone(timezone.utc)
+
+        def read(db):
+            scope = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
+            target_parameters = ((keyword_id, self.data_mode_scope)
+                                 if self.data_mode_scope else (keyword_id,))
+            target = db.execute(sql.SQL("SELECT id,keyword,data_mode FROM {} WHERE id=%s {}")
+                                .format(self._table("keywords"), scope),
+                                target_parameters).fetchone()
+            if target is None:
+                return None
+
+            from app.analysis.keyword_identity import canonical_keyword_digest
+            from app.discovery.multi_source import build_multi_source_profile
+
+            canonical_identity = canonical_keyword_digest(target["keyword"])
+            mode = target["data_mode"]
+            related = db.execute(sql.SQL("""SELECT DISTINCT k.id FROM {} k
+                WHERE k.data_mode=%s AND EXISTS (
+                    SELECT 1 FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                    WHERE ek.keyword_id=k.id AND se.expires_at>%s
+                      AND se.query_scope->>'canonical_keyword_identity'=%s)
+                ORDER BY k.id""").format(
+                    self._table("keywords"), self._table("evidence_keywords"),
+                    self._table("source_evidence")),
+                (mode, observed_now, canonical_identity)).fetchall()
+            identifiers = sorted({target["id"], *(row["id"] for row in related)})
+            keyword_rows = db.execute(sql.SQL("""SELECT id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence FROM {} WHERE id=ANY(%s) AND data_mode=%s
+                ORDER BY source,project,id""").format(self._table("keywords")),
+                (identifiers, mode)).fetchall()
+            evidence_rows = db.execute(sql.SQL("""SELECT se.id,se.source_id,s.display_name,
+                se.external_id,se.content_digest,se.query_scope,se.geography,se.observed_at,
+                se.collected_at,se.expires_at,ek.keyword_id FROM {} ek
+                JOIN {} se ON se.id=ek.evidence_id JOIN {} s ON s.id=se.source_id
+                JOIN {} k ON k.id=ek.keyword_id WHERE ek.keyword_id=ANY(%s)
+                  AND k.data_mode=%s AND se.expires_at>%s
+                ORDER BY se.collected_at,se.id,ek.keyword_id""").format(
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("sources"), self._table("keywords")),
+                (identifiers, mode, observed_now)).fetchall()
+            algorithm_rows = db.execute(sql.SQL("""SELECT r.keyword_id,r.algorithm_id,r.version,
+                r.status,r.reason_code,r.value,r.metric,r.unit,r.input_digest,r.result_json,r.updated_at
+                FROM {} r JOIN {} k ON k.id=r.keyword_id WHERE r.keyword_id=ANY(%s)
+                  AND k.data_mode=%s ORDER BY r.keyword_id,r.algorithm_id""").format(
+                    self._table("algorithm_results"), self._table("keywords")),
+                (identifiers, mode)).fetchall()
+            return build_multi_source_profile(
+                canonical_keyword=target["keyword"],
+                canonical_identity=canonical_identity,
+                data_mode=mode,
+                keyword_rows=[dict(row) for row in keyword_rows],
+                evidence_rows=[dict(row) for row in evidence_rows],
+                algorithm_results=[dict(row) for row in algorithm_rows],
+                now=observed_now,
+            )
+
+        return self._read(read)
+
     def runtime_storage_metrics(self, model_version):
         scope = sql.SQL("AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
         mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()

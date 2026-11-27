@@ -1191,6 +1191,239 @@ def test_google_trends_increase_rank_persists_lineage_and_skips_unchanged_inputs
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_postgres_multi_source_profile_keeps_metrics_roles_and_lineage_separate():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema)
+            service = CollectionService(store, fetch_model_inference_enabled=False)
+            fetched_at = "2026-11-26T12:00:00Z"
+            provider_data_at = "2026-11-26T11:30:00Z"
+            google_rows = []
+            for phrase, increase, volume in (
+                    ("wireless headphones", 250.0, 20000),
+                    ("over-ear headphones", 100.0, 5000)):
+                _, identity = normalize_keyword(phrase)
+                google_rows.append({
+                    "data_source": "GOOGLE_TRENDS",
+                    "provider_id": "serpapi_google_trends_trending_now",
+                    "transport_id": "serpapi",
+                    "discovery_mode": "SERPAPI_TRENDING_NOW",
+                    "canonical_keyword": phrase,
+                    "canonical_keyword_identity": hashlib.sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest(),
+                    "region": "US", "language": "en", "time_window_hours": 24,
+                    "provider_data_at": provider_data_at,
+                    "provider_created_at": provider_data_at,
+                    "fetched_at": fetched_at,
+                    "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
+                    "delivery_state": "FRESH", "quality_flags": [],
+                    "serp_verification": {
+                        "status": "VERIFIED", "provider_id": "serpapi_google",
+                        "transport_id": "serpapi", "query": phrase, "market": "US",
+                        "fetched_at": fetched_at,
+                        "results": [{"rank": 1, "title": phrase}],
+                    } if phrase == "wireless headphones" else None,
+                    "bing_verification": {
+                        "status": "VERIFIED", "provider_id": "serpapi_bing",
+                        "verification_mode": "BING_SERP", "query": phrase,
+                        "market": "US", "language": "en-US", "fetched_at": fetched_at,
+                        "results": [{"rank": 1, "title": phrase}],
+                    } if phrase == "wireless headphones" else None,
+                    "trend_clusters": [{
+                        "trend_cluster_id": "cluster-" + hashlib.sha256(
+                            phrase.encode("utf-8")
+                        ).hexdigest()[:12],
+                        "increase_percentage": increase,
+                        "search_volume": volume,
+                        "search_volume_display": f"{volume // 1000}K+",
+                        "search_volume_semantics": "PROVIDER_REPORTED_APPROXIMATE_BUCKET",
+                        "started_at": provider_data_at,
+                        "ended_at": fetched_at,
+                    }],
+                })
+            google_source = {
+                "source_id": GOOGLE_SOURCE_ID, "status": "SUCCESS",
+                "data_mode": "SYNTHETIC", "record_count": len(google_rows),
+                "records": google_rows,
+            }
+            google_cleaned = [keyword_record(row, GOOGLE_SOURCE_ID, "SYNTHETIC")
+                              for row in google_rows]
+            google_saved = store.persist_cleaned_keywords(
+                google_cleaned,
+                source_evidence_rows=build_source_evidence([google_source])["rows"],
+            )
+            google_analysis = service._analyze_google_trends_keywords(
+                google_saved["records"], sources=[google_source],
+                keyword_id_map=google_saved["id_remap"],
+                persisted_source_evidence_ids=google_saved["source_evidence_ids"],
+            )
+            assert google_analysis["executed_keywords"] == 2
+
+            wikimedia_rows = [{
+                "article_display": phrase,
+                "article_original": phrase.replace(" ", "_"),
+                "project": "en.wikipedia", "country_scope": "US",
+                "access": "all-access", "observation_date": "2026-11-26",
+                "fetched_at": fetched_at,
+                "provider_rank": rank, "views_ceil": views,
+                "source_url": "https://en.wikipedia.org/wiki/" + phrase.replace(" ", "_"),
+                "quality_flags": [],
+            } for phrase, rank, views in (
+                ("wireless headphones", 10, 4000),
+                ("over-ear headphones", 20, 2000),
+            )]
+            wikimedia_source = {
+                "source_id": WIKIMEDIA_SOURCE_ID, "status": "SUCCESS",
+                "data_mode": "SYNTHETIC", "record_count": len(wikimedia_rows),
+                "records": wikimedia_rows,
+            }
+            wikimedia_cleaned = [keyword_record(row, WIKIMEDIA_SOURCE_ID, "SYNTHETIC")
+                                 for row in wikimedia_rows]
+            wikimedia_saved = store.persist_cleaned_keywords(
+                wikimedia_cleaned,
+                source_evidence_rows=build_source_evidence([wikimedia_source])["rows"],
+            )
+            wikimedia_analysis = service._analyze_persisted_keywords(
+                wikimedia_saved["records"], sources=[wikimedia_source],
+            )
+            assert wikimedia_analysis["recomputed_algorithms"] >= 2
+
+            google_id = next(record["id"] for record in google_saved["records"]
+                             if record["keyword"] == "wireless headphones")
+            wikimedia_id = next(record["id"] for record in wikimedia_saved["records"]
+                                if record["keyword"] == "wireless headphones")
+            assert google_id != wikimedia_id
+            profile = store.multi_source_trend_profile(
+                google_id, now=datetime.fromisoformat("2026-11-26T13:00:00+00:00"),
+            )
+            assert profile["canonical_keyword_identity"] == hashlib.sha256(
+                b"wireless headphones"
+            ).hexdigest()
+            assert {"US_COUNTRY_SCOPED", "US_FILTER_ONLY"} == set(
+                profile["market_relevance"]["evidence_scopes"]
+            )
+            assert profile["market_relevance"]["status"] == "MIXED"
+            assert profile["market_relevance"]["audience_geography_inferred"] is False
+            assert profile["corroboration"]["composite_score"] is None
+            assert profile["corroboration"]["ranking_method"] == "SOURCE_SPECIFIC_RESULTS_ONLY"
+            assert profile["corroboration"]["independent_trend_signal_group_count"] == 1
+            assert {outcome["source_id"] for outcome in profile["trend_signal_outcomes"]} == {
+                GOOGLE_SOURCE_ID,
+            }
+            assert profile["corroboration"]["status"] == "SINGLE_INDEPENDENT_TREND_SIGNAL"
+            profiles = profile["source_breakdown"]
+            google_trends = next(item for item in profiles
+                                 if item["platform_id"] == "google_trends"
+                                 and item["evidence_status"] == "PRESENT")
+            wikimedia = next(item for item in profiles
+                             if item["platform_id"] == "wikimedia"
+                             and item["evidence_status"] == "PRESENT")
+            google_search = next(item for item in profiles
+                                 if item["platform_id"] == "google_search"
+                                 and item["evidence_status"] == "PRESENT")
+            bing = next(item for item in profiles
+                        if item["source_id"] == "bing_web_serp"
+                        and item["evidence_status"] == "PRESENT")
+            youtube = next(item for item in profiles
+                           if item["source_id"] == "youtube_video_search")
+            assert google_trends["evidence_role"] == "TREND_SIGNAL"
+            assert google_trends["coverage"]["keyword_evidence_reference_count"] == 1
+            assert google_trends["coverage"]["snapshot_statuses"] == ["SUCCESS"]
+            assert google_trends["coverage"]["source_population_totals"] == "NOT_RETAINED"
+            assert google_trends["source_specific_rankings"]
+            assert all(len(item["input_digest"]) == 64
+                       and item["version"]
+                       and item["result"]["source_id"] == GOOGLE_SOURCE_ID
+                       for item in google_trends["source_specific_rankings"])
+            assert google_trends["metric_observations"] == [
+                {"metric": "approximate_search_volume_bucket",
+                 "unit": "PROVIDER_REPORTED_APPROXIMATE_BUCKET", "value": 20000,
+                 "display": "20K+"},
+                {"metric": "provider_increase_percentage",
+                 "unit": "provider_reported_percentage", "value": 250.0},
+            ]
+            assert wikimedia["evidence_role"] == "OBSERVED_ACTIVITY"
+            assert {"views_ceil", "provider_rank"} <= {
+                metric["metric"] for metric in wikimedia["metric_observations"]
+            }
+            assert google_search["evidence_role"] == "VERIFICATION"
+            assert bing["evidence_role"] == "VERIFICATION"
+            verification_groups = [item for item in profile["independent_evidence_groups"]
+                                   if item["role"] == "VERIFICATION"]
+            assert len(verification_groups) == 1
+            assert len(verification_groups[0]["source_adapter_ids"]) == 2
+            assert youtube["evidence_status"] == "POLICY_RESTRICTED"
+            assert all(item.get("absence_is_negative_evidence") is not True
+                       for item in profiles if not item["evidence_references"])
+
+            import httpx
+
+            from app.main import create_app
+            from app.settings import Settings
+
+            app = create_app(read_only=True, settings=Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true",
+            }))
+            app.state.collection_service = service
+
+            async def read_profile():
+                async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://testserver") as client:
+                    return await client.get(f"/api/v1/algorithms/multi-source/{google_id}")
+
+            response = asyncio.run(read_profile())
+            assert response.status_code == 200
+            assert response.json()["canonical_keyword_identity"] == (
+                profile["canonical_keyword_identity"]
+            )
+            api_profile = response.json()
+            assert api_profile["market_relevance"] == profile["market_relevance"]
+            assert api_profile["corroboration"] == profile["corroboration"]
+
+            def without_dynamic_ages(source_breakdown):
+                return [
+                    {
+                        **source,
+                        "freshness": [
+                            {**freshness, "age_seconds": None}
+                            for freshness in source["freshness"]
+                        ],
+                    }
+                    for source in source_breakdown
+                ]
+
+            assert without_dynamic_ages(api_profile["source_breakdown"]) == (
+                without_dynamic_ages(profile["source_breakdown"])
+            )
+
+            connection.execute(sql.SQL("""UPDATE {} SET expires_at=%s
+                WHERE id IN (SELECT evidence_id FROM {} WHERE keyword_id=%s)""").format(
+                    store._table("source_evidence"), store._table("evidence_keywords")),
+                (datetime.fromisoformat("2026-11-26T12:59:59+00:00"), wikimedia_id))
+            retained_profile = store.multi_source_trend_profile(
+                google_id, now=datetime.fromisoformat("2026-11-26T13:00:00+00:00"),
+            )
+            assert "US_COUNTRY_SCOPED" not in retained_profile[
+                "market_relevance"]["evidence_scopes"]
+            assert any(item["source_id"] == WIKIMEDIA_SOURCE_ID
+                       and item["evidence_status"] == "NO_STORED_EVIDENCE"
+                       for item in retained_profile["source_breakdown"])
+        finally:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_collection_service_processes_fixture_through_postgres_without_model_or_provider_calls():
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:
