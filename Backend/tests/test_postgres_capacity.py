@@ -7,7 +7,7 @@ from psycopg import sql
 
 from app.storage.postgres_capacity import inspect_capacity
 from app.storage.postgres_connection import postgres_connection
-from app.storage.postgres_migrations import apply_migrations
+from app.storage.postgres_migrations import apply_migrations, bundled_migrations
 
 
 def test_capacity_snapshot_measures_schema_without_claiming_project_headroom():
@@ -28,7 +28,7 @@ def test_capacity_snapshot_measures_schema_without_claiming_project_headroom():
             assert result["database"]["connections"] > 0
             assert result["database"]["max_connections"] > 0
             assert result["schema"]["relation_count"] >= 30
-            assert result["schema"]["latest_migration_version"] == 8
+            assert result["schema"]["latest_migration_version"] == len(bundled_migrations())
             assert all(item["total_bytes"] >= item["heap_bytes"]
                        for item in result["schema"]["largest_relations"])
             assert result["neon_project_capacity"] == {

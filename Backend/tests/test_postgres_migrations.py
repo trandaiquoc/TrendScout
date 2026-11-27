@@ -5,6 +5,7 @@ import uuid
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import (
@@ -12,6 +13,7 @@ from app.storage.postgres_migrations import (
     MigrationMismatch,
     apply_migrations,
     bundled_migrations,
+    verify_migrations,
 )
 
 
@@ -63,3 +65,47 @@ def test_migrations_in_isolated_rolled_back_schema():
         assert connection.execute(
             "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = %s)", (schema,)
         ).fetchone()[0] is False
+
+
+def test_upgrade_from_version_nine_verifies_checksum_idempotency_and_compatibility():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    schema = "ts_test_db07_" + uuid.uuid4().hex
+    migrations = bundled_migrations()
+    assert len(migrations) == 12
+
+    with postgres_connection({"DATABASE_URL_UNPOOLED": url}, direct=True) as connection:
+        connection.autocommit = True
+        assert connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0] is False
+        created = False
+        try:
+            created = True
+            assert apply_migrations(connection, schema=schema, migrations=migrations[:9]) == tuple(
+                range(1, 10)
+            )
+            assert apply_migrations(connection, schema=schema) == (10, 11, 12)
+            verify_migrations(connection, schema=schema)
+            assert apply_migrations(connection, schema=schema) == ()
+
+            ledger = connection.execute(sql.SQL(
+                "SELECT version,name,checksum FROM {}._schema_migrations ORDER BY version"
+            ).format(sql.Identifier(schema))).fetchall()
+            assert ledger == [(item.version, item.name, item.checksum) for item in migrations]
+            columns = connection.execute(
+                "SELECT table_name,column_name FROM information_schema.columns "
+                "WHERE table_schema=%s AND ("
+                "(table_name='dataset_snapshots' AND column_name IN "
+                "('source_ingestion_status','materialization_status','algorithm_processing_status',"
+                "'ai_classification_status')) OR "
+                "(table_name='classification_results' AND column_name='classification_input_digest'))",
+                (schema,),
+            ).fetchall()
+            assert len(columns) == 5
+        finally:
+            if created:
+                connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema),
+                ))

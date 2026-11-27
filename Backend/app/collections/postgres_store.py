@@ -2110,7 +2110,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 item = dict(row)
                 metadata = _decode_ai_proposal_reason(item.get("reason"))
                 item["reason"] = metadata.get("reason", "")
-                for field in ("score", "uncertainty", "evidence_ids", "model_id"):
+                for field in ("score", "uncertainty", "evidence_ids", "source_ids", "model_id"):
                     if field in metadata:
                         item["model_" + field if field == "score" else field] = metadata[field]
                 result.append(item)

@@ -88,10 +88,22 @@ def test_summary_and_tree_match_legacy_on_isolated_postgres(tmp_path):
             assert reader.latest_dataset_reuse_summary() is None
             assert reader.list_collections() == []
             import_backup(connection, backup, schema=schema)
-            assert reader.latest_dataset() == legacy.latest_dataset()
+            postgres_dataset = reader.latest_dataset()
+            status_fields = (
+                "source_ingestion_status", "materialization_status",
+                "algorithm_processing_status", "ai_classification_status",
+            )
+            assert {field: postgres_dataset.pop(field) for field in status_fields} == {
+                field: "UNKNOWN" for field in status_fields
+            }
+            assert postgres_dataset == legacy.latest_dataset()
             assert reader.latest_dataset_reuse_summary() == {
                 "dataset_id": "dataset",
                 "processing_status": "COMPLETED",
+                "source_ingestion_status": "UNKNOWN",
+                "materialization_status": "UNKNOWN",
+                "algorithm_processing_status": "UNKNOWN",
+                "ai_classification_status": "UNKNOWN",
                 "source_manifest": [{"source_id": "synthetic"}],
             }
             query = {"source_id": "synthetic", "project_prefix": "google_trends:",

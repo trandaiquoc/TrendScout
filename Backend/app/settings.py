@@ -308,6 +308,8 @@ class Settings:
             raise ValueError(
                 "PostgreSQL runtime requires pooled and direct database URLs"
             )
+        if postgres_runtime_enabled and not environment.get("TREND_SCOUT_RUN_MODE", "").strip():
+            raise ValueError("PostgreSQL runtime requires a writable LIVE local or Vercel profile")
         public_fetch_deadline_seconds = _bounded_float(
             environment, "TREND_SCOUT_PUBLIC_FETCH_DEADLINE_SECONDS", 60.0, 1.0, 300.0
         )
