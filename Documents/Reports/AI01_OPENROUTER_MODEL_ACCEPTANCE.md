@@ -1,24 +1,20 @@
 # AI01 — OpenRouter model acceptance
-As of 2026-11-27. Branch: `integration/demo-final`; no Production configuration changed.
-Progress: [50%] AI01 BLOCKED; G1/G5/G6 PASS; G2/G3/G4 BLOCKED.
-G1 PASS — Lifecycle statuses are verified by focused tests; no runtime lifecycle bug reproduced.
-G2 BLOCKED — `.env` key was not printed; OpenRouter `GET /key` returned HTTP 401, so authentication and safe quota metadata are unavailable.
-G3 BLOCKED — None of the six current Gemma/Nemotron `:free` variants meets every zero-price, active, JSON Schema, limits, and ZDR requirement.
-G4 BLOCKED — No eligible authenticated model; guarded synthetic inference was correctly not attempted.
-G5 PASS — PostgreSQL quota, jobs/idempotency, ALG07 inputs and fail-closed contracts passed against isolated test schemas.
-G6 PASS — Required focused tests, scoped Ruff, compileall, diff check, schema cleanup, commit and remote verification passed; wider `app/ai` lint retains findings in untouched modules.
-Lifecycle root cause: SQLite `CollectionStore` without AI correctly reports `AI_DISABLED`; the stale test expected Postgres incremental `MODEL_INFERENCE_DEFERRED`, which remains distinct and has its own passing no-provider regression.
-The OpenRouter mock routed only paths ending `/models`, not `/models/{author}/{slug}/endpoints`; this caused false provider-unavailable failures.
-After fixing the mock route, nonzero auxiliary pricing is `AI_PRICING_UNVERIFIED`/`PENDING` per contract; the old `AI_MODEL_UNAVAILABLE` expectation was stale.
-Three other Smart Collections failures expected legacy embedding-era completion without an AI service; tests now assert `AI_DISABLED` and preserve scope/user state.
-Fixes: corrected lifecycle assertions/mock routing; added model-vs-pricing status and storage-unavailable regression tests; no AI behavior change was needed.
-Source manifest remains `SUCCESS` and the keyword is retained while collection processing independently reports `MODEL_UNAVAILABLE`; PostgreSQL lineage tests pass.
-Provider quota: unavailable after 401; remaining quota was not inferred. Internal PostgreSQL limits remain 40/day and 20/minute.
-Eligible-shape candidate: `nvidia/nemotron-3.5-super-vl:free` is active, zero-priced, structured-output capable (1M context/131072 output), but has no matching ZDR endpoint.
-Other variants: `nvidia/nemotron-3.5-lightning:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`, `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`, `google/gemma-4-26b-a4b-it:free`, and `google/gemma-4-31b-it:free`; none meets structured-output plus ZDR.
-Selected exact model IDs: none. Classification and recommendation quality/latency/token usage remain unverified because no inference was eligible.
-Physical inference requests: 0/6; no inference charge incurred. Only the requested OpenRouter metadata GETs were made; no source providers or OpenRouter completion endpoint were called.
-Tests: 95 passed, 21 subtests passed, 0 skipped; PostgreSQL fixture tests used and dropped only their isolated `ts_test_*` schemas.
-`compileall`, `git diff --check`, and fixture-owned PostgreSQL schema cleanup: PASS; no `trendscout` schema was written.
-Code/test commit: `ed1567871b2f4359b408a30a74ef005fbf62a82d` (pushed and remote-verified before this report).
-OpenRouter references (checked 2026-11-27): [key metadata](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key), [models](https://openrouter.ai/docs/api/api-reference/models/get-models), [model endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints), [ZDR endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints-zdr).
+As of 2026-11-27; branch `integration/demo-final`.
+Progress: [83%] AI01 BLOCKED; G1/G2/G3/G5/G6 PASS, G4 BLOCKED.
+G1 PASS — Existing lifecycle and failure-state contracts remain covered by focused tests.
+G2 PASS — AI01C root `.env` key: direct `GET /key` and adapter both HTTP 200; quota metadata verified.
+G3 PASS — Full `GET /models` catalog: 441 entries, 11 exact `:free` text-to-text models; all 11 model prices are zero.
+Endpoint scan — All 11 endpoint routes returned metadata; 9 active (`status=0`), 2 inactive (`status=-2`); active endpoint prices, including auxiliary fields, were zero.
+Five models advertise `structured_outputs`; two also match active endpoint, exact provider tag, and `safety_retention=false` in the ZDR list.
+Eligible exact IDs: `liquid/lfm-3-1.7b:free` (Liquid, tag `liquid`, 262144 context/8192 output); `particle-ai/particle-1:free` (Particle AI, tag `particle-ai/us`, 1048576/943718).
+The adapter verified both exact model IDs and endpoint/provider tags. Provider slugs were checked against `/providers`; routing kept the full endpoint slug.
+Rejected 9: 3 structured-output models lack a matching ZDR endpoint; 2 endpoints are inactive; 4 active models lack structured-output support.
+Configuration candidates only, not written or enabled: `TRENDSCOUT_AI_COLLECTION_MODEL=liquid/lfm-3-1.7b:free`; `TRENDSCOUT_AI_RECOMMENDATION_MODEL=particle-ai/particle-1:free`.
+G4 BLOCKED — Four physical synthetic requests (two per candidate) returned HTTP 404; adapter mapped them to `AI_PROVIDER_UNAVAILABLE`; no completion succeeded.
+Classification and recommendation both deferred; fixture accuracy and recommendation relevance are unmeasurable. Failed POST wall latency was 74–328 ms; task end-to-end 1.56–2.83 s; successful token usage 0.
+Each physical attempt received one PostgreSQL quota reservation in two isolated schemas (2 each; 4 total); all failed. Both schemas were dropped; `trendscout` was untouched.
+OpenRouter key usage was 0 before and after. No generation IDs were returned, so per-generation actual cost could not be verified; no inference completion was billed according to key usage.
+G5 PASS — PostgreSQL quota reservation was shared within each isolated AIService run; failure attempts consumed quota. G6 PASS — `test_ai_engine.py`: 28 passed, 2 subtests passed; Ruff, compileall, diff check, and cleanup passed.
+AI01C's 2 skips were Linux-only owner-host tests, skipped on this Windows host; they are unrelated to root ENV acceptance and are not required AI01D gates.
+No inference retry was made after the four 404s; no source provider, Production ENV, or inference budget setting was changed.
+References (checked 2026-11-27): [models](https://openrouter.ai/docs/api/api-reference/models/get-models), [model endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints), [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection), [generation cost metadata](https://openrouter.ai/docs/api/api-reference/generations/get-generation), [ZDR endpoint list](https://openrouter.ai/api/v1/endpoints/zdr).
