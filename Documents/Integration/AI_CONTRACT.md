@@ -1,7 +1,7 @@
 # TrendScout AI Integration Contract
 
 **Version:** 1.4-draft
-**Status:** AI input contract and profile isolation implemented on `integration/demo-final`; AI01G synthetic classification and recommendation acceptance passed on 2026-11-27. STRICT_PRIVATE LIVE, real-source processing, and production acceptance remain unverified.
+**Status:** AI input contract, profile isolation, and the server-side `PUBLIC_DATA` transfer boundary are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
@@ -13,37 +13,41 @@ The AI boundary is implemented in this branch. The Database goal owns PostgreSQL
 - AI classifies eligible normalized keywords against existing Collections, proposes new Collections for user review, supports user-triggered reclassification, and creates qualitative Vietnam-to-US export product hypotheses.
 - AI does not fetch source data, calculate search volume, create evidence, create a Collection without user acceptance, or claim a product will sell or be profitable.
 - Provider input is built server-side from exact canonical keyword groups and retains all durable source keyword IDs. Groups do not cross data modes or resolved entity identities; unresolved records group only with other unresolved records, and conflicting known entities remain separate. Categories, per-source geography/freshness, active evidence references, source-specific algorithm results, and Collection/user constraints are bounded and deterministically ordered. Request bodies accept IDs and bounded research constraints only. Raw source payloads, credentials, and YouTube data are excluded.
-- A source must appear in both `TRENDSCOUT_AI_ALLOWED_SOURCES` and the independent `TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES`. Both default to empty. The second setting is explicit approval for transfer/processing by the configured AI provider; extraction and derived-metric grants do not imply that permission. YouTube is denied even if configured.
+- For LIVE data in `PUBLIC_DATA` or `STRICT_PRIVATE`, a source must appear in both `TRENDSCOUT_AI_ALLOWED_SOURCES` and the independent `TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES`, and its current source-policy registry entry must allow the task and fields. Both environment lists default to empty. Fetch, storage, derived-metric, AI-transfer, and provider-retention permissions remain independent. YouTube is denied even if configured. See `Documents/Integration/AI_SOURCE_POLICY_MATRIX.md`.
 - Expired or expiry-unknown evidence is omitted. AI cache/result lifetime is bounded by the earliest active evidence expiry; Fetch replay does not extend source expiry.
 - Source geography and observation time remain evidence metadata. English text or a US-targeted product hypothesis does not establish US authorship, readership, or demand.
 - An AI failure does not discard persisted keywords or algorithm results. Resuming an AI job reads stored records; it does not run Fetch or call source adapters.
 
 ## 2. OpenRouter and free-only admission
 
-The adapter uses https://openrouter.ai/api/v1 and a server-side OPENROUTER_API_KEY. Model IDs are configuration; the business logic is provider-independent. Before every inference attempt, the adapter rechecks the exact model's pricing and available endpoints, required structured-output support, provider slug, context/output limits, and current ZDR endpoint list.
+The adapter uses https://openrouter.ai/api/v1 and a server-side OPENROUTER_API_KEY. Classification and recommendation model IDs are separate configuration; business logic does not select a model. Before every inference attempt, the adapter rechecks the exact model's `:free` catalog entry, zero model and endpoint pricing, active endpoint, required structured-output support, provider slug, context/output limits, and profile-specific provider policy. STRICT_PRIVATE additionally rechecks the current ZDR endpoint list.
 
 An inference is admitted only when:
 
 1. The configured ID ends in :free and appears in the current model catalog.
 2. Every listed model and selected-endpoint price field is present, numeric, and zero. Unknown or nonzero fields leave the job PENDING.
 3. The selected endpoint is active and supports the request's JSON Schema output, temperature, and token parameters.
-4. STRICT_PRIVATE (default) requires a currently ZDR-listed endpoint and sends data_collection="deny", zdr=true. PUBLIC_DEMO is local/test only, pins the reviewed Particle AI endpoint, sends data_collection="allow", and omits a request-level ZDR requirement.
-5. Both profiles pin the endpoint, set allow_fallbacks=false, require_parameters=true, and max_price.prompt=0 / completion=0. No web-search plugin, tools, paid fallback, BYOK, credits, or key switching are used.
+4. STRICT_PRIVATE requires a currently ZDR-listed endpoint and sends data_collection="deny", zdr=true. PUBLIC_DATA and PUBLIC_DEMO pin the reviewed Particle AI provider endpoint, send data_collection="allow", and do not require request-level ZDR. PUBLIC_DEMO is local/test-only synthetic data; PUBLIC_DATA is eligible for local and Vercel use only with a verified source grant and explicit source configuration.
+5. All profiles pin the endpoint and set allow_fallbacks=false, require_parameters=true, and max_price.prompt=0 / completion=0. No web-search plugin, tools, paid fallback, BYOK, credits, or key switching are used. PUBLIC_DATA does not permit public prompt/completion exposure; OpenRouter's current default API logging excludes prompt/completion text, and the selected Particle AI policy currently says no training and zero retention. Review these provider policies again before activation.
 6. A shared PostgreSQL quota reservation commits before the chat-completion request.
 
 ### Data profiles
 
-- `STRICT_PRIVATE` is the default and preserves the independent source allowlist, transfer approval, YouTube prohibition, and ZDR routing. Local/Vercel composition continues to use its existing primary Collection store.
+- `PUBLIC_DATA` is the runtime default profile proposed for TrendScout's public-source workflow and supports local/Vercel composition over the existing PostgreSQL Collection store. It accepts only source IDs present in the source-policy registry, the server allowlist, and the separate transfer-approval list. The checked-in policy currently allows only `wikimedia_pageviews_top_per_country` for live AI input. The AI feature remains disabled and both source lists remain empty by default.
+- PUBLIC_DATA sends only the source registry's field projection. It omits user removal feedback, existing Collection membership context, unapproved Collection names/descriptions, and raw provider payloads. Collection names/descriptions are eligible only when their durable IDs appear in server-side `TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS`; the runtime screens those texts for private/confidential markers and common PII patterns. Non-empty `research_constraints` are rejected in PUBLIC_DATA because no server-side public classification exists for request-supplied constraints.
+- `STRICT_PRIVATE` is an opt-in private-data profile. It preserves the independent source allowlist, transfer approval, YouTube prohibition, and ZDR routing. An invalid profile fails closed; it does not switch profiles. PublicData source permissions never override STRICT_PRIVATE's ZDR requirements.
 - `PUBLIC_DEMO` requires an explicit server-side `TRENDSCOUT_AI_DATA_PROFILE=PUBLIC_DEMO`, local/test environment, and a distinct `ts_test_ai_demo_<hex>` schema configured through `TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA`. Vercel rejects this profile.
 - PUBLIC_DEMO AI routes are bound to a separate PostgreSQL store scoped to `data_mode=SYNTHETIC`; the store must contain the server-written `ai_synthetic_provenance` marker. The schema cannot equal the primary schema. Client request models have no profile selector and reject extra fields.
 - Only synthetic fixtures may be written to this profile. It cannot read the primary schema's keywords or Collections. Source IDs on fixture rows identify the data contract and do not enable source adapters or grant transfer of real provider data. A runtime check rejects LIVE rows.
 - The selected public-demo model is `particle-ai/particle-1:free`, pinned to `particle-ai/us`. OpenRouter's provider directory currently labels Particle AI as no-training and zero-retention; model pricing/endpoint metadata is verified separately for each inference. No public prompt/completion exposure is accepted for this profile.
-- Profile and profile-version are included in classification/recommendation digests. Cache and idempotency identity cannot cross STRICT_PRIVATE and PUBLIC_DEMO.
-- Provider retention/training permission in PUBLIC_DEMO applies only to synthetic inputs. It does not approve real source data, production records, user research, credentials, or internal information.
+- Profile, profile version, transfer-policy version, source approvals, source field policy, and approved public Collection IDs are included in classification/recommendation digests. Cache and idempotency identity cannot cross STRICT_PRIVATE, PUBLIC_DATA, and PUBLIC_DEMO.
+- PUBLIC_DATA eligibility comes only from an explicit source license/policy review and does not approve unrelated records, user research, credentials, private Collection context, or confidential business constraints. PUBLIC_DEMO's provider-policy choice applies only to synthetic fixtures and grants no live-source permission.
 
 No application-level model fallback is implemented. Classification and recommendation may use different configured model IDs; the checked-in example pins the same reviewed free candidate for both while keeping AI disabled. Synthetic smoke acceptance establishes the structured contract only, not broad model quality.
 
 The internal budget is **40 physical inference requests per UTC day** and **20 per rolling minute**, shared through PostgreSQL. Failed requests and user retries consume reservations. Cache hits do not call the provider. The limit applies to model inference; metadata lookups are not counted as inference.
+
+A provider HTTP 429 records a shared PostgreSQL `provider_retry_at` across classification and recommendation. Every AI task remains deferred until the normalized provider Retry-After/reset time; if the provider supplied no usable reset, the runtime waits one full rolling minute. Repeated submissions still consume internal reservations only when a physical inference is admitted.
 
 OpenRouter currently publishes a free-variant baseline of 50 requests/day and 20/minute; failed attempts count against the daily limit. These account limits can change. The internal daily cap leaves headroom and does not rely on separate per-model quotas. [Free model limits](https://openrouter.ai/collections/free-models/) · [Pricing and plan limits](https://openrouter.ai/pricing)
 
@@ -120,7 +124,7 @@ Requires Idempotency-Key with 8–128 printable ASCII characters.
       "preview": false
     }
 
-The request has no text, evidence, source, Collection, model, URL, or credential fields. The service groups exact canonical phrases within each data mode and resolved entity identity, passes one logical keyword input with its durable source IDs, categories, active evidence IDs, and current Collection context, and fans a validated result back to eligible durable IDs. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, unsupported-mode, evidence-expired, and YouTube rows are not sent. Removed Collection IDs are unioned across grouped source records so a result cannot override a user's removal on any member.
+The request has no text, evidence, source, Collection, model, URL, or credential fields. The service groups exact canonical phrases within each data mode and resolved entity identity, passes one logical keyword input with its durable source IDs, categories, active evidence IDs, and eligible Collection context, and fans a validated result back to eligible durable IDs. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, unsupported-mode, evidence-expired, and YouTube rows are not sent. Removed Collection IDs remain part of the server-side write guard and are never included in PUBLIC_DATA prompts. PUBLIC_DATA sends only fields allowed by the source policy matrix; Collection names/descriptions require the server-side public Collection ID allowlist and a content screen.
 
 Classification is batched. Initial batch size is bounded by model limits and token estimates, then adjusted using recent latency and structured-output validity. Only cache misses are sent. Cache identity includes the model, prompt/schema/input-contract/source-policy versions, canonical group and durable IDs, source/data-mode/categories, active evidence content/expiry, Collections and versions, and per-keyword override state. The Postgres write transaction rechecks keyword, active evidence lineage/expiry, categories, override, data mode, and Collection state before applying changes.
 
@@ -158,7 +162,7 @@ User membership, pinned keywords, exclusion, removal feedback, proposal-name sup
 
 ### POST /api/v1/ai/recommendations
 
-Requires Idempotency-Key. keyword_ids accepts 1–20 IDs; research_constraints is optional and at most 500 characters; regenerate is a boolean. The server groups exact canonical phrases within each data mode and resolved entity identity and loads eligible normalized keywords, categories, Collections, active source evidence, and current algorithm results with active evidence lineage. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. The profile keeps metric/unit, source role/platform, independent evidence groups, geography, window, freshness, conflicting/insufficient status, and source limitations separate. It supplies no composite score and no raw provider payload. If current evidence is insufficient, the bounded input says so explicitly.
+Requires Idempotency-Key. keyword_ids accepts 1–20 IDs; research_constraints is optional and at most 500 characters; regenerate is a boolean. In PUBLIC_DATA, non-empty request-supplied research constraints are rejected because they have no server-side public classification. The server groups exact canonical phrases within each data mode and resolved entity identity and loads eligible normalized keywords, categories, active source evidence, and current algorithm results with active evidence lineage. Existing Collection membership context is omitted from PUBLIC_DATA. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. The profile keeps metric/unit, source role/platform, geography, window, freshness, conflicting/insufficient status, and source limitations separate. It supplies no composite score and no raw provider payload. If current evidence is insufficient, the bounded input says so explicitly.
 
 Each recommendation is labeled AI hypothesis and includes a product name/category, US export target, related keyword/evidence IDs, rationale, potential segment, seasonality, possible materials, manufacturing/export considerations, competition/IP/regulatory risks, uncertainty, research steps, and encoded marketplace search links. A link creates a search URL; it does not mean the marketplace was searched.
 
@@ -168,7 +172,7 @@ Identical business-input digests reuse the stored recommendation. Manual regener
 
 ## 8. Environment
 
-Repository-root `.env.example` is the only local environment template. The checked-in defaults keep AI disabled, STRICT_PRIVATE selected, source allowlist/transfer approval blank, and model IDs set only to the reviewed free candidate.
+Repository-root `.env.example` is the only local environment template. The checked-in defaults keep AI disabled, select PUBLIC_DATA as the proposed operating profile, leave source allowlist/transfer approval and public Collection context blank, and set classification and recommendation model IDs to the reviewed free candidate. Vercel must use equivalent server-side environment settings; this change does not modify Production ENV.
 
 | Variable | Purpose |
 | --- | --- |
@@ -178,12 +182,13 @@ Repository-root `.env.example` is the only local environment template. The check
 | TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; the checked-in example uses the same reviewed Particle AI candidate. |
 | TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated allowlist of Wikimedia, Google, and Bing source IDs; defaults to empty. YouTube is always denied. |
 | TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate comma-separated approval for transferring those source records/evidence to the configured AI provider; defaults to empty and never grants extraction permission. YouTube is always denied. |
-| TRENDSCOUT_AI_DATA_PROFILE | Server-side `STRICT_PRIVATE` default; `PUBLIC_DEMO` is restricted to local/test synthetic data. Never a request-body field. |
+| TRENDSCOUT_AI_DATA_PROFILE | Server-side `PUBLIC_DATA` runtime default; `STRICT_PRIVATE` is an explicit private-data profile requiring deny/ZDR; `PUBLIC_DEMO` is restricted to local/test synthetic data. Never a request-body field. |
 | TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA | Dedicated local/test schema matching `ts_test_ai_demo_<hex>`; it must be distinct from the primary schema and carry the server-set synthetic provenance marker. |
+| TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS | Server-side IDs of Collections reviewed and classified public for AI context. Defaults to empty; unlisted Collection text is omitted. |
 
 ## 9. Provider references
 
-Verified against OpenRouter's public model, endpoint, ZDR, routing, and provider policy metadata on **2026-11-27**. The AI01G synthetic smoke completed one expected classification and one recommendation with valid references; generation metadata confirmed Particle AI, the resolved free model, and zero cost for both. This is a narrow contract smoke, not a task-quality benchmark. STRICT_PRIVATE live-source use and production acceptance remain unverified. Provider policies can change.
+Provider and source policies were reviewed on **2026-11-27**. The Wikimedia Pageviews Analytics API states its data is CC0. Google/Bing search and Google Trends transfers remain denied because the current retrieval paths do not establish the required permission; YouTube and Wikimedia entity text remain denied. OpenRouter's provider directory currently labels Particle AI no-training/zero-retention; Particle's current Terms and Privacy Policy describe standard synchronous inference as zero-retention and no-training. OpenRouter says prompt/completion text is not logged by default, though request metadata may be retained. See the dated source matrix for direct policy references and restrictions. The AI01G synthetic smoke completed one expected classification and one recommendation with valid references; generation metadata confirmed Particle AI, the resolved free model, and zero cost for both. This is a narrow contract smoke, not a task-quality benchmark. PUBLIC_DATA real-source acceptance and production activation are tracked separately; provider/source policies can change.
 
 - [Models API and pricing fields](https://openrouter.ai/docs/api/api-reference/models/get-models)
 - [Per-model provider endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)

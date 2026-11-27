@@ -337,6 +337,26 @@ def test_postgres_ai_quota_is_shared_across_service_instances():
         assert services[0]._quota()["daily_used"] == ROLLING_MINUTE_LIMIT
 
 
+def test_postgres_provider_rate_limit_cooldown_is_shared_across_tasks():
+    with isolated_schema() as (environment, schema, _connection):
+        services = [
+            AIService(PostgresAtomicStateStore(environment, schema=schema),
+                      config=_ai_config(), provider=object(), utcnow=lambda: NOW)
+            for _ in range(2)
+        ]
+        attempt = services[0]._reserve("provider-limited-classification", "classification")
+        retry_at = (NOW + timedelta(minutes=1)).isoformat()
+        services[0]._finish_attempt(
+            attempt, outcome="FAILED", error_code="AI_RATE_LIMITED", retry_at=retry_at,
+        )
+        with pytest.raises(AIExecutionError) as caught:
+            services[1]._reserve("provider-limited-recommendation", "recommendations")
+
+        assert caught.value.code == "AI_RATE_LIMITED"
+        assert caught.value.retry_at == retry_at
+        assert services[0]._quota()["daily_used"] == 1
+
+
 def test_public_demo_profile_is_bound_to_attested_synthetic_postgres_schema():
     with isolated_schema("ts_test_ai_demo_") as (environment, schema, connection):
         store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="SYNTHETIC")

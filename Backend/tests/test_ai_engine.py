@@ -17,6 +17,9 @@ from starlette.requests import Request
 
 from app.ai.input_contract import group_keyword_records
 from app.ai.openrouter import (
+    PUBLIC_DATA as OPENROUTER_PUBLIC_DATA,
+)
+from app.ai.openrouter import (
     OpenRouterAdapter,
     OpenRouterError,
     VerifiedModel,
@@ -24,6 +27,7 @@ from app.ai.openrouter import (
 )
 from app.ai.runtime import (
     DAILY_REQUEST_LIMIT,
+    PUBLIC_DATA,
     PUBLIC_DEMO,
     ROLLING_MINUTE_LIMIT,
     STRICT_PRIVATE,
@@ -45,6 +49,7 @@ from app.api.ai import (
     _error,
     reclassify,
 )
+from app.sources.ai_transfer_policy import project_public_data_payload
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 NOW = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
@@ -222,6 +227,16 @@ def config(*, key_present=True, sources=None, enabled=True):
         transfer_approved_sources=frozenset(
             sources if sources is not None else {WIKIMEDIA_SOURCE_ID}),
         api_key_present=key_present,
+    )
+
+
+def public_data_config(*, collection_ids=()):
+    return AIConfig(
+        enabled=True, collection_model=MODEL_ID, recommendation_model=MODEL_ID,
+        allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+        transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+        api_key_present=True, data_profile=PUBLIC_DATA,
+        public_data_collection_ids=frozenset(collection_ids),
     )
 
 
@@ -489,6 +504,41 @@ class OpenRouterAdapterTests(unittest.TestCase):
     def test_public_demo_rejects_non_reviewed_provider(self):
         adapter = OpenRouterAdapter(
             "test-secret", client=self.client, data_profile=PUBLIC_DEMO,
+        )
+        with self.assertRaises(OpenRouterError) as caught:
+            adapter.verify_model(self.model)
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
+
+    def test_public_data_request_is_zero_price_structured_and_provider_pinned(self):
+        self.model = "particle-ai/particle-1:free"
+        self.base_id = self.model.removesuffix(":free")
+        self.provider_name = "Particle AI"
+        self.provider_tag = "particle-ai/us"
+        adapter = OpenRouterAdapter(
+            "test-secret", client=self.client, data_profile=OPENROUTER_PUBLIC_DATA,
+        )
+        verified = adapter.verify_model(self.model)
+        self.assertEqual((verified.provider_name, verified.provider_tag),
+                         ("Particle AI", "particle-ai/us"))
+        self.assertFalse(any(request.url.path == "/api/v1/endpoints/zdr"
+                             for request in self.requests))
+        adapter.complete(
+            verified, messages=[{"role": "user", "content": "licensed public metric"}],
+            schema={"type": "object"}, max_tokens=256,
+        )
+        body = json.loads(self.requests[-1].content)
+        self.assertEqual(body["provider"], {
+            "only": ["particle-ai/us"], "allow_fallbacks": False,
+            "require_parameters": True, "max_price": {"prompt": 0, "completion": 0},
+            "data_collection": "allow",
+        })
+        self.assertEqual(body["response_format"]["type"], "json_schema")
+        self.assertNotIn("plugins", body)
+        self.assertNotIn("tools", body)
+
+    def test_public_data_rejects_an_unreviewed_provider_endpoint(self):
+        adapter = OpenRouterAdapter(
+            "test-secret", client=self.client, data_profile=OPENROUTER_PUBLIC_DATA,
         )
         with self.assertRaises(OpenRouterError) as caught:
             adapter.verify_model(self.model)
@@ -956,6 +1006,26 @@ class AIServiceTests(unittest.TestCase):
                                   provider=FakeProvider(), utcnow=lambda: NOW)._allowed_sources,
                          frozenset({WIKIMEDIA_SOURCE_ID}))
 
+    def test_private_provider_controls_do_not_override_source_transfer_policy(self):
+        configured = AIConfig.from_environment({
+            "TRENDSCOUT_AI_DATA_PROFILE": "STRICT_PRIVATE",
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": (
+                WIKIMEDIA_SOURCE_ID + ",google_web_serp,bing_web_serp,youtube_video_search"),
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": (
+                WIKIMEDIA_SOURCE_ID + ",google_web_serp,bing_web_serp,youtube_video_search"),
+            "TRENDSCOUT_AI_COLLECTION_MODEL": MODEL_ID,
+            "OPENROUTER_API_KEY": "present",
+        })
+        service = AIService(MemoryAtomicState(), config=configured,
+                            provider=FakeProvider(), utcnow=lambda: NOW)
+        self.assertTrue(service._source_allowed_for_item({
+            "source": WIKIMEDIA_SOURCE_ID, "data_mode": "LIVE",
+        }))
+        for source_id in ("google_web_serp", "bing_web_serp", "youtube_video_search"):
+            self.assertFalse(service._source_allowed_for_item({
+                "source": source_id, "data_mode": "LIVE",
+            }))
+
     def test_source_policy_digest_only_tracks_sources_in_the_input(self):
         base = AIConfig(
             enabled=True, collection_model=MODEL_ID,
@@ -986,8 +1056,46 @@ class AIServiceTests(unittest.TestCase):
         self.assertNotEqual(first._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
                             third._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
 
-    def test_data_profile_defaults_strict_and_public_demo_requires_isolated_local_schema(self):
-        self.assertEqual(AIConfig.from_environment({}).data_profile, STRICT_PRIVATE)
+    def test_public_source_projection_keeps_country_scope_and_drops_unapproved_fields(self):
+        projected = project_public_data_payload({
+            "keyword_id": "keyword-1",
+            "evidence_ids": ["evidence-1"],
+            "source_evidence_profile": [{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "evidence_references": [{
+                    "evidence_id": "evidence-1",
+                    "source_id": WIKIMEDIA_SOURCE_ID,
+                    "scope": {
+                        "country_scope": "US",
+                        "observation_date": "2026-11-25",
+                        "source_metric_name": "views_ceil",
+                        "source_metric_unit": "approx_pageviews_upper_bound",
+                        "private_note": "PRIVATE_SCOPE_SENTINEL",
+                    },
+                }],
+            }],
+        }, {WIKIMEDIA_SOURCE_ID}, task="recommendation")
+        scope = projected["source_evidence_profile"][0]["evidence_references"][0]["scope"]
+        self.assertEqual(scope["country_scope"], "US")
+        self.assertNotIn("private_note", scope)
+
+    def test_data_profile_defaults_public_and_public_demo_requires_isolated_local_schema(self):
+        self.assertEqual(AIConfig.from_environment({}).data_profile, PUBLIC_DATA)
+        invalid = AIConfig.from_environment({"TRENDSCOUT_AI_DATA_PROFILE": "unknown"})
+        self.assertEqual(invalid.data_profile, STRICT_PRIVATE)
+        self.assertEqual(invalid.config_error, "AI_POLICY_DENIED")
+        public = AIConfig.from_environment({
+            "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DATA,
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": "wikimedia_pageviews_top_per_country,bing_web_serp",
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": (
+                "wikimedia_pageviews_top_per_country,bing_web_serp"),
+            "TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS": "public-outdoors",
+        })
+        self.assertIsNone(public.config_error)
+        self.assertEqual(public.public_data_collection_ids, frozenset({"public-outdoors"}))
+        self.assertEqual(AIService(MemoryAtomicState(), config=public, provider=FakeProvider(),
+                                   utcnow=lambda: NOW)._allowed_sources,
+                         frozenset({WIKIMEDIA_SOURCE_ID}))
         allowed = AIConfig.from_environment({
             "TREND_SCOUT_ENVIRONMENT": "local",
             "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DEMO,
@@ -1026,6 +1134,75 @@ class AIServiceTests(unittest.TestCase):
             ClassificationInput.model_validate({
                 "keyword_ids": ["keyword-1"], "data_profile": "PUBLIC_DEMO",
             })
+
+    def test_public_data_classification_uses_only_public_classified_context_and_fields(self):
+        provider = FakeProvider([classification_response])
+        provider.data_profile = PUBLIC_DATA
+        service = AIService(
+            MemoryAtomicState(),
+            config=public_data_config(collection_ids={COLLECTION_ID, "collection-private"}),
+            provider=provider, utcnow=lambda: NOW,
+        )
+        store = FakeCollectionStore(
+            keywords=[{"id": "keyword-1", "keyword": "Outdoor gear",
+                       "removed_collection_ids": ["private-removal-feedback"]}],
+            collections=[
+                {"id": COLLECTION_ID, "name": "Outdoor equipment",
+                 "description": "Public hiking and camping gear", "version": 4,
+                 "auto_match": True},
+                {"id": "collection-private", "name": "Confidential customer research",
+                 "description": "Contact private@example.com", "version": 2,
+                 "auto_match": True},
+                {"id": "collection-unreviewed", "name": "Home cooking",
+                 "description": "Public recipe themes", "version": 1,
+                 "auto_match": True},
+            ],
+        )
+
+        result = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="public-data-context",
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        payload = json.loads(provider.calls[0]["messages"][1]["content"])
+        self.assertEqual([row["id"] for row in payload["collections"]], [COLLECTION_ID])
+        self.assertNotIn("confidential customer research", json.dumps(payload).casefold())
+        self.assertNotIn("private@example.com", json.dumps(payload))
+        self.assertNotIn("private-removal-feedback", json.dumps(payload))
+        keyword = payload["keywords"][0]
+        self.assertIn("durable_keyword_ids", keyword)
+        self.assertIn("evidence_ids", keyword)
+        self.assertNotIn("excluded_collection_ids", keyword)
+        self.assertNotIn("content_digest", json.dumps(payload))
+        self.assertNotIn(store.raw_payload, json.dumps(payload))
+
+    def test_public_data_rejects_unclassified_research_constraints_and_projects_recommendation(self):
+        provider = FakeProvider([recommendation_response])
+        provider.data_profile = PUBLIC_DATA
+        service = AIService(
+            MemoryAtomicState(), config=public_data_config(), provider=provider,
+            utcnow=lambda: NOW,
+        )
+        store = FakeCollectionStore()
+        with self.assertRaises(AIExecutionError) as caught:
+            service.recommend(
+                store, ["keyword-1"], research_constraints="Confidential supplier terms",
+                idempotency_key="public-research-private",
+            )
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
+        self.assertEqual(store.recommendation_reads, 0)
+        self.assertEqual(provider.calls, [])
+
+        result = service.recommend(store, ["keyword-1"], idempotency_key="public-recommend")
+
+        self.assertEqual(result["status"], "COMPLETED")
+        payload = json.loads(provider.calls[0]["messages"][1]["content"])["keywords"][0]
+        self.assertIn("source_evidence_profile", payload)
+        self.assertIn("evidence_expiry", payload)
+        self.assertNotIn("collection_context", payload)
+        self.assertNotIn("input_digest", json.dumps(payload))
+        self.assertNotIn(store.raw_payload, json.dumps(payload))
+        self.assertNotIn("Outdoor equipment", json.dumps(payload))
 
     def test_public_demo_requires_attested_synthetic_store_and_never_reads_live_records(self):
         schema = "ts_test_ai_demo_0123456789abcdef"
@@ -1190,10 +1367,15 @@ class AIServiceTests(unittest.TestCase):
         configured = AIConfig.from_environment({
             "TRENDSCOUT_AI_ENABLED": "true", "TRENDSCOUT_AI_ALLOWED_SOURCES":
                 WIKIMEDIA_SOURCE_ID + "," + YOUTUBE_SOURCE_ID,
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": WIKIMEDIA_SOURCE_ID,
             "TRENDSCOUT_AI_COLLECTION_MODEL": MODEL_ID, "OPENROUTER_API_KEY": "present",
         })
-        self.assertEqual(configured.config_error, "AI_POLICY_DENIED")
-        self.assertNotIn(YOUTUBE_SOURCE_ID, configured.allowed_sources)
+        self.assertIsNone(configured.config_error)
+        self.assertIn(YOUTUBE_SOURCE_ID, configured.allowed_sources)
+        self.assertEqual(AIService(
+            MemoryAtomicState(), config=configured, provider=FakeProvider(),
+            utcnow=lambda: NOW,
+        )._allowed_sources, frozenset({WIKIMEDIA_SOURCE_ID}))
 
         unsupported_config = AIConfig(
             enabled=True, collection_model=MODEL_ID, recommendation_model=MODEL_ID,
@@ -1226,12 +1408,21 @@ class AIServiceTests(unittest.TestCase):
             classification_response,
         ])
         atomic = MemoryAtomicState()
-        service = AIService(atomic, config=config(), provider=provider, utcnow=lambda: NOW)
+        clock = [NOW]
+        service = AIService(atomic, config=config(), provider=provider, utcnow=lambda: clock[0])
         store = FakeCollectionStore()
         first = service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="retry-request")
         self.assertEqual((first["status"], first["error_code"]), ("DEFERRED", "AI_RATE_LIMITED"))
         self.assertEqual(service._quota()["daily_used"], 1)
         self.assertEqual(atomic.snapshot("trendscout-ai-engine-v1").get("batch_profile", {}), {})
+
+        with self.assertRaises(AIExecutionError) as caught:
+            service._reserve("another-task", "recommendations")
+        self.assertEqual(caught.exception.code, "AI_RATE_LIMITED")
+        self.assertEqual(caught.exception.retry_at, first["retry_at"])
+        self.assertEqual(service._quota()["daily_used"], 1)
+
+        clock[0] = NOW + timedelta(minutes=1)
         resumed = service.resume_job(store, first["job_id"])
         self.assertEqual(resumed["status"], "COMPLETED")
         self.assertEqual(service._quota()["daily_used"], 2)
@@ -1241,6 +1432,19 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(len(profile), 1)
         self.assertTrue(profile[0]["valid_output"])
         self.assertEqual(service._batch_size(provider.verify_model(MODEL_ID), store.collections, 100), 40)
+
+    def test_rate_limit_without_reset_header_uses_a_bounded_retry_window(self):
+        provider = FakeProvider([OpenRouterError("AI_RATE_LIMITED")])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        result = service.classify_keyword_ids(
+            FakeCollectionStore(), ["keyword-1"], idempotency_key="missing-reset-header",
+        )
+        self.assertEqual(result["error_code"], "AI_RATE_LIMITED")
+        self.assertEqual(result["retry_at"], (NOW + timedelta(seconds=60)).isoformat())
+        with self.assertRaises(AIExecutionError) as caught:
+            service._reserve("cross-task-after-rate-limit", "recommendations")
+        self.assertEqual(caught.exception.retry_at, result["retry_at"])
 
     def test_interrupted_classification_resumes_after_cached_batch_without_repeating_it(self):
         keywords = [{"id": f"interrupt-keyword-{index:02d}",

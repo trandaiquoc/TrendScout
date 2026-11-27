@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from app.ai.openrouter import OpenRouterAdapter
 from app.api.analytics import _history_storage
 from app.api.runs import read_storage
 from app.collections.postgres_store import PostgresCollectionStore
@@ -176,6 +177,7 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
             "SERPAPI_API_KEY": "",
             "YOUTUBE_API_KEY": "",
             "OPENROUTER_API_KEY": "",
+            "TRENDSCOUT_AI_DATA_PROFILE": "PUBLIC_DATA",
             "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
             "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
             "TREND_SCOUT_GOOGLE_SERP_APPROVED": "false",
@@ -225,6 +227,10 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertIsInstance(
                                 local_app.app.state.ai_service.state_store,
                                 PostgresAtomicStateStore,
+                            )
+                            self.assertEqual(
+                                local_app.app.state.ai_service.config.data_profile,
+                                "PUBLIC_DATA",
                             )
                             self.assertIsInstance(
                                 local_app.app.state.postgres_analysis_storage,
@@ -297,18 +303,31 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                         vercel_postgres_environment=environment,
                         vercel_postgres_schema=schema,
                     )
-                    base_url = "https://trend-scout-mu.vercel.app"
-                    with TestClient(vercel_app, base_url=base_url) as vercel_client:
-                        names = [item["name"] for item in vercel_client.get(
-                            "/api/v1/collections"
-                        ).json()["items"]]
-                        self.assertIn("Local PostgreSQL write", names)
-                        second = vercel_client.post(
-                            "/api/v1/collections",
-                            json={"name": "Vercel PostgreSQL write"},
-                            headers={"Origin": base_url},
+                    vercel_profiles = []
+                    original_adapter_init = OpenRouterAdapter.__init__
+
+                    def capture_vercel_profile(adapter, api_key, *, client=None,
+                                               data_profile="STRICT_PRIVATE"):
+                        vercel_profiles.append(data_profile)
+                        original_adapter_init(
+                            adapter, api_key, client=client, data_profile=data_profile,
                         )
-                        self.assertEqual(second.status_code, 201, second.text)
+
+                    base_url = "https://trend-scout-mu.vercel.app"
+                    with patch.object(OpenRouterAdapter, "__init__", capture_vercel_profile):
+                        with TestClient(vercel_app, base_url=base_url) as vercel_client:
+                            names = [item["name"] for item in vercel_client.get(
+                                "/api/v1/collections"
+                            ).json()["items"]]
+                            self.assertIn("Local PostgreSQL write", names)
+                            second = vercel_client.post(
+                                "/api/v1/collections",
+                                json={"name": "Vercel PostgreSQL write"},
+                                headers={"Origin": base_url},
+                            )
+                            self.assertEqual(second.status_code, 201, second.text)
+                    self.assertTrue(vercel_profiles)
+                    self.assertEqual(set(vercel_profiles), {"PUBLIC_DATA"})
                 self.assertIn(
                     "Vercel PostgreSQL write",
                     [item["name"] for item in local_store.list_collections()],

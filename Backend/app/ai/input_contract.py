@@ -15,7 +15,7 @@ from app.sources.catalog import (
     source_capability,
 )
 
-INPUT_CONTRACT_VERSION = "ai-input-contract-v1"
+INPUT_CONTRACT_VERSION = "ai-input-contract-v2"
 _COUNTRY_CODE = re.compile(r"^[A-Z]{2}$")
 _REGION_CODE = re.compile(r"^[A-Z]{2}(?:-[A-Z0-9]{1,3})?$")
 _LANGUAGE_CODE = re.compile(r"^[a-z]{2,3}(?:-[A-Z]{2})?$")

@@ -17,9 +17,11 @@ import httpx
 API_BASE = "https://openrouter.ai/api/v1"
 STRICT_PRIVATE = "STRICT_PRIVATE"
 PUBLIC_DEMO = "PUBLIC_DEMO"
+PUBLIC_DATA = "PUBLIC_DATA"
 _PUBLIC_DEMO_MODEL_ENDPOINTS = frozenset({
     ("particle-ai/particle-1:free", "Particle AI", "particle-ai/us"),
 })
+_PUBLIC_DATA_PROVIDER_ENDPOINTS = frozenset({("Particle AI", "particle-ai/us")})
 _REQUIRED_STRUCTURED_PARAMETERS = frozenset({
     "temperature", "max_tokens", "response_format", "structured_outputs",
 })
@@ -325,7 +327,7 @@ class OpenRouterAdapter:
 
     def __init__(self, api_key: str | None, *, client: httpx.Client | None = None,
                  data_profile: str = STRICT_PRIVATE):
-        if data_profile not in {STRICT_PRIVATE, PUBLIC_DEMO}:
+        if data_profile not in {STRICT_PRIVATE, PUBLIC_DEMO, PUBLIC_DATA}:
             raise ValueError("unsupported AI data profile")
         self._api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
         self.data_profile = data_profile
@@ -437,6 +439,8 @@ class OpenRouterAdapter:
                 continue
             if self.data_profile == PUBLIC_DEMO:
                 policy_match = (model_id, provider_name, provider_tag) in _PUBLIC_DEMO_MODEL_ENDPOINTS
+            elif self.data_profile == PUBLIC_DATA:
+                policy_match = (provider_name, provider_tag) in _PUBLIC_DATA_PROVIDER_ENDPOINTS
             else:
                 policy_match = next((entry for entry in zdr_endpoints
                     if isinstance(entry, dict)
