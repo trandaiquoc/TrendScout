@@ -1,7 +1,7 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.3-draft
-**Status:** AI input contract and profile isolation implemented on `integration/demo-final`; PUBLIC_DEMO smoke executed with G4 blocked by provider rate limiting and recommendation output validation. STRICT_PRIVATE LIVE and production acceptance remain unverified.
+**Version:** 1.4-draft
+**Status:** AI input contract and profile isolation implemented on `integration/demo-final`; AI01G synthetic classification and recommendation acceptance passed on 2026-11-27. STRICT_PRIVATE LIVE, real-source processing, and production acceptance remain unverified.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
@@ -41,7 +41,7 @@ An inference is admitted only when:
 - Profile and profile-version are included in classification/recommendation digests. Cache and idempotency identity cannot cross STRICT_PRIVATE and PUBLIC_DEMO.
 - Provider retention/training permission in PUBLIC_DEMO applies only to synthetic inputs. It does not approve real source data, production records, user research, credentials, or internal information.
 
-No application-level model fallback is implemented. Classification and recommendation may use different configured model IDs, but both are blank until exact-model task quality is reviewed.
+No application-level model fallback is implemented. Classification and recommendation may use different configured model IDs; the checked-in example pins the same reviewed free candidate for both while keeping AI disabled. Synthetic smoke acceptance establishes the structured contract only, not broad model quality.
 
 The internal budget is **40 physical inference requests per UTC day** and **20 per rolling minute**, shared through PostgreSQL. Failed requests and user retries consume reservations. Cache hits do not call the provider. The limit applies to model inference; metadata lookups are not counted as inference.
 
@@ -76,7 +76,7 @@ Job/result statuses:
 | INVALID_OUTPUT | JSON, schema, ID, evidence, or cross-reference validation failed. |
 | FAILED | Non-retryable request or persistence failure. |
 
-Public errors are sanitized: AI_DISABLED, AI_KEY_MISSING, AI_MODEL_UNAVAILABLE, AI_PRICING_UNVERIFIED, AI_POLICY_DENIED, AI_QUOTA_EXHAUSTED, AI_RATE_LIMITED, AI_INVALID_OUTPUT, AI_KEYWORD_NOT_FOUND, AI_COLLECTION_NOT_FOUND, AI_IDEMPOTENCY_REQUIRED, AI_JOB_NOT_RESUMABLE, AI_INPUT_CHANGED, and AI_STORAGE_UNAVAILABLE. Provider text, prompt contents, credentials, and raw responses are not included.
+Public errors are sanitized: AI_DISABLED, AI_KEY_MISSING, AI_MODEL_UNAVAILABLE, AI_PRICING_UNVERIFIED, AI_POLICY_DENIED, AI_QUOTA_EXHAUSTED, AI_RATE_LIMITED, AI_INVALID_OUTPUT, AI_KEYWORD_NOT_FOUND, AI_COLLECTION_NOT_FOUND, AI_IDEMPOTENCY_REQUIRED, AI_JOB_NOT_RESUMABLE, AI_INPUT_CHANGED, and AI_STORAGE_UNAVAILABLE. Structured-output validation failures may include a safe machine-readable stage, reason, field path, expected constraint, and missing/unknown reference category. Rate-limit diagnostics may include a bounded `limit_source` category and normalized `Retry-After` / `X-RateLimit-Reset` times. No automatic retry is performed after HTTP 429. Provider text, prompt contents, credentials, and raw responses are not included.
 
 retry_at is returned only when a provider Retry-After or supported reset header gives a valid timestamp within the bounded retry window. Otherwise it is null.
 
@@ -162,7 +162,9 @@ Requires Idempotency-Key. keyword_ids accepts 1–20 IDs; research_constraints i
 
 Each recommendation is labeled AI hypothesis and includes a product name/category, US export target, related keyword/evidence IDs, rationale, potential segment, seasonality, possible materials, manufacturing/export considerations, competition/IP/regulatory risks, uncertainty, research steps, and encoded marketplace search links. A link creates a search URL; it does not mean the marketplace was searched.
 
-Narrative output is screened for unsupported metrics and commercial claims. Evidence IDs must come from the server-supplied context and support the selected keywords. Identical business-input digests reuse the stored recommendation. Manual regeneration bypasses that cache and consumes a new request reservation; use a new idempotency key for a new action.
+The request JSON Schema is built for the exact keyword, Collection, and evidence IDs in each batch, with matching required fields, string/list bounds, and reference enums. The application validator additionally checks evidence-to-keyword lineage and rejects unsupported numerical or factual commercial claims. Qualitative research wording such as “research consumer demand,” “verify certification requirements,” and “compare competitor prices” is allowed when framed as a research step or question. Rejections expose only machine-readable stage, reason, field path, expected constraint, and reference category; raw model output is not stored or logged.
+
+Identical business-input digests reuse the stored recommendation. Manual regeneration bypasses that cache and consumes a new request reservation; use a new idempotency key for a new action.
 
 ## 8. Environment
 
@@ -172,8 +174,8 @@ Repository-root `.env.example` is the only local environment template. The check
 | --- | --- |
 | OPENROUTER_API_KEY | Server-side key for current key metadata and inference. |
 | TRENDSCOUT_AI_ENABLED | Explicit feature switch; defaults to false. |
-| TRENDSCOUT_AI_COLLECTION_MODEL | Exact currently verified :free model ID for classification; unset pending quality review. |
-| TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; may equal the classifier model. |
+| TRENDSCOUT_AI_COLLECTION_MODEL | Exact currently verified :free model ID for classification; the checked-in example uses the reviewed Particle AI candidate while AI remains disabled. |
+| TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; the checked-in example uses the same reviewed Particle AI candidate. |
 | TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated allowlist of Wikimedia, Google, and Bing source IDs; defaults to empty. YouTube is always denied. |
 | TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate comma-separated approval for transferring those source records/evidence to the configured AI provider; defaults to empty and never grants extraction permission. YouTube is always denied. |
 | TRENDSCOUT_AI_DATA_PROFILE | Server-side `STRICT_PRIVATE` default; `PUBLIC_DEMO` is restricted to local/test synthetic data. Never a request-body field. |
@@ -181,12 +183,13 @@ Repository-root `.env.example` is the only local environment template. The check
 
 ## 9. Provider references
 
-Verified against OpenRouter's public model, endpoint, ZDR, routing, and provider policy metadata on **2026-11-27**. This verifies public catalog metadata only; live inference, task quality, exact provider execution, and cost remain pending until the synthetic smoke completes. Provider policies can change.
+Verified against OpenRouter's public model, endpoint, ZDR, routing, and provider policy metadata on **2026-11-27**. The AI01G synthetic smoke completed one expected classification and one recommendation with valid references; generation metadata confirmed Particle AI, the resolved free model, and zero cost for both. This is a narrow contract smoke, not a task-quality benchmark. STRICT_PRIVATE live-source use and production acceptance remain unverified. Provider policies can change.
 
 - [Models API and pricing fields](https://openrouter.ai/docs/api/api-reference/models/get-models)
 - [Per-model provider endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)
 - [ZDR endpoint list](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints-zdr)
 - [Provider routing controls](https://openrouter.ai/docs/guides/routing/provider-selection)
+- [Rate-limit source and reset metadata](https://openrouter.ai/blog/llm-api-rate-limits/)
 - [Structured-output request mode](https://openrouter.ai/docs/guides/features/structured-outputs)
 - [Free model list and limits](https://openrouter.ai/collections/free-models/)
 - [OpenRouter privacy policy](https://openrouter.ai/privacy)

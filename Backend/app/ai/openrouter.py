@@ -28,6 +28,8 @@ _BILLABLE_PRICING_FIELDS = frozenset({"prompt", "completion"})
 _SAFE_DIAGNOSTIC_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _./:-]{0,79}$")
 _SAFE_PROVIDER_SLUG = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,79}$")
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$")
+_SAFE_LIMIT_SOURCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
+_SAFE_SCHEMA_PATH = re.compile(r"^[A-Za-z0-9_.$\[\]-]{1,160}$")
 _SAFE_GENERATION_ID = re.compile(r"^gen-[0-9A-Za-z-]{1,124}$")
 _SAFE_MODEL_METADATA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,249}$")
 _ERROR_BODY_LIMIT = 8192
@@ -61,10 +63,49 @@ def sanitize_provider_diagnostics(value):
         safe = _safe_diagnostic_text(error_code, re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,39}$"))
         if safe:
             result["error_code"] = safe
+    error_type = _safe_diagnostic_text(
+        value.get("error_type"), re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"),
+    )
+    if error_type:
+        result["error_type"] = error_type
+    error_category = value.get("error_category")
+    if error_category in {
+        "STRUCTURED_OUTPUT_SCHEMA_REJECTED", "UNSUPPORTED_REQUEST_PARAMETER",
+        "RATE_LIMIT", "PROVIDER_ERROR",
+    }:
+        result["error_category"] = error_category
+    schema_keyword = value.get("schema_keyword")
+    if schema_keyword in {
+        "additionalProperties", "enum", "items", "maxItems", "maxLength",
+        "minItems", "minLength", "required", "type", "uniqueItems",
+    }:
+        result["schema_keyword"] = schema_keyword
+    parameter_path = value.get("parameter_path")
+    if isinstance(parameter_path, str) and _SAFE_SCHEMA_PATH.fullmatch(parameter_path):
+        result["parameter_path"] = parameter_path
     for field in ("failed_routing_step",):
         safe = _safe_diagnostic_text(value.get(field))
         if safe:
             result[field] = safe
+    limit_source = _safe_diagnostic_text(value.get("limit_source"), _SAFE_LIMIT_SOURCE)
+    if limit_source:
+        result["limit_source"] = limit_source
+    source_kind = value.get("rate_limit_source")
+    if source_kind in {"OPENROUTER", "UPSTREAM_PROVIDER", "UNKNOWN"}:
+        result["rate_limit_source"] = source_kind
+    for field in ("retry_after_at", "rate_limit_reset_at"):
+        stamp = value.get(field)
+        if isinstance(stamp, str) and len(stamp) <= 32:
+            try:
+                parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+            if parsed is not None and parsed.tzinfo is not None:
+                result[field] = parsed.astimezone(timezone.utc).isoformat()
+    seconds = value.get("retry_after_seconds")
+    if (type(seconds) in (int, float) and 0 <= seconds <= 604800
+            and math.isfinite(seconds)):
+        result["retry_after_seconds"] = int(seconds)
     request_id = _safe_diagnostic_text(value.get("request_id"), _SAFE_REQUEST_ID)
     if request_id:
         result["request_id"] = request_id
@@ -105,6 +146,14 @@ def sanitize_provider_diagnostics(value):
 def _response_diagnostics(response):
     """Extract bounded routing fields without retaining error text or prompts."""
     diagnostics = {"http_status": response.status_code}
+    if response.status_code == 429:
+        diagnostics.update({"limit_source": "unknown", "rate_limit_source": "UNKNOWN"})
+        retry_after = response.headers.get("Retry-After")
+        reset_at = response.headers.get("X-RateLimit-Reset")
+        if retry_after:
+            diagnostics["retry_after_at"] = _retry_at({"Retry-After": retry_after})
+        if reset_at:
+            diagnostics["rate_limit_reset_at"] = _retry_at({"X-RateLimit-Reset": reset_at})
     for header in ("x-openrouter-request-id", "x-request-id"):
         value = _safe_diagnostic_text(response.headers.get(header), _SAFE_REQUEST_ID)
         if value:
@@ -130,6 +179,60 @@ def _response_diagnostics(response):
                 "available_providers": metadata.get("available_providers"),
                 "request_id": diagnostics.get("request_id"),
             }
+            error_type = _safe_diagnostic_text(
+                error.get("type"), re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"),
+            )
+            if error_type:
+                extracted["error_type"] = error_type
+            parameter = error.get("param")
+            if isinstance(parameter, str) and _SAFE_SCHEMA_PATH.fullmatch(parameter):
+                extracted["parameter_path"] = parameter
+            message = error.get("message")
+            if response.status_code == 400 and isinstance(message, str) and len(message) <= 2048:
+                normalized_message = message.casefold()
+                if "schema" in normalized_message and any(
+                        marker in normalized_message for marker in ("invalid", "unsupported", "must be")):
+                    extracted["error_category"] = "STRUCTURED_OUTPUT_SCHEMA_REJECTED"
+                elif "parameter" in normalized_message and any(
+                        marker in normalized_message for marker in ("invalid", "unsupported", "not supported")):
+                    extracted["error_category"] = "UNSUPPORTED_REQUEST_PARAMETER"
+                elif "rate limit" in normalized_message or "rate-limited" in normalized_message:
+                    extracted["error_category"] = "RATE_LIMIT"
+                else:
+                    extracted["error_category"] = "PROVIDER_ERROR"
+                for keyword in (
+                    "additionalProperties", "enum", "items", "maxItems", "maxLength",
+                    "minItems", "minLength", "required", "type", "uniqueItems",
+                ):
+                    if re.search(rf"\b{re.escape(keyword.casefold())}\b", normalized_message):
+                        extracted["schema_keyword"] = keyword
+                        break
+            if response.status_code == 429:
+                source = metadata.get("limit_source")
+                safe_source = _safe_diagnostic_text(source, _SAFE_LIMIT_SOURCE)
+                extracted["limit_source"] = safe_source or "unknown"
+                extracted["rate_limit_source"] = (
+                    "OPENROUTER" if safe_source and safe_source.startswith("openrouter_")
+                    else "UPSTREAM_PROVIDER" if safe_source and safe_source.startswith("upstream_")
+                    else "UNKNOWN"
+                )
+                retry_seconds = metadata.get("retry_after_seconds")
+                if (type(retry_seconds) in (int, float) and 0 <= retry_seconds <= 604800
+                        and math.isfinite(retry_seconds)):
+                    extracted["retry_after_seconds"] = retry_seconds
+                extracted["retry_after_at"] = _retry_at(
+                    {"Retry-After": response.headers.get("Retry-After")}
+                    if response.headers.get("Retry-After") else {},
+                )
+                extracted["rate_limit_reset_at"] = _retry_at(
+                    {"X-RateLimit-Reset": response.headers.get("X-RateLimit-Reset")}
+                    if response.headers.get("X-RateLimit-Reset") else {},
+                )
+                if not extracted["retry_after_at"] and extracted.get("retry_after_seconds") is not None:
+                    extracted["retry_after_at"] = datetime.fromtimestamp(
+                        datetime.now(timezone.utc).timestamp() + extracted["retry_after_seconds"],
+                        timezone.utc,
+                    ).isoformat()
             diagnostics = sanitize_provider_diagnostics(extracted) or diagnostics
     return sanitize_provider_diagnostics(diagnostics)
 
@@ -184,7 +287,8 @@ def _all_zero_pricing(value) -> bool:
 def _retry_at(headers, now=None) -> str | None:
     now = now or datetime.now(timezone.utc)
     retry_after = headers.get("Retry-After")
-    raw = retry_after or headers.get("X-RateLimit-Reset")
+    reset_header = headers.get("X-RateLimit-Reset")
+    raw = retry_after or reset_header
     if not isinstance(raw, str) or not raw.strip():
         return None
     raw = raw.strip()
@@ -203,11 +307,15 @@ def _retry_at(headers, now=None) -> str | None:
             return None
     if not math.isfinite(seconds):
         return None
+    if retry_after is None and reset_header is not None and seconds > 1_000_000_000_000:
+        seconds /= 1000
     if retry_after is None and seconds > 1_000_000_000:
         if seconds < now.timestamp() or seconds > now.timestamp() + 7 * 24 * 60 * 60:
             return None
         return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
     if seconds < 0 or seconds > 7 * 24 * 60 * 60:
+        return None
+    if retry_after is None and reset_header is not None and seconds > 7 * 24 * 60 * 60:
         return None
     return datetime.fromtimestamp(now.timestamp() + seconds, timezone.utc).isoformat()
 
@@ -251,8 +359,12 @@ class OpenRouterAdapter:
         except (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError):
             raise OpenRouterError("AI_PROVIDER_UNAVAILABLE") from None
         if response.status_code == 429:
-            raise OpenRouterError("AI_RATE_LIMITED", retry_at=_retry_at(response.headers),
-                                  diagnostics=_response_diagnostics(response))
+            diagnostics = _response_diagnostics(response)
+            retry_at = ((diagnostics or {}).get("retry_after_at")
+                        or (diagnostics or {}).get("rate_limit_reset_at")
+                        or _retry_at(response.headers))
+            raise OpenRouterError("AI_RATE_LIMITED", retry_at=retry_at,
+                                  diagnostics=diagnostics)
         if response.status_code in (401, 403) and authenticated:
             raise OpenRouterError("AI_KEY_MISSING", diagnostics=_response_diagnostics(response)) from None
         if response.status_code < 200 or response.status_code >= 300:

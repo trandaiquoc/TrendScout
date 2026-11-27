@@ -31,6 +31,13 @@ from app.ai.runtime import (
     AIExecutionError,
     AIService,
 )
+from app.ai.schemas import (
+    InvalidAIOutput,
+    classification_schema_for,
+    recommendation_schema_for,
+    validate_classification,
+    validate_recommendations,
+)
 from app.api.ai import (
     ClassificationInput,
     RecommendationInput,
@@ -252,6 +259,101 @@ def recommendation_response(messages):
     }]})
 
 
+class OutputContractTests(unittest.TestCase):
+    @staticmethod
+    def recommendation():
+        return {"recommendations": [{
+            "product_name": "Handwoven tote",
+            "product_category": "Textile accessories",
+            "related_keyword_ids": ["keyword-1"],
+            "supporting_evidence_ids": ["evidence-1"],
+            "why_this_product": "Research consumer demand and compare competitor prices before deciding.",
+            "consumer_segment": "Potential buyers could be interviewed during research.",
+            "seasonality": "Seasonality remains an open research question.",
+            "possible_materials": ["Cotton canvas"],
+            "manufacturing_considerations": ["Verify supplier capabilities."],
+            "export_considerations": ["Verify certification requirements."],
+            "competition_risks": ["Compare competitor prices."],
+            "ip_risks": ["Check relevant trademarks."],
+            "regulatory_risks": ["Confirm requirements before export."],
+            "uncertainty": "The supplied evidence does not establish a market outcome.",
+            "research_steps": ["Research consumer demand.", "Verify certification requirements."],
+        }]}
+
+    def test_qualitative_research_language_passes_and_claims_fail_with_safe_field_diagnostics(self):
+        accepted = validate_recommendations(
+            self.recommendation(), keyword_ids={"keyword-1"}, evidence_ids={"evidence-1"},
+            evidence_by_keyword={"keyword-1": {"evidence-1"}},
+        )
+        self.assertEqual(len(accepted["recommendations"]), 1)
+
+        unsupported = (
+            "Guaranteed sales are not supported by these fixtures.",
+            "Estimated revenue of $50,000 is not verified.",
+            "Profit margin of 30% is unsupported.",
+            "Product is certified for export.",
+        )
+        for narrative in unsupported:
+            candidate = deepcopy(self.recommendation())
+            candidate["recommendations"][0]["why_this_product"] = narrative
+            with self.subTest(narrative=narrative), self.assertRaises(InvalidAIOutput) as caught:
+                validate_recommendations(candidate, keyword_ids={"keyword-1"},
+                                         evidence_ids={"evidence-1"})
+            self.assertIn(caught.exception.diagnostics["reason_code"], {
+                "UNSUPPORTED_NUMERIC_CLAIM", "UNSUPPORTED_COMMERCIAL_CLAIM",
+            })
+            self.assertEqual(caught.exception.diagnostics["field_path"],
+                             "recommendations[0].why_this_product")
+            self.assertNotIn(narrative, repr(caught.exception.diagnostics))
+
+    def test_dynamic_json_schemas_match_id_and_cardinality_contracts(self):
+        classification = classification_schema_for(
+            keyword_ids={"keyword-a", "keyword-b"}, collection_ids={"collection-a"},
+            evidence_ids={"evidence-a", "evidence-b"},
+        )
+        class_props = classification["properties"]
+        self.assertEqual((class_props["classifications"]["minItems"],
+                          class_props["classifications"]["maxItems"]), (2, 2))
+        self.assertEqual(class_props["classifications"]["items"]["properties"]
+                         ["keyword_id"]["enum"], ["keyword-a", "keyword-b"])
+        proposal = class_props["proposals"]["items"]["properties"]
+        self.assertEqual(proposal["keyword_ids"]["minItems"], 2)
+        self.assertTrue(proposal["keyword_ids"]["uniqueItems"])
+        self.assertEqual(proposal["evidence_ids"]["items"]["enum"], ["evidence-a", "evidence-b"])
+        one_keyword = classification_schema_for(
+            keyword_ids={"keyword-a"}, collection_ids={"collection-a"},
+            evidence_ids={"evidence-a"},
+        )["properties"]["proposals"]
+        self.assertEqual(one_keyword["maxItems"], 0)
+        proposal_keyword_ids = one_keyword["items"]["properties"]["keyword_ids"]
+        self.assertNotIn("maxItems", proposal_keyword_ids)
+        self.assertEqual(proposal_keyword_ids["minItems"], 2)
+        accepted = validate_classification({"classifications": [
+            {"keyword_id": keyword_id, "collection_id": "collection-a", "score": 0.5,
+             "reason": "Research consumer demand before drawing a conclusion."}
+            for keyword_id in ("keyword-a", "keyword-b")
+        ], "proposals": []}, keyword_ids={"keyword-a", "keyword-b"},
+            collection_ids={"collection-a"}, evidence_ids={"evidence-a", "evidence-b"})
+        self.assertEqual(len(accepted["classifications"]), 2)
+        with self.assertRaises(InvalidAIOutput) as caught:
+            validate_classification({"classifications": [{
+                "keyword_id": "keyword-a", "collection_id": None,
+                "score": 0.5, "reason": "Demand is growing rapidly.",
+            }], "proposals": []}, keyword_ids={"keyword-a"}, collection_ids=set(),
+                evidence_ids={"evidence-a"})
+        self.assertEqual(caught.exception.diagnostics["reason_code"],
+                         "UNSUPPORTED_COMMERCIAL_CLAIM")
+
+        recommendation = recommendation_schema_for(
+            keyword_ids={"keyword-a"}, evidence_ids={"evidence-a"},
+        )["properties"]["recommendations"]
+        self.assertEqual((recommendation["minItems"], recommendation["maxItems"]), (1, 5))
+        rec_props = recommendation["items"]["properties"]
+        self.assertEqual(rec_props["related_keyword_ids"]["items"]["enum"], ["keyword-a"])
+        self.assertEqual(rec_props["supporting_evidence_ids"]["items"]["enum"], ["evidence-a"])
+        self.assertTrue(rec_props["supporting_evidence_ids"]["uniqueItems"])
+
+
 class OpenRouterAdapterTests(unittest.TestCase):
     def setUp(self):
         self.model = MODEL_ID
@@ -449,6 +551,49 @@ class OpenRouterAdapterTests(unittest.TestCase):
             "http_status": 404, "request_id": "request-safe",
         })
 
+    def test_rate_limit_diagnostics_classify_source_and_normalize_reset_headers(self):
+        reset = datetime.now(timezone.utc) + timedelta(seconds=90)
+        reset_ms = str(int(reset.timestamp() * 1000))
+        response = httpx.Response(429, json={"error": {
+            "code": 429, "message": "PRIVATE_PROMPT_SENTINEL",
+            "metadata": {"limit_source": "upstream_provider_shared_pool",
+                         "retry_after_seconds": 45},
+        }}, headers={"Retry-After": "12", "X-RateLimit-Reset": reset_ms})
+        client = httpx.Client(transport=httpx.MockTransport(lambda _request: response))
+        adapter = OpenRouterAdapter("test-secret", client=client)
+        try:
+            with self.assertRaises(OpenRouterError) as caught:
+                adapter._request("POST", "/chat/completions", authenticated=True, json={})
+        finally:
+            client.close()
+        diagnostics = caught.exception.diagnostics
+        self.assertEqual(diagnostics["limit_source"], "upstream_provider_shared_pool")
+        self.assertEqual(diagnostics["rate_limit_source"], "UPSTREAM_PROVIDER")
+        self.assertTrue(diagnostics["retry_after_at"])
+        self.assertTrue(diagnostics["rate_limit_reset_at"])
+        self.assertEqual(caught.exception.retry_at, diagnostics["retry_after_at"])
+        self.assertNotIn("PRIVATE_PROMPT_SENTINEL", repr(diagnostics))
+
+    def test_invalid_structured_schema_diagnostic_is_categorized_without_raw_error_text(self):
+        response = httpx.Response(400, json={"error": {
+            "code": 400, "type": "invalid_request_error",
+            "param": "response_format.json_schema.schema",
+            "message": "Invalid schema: maxItems is below minItems. PRIVATE_PROMPT_SENTINEL",
+        }})
+        client = httpx.Client(transport=httpx.MockTransport(lambda _request: response))
+        adapter = OpenRouterAdapter("test-secret", client=client)
+        try:
+            with self.assertRaises(OpenRouterError) as caught:
+                adapter._request("POST", "/chat/completions", authenticated=True, json={})
+        finally:
+            client.close()
+        self.assertEqual(caught.exception.diagnostics["error_category"],
+                         "STRUCTURED_OUTPUT_SCHEMA_REJECTED")
+        self.assertEqual(caught.exception.diagnostics["schema_keyword"], "maxItems")
+        self.assertEqual(caught.exception.diagnostics["parameter_path"],
+                         "response_format.json_schema.schema")
+        self.assertNotIn("PRIVATE_PROMPT_SENTINEL", repr(caught.exception.diagnostics))
+
     def test_generation_metadata_is_reduced_to_cost_model_provider_and_usage(self):
         def handler(request):
             if request.method == "POST":
@@ -485,6 +630,10 @@ class OpenRouterAdapterTests(unittest.TestCase):
     def test_retry_time_validation_is_bounded(self):
         now = NOW
         self.assertEqual(_retry_at({"Retry-After": "30"}, now), (now + timedelta(seconds=30)).isoformat())
+        reset = now + timedelta(seconds=90)
+        reset_ms = str(int(reset.timestamp() * 1000))
+        self.assertEqual(_retry_at({"X-RateLimit-Reset": reset_ms}, now),
+                         datetime.fromtimestamp(int(reset_ms) / 1000, timezone.utc).isoformat())
         self.assertIsNone(_retry_at({"Retry-After": "NaN"}, now))
         self.assertIsNone(_retry_at({"Retry-After": "-1"}, now))
         self.assertIsNone(_retry_at({"Retry-After": "999999999"}, now))
@@ -1186,20 +1335,29 @@ class AIServiceTests(unittest.TestCase):
                          {"wiki-cafe", "google-cafe"})
 
     def test_recommendation_rejects_unknown_evidence_and_unapproved_sources(self):
-        provider = FakeProvider([lambda messages: json.dumps({"recommendations": [{
+        def unknown_evidence_response(messages):
+            keyword = json.loads(messages[1]["content"])["keywords"][0]
+            return json.dumps({"recommendations": [{
             "product_name": "Handwoven market tote", "product_category": "Textile accessories",
-            "related_keyword_ids": ["keyword-1"], "supporting_evidence_ids": ["invented"],
+            "related_keyword_ids": [keyword["keyword_id"]], "supporting_evidence_ids": ["invented"],
             "why_this_product": "A qualitative product research hypothesis.",
             "consumer_segment": "Craft shoppers", "seasonality": "Review seasonal context.",
             "possible_materials": [], "manufacturing_considerations": [],
             "export_considerations": [], "competition_risks": [], "ip_risks": [],
             "regulatory_risks": [], "uncertainty": "Evidence is limited.",
             "research_steps": ["Check current listings."],
-        }]})])
+        }]})
+
+        provider = FakeProvider([unknown_evidence_response])
         service = AIService(MemoryAtomicState(), config=config(), provider=provider, utcnow=lambda: NOW)
         store = FakeCollectionStore()
         invalid = service.recommend(store, ["keyword-1"], idempotency_key="bad-evidence")
         self.assertEqual(invalid["error_code"], "AI_INVALID_OUTPUT")
+        self.assertEqual(invalid["validation_diagnostics"]["field_path"],
+                         "recommendations[0].supporting_evidence_ids")
+        self.assertEqual(invalid["validation_diagnostics"]["reference_category"], "EVIDENCE_ID")
+        self.assertEqual(invalid["validation_diagnostics"]["reference_status"], "UNKNOWN")
+        self.assertNotIn("invented", repr(invalid["validation_diagnostics"]))
 
         disallowed = FakeCollectionStore(keywords=[{
             "id": "keyword-1", "keyword": "A video topic", "source": YOUTUBE_SOURCE_ID,
