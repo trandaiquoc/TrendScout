@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -450,13 +450,72 @@ def accept_suggestion(proposal_id: str, request: Request, value: ProposalAcceptI
     ai_service = (getattr(getattr(request, "state", None), "ai_service", None)
                   or getattr(request.app.state, "ai_service", None))
     overrides = value.model_dump(exclude_unset=True) if value is not None else {}
-    identifier = service.store.resolve_proposal(
-        proposal_id, True, name=overrides.get("name"), description=overrides.get("description"),
-        allowed_sources=getattr(ai_service, "_allowed_sources", None),
-    )
+    proposal = service.store.get_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(404, {"code": "SUGGESTION_NOT_FOUND"})
+    try:
+        identifier = service.store.resolve_proposal(
+            proposal_id, True, name=overrides.get("name"), description=overrides.get("description"),
+            allowed_sources=getattr(ai_service, "_allowed_sources", None),
+        )
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if code in {"AI_PROPOSAL_EXPIRED", "AI_INPUT_CHANGED",
+                                 "COLLECTION_NAME_CONFLICT", "COLLECTION_CONTENT_CONFLICT"} else 422
+        if code == "AI_POLICY_DENIED":
+            status = 403
+        raise HTTPException(status, {"code": code}) from None
     if identifier is None:
         raise HTTPException(404, {"code": "SUGGESTION_NOT_FOUND"})
-    return {"collection_id": identifier}
+    support_ids = proposal.get("support_ids", [])
+    if isinstance(support_ids, str):
+        try:
+            support_ids = json.loads(support_ids)
+        except (TypeError, ValueError):
+            support_ids = []
+    related_ids = support_ids if isinstance(support_ids, list) else []
+    return {"collection_id": identifier, "reclassification_keyword_ids": related_ids,
+            "reclassification_candidate_count": len(related_ids)}
+
+
+@router.get("/collections/suggestions/{proposal_id}")
+def get_suggestion(proposal_id: str, request: Request):
+    service = _service(request)
+    proposal = service.store.get_proposal(proposal_id)
+    if proposal is None or proposal.get("status") not in {None, "PENDING"}:
+        raise HTTPException(404, {"code": "SUGGESTION_NOT_FOUND"})
+    support_ids = proposal.get("support_ids", [])
+    if isinstance(support_ids, str):
+        try:
+            support_ids = json.loads(support_ids)
+        except (TypeError, ValueError):
+            support_ids = []
+    if not isinstance(support_ids, list):
+        support_ids = []
+    rows = service.store.keyword_records_by_ids(support_ids)
+    keyword_by_id = {dict(row)["id"]: dict(row) for row in rows}
+    keywords = []
+    for identifier in support_ids:
+        row = keyword_by_id.get(identifier)
+        keywords.append({
+            "id": identifier,
+            "keyword": row.get("keyword") if row else None,
+            "normalized": row.get("normalized") if row else None,
+            "source_id": row.get("source") if row else None,
+            "project": row.get("project") if row else None,
+            "observed_at": row.get("observed_at") if row else None,
+            "available": row is not None,
+        })
+    expires_at = proposal.get("expires_at")
+    if isinstance(expires_at, str):
+        try:
+            expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            expires_at = None
+    if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    expired = (expires_at is not None and expires_at <= datetime.now(timezone.utc))
+    return {**proposal, "support_ids": support_ids, "keywords": keywords, "expired": expired}
 
 
 @router.post("/collections/suggestions/{proposal_id}/reject")

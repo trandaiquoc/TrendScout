@@ -89,6 +89,9 @@ def _error(exc):
         "AI_COLLECTION_NOT_FOUND": 404,
         "AI_JOB_NOT_RESUMABLE": 409,
         "AI_INPUT_CHANGED": 409,
+        "AI_PROPOSAL_EXPIRED": 409,
+        "COLLECTION_NAME_CONFLICT": 409,
+        "COLLECTION_CONTENT_CONFLICT": 409,
         "AI_STORAGE_UNAVAILABLE": 503,
         "AI_POLICY_DENIED": 403,
     }.get(code, 422)
@@ -200,9 +203,14 @@ def patch_ai_proposal(proposal_id: str, value: ProposalPatch, request: Request):
             allowed_sources=getattr(ai_service, "_allowed_sources", None),
         )
     except ValueError as exc:
-        code = str(exc) if str(exc).startswith("AI_") or str(exc).startswith("INVALID_") else "AI_KEYWORD_NOT_FOUND"
+        code = str(exc)
+        if (not code.startswith(("AI_", "INVALID_"))
+                and code not in {"COLLECTION_NAME_CONFLICT", "COLLECTION_CONTENT_CONFLICT"}):
+            code = "AI_KEYWORD_NOT_FOUND"
         status = (404 if code == "AI_KEYWORD_NOT_FOUND" else
-                  403 if code == "AI_POLICY_DENIED" else 422)
+                  403 if code == "AI_POLICY_DENIED" else
+                  409 if code in {"AI_PROPOSAL_EXPIRED", "AI_INPUT_CHANGED",
+                                  "COLLECTION_NAME_CONFLICT", "COLLECTION_CONTENT_CONFLICT"} else 422)
         raise HTTPException(status, {"code": code}) from None
     except Exception:
         raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"}) from None

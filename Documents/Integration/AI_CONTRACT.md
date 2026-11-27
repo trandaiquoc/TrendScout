@@ -1,11 +1,11 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.5-draft
-**Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, and AI03 automatic Collection matching are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
+**Version:** 1.6-draft
+**Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, AI03 automatic Collection matching, and the AI04 proposal review lifecycle are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
-The AI boundary is implemented in this branch. The Database goal owns the general PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. AI03 adds migration `0013_fetch_job_ai_work.sql` for durable Fetch-to-AI batch linkage; it is versioned and operator-applied, never applied by an application request.
+The AI boundary is implemented in this branch. The Database goal owns the general PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. AI03 adds migration `0013_fetch_job_ai_work.sql` for durable Fetch-to-AI batch linkage; AI04 adds migration `0014_collection_proposal_lifecycle.sql` for proposal expiry and idempotent acceptance. These migrations are versioned and operator-applied, never applied by an application request.
 
 ## 1. Responsibilities and boundaries
 
@@ -61,6 +61,7 @@ AI runtime requires PostgreSQL Neon and does not use SQLite, Firestore, Redis, i
 
 - Collection assignments, proposals, review, and rollback use the existing PostgresCollectionStore business tables.
 - `fetch_jobs.ai_jobs` stores the stable AI job ID and keyword IDs for each automatic Fetch batch. Migration `0013_fetch_job_ai_work.sql` adds this JSONB field; the Local SQLite store has a corresponding additive column migration.
+- PostgreSQL proposals store their active-evidence expiry and accepted Collection ID. Local SQLite adds compatible proposal-edit, expiry, and accepted-ID columns additively.
 - Shared attempts, quota, jobs, idempotency records, model verification metadata, classification cache, and recommendation cache use AtomicStateStore through PostgresAtomicStateStore, under scope trendscout-ai-engine-v1.
 - The current atomic state store reads/writes coordination_fields, coordination_entries, coordination_checkpoints, source_payload_blobs, and source_payload_references. This requires existing migrations 0003_coordination.sql, 0004_source_payloads.sql, and 0008_payload_references.sql, as well as the existing business schema. The Database goal must confirm this compatibility boundary.
 - The atomic-state port must serialize concurrent quota reservations across hosts. Local test doubles are not authoritative.
@@ -166,14 +167,15 @@ Setting preview=true returns proposed assignments and proposal drafts with mode=
 
 ### Proposal lifecycle
 
-AI creates PENDING proposals only. A proposal contains a name, description, support keyword IDs, reason, score, uncertainty, evidence IDs, source IDs, model ID, and job ID. No Collection is created until user acceptance.
+AI creates PENDING proposals only. A proposal contains a name, description, the complete candidate and selected keyword ID lists, reason, heuristic score, uncertainty, active evidence IDs, source IDs, model ID, job ID, and an expiry bounded by its supporting evidence. No Collection is created until user acceptance.
 
+- GET /api/v1/collections/suggestions/{proposal_id} returns the full keyword ID list and a safe row for every proposed keyword; it is not restricted to the five-keyword preview used by the workbench.
 - PATCH /api/v1/ai/proposals/{proposal_id} edits the pending proposal name, description, or selected keyword IDs; every selected keyword and current evidence reference is revalidated.
-- POST /api/v1/collections/suggestions/{proposal_id}/accept atomically creates the Collection and selected memberships.
-- POST /api/v1/collections/suggestions/{proposal_id}/reject records rejection/suppression feedback.
+- POST /api/v1/collections/suggestions/{proposal_id}/accept atomically revalidates policy, evidence, expiry, eligibility, and user-owned state, then creates the Collection and selected memberships. Repeating an acceptance returns the same Collection ID. The response includes `reclassification_keyword_ids` for the selected proposal keywords.
+- POST /api/v1/collections/suggestions/{proposal_id}/reject records name and selected/candidate keyword-content suppression, so the same proposed group is not repeatedly resurfaced under a changed name.
 - POST /api/v1/collections/reconciliation/{run_id}/rollback restores earlier AI memberships when the latest applicable targeted reconciliation has not been superseded.
 
-User membership, pinned keywords, exclusion, removal feedback, proposal-name suppression, and current source policy are checked at persistence/acceptance time.
+Proposal creation is transactionally deduplicated against normalized existing/pending names, an identical pending keyword set, a rejected keyword set, and an exact existing Collection membership set. Proposal edits can only select from the original candidate IDs. Acceptance serializes against user membership changes and leaves the proposal pending when evidence expired or input changed. Adding the accepted Collection changes the Collection context included in classification cache keys; later targeted classification recomputes against the new context without replaying the whole dataset.
 
 ## 7. Export product recommendations
 

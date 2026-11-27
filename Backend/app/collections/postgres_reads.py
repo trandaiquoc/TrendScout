@@ -1109,6 +1109,16 @@ class PostgresCollectionReader:
         return self._read(lambda db: db.execute(sql.SQL("SELECT * FROM {} WHERE id=%s")
             .format(self._table("keywords")) + scope, params).fetchone())
 
+    def keyword_records_by_ids(self, identifiers):
+        values = list(dict.fromkeys(item for item in identifiers if isinstance(item, str)))
+        if not values:
+            return []
+        scope = sql.SQL(" AND data_mode=%s") if self.data_mode_scope else sql.SQL("")
+        params = (values, self.data_mode_scope) if self.data_mode_scope else (values,)
+        return self._read(lambda db: db.execute(sql.SQL(
+            "SELECT * FROM {} WHERE id=ANY(%s)").format(self._table("keywords"))
+            + scope + sql.SQL(" ORDER BY id"), params).fetchall())
+
     def classification_for(self, identifier):
         scope = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
         params = (identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,)

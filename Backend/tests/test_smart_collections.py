@@ -16,6 +16,7 @@ from app.collections.service import CollectionService
 from app.collections.store import CollectionStore, fingerprint, keyword_record
 from app.main import create_app
 from app.settings import Settings
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.sources.google_trends.trending_now import normalize_keyword
 from app.sources.wikimedia.cleaning_rules import collection_technical_reason
 
@@ -1329,9 +1330,20 @@ class SmartCollectionsTests(unittest.TestCase):
         self.store.create_proposal("legacy-proposal", "Sustainable fashion", "Legacy local proposal",
                                    keyword_ids, "legacy compatibility", stamp, stamp)
         proposal = self.store.suggestions()[0]
+        self.store.patch_proposal(
+            proposal["id"], support_ids=keyword_ids[:2],
+            allowed_sources={WIKIMEDIA_SOURCE_ID},
+        )
+        self.assertEqual(self.store.suggestions()[0]["support_ids"], keyword_ids[:2])
+        self.store.patch_proposal(
+            proposal["id"], support_ids=keyword_ids,
+            allowed_sources={WIKIMEDIA_SOURCE_ID},
+        )
+        self.assertEqual(self.store.suggestions()[0]["support_ids"], keyword_ids)
         accepted = self.store.resolve_proposal(
             proposal["id"], True, name="Reviewed sustainable fashion", description="Reviewed evidence context",
         )
+        self.assertEqual(self.store.resolve_proposal(proposal["id"], True), accepted)
         created = next(item for item in self.store.list_collections() if item["id"] == accepted)
         self.assertEqual(created["name"], "Reviewed sustainable fashion")
         self.assertEqual(created["description"], "Reviewed evidence context")

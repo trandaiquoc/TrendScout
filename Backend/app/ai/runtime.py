@@ -980,6 +980,8 @@ class AIService:
         collections = context.get("collections")
         if not isinstance(keywords, list) or not isinstance(collections, list):
             raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED")
+        collection_ids_at_load = [item["id"] for item in collections
+                                  if isinstance(item, dict) and isinstance(item.get("id"), str)]
         collections = self._public_data_collection_context(collections)
         keyword_by_id = {item["id"]: item for item in keywords}
         if set(keyword_by_id) != set(ids):
@@ -1247,12 +1249,29 @@ class AIService:
                 evidence = [value for value in evidence if value in support_evidence]
                 if not evidence:
                     continue
+                selected_evidence = set(evidence)
+                support_evidence_by_keyword = {
+                    item["id"]: set(item.get("evidence_ids", [])) & selected_evidence
+                    for item in eligible if item["id"] in support_ids
+                }
+                if (set(support_evidence_by_keyword) != set(support_ids)
+                        or any(not values for values in support_evidence_by_keyword.values())):
+                    continue
+                expiry_values = [
+                    _parse_time((item.get("evidence_expiry") or {}).get(evidence_id))
+                    for item in eligible if item["id"] in support_ids
+                    for evidence_id in support_evidence_by_keyword[item["id"]]
+                ]
+                if not expiry_values or any(value is None for value in expiry_values):
+                    continue
+                proposal_expires_at = min(expiry_values)
                 valid_proposals.append({
                     "id": "prop_" + uuid.uuid5(uuid.NAMESPACE_URL,
                         job_id + ":" + _digest({"name": name, "ids": sorted(support_ids)})).hex,
                     "name": name,
                     "description": _clean_text(proposal.get("description"), 1200),
                     "support_ids": support_ids,
+                    "candidate_keyword_ids": support_ids,
                     "reason": _clean_text(proposal.get("reason"), 500),
                     "score": proposal.get("score"),
                     "uncertainty": _clean_text(proposal.get("uncertainty"), 500),
@@ -1260,6 +1279,8 @@ class AIService:
                     "source_ids": sorted({item["source"] for item in eligible
                                            if item["id"] in support_ids and isinstance(item.get("source"), str)}),
                     "model_id": self.config.collection_model,
+                    "job_id": job_id,
+                    "expires_at": proposal_expires_at.isoformat(),
                 })
             if preview:
                 preview_assigned_ids = {entry[1] for entry in to_persist}
@@ -1276,7 +1297,8 @@ class AIService:
                                                 and item["id"] not in preview_proposed_ids],
                     "proposals": [{key: proposal[key] for key in (
                         "name", "description", "support_ids", "reason", "score", "uncertainty",
-                        "evidence_ids", "model_id")} for proposal in valid_proposals],
+                        "evidence_ids", "source_ids", "model_id", "job_id", "expires_at")}
+                        for proposal in valid_proposals],
                     "proposal_ids": [], "skipped_keyword_ids": skipped,
                     "membership_reconciliation_id": None,
                     "retry_at": None, "error_code": None,
@@ -1294,6 +1316,7 @@ class AIService:
                     reconciliation_id, [item["id"] for item in eligible], to_persist,
                     valid_proposals, job_id=job_id,
                     expected_collection_versions={item["id"]: item["version"] for item in collections},
+                    expected_collection_ids=collection_ids_at_load,
                     expected_keyword_texts={item["id"]: item.get("normalized") for item in eligible},
                     expected_collection_auto_match={item["id"]: bool(item.get("auto_match"))
                                                     for item in collections},

@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS cache (
 CREATE TABLE IF NOT EXISTS proposals (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
  support_ids TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL,
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ candidate_keyword_ids TEXT NOT NULL DEFAULT '[]', expires_at TEXT,
+ accepted_collection_id TEXT
 );
 CREATE TABLE IF NOT EXISTS suppression (
  fingerprint TEXT PRIMARY KEY, kind TEXT NOT NULL, created_at TEXT NOT NULL, label TEXT NOT NULL DEFAULT ''
@@ -160,6 +162,26 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _proposal_content_fingerprint(support_ids):
+    return fingerprint("proposal-support|" + "|".join(sorted(support_ids)))
+
+
+def _proposal_view(row):
+    item = dict(row)
+    for field in ("support_ids", "candidate_keyword_ids"):
+        value = item.get(field)
+        if isinstance(value, str):
+            try:
+                item[field] = json.loads(value)
+            except (TypeError, ValueError):
+                item[field] = []
+    if not isinstance(item.get("support_ids"), list):
+        item["support_ids"] = []
+    if not item.get("candidate_keyword_ids") or not isinstance(item.get("candidate_keyword_ids"), list):
+        item["candidate_keyword_ids"] = list(item["support_ids"])
+    return item
+
+
 class CollectionStore:
     def __init__(self, path: Path, *, data_mode_scope: str | None = None):
         if data_mode_scope not in {None, "LIVE"}:
@@ -179,6 +201,12 @@ class CollectionStore:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(suppression)")}
             if "label" not in columns:
                 db.execute("ALTER TABLE suppression ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+            proposal_columns = {row["name"] for row in db.execute("PRAGMA table_info(proposals)")}
+            for name, declaration in (("candidate_keyword_ids", "TEXT NOT NULL DEFAULT '[]'"),
+                                      ("expires_at", "TEXT"),
+                                      ("accepted_collection_id", "TEXT")):
+                if name not in proposal_columns:
+                    db.execute(f"ALTER TABLE proposals ADD COLUMN {name} {declaration}")
             keyword_columns = {row["name"] for row in db.execute("PRAGMA table_info(keywords)")}
             if "eligible" not in keyword_columns:
                 db.execute("ALTER TABLE keywords ADD COLUMN eligible INTEGER NOT NULL DEFAULT 1")
@@ -1475,6 +1503,17 @@ class CollectionStore:
             row = db.execute("SELECT * FROM keywords WHERE id=? " + scope, parameters).fetchone()
         return row
 
+    def keyword_records_by_ids(self, identifiers):
+        values = list(dict.fromkeys(item for item in identifiers if isinstance(item, str)))
+        if not values:
+            return []
+        marks = ",".join("?" for _ in values)
+        scope = " AND data_mode=?" if self.data_mode_scope else ""
+        params = (*values, self.data_mode_scope) if self.data_mode_scope else tuple(values)
+        with self.connect() as db:
+            return db.execute("SELECT * FROM keywords WHERE id IN (" + marks + ")" + scope
+                              + " ORDER BY id", params).fetchall()
+
     def classification_for(self, identifier):
         scope = "AND k.data_mode=?" if self.data_mode_scope else ""
         parameters = ((identifier, self.data_mode_scope) if self.data_mode_scope else (identifier,))
@@ -1904,8 +1943,10 @@ class CollectionStore:
 
     def create_proposal(self, proposal_id, name, description, support_ids, reason, created_at, updated_at):
         with self.connect() as db:
-            db.execute("INSERT INTO proposals VALUES(?,?,?,?,?,'PENDING',?,?)",
-                (proposal_id, name, description, json.dumps(support_ids), reason, created_at, updated_at))
+            db.execute("""INSERT INTO proposals(id,name,description,support_ids,reason,status,
+                created_at,updated_at,candidate_keyword_ids) VALUES(?,?,?,?,?,'PENDING',?,?,?)""",
+                (proposal_id, name, description, json.dumps(support_ids), reason,
+                 created_at, updated_at, json.dumps(support_ids)))
 
     def list_research(self, *, q="", status=None, limit=50, offset=0):
         query = " ".join(q.casefold().split())
@@ -1969,11 +2010,114 @@ class CollectionStore:
 
     def suggestions(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM proposals p WHERE p.status='PENDING' "
+            return [_proposal_view(row) for row in db.execute("SELECT * FROM proposals p WHERE p.status='PENDING' "
                 + ("AND EXISTS (SELECT 1 FROM json_each(p.support_ids) s JOIN keywords k ON k.id=s.value WHERE k.data_mode=?) "
                    if self.data_mode_scope else "")
                 + "ORDER BY p.created_at DESC",
                 (self.data_mode_scope,) if self.data_mode_scope else ())]
+
+    def get_proposal(self, proposal_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+        return _proposal_view(row) if row is not None else None
+
+    def patch_proposal(self, proposal_id, *, name=None, description=None, support_ids=None,
+                       allowed_sources=None):
+        if not isinstance(proposal_id, str) or not proposal_id or len(proposal_id) > 128:
+            return False
+        if name is not None and (not isinstance(name, str) or not 1 <= len(name.strip()) <= 80):
+            raise ValueError("INVALID_PROPOSAL_NAME")
+        if description is not None and (not isinstance(description, str) or len(description) > 1200):
+            raise ValueError("INVALID_PROPOSAL_DESCRIPTION")
+        if support_ids is not None and (not isinstance(support_ids, list) or len(support_ids) < 2
+                or len(support_ids) > 200
+                or any(not isinstance(value, str) or not value or len(value) > 64 for value in support_ids)
+                or len(support_ids) != len(set(support_ids))):
+            raise ValueError("INVALID_PROPOSAL_KEYWORDS")
+
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM proposals WHERE id=? AND status='PENDING'",
+                             (proposal_id,)).fetchone()
+            if row is None:
+                return False
+            if row["expires_at"]:
+                try:
+                    expiry = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError("AI_INPUT_CHANGED") from None
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= datetime.now(timezone.utc):
+                    raise ValueError("AI_PROPOSAL_EXPIRED")
+
+            updates = {}
+            if name is not None:
+                clean_name = name.strip()
+                name_fingerprint = fingerprint(clean_name)
+                conflict = db.execute("""SELECT 1 FROM suppression WHERE fingerprint=?
+                    UNION ALL SELECT 1 FROM collections WHERE status='ACTIVE' AND lower(name)=lower(?)
+                    UNION ALL SELECT 1 FROM proposals WHERE status='PENDING' AND id<>?
+                        AND lower(name)=lower(?) LIMIT 1""",
+                    (name_fingerprint, clean_name, proposal_id, clean_name)).fetchone()
+                if conflict:
+                    raise ValueError("COLLECTION_NAME_CONFLICT")
+                updates["name"] = clean_name
+            if description is not None:
+                updates["description"] = description.strip()
+            if support_ids is not None:
+                candidates = row["candidate_keyword_ids"]
+                try:
+                    candidates = json.loads(candidates) if isinstance(candidates, str) else candidates
+                except (TypeError, ValueError):
+                    candidates = []
+                if not candidates:
+                    candidates = json.loads(row["support_ids"])
+                if not isinstance(candidates, list) or not set(support_ids).issubset(set(candidates)):
+                    raise ValueError("INVALID_PROPOSAL_KEYWORDS")
+                sources = set(allowed_sources or ())
+                if not sources:
+                    raise ValueError("AI_POLICY_DENIED")
+                marks = ",".join("?" for _ in support_ids)
+                params = [*support_ids]
+                scope = " AND data_mode=?" if self.data_mode_scope else ""
+                if self.data_mode_scope:
+                    params.append(self.data_mode_scope)
+                rows = db.execute(f"SELECT id,source,eligible,evidence FROM keywords "
+                    f"WHERE id IN ({marks}){scope}", params).fetchall()
+                if len(rows) != len(support_ids):
+                    raise ValueError("AI_KEYWORD_NOT_FOUND")
+                if any(row["source"] not in sources for row in rows):
+                    raise ValueError("AI_POLICY_DENIED")
+                if any(not row["eligible"] for row in rows):
+                    raise ValueError("AI_KEYWORD_NOT_FOUND")
+                excluded = db.execute(f"SELECT keyword_id FROM keyword_decisions WHERE decision='EXCLUDED' "
+                    f"AND keyword_id IN ({marks})", support_ids).fetchall()
+                user_state = db.execute(f"SELECT keyword_id FROM memberships WHERE keyword_id IN ({marks}) "
+                    "AND (origin='USER' OR pinned=1)", support_ids).fetchall()
+                if excluded or user_state:
+                    raise ValueError("AI_INPUT_CHANGED")
+                for item in rows:
+                    try:
+                        evidence = json.loads(item["evidence"])
+                    except (TypeError, ValueError):
+                        evidence = None
+                    if not isinstance(evidence, dict) or not evidence:
+                        raise ValueError("AI_PROPOSAL_EXPIRED")
+                content_fingerprint = _proposal_content_fingerprint(support_ids)
+                suppressed = db.execute("SELECT 1 FROM suppression WHERE fingerprint=?",
+                                        (content_fingerprint,)).fetchone()
+                if suppressed:
+                    raise ValueError("COLLECTION_CONTENT_CONFLICT")
+                updates["support_ids"] = json.dumps(support_ids)
+
+            if not updates:
+                raise ValueError("EMPTY_UPDATE")
+            assignments = [f"{key}=?" for key in updates]
+            db.execute("UPDATE proposals SET " + ",".join(assignments)
+                       + ",updated_at=? WHERE id=?",
+                       (*updates.values(), now(), proposal_id))
+            return True
 
     def resolve_proposal(self, proposal_id, accept, *, name=None, description=None,
                          allowed_sources=None):
@@ -1984,32 +2128,81 @@ class CollectionStore:
         name = name.strip() if name is not None else None
         description = description.strip() if description is not None else None
         with self.connect() as db:
-            row = db.execute("SELECT * FROM proposals WHERE id=? AND status='PENDING'", (proposal_id,)).fetchone()
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
             if row is None:
                 return None
-            support_ids = json.loads(row["support_ids"])
+            if row["status"] == "ACCEPTED" and row["accepted_collection_id"]:
+                return row["accepted_collection_id"] if accept else None
+            if row["status"] != "PENDING":
+                return None
+            try:
+                support_ids = json.loads(row["support_ids"])
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(support_ids, list) or len(support_ids) != len(set(support_ids)):
+                return None
+            if row["expires_at"]:
+                try:
+                    expiry = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+                except ValueError:
+                    raise ValueError("AI_INPUT_CHANGED") from None
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                if expiry <= datetime.now(timezone.utc):
+                    raise ValueError("AI_PROPOSAL_EXPIRED")
             if self.data_mode_scope and support_ids:
                 placeholders = ",".join("?" for _ in support_ids)
-                supported = db.execute(f"SELECT count(*) FROM keywords WHERE id IN ({placeholders}) AND data_mode=?",
+                supported = db.execute(f"""SELECT count(*) FROM keywords k WHERE k.id IN ({placeholders})
+                    AND k.data_mode=? AND k.eligible=1
+                    AND NOT EXISTS(SELECT 1 FROM keyword_decisions d WHERE d.keyword_id=k.id AND d.decision='EXCLUDED')
+                    AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id
+                        AND (m.origin='USER' OR m.pinned=1))""",
                     (*support_ids, self.data_mode_scope)).fetchone()[0]
                 if supported != len(set(support_ids)):
-                    return None
+                    raise ValueError("AI_INPUT_CHANGED")
             collection_name = name if name is not None else row["name"]
-            if accept and name is not None:
+            if accept:
                 name_fingerprint = fingerprint(collection_name)
-                suppressed = db.execute("SELECT 1 FROM suppression WHERE fingerprint=?",
-                                        (name_fingerprint,)).fetchone()
+                content_fingerprint = _proposal_content_fingerprint(support_ids)
+                suppressed = db.execute("SELECT 1 FROM suppression WHERE fingerprint IN (?,?)",
+                                        (name_fingerprint, content_fingerprint)).fetchone()
                 duplicate = db.execute("SELECT 1 FROM collections WHERE status='ACTIVE' AND lower(name)=lower(?) "
                     "UNION ALL SELECT 1 FROM proposals WHERE status='PENDING' AND id<>? "
                     "AND lower(name)=lower(?) LIMIT 1",
                     (collection_name, proposal_id, collection_name)).fetchone()
                 if suppressed or duplicate:
-                    return None
+                    raise ValueError("COLLECTION_NAME_CONFLICT")
+                if support_ids:
+                    marks = ",".join("?" for _ in support_ids)
+                    duplicate_content = db.execute(f"""SELECT m.collection_id FROM memberships m
+                        JOIN collections c ON c.id=m.collection_id
+                        JOIN keywords k ON k.id=m.keyword_id
+                        WHERE c.status='ACTIVE'{(' AND k.data_mode=?' if self.data_mode_scope else '')}
+                        GROUP BY m.collection_id HAVING count(*)=?
+                        AND sum(CASE WHEN m.keyword_id IN ({marks}) THEN 1 ELSE 0 END)=? LIMIT 1""",
+                        (*((self.data_mode_scope,) if self.data_mode_scope else ()),
+                         len(support_ids), *support_ids, len(support_ids))).fetchone()
+                    if duplicate_content:
+                        raise ValueError("COLLECTION_CONTENT_CONFLICT")
             status = "ACCEPTED" if accept else "REJECTED"
-            db.execute("UPDATE proposals SET status=?,updated_at=? WHERE id=?", (status, now(), proposal_id))
             if not accept:
+                db.execute("UPDATE proposals SET status=?,updated_at=? WHERE id=?", (status, now(), proposal_id))
                 db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
                            (fingerprint(row["name"]), "REJECTED_PROPOSAL", now(), row["name"]))
+                try:
+                    candidate_ids = json.loads(row["candidate_keyword_ids"] or "[]")
+                except (TypeError, ValueError):
+                    candidate_ids = support_ids
+                content_sets = [support_ids]
+                if isinstance(candidate_ids, list) and set(candidate_ids) != set(support_ids):
+                    content_sets.append(candidate_ids)
+                for content_ids in content_sets:
+                    if not content_ids:
+                        continue
+                    db.execute("INSERT OR REPLACE INTO suppression(fingerprint,kind,created_at,label) VALUES(?,?,?,?)",
+                        (_proposal_content_fingerprint(content_ids), "REJECTED_PROPOSAL_CONTENT",
+                         now(), "Rejected Collection proposal content"))
             else:
                 identifier, stamp = str(uuid.uuid4()), now()
                 collection_name = name if name is not None else row["name"]
@@ -2020,6 +2213,8 @@ class CollectionStore:
                 for keyword_id in support_ids:
                     db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?, 'LOCAL_AI',0,NULL,?,?)",
                                (identifier, keyword_id, "Representative keyword in accepted AI suggestion", now()))
+                db.execute("UPDATE proposals SET status='ACCEPTED',accepted_collection_id=?,updated_at=? WHERE id=?",
+                           (identifier, stamp, proposal_id))
                 return identifier
             return ""
 

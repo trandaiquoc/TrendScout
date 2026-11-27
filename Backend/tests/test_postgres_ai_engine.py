@@ -23,7 +23,7 @@ from app.ai.runtime import (
     AIExecutionError,
     AIService,
 )
-from app.collections.postgres_store import PostgresCollectionStore
+from app.collections.postgres_store import CollectionWriteError, PostgresCollectionStore
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_connection import postgres_connection
@@ -55,6 +55,7 @@ def isolated_schema(prefix="ts_test_"):
 class ProposalThenAssignProvider:
     def __init__(self):
         self.calls = 0
+        self.proposal_name = "Outdoor recreation"
 
     def verify_model(self, model_id):
         assert model_id == MODEL_ID
@@ -76,7 +77,7 @@ class ProposalThenAssignProvider:
         }
         if not collections and len(keywords) >= 2:
             payload["proposals"].append({
-                "name": "Outdoor recreation",
+                "name": self.proposal_name,
                 "description": "Topics about recreation and equipment outdoors.",
                 "keyword_ids": [item["id"] for item in keywords],
                 "reason": "The terms describe a coherent outdoor activity topic.",
@@ -128,6 +129,46 @@ class RecommendationCaptureProvider:
             "research_steps": ["Review current US marketplace listings."],
         }]}
         return json.dumps(response), {"input_tokens": 12, "output_tokens": 9}, None
+
+
+def _seed_proposal_keywords(connection, schema, count=3):
+    tables = {name: sql.Identifier(schema, name) for name in (
+        "sources", "keywords", "source_evidence", "evidence_keywords",
+    )}
+    keyword_ids = [f"proposal-keyword-{index}" for index in range(1, count + 1)]
+    stamp = NOW - timedelta(days=1)
+    with connection.transaction():
+        connection.execute(sql.SQL("""INSERT INTO {}(id,display_name,configuration)
+            VALUES (%s,%s,%s) ON CONFLICT(id) DO NOTHING""").format(tables["sources"]),
+            (WIKIMEDIA_SOURCE_ID, "Wikimedia", Jsonb({})))
+        for index, keyword_id in enumerate(keyword_ids, start=1):
+            evidence_id = f"proposal-evidence-{index}"
+            connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,'LIVE',%s,'')""")
+                .format(tables["keywords"]),
+                (keyword_id, f"Outdoor activity {index}", f"outdoor activity {index}",
+                 WIKIMEDIA_SOURCE_ID, "en.wikipedia", stamp.isoformat(), Jsonb({})))
+            connection.execute(sql.SQL("""INSERT INTO {}(id,source_id,content_digest,query_scope,
+                geography,observed_at,collected_at,expires_at,payload)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""").format(tables["source_evidence"]),
+                (evidence_id, WIKIMEDIA_SOURCE_ID, f"proposal-digest-{index}",
+                 Jsonb({"data_mode": "LIVE"}), Jsonb({"country_code": "US"}), stamp,
+                 stamp, NOW + timedelta(days=7), None))
+            connection.execute(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
+                VALUES (%s,%s)""").format(tables["evidence_keywords"]),
+                (evidence_id, keyword_id))
+    return keyword_ids
+
+
+def _propose(store, environment, provider, keyword_ids, key):
+    service = AIService(
+        PostgresAtomicStateStore(environment, schema=store.schema),
+        config=_ai_config(), provider=provider, utcnow=lambda: NOW,
+    )
+    result = service.classify_keyword_ids(store, keyword_ids, idempotency_key=key)
+    assert result["status"] == "COMPLETED", (result.get("status"), result.get("error_code"))
+    assert len(result["proposal_ids"]) == 1
+    return service, result, store.get_proposal(result["proposal_ids"][0])
 
 
 def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
@@ -221,6 +262,218 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
                                     .format(sql.Identifier(schema, "memberships")),
                                     (keyword_ids[0],)).fetchone()
         assert tuple(manual) == ("USER", 1)
+
+
+def test_postgres_proposal_edit_and_concurrent_accept_are_atomic_and_idempotent():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=3)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        _service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-edit-accept",
+        )
+        assert proposal["job_id"]
+        assert proposal["expires_at"]
+        assert proposal["candidate_keyword_ids"] == keyword_ids
+        assert proposal["support_ids"] == keyword_ids
+
+        assert store.patch_proposal(
+            proposal["id"], name="Edited outdoor topic", description="User reviewed description.",
+            support_ids=keyword_ids[:2], allowed_sources={WIKIMEDIA_SOURCE_ID},
+        )
+        edited = store.get_proposal(proposal["id"])
+        assert edited["support_ids"] == keyword_ids[:2]
+        assert edited["candidate_keyword_ids"] == keyword_ids
+        assert len(edited["evidence_ids"]) == 2
+
+        def accept():
+            return store.resolve_proposal(
+                proposal["id"], True, allowed_sources={WIKIMEDIA_SOURCE_ID},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            accepted_ids = list(pool.map(lambda _index: accept(), range(2)))
+        assert accepted_ids[0] == accepted_ids[1]
+        accepted_id = accepted_ids[0]
+        persisted = store.get_proposal(proposal["id"])
+        assert persisted["status"] == "ACCEPTED"
+        assert persisted["accepted_collection_id"] == accepted_id
+        assert {row["id"] for row in store.keywords_for(accepted_id)} == set(keyword_ids[:2])
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+            .format(sql.Identifier(schema, "collections")), (accepted_id,)).fetchone()[0] == 1
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE collection_id=%s")
+            .format(sql.Identifier(schema, "memberships")), (accepted_id,)).fetchone()[0] == 2
+
+
+def test_postgres_new_collection_during_inference_invalidates_proposal_context():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+
+        class AddCollectionDuringInference(ProposalThenAssignProvider):
+            def __init__(self):
+                super().__init__()
+                self.inserted = False
+                self.db_schema = schema
+                self.db_connection = connection
+
+            def complete(self, verified, *, messages, schema, max_tokens):
+                output = super().complete(verified, messages=messages, schema=schema,
+                                          max_tokens=max_tokens)
+                if not self.inserted:
+                    stamp = datetime.now(timezone.utc)
+                    self.db_connection.execute(sql.SQL("""INSERT INTO {}(id,name,description,created_by,
+                        reason,created_at,updated_at) VALUES ('concurrent-collection',
+                        'Outdoor recreation','', 'USER','',%s,%s)""").format(
+                            sql.Identifier(self.db_schema, "collections")), (stamp, stamp))
+                    self.inserted = True
+                return output
+
+        provider = AddCollectionDuringInference()
+        service = AIService(
+            PostgresAtomicStateStore(environment, schema=schema),
+            config=_ai_config(), provider=provider, utcnow=lambda: NOW,
+        )
+        result = service.classify_keyword_ids(
+            store, keyword_ids, idempotency_key="pg-proposal-context-race",
+        )
+        assert result["status"] == "FAILED"
+        assert result["error_code"] == "AI_INPUT_CHANGED"
+        assert store.suggestions() == []
+        assert store.list_collections()[0]["id"] == "concurrent-collection"
+
+
+def test_postgres_expired_proposal_and_new_user_membership_block_acceptance():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        _service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-expiry",
+        )
+        connection.execute(sql.SQL("UPDATE {} SET expires_at=%s WHERE id=%s")
+            .format(sql.Identifier(schema, "proposals")),
+            (NOW - timedelta(days=1), proposal["id"]))
+        stored_expiry = connection.execute(sql.SQL("SELECT expires_at FROM {} WHERE id=%s")
+            .format(sql.Identifier(schema, "proposals")), (proposal["id"],)).fetchone()[0]
+        assert stored_expiry <= datetime.now(timezone.utc)
+        with pytest.raises(ValueError, match="AI_PROPOSAL_EXPIRED"):
+            store.resolve_proposal(proposal["id"], True, allowed_sources={WIKIMEDIA_SOURCE_ID})
+        assert store.get_proposal(proposal["id"])["status"] == "PENDING"
+
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        _service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-user-edit",
+        )
+        stamp = datetime.now(timezone.utc)
+        connection.execute(sql.SQL("""INSERT INTO {}(id,name,description,created_by,reason,created_at,updated_at)
+            VALUES ('user-collection','User Collection','', 'USER','',%s,%s)""").format(
+                sql.Identifier(schema, "collections")), (stamp, stamp))
+        connection.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,reason,created_at)
+            VALUES ('user-collection',%s,'USER',1,'User pinned after proposal generation',%s)""").format(
+                sql.Identifier(schema, "memberships")), (keyword_ids[0], stamp))
+        with pytest.raises(ValueError, match="AI_INPUT_CHANGED"):
+            store.resolve_proposal(proposal["id"], True, allowed_sources={WIKIMEDIA_SOURCE_ID})
+        assert connection.execute(sql.SQL("SELECT origin,pinned FROM {} WHERE collection_id='user-collection' "
+                                          "AND keyword_id=%s").format(sql.Identifier(schema, "memberships")),
+                                   (keyword_ids[0],)).fetchone() == ("USER", 1)
+        assert store.get_proposal(proposal["id"])["status"] == "PENDING"
+
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        _service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-expired-evidence",
+        )
+        connection.execute(sql.SQL("""UPDATE {} SET expires_at=%s WHERE id IN (
+            SELECT evidence_id FROM {} WHERE keyword_id=ANY(%s))""").format(
+                sql.Identifier(schema, "source_evidence"),
+                sql.Identifier(schema, "evidence_keywords")),
+            (NOW - timedelta(days=1), keyword_ids))
+        with pytest.raises(ValueError, match="AI_PROPOSAL_EXPIRED"):
+            store.resolve_proposal(proposal["id"], True, allowed_sources={WIKIMEDIA_SOURCE_ID})
+        assert store.get_proposal(proposal["id"])["status"] == "PENDING"
+
+
+def test_postgres_rejected_proposal_suppresses_same_keyword_content():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-reject",
+        )
+        assert store.resolve_proposal(proposal["id"], False) == ""
+        assert store.suggestions() == []
+        provider.proposal_name = "Camping equipment"
+        connection.execute(sql.SQL("UPDATE {} SET normalized=normalized || ' revised' WHERE id=ANY(%s)")
+            .format(sql.Identifier(schema, "keywords")), (keyword_ids,))
+
+        again = service.classify_keyword_ids(
+            store, keyword_ids, idempotency_key="pg-proposal-reject-again",
+        )
+        assert again["status"] == "COMPLETED"
+        assert again["proposal_ids"] == []
+        assert store.suggestions() == []
+        assert provider.calls == 2
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE kind='REJECTED_PROPOSAL_CONTENT'")
+            .format(sql.Identifier(schema, "suppression"))).fetchone()[0] == 1
+
+
+def test_postgres_pending_proposal_deduplicates_identical_keyword_content():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        service, _first, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-pending-dedupe-one",
+        )
+        provider.proposal_name = "Camping equipment"
+        connection.execute(sql.SQL("UPDATE {} SET normalized=normalized || ' revised' WHERE id=ANY(%s)")
+            .format(sql.Identifier(schema, "keywords")), (keyword_ids,))
+
+        second = service.classify_keyword_ids(
+            store, keyword_ids, idempotency_key="pg-proposal-pending-dedupe-two",
+        )
+        assert second["status"] == "COMPLETED"
+        assert second["proposal_ids"] == []
+        pending = store.suggestions()
+        assert [item["id"] for item in pending] == [proposal["id"]]
+        assert pending[0]["support_ids"] == keyword_ids
+        assert provider.calls == 2
+
+
+def test_postgres_proposal_accept_rolls_back_on_membership_insert_failure():
+    with isolated_schema() as (environment, schema, connection):
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        provider = ProposalThenAssignProvider()
+        _service, _result, proposal = _propose(
+            store, environment, provider, keyword_ids, "pg-proposal-rollback",
+        )
+        connection.execute(sql.SQL("""CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.reason='Representative keyword in accepted AI suggestion' THEN
+                    RAISE EXCEPTION 'simulated proposal membership failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$""").format(sql.Identifier(schema, "reject_proposal_membership")))
+        connection.execute(sql.SQL("""CREATE TRIGGER reject_proposal_membership
+            BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION {}()""").format(
+                sql.Identifier(schema, "memberships"),
+                sql.Identifier(schema, "reject_proposal_membership")))
+
+        with pytest.raises(CollectionWriteError):
+            store.resolve_proposal(proposal["id"], True, allowed_sources={WIKIMEDIA_SOURCE_ID})
+        assert store.get_proposal(proposal["id"])["status"] == "PENDING"
+        assert store.list_collections() == []
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE origin='LOCAL_AI'")
+            .format(sql.Identifier(schema, "memberships"))).fetchone()[0] == 0
 
 
 def test_postgres_ai_assignment_revalidates_a_concurrent_user_pin():
