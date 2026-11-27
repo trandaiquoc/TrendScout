@@ -384,7 +384,7 @@ class AIServiceTests(unittest.TestCase):
 
     def test_large_classification_uses_batches_and_rechecks_metadata_per_request(self):
         keywords = [{"id": f"keyword-{index:02d}", "keyword": f"Outdoor topic {index}"}
-                    for index in range(17)]
+                    for index in range(42)]
         provider = FakeProvider([classification_response, classification_response])
         service = AIService(MemoryAtomicState(), config=config(), provider=provider,
                             utcnow=lambda: NOW)
@@ -398,7 +398,19 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(provider.verifications, [MODEL_ID, MODEL_ID])
         sizes = [len(json.loads(call["messages"][1]["content"])["keywords"])
                  for call in provider.calls]
-        self.assertEqual(sizes, [12, 5])
+        self.assertEqual(sizes, [40, 2])
+        self.assertEqual([call["max_tokens"] for call in provider.calls], [6400, 512])
+
+    def test_classification_batch_is_bounded_by_model_output_capacity(self):
+        service = AIService(MemoryAtomicState(), config=config(), provider=FakeProvider(),
+                            utcnow=lambda: NOW)
+        collections = FakeCollectionStore().collections
+        full_model = VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 8192, True)
+        half_model = VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 4096, True)
+        tiny_model = VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 1024, True)
+        self.assertEqual(service._batch_size(full_model, collections, 100), 40)
+        self.assertEqual(service._batch_size(half_model, collections, 100), 25)
+        self.assertEqual(service._batch_size(tiny_model, collections, 100), 6)
 
     def test_idempotency_conflict_cache_input_change_and_missing_key(self):
         provider = FakeProvider([classification_response, classification_response])
@@ -721,6 +733,30 @@ class AIServiceTests(unittest.TestCase):
         )
         self.assertEqual(result["error_code"], "AI_POLICY_DENIED")
 
+    def test_classification_cache_ignores_unrelated_metrics_but_tracks_collection_metadata(self):
+        provider = FakeProvider([classification_response, classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore()
+        service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="metric-cache-first")
+
+        store.keywords["keyword-1"]["algorithm_results"] = [{
+            "algorithm_id": "observed-volume-rank", "metric": "pageviews",
+            "unit": "views", "value": 999, "input_digest": "new-metric-digest",
+        }]
+        metric_only = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="metric-cache-warm",
+        )
+        self.assertEqual(metric_only["status"], "COMPLETED")
+        self.assertEqual(len(provider.calls), 1)
+
+        store.collections[0]["version"] += 1
+        collection_changed = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="collection-cache-change",
+        )
+        self.assertEqual(collection_changed["status"], "COMPLETED")
+        self.assertEqual(len(provider.calls), 2)
+
     def test_invalid_json_unknown_ids_and_unknown_collections_are_rejected(self):
         for response in (
             "not-json",
@@ -793,11 +829,58 @@ class AIServiceTests(unittest.TestCase):
         first = service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="retry-request")
         self.assertEqual((first["status"], first["error_code"]), ("DEFERRED", "AI_RATE_LIMITED"))
         self.assertEqual(service._quota()["daily_used"], 1)
+        self.assertEqual(atomic.snapshot("trendscout-ai-engine-v1").get("batch_profile", {}), {})
         resumed = service.resume_job(store, first["job_id"])
         self.assertEqual(resumed["status"], "COMPLETED")
         self.assertEqual(service._quota()["daily_used"], 2)
         self.assertEqual(len(provider.calls), 2)
         self.assertEqual(store.context_reads, 2)
+        profile = atomic.snapshot("trendscout-ai-engine-v1")["batch_profile"][MODEL_ID]
+        self.assertEqual(len(profile), 1)
+        self.assertTrue(profile[0]["valid_output"])
+        self.assertEqual(service._batch_size(provider.verify_model(MODEL_ID), store.collections, 100), 40)
+
+    def test_interrupted_classification_resumes_after_cached_batch_without_repeating_it(self):
+        keywords = [{"id": f"interrupt-keyword-{index:02d}",
+                     "keyword": f"Outdoor topic {index}"} for index in range(41)]
+        provider = FakeProvider([classification_response, classification_response])
+        atomic = MemoryAtomicState()
+        clock = [NOW]
+        service = AIService(atomic, config=config(), provider=provider, utcnow=lambda: clock[0])
+        store = FakeCollectionStore(keywords=keywords)
+        original_remember = service._remember_classifications
+        interrupted = False
+
+        def interrupt_after_checkpoint(cache_items, *, expires_at):
+            nonlocal interrupted
+            original_remember(cache_items, expires_at=expires_at)
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+
+        service._remember_classifications = interrupt_after_checkpoint
+        identifiers = [item["id"] for item in keywords]
+        with self.assertRaises(KeyboardInterrupt):
+            service.classify_keyword_ids(
+                store, identifiers, idempotency_key="interrupt-after-batch",
+            )
+        self.assertEqual(len(provider.calls), 1)
+        state = atomic.snapshot("trendscout-ai-engine-v1")
+        self.assertEqual(len(state["cache"]), 40)
+        job_id = next(job_id for job_id, job in state["jobs"].items()
+                      if job["status"] == "RUNNING")
+
+        clock[0] += timedelta(minutes=5, seconds=1)
+        service._remember_classifications = original_remember
+        resumed = service.resume_job(store, job_id)
+        self.assertEqual(resumed["status"], "COMPLETED")
+        self.assertEqual(resumed["processed"], 41)
+        self.assertEqual(len(provider.calls), 2)
+        group_counts = [len(json.loads(call["messages"][1]["content"])["keywords"])
+                        for call in provider.calls]
+        self.assertEqual(group_counts, [40, 1])
+        self.assertEqual(len(store.persist_calls), 1)
+        self.assertEqual(service._quota()["daily_used"], 2)
 
     def test_recommendation_evidence_limits_and_cache_regeneration(self):
         provider = FakeProvider([recommendation_response, recommendation_response])

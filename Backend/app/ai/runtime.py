@@ -42,6 +42,9 @@ POLICY_VERSION = "free-zdr-source-transfer-v2"
 ASSIGNMENT_THRESHOLD = 0.82
 DAILY_REQUEST_LIMIT = 40
 ROLLING_MINUTE_LIMIT = 20
+CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD = 160
+MAX_CLASSIFICATION_BATCH_SIZE = 40
+MAX_CLASSIFICATION_PROMPT_BYTES = 80_000
 ATTEMPT_RETENTION_SECONDS = 24 * 60 * 60
 JOB_RETENTION = timedelta(days=30)
 CACHE_RETENTION = timedelta(days=7)
@@ -572,7 +575,7 @@ class AIService:
         prompt_bytes = sum(len(item.get("content", "").encode("utf-8"))
                            for item in messages if isinstance(item, dict))
         estimated_input = max(1, math.ceil(prompt_bytes / 3.2) + 256)
-        max_tokens = min(output_cap, verified.max_output_tokens, 2048)
+        max_tokens = min(output_cap, verified.max_output_tokens)
         if estimated_input + max_tokens > verified.context_tokens:
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
         attempt_id = self._reserve(job_id, task)
@@ -582,17 +585,19 @@ class AIService:
                 verified, messages=messages, schema=schema, max_tokens=max_tokens,
             )
         except OpenRouterError as exc:
+            provider_latency_ms = (time.monotonic() - started) * 1000
             self._finish_attempt(attempt_id, outcome="FAILED", usage=exc.usage,
                                  error_code=exc.code,
-                                 retry_at=exc.retry_at, latency_ms=(time.monotonic() - started) * 1000)
+                                 retry_at=exc.retry_at, latency_ms=provider_latency_ms)
             if exc.code == "AI_RATE_LIMITED" or exc.code == "AI_PROVIDER_UNAVAILABLE":
                 raise AIExecutionError(exc.code, status="DEFERRED", retry_at=exc.retry_at) from None
             if exc.code == "AI_INVALID_OUTPUT":
                 raise AIExecutionError(exc.code, status="INVALID_OUTPUT") from None
             raise AIExecutionError(exc.code, status="MODEL_UNAVAILABLE") from None
+        provider_latency_ms = (time.monotonic() - started) * 1000
         self._finish_attempt(attempt_id, outcome="COMPLETED", usage=usage, retry_at=retry_at,
-                             latency_ms=(time.monotonic() - started) * 1000)
-        return content, usage
+                             latency_ms=provider_latency_ms)
+        return content, usage, provider_latency_ms
 
     def _remember_classifications(self, cache_items, *, expires_at):
         if expires_at is None or expires_at <= self._now():
@@ -700,14 +705,16 @@ class AIService:
                              "version": row.get("version"),
                              "auto_match": bool(row.get("auto_match"))} for row in collections],
         }
-        if len(_canonical(data).encode("utf-8")) > 48_000:
+        if len(_canonical(data).encode("utf-8")) > MAX_CLASSIFICATION_PROMPT_BYTES:
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
         return [{"role": "system", "content": system},
                 {"role": "user", "content": _canonical(data)}]
 
     def _batch_size(self, model, collections, remaining):
         # Limit prompt growth by the endpoint's current context and output caps.
-        base = 12
+        keyword_groups = remaining if isinstance(remaining, list) else None
+        remaining_count = len(keyword_groups) if keyword_groups is not None else remaining
+        base = MAX_CLASSIFICATION_BATCH_SIZE
         try:
             profile = self._transact(lambda state: (state, dict(state["batch_profile"])))
             recent = profile.get(self.config.collection_model, [])
@@ -716,11 +723,29 @@ class AIService:
                 base = 4
             elif recent and not all(item.get("valid_output", True) for item in recent[-5:]):
                 base = 4
-            elif recent and all(item.get("valid_output", True) for item in recent[-5:]):
-                base = 16
         except Exception:
             base = 4
-        base = min(base, max(1, model.max_output_tokens // 128), remaining)
+        output_fit = max(1, model.max_output_tokens // CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD)
+        base = min(base, output_fit, remaining_count)
+        if keyword_groups is not None:
+            fitting = 0
+            for count in range(1, base + 1):
+                candidate = keyword_groups[:count]
+                try:
+                    messages = self._classification_messages(candidate, collections)
+                except AIExecutionError:
+                    break
+                prompt_bytes = sum(len(item["content"].encode("utf-8"))
+                                   for item in messages if isinstance(item, dict))
+                estimated_input = max(1, math.ceil(prompt_bytes / 3.2) + 256)
+                output_cap = min(model.max_output_tokens, max(
+                    512, count * CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD))
+                if estimated_input + output_cap > model.context_tokens:
+                    break
+                fitting = count
+            if fitting < 1:
+                raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
+            return fitting
         collections_json = _canonical([{key: item.get(key) for key in ("id", "name", "description", "version")}
                                         for item in collections])
         context_budget = max(256, model.context_tokens - 2048)
@@ -906,15 +931,16 @@ class AIService:
                 except OpenRouterError as exc:
                     _code, status, retry_at = self._safe_error(exc)
                     raise AIExecutionError(exc.code, status=status, retry_at=retry_at) from None
-                batch_length = self._batch_size(verified, collections, len(misses) - cursor)
+                batch_length = self._batch_size(verified, collections, misses[cursor:])
                 batch = misses[cursor:cursor + batch_length]
                 messages = self._classification_messages(batch, collections)
-                start = time.monotonic()
+                provider_latency_ms = 0
                 try:
-                    content, _usage = self._call_json(
+                    content, _usage, provider_latency_ms = self._call_json(
                         job_id=job_id, task="classification", model_id=self.config.collection_model,
                         messages=messages, schema=CLASSIFICATION_SCHEMA,
-                        output_cap=min(2048, max(512, len(batch) * 160)),
+                        output_cap=min(verified.max_output_tokens, max(
+                            512, len(batch) * CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD)),
                         verified=verified,
                     )
                     parsed = parse_json(content)
@@ -931,14 +957,15 @@ class AIService:
                     )
                 except InvalidAIOutput:
                     self._save_batch_profile(self.config.collection_model,
-                                             (time.monotonic() - start) * 1000, valid_output=False)
+                                             provider_latency_ms, valid_output=False)
                     raise AIExecutionError("AI_INVALID_OUTPUT", status="INVALID_OUTPUT") from None
-                except AIExecutionError:
-                    self._save_batch_profile(self.config.collection_model,
-                                             (time.monotonic() - start) * 1000, valid_output=False)
+                except AIExecutionError as exc:
+                    if exc.code == "AI_INVALID_OUTPUT":
+                        self._save_batch_profile(self.config.collection_model,
+                                                 provider_latency_ms, valid_output=False)
                     raise
                 self._save_batch_profile(self.config.collection_model,
-                                         (time.monotonic() - start) * 1000, valid_output=True)
+                                         provider_latency_ms, valid_output=True)
                 for row in validated["classifications"]:
                     group_results[row["keyword_id"]] = row
                 self._remember_classifications({cache_keys[group["id"]]: {
@@ -1494,7 +1521,7 @@ class AIService:
                 return self._complete_with_error(job_id, "AI_MODEL_UNAVAILABLE", "MODEL_UNAVAILABLE")
             verified = self._verify_model(self.config.recommendation_model)
             messages = self._recommendation_messages(safe_context, research_constraints)
-            content, usage = self._call_json(
+            content, usage, _provider_latency_ms = self._call_json(
                 job_id=job_id, task="recommendations", model_id=self.config.recommendation_model,
                 messages=messages, schema=RECOMMENDATION_SCHEMA,
                 output_cap=min(verified.max_output_tokens, 2048),
