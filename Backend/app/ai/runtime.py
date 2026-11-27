@@ -18,7 +18,11 @@ from app.ai.input_contract import (
     group_keyword_records,
     supported_ai_data_mode,
 )
-from app.ai.openrouter import OpenRouterAdapter, OpenRouterError
+from app.ai.openrouter import (
+    OpenRouterAdapter,
+    OpenRouterError,
+    sanitize_provider_diagnostics,
+)
 from app.ai.schemas import (
     CLASSIFICATION_SCHEMA,
     RECOMMENDATION_SCHEMA,
@@ -59,11 +63,13 @@ _SUPPORTED_AI_SOURCES = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_S
 
 
 class AIExecutionError(RuntimeError):
-    def __init__(self, code: str, *, status: str = "FAILED", retry_at: str | None = None):
+    def __init__(self, code: str, *, status: str = "FAILED", retry_at: str | None = None,
+                 diagnostics=None):
         super().__init__(code)
         self.code = code
         self.status = status
         self.retry_at = retry_at
+        self.diagnostics = sanitize_provider_diagnostics(diagnostics)
 
 
 @dataclass(frozen=True)
@@ -590,10 +596,16 @@ class AIService:
                                  error_code=exc.code,
                                  retry_at=exc.retry_at, latency_ms=provider_latency_ms)
             if exc.code == "AI_RATE_LIMITED" or exc.code == "AI_PROVIDER_UNAVAILABLE":
-                raise AIExecutionError(exc.code, status="DEFERRED", retry_at=exc.retry_at) from None
+                raise AIExecutionError(exc.code, status="DEFERRED", retry_at=exc.retry_at,
+                                       diagnostics=exc.diagnostics) from None
             if exc.code == "AI_INVALID_OUTPUT":
-                raise AIExecutionError(exc.code, status="INVALID_OUTPUT") from None
-            raise AIExecutionError(exc.code, status="MODEL_UNAVAILABLE") from None
+                raise AIExecutionError(exc.code, status="INVALID_OUTPUT",
+                                       diagnostics=exc.diagnostics) from None
+            if exc.code == "AI_POLICY_DENIED":
+                raise AIExecutionError(exc.code, status="POLICY_DENIED",
+                                       diagnostics=exc.diagnostics) from None
+            raise AIExecutionError(exc.code, status="MODEL_UNAVAILABLE",
+                                   diagnostics=exc.diagnostics) from None
         provider_latency_ms = (time.monotonic() - started) * 1000
         self._finish_attempt(attempt_id, outcome="COMPLETED", usage=usage, retry_at=retry_at,
                              latency_ms=provider_latency_ms)
@@ -930,7 +942,8 @@ class AIService:
                     verified = self._verify_model(self.config.collection_model)
                 except OpenRouterError as exc:
                     _code, status, retry_at = self._safe_error(exc)
-                    raise AIExecutionError(exc.code, status=status, retry_at=retry_at) from None
+                    raise AIExecutionError(exc.code, status=status, retry_at=retry_at,
+                                           diagnostics=exc.diagnostics) from None
                 batch_length = self._batch_size(verified, collections, misses[cursor:])
                 batch = misses[cursor:cursor + batch_length]
                 messages = self._classification_messages(batch, collections)
@@ -1132,12 +1145,18 @@ class AIService:
             return result
         except Exception as exc:
             code, status, retry_at = self._safe_error(exc)
-            return self._complete_with_error(job_id, code, status, retry_at=retry_at)
+            return self._complete_with_error(
+                job_id, code, status, retry_at=retry_at,
+                diagnostics=getattr(exc, "diagnostics", None),
+            )
 
-    def _complete_with_error(self, job_id, code, status, *, retry_at=None):
+    def _complete_with_error(self, job_id, code, status, *, retry_at=None, diagnostics=None):
         result = {"job_id": job_id, "status": status, "processed": 0, "assigned": [],
                   "unassigned_keyword_ids": [], "proposal_ids": [], "retry_at": retry_at,
                   "error_code": code}
+        safe_diagnostics = sanitize_provider_diagnostics(diagnostics)
+        if safe_diagnostics:
+            result["provider_diagnostics"] = safe_diagnostics
         self._update_job(job_id, status=status, error_code=code, retry_at=retry_at,
                          result=result, lease_token=None, lease_until=None)
         return result
@@ -1573,7 +1592,10 @@ class AIService:
             return self._complete_with_error(job_id, "AI_INVALID_OUTPUT", "INVALID_OUTPUT")
         except Exception as exc:
             code, status, retry_at = self._safe_error(exc)
-            return self._complete_with_error(job_id, code, status, retry_at=retry_at)
+            return self._complete_with_error(
+                job_id, code, status, retry_at=retry_at,
+                diagnostics=getattr(exc, "diagnostics", None),
+            )
 
     def _read_recommendation(self, key):
         now = _iso_now(self._now())

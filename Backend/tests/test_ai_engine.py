@@ -345,6 +345,96 @@ class OpenRouterAdapterTests(unittest.TestCase):
         })
         self.assertNotIn("private", repr(result))
 
+    def test_routing_error_diagnostics_are_bounded_and_redacted(self):
+        prompt_marker = "PRIVATE_PROMPT_SENTINEL"
+        key_marker = "sk-or-v1-private-marker"
+        body = {
+            "error": {
+                "message": f"{prompt_marker} {key_marker}",
+                "code": 404,
+                "metadata": {
+                    "failed_routing_step": "Filter by Data Policy",
+                    "routing_funnel": [
+                        {"step": "Initial Endpoints", "endpoint_count": 1},
+                        {"step": f"{prompt_marker} {key_marker}", "endpoint_count": 1},
+                    ],
+                    "requested_providers": ["liquid", key_marker],
+                    "available_providers": ["liquid"],
+                    "prompt": prompt_marker,
+                },
+            },
+        }
+        client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(
+            404, json=body, headers={"x-openrouter-request-id": "req_safe-123"},
+        )))
+        adapter = OpenRouterAdapter("test-secret", client=client)
+        try:
+            with self.assertRaises(OpenRouterError) as caught:
+                adapter._request("POST", "/chat/completions", authenticated=True, json={})
+        finally:
+            client.close()
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
+        self.assertEqual(caught.exception.diagnostics, {
+            "http_status": 404,
+            "error_code": 404,
+            "failed_routing_step": "Filter by Data Policy",
+            "request_id": "req_safe-123",
+            "routing_funnel": [{"step": "Initial Endpoints", "endpoint_count": 1}],
+            "requested_providers": ["liquid"],
+            "available_providers": ["liquid"],
+        })
+        self.assertNotIn(prompt_marker, repr(caught.exception.diagnostics))
+        self.assertNotIn(key_marker, repr(caught.exception.diagnostics))
+        self.assertNotIn(prompt_marker, str(caught.exception))
+        self.assertNotIn(key_marker, str(caught.exception))
+
+    def test_routing_error_body_over_limit_keeps_only_status_and_request_id(self):
+        client = httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(
+            404, content=b"x" * 8193, headers={"x-request-id": "request-safe"},
+        )))
+        adapter = OpenRouterAdapter("test-secret", client=client)
+        try:
+            with self.assertRaises(OpenRouterError) as caught:
+                adapter._request("POST", "/chat/completions", authenticated=True, json={})
+        finally:
+            client.close()
+        self.assertEqual(caught.exception.diagnostics, {
+            "http_status": 404, "request_id": "request-safe",
+        })
+
+    def test_generation_metadata_is_reduced_to_cost_model_provider_and_usage(self):
+        def handler(request):
+            if request.method == "POST":
+                return httpx.Response(200, json={
+                    "id": "gen-safe123", "model": self.model,
+                    "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 4},
+                })
+            return httpx.Response(200, json={"data": {
+                "id": "gen-safe123", "model": self.model, "provider_name": "Liquid",
+                "tokens_prompt": 9, "tokens_completion": 4, "total_cost": "0",
+                "generation_time": "0.25", "prompt": "PRIVATE_PROMPT_SENTINEL",
+            }})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        adapter = OpenRouterAdapter("test-secret", client=client)
+        try:
+            content, usage, _retry = adapter.complete(
+                VerifiedModel(self.model, "Liquid", "liquid", 262144, 8192, True),
+                messages=[{"role": "user", "content": "Synthetic"}],
+                schema={"type": "object"}, max_tokens=64,
+            )
+            metadata = adapter.generation_metadata(adapter.last_generation_id)
+        finally:
+            client.close()
+        self.assertEqual((content, usage), ("{}", {"input_tokens": 9, "output_tokens": 4}))
+        self.assertEqual(metadata, {
+            "id": "gen-safe123", "model": self.model, "provider_name": "Liquid",
+            "tokens_prompt": 9, "tokens_completion": 4, "total_cost": 0.0,
+            "generation_time": 0.25,
+        })
+        self.assertNotIn("PRIVATE_PROMPT_SENTINEL", repr(metadata))
+
     def test_retry_time_validation_is_bounded(self):
         now = NOW
         self.assertEqual(_retry_at({"Retry-After": "30"}, now), (now + timedelta(seconds=30)).isoformat())
@@ -381,6 +471,23 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(store.persist_calls[0]["kwargs"]["expected_collection_auto_match"],
                          {COLLECTION_ID: True})
+
+    def test_safe_provider_diagnostics_survive_classification_result(self):
+        diagnostics = {
+            "http_status": 404,
+            "failed_routing_step": "Filter by Data Policy",
+            "routing_funnel": [{"step": "Initial Endpoints", "endpoint_count": 1}],
+        }
+        service, provider, store, _atomic = self.build(
+            keywords=[{"id": "keyword-diag", "keyword": "Synthetic outdoor bags"}],
+            responses=[OpenRouterError("AI_POLICY_DENIED", diagnostics=diagnostics)],
+        )
+        result = service.classify_keyword_ids(
+            store, ["keyword-diag"], idempotency_key="classification-diagnostics",
+        )
+        self.assertEqual(result["status"], "POLICY_DENIED")
+        self.assertEqual(result["provider_diagnostics"], diagnostics)
+        self.assertEqual(len(provider.calls), 1)
 
     def test_large_classification_uses_batches_and_rechecks_metadata_per_request(self):
         keywords = [{"id": f"keyword-{index:02d}", "keyword": f"Outdoor topic {index}"}

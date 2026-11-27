@@ -1,20 +1,26 @@
 # AI01 — OpenRouter model acceptance
+
 As of 2026-11-27; branch `integration/demo-final`.
-Progress: [83%] AI01 BLOCKED; G1/G2/G3/G5/G6 PASS, G4 BLOCKED.
-G1 PASS — Existing lifecycle and failure-state contracts remain covered by focused tests.
-G2 PASS — AI01C root `.env` key: direct `GET /key` and adapter both HTTP 200; quota metadata verified.
-G3 PASS — Full `GET /models` catalog: 441 entries, 11 exact `:free` text-to-text models; all 11 model prices are zero.
-Endpoint scan — All 11 endpoint routes returned metadata; 9 active (`status=0`), 2 inactive (`status=-2`); active endpoint prices, including auxiliary fields, were zero.
-Five models advertise `structured_outputs`; two also match active endpoint, exact provider tag, and `safety_retention=false` in the ZDR list.
-Eligible exact IDs: `liquid/lfm-3-1.7b:free` (Liquid, tag `liquid`, 262144 context/8192 output); `particle-ai/particle-1:free` (Particle AI, tag `particle-ai/us`, 1048576/943718).
-The adapter verified both exact model IDs and endpoint/provider tags. Provider slugs were checked against `/providers`; routing kept the full endpoint slug.
-Rejected 9: 3 structured-output models lack a matching ZDR endpoint; 2 endpoints are inactive; 4 active models lack structured-output support.
-Configuration candidates only, not written or enabled: `TRENDSCOUT_AI_COLLECTION_MODEL=liquid/lfm-3-1.7b:free`; `TRENDSCOUT_AI_RECOMMENDATION_MODEL=particle-ai/particle-1:free`.
-G4 BLOCKED — Four physical synthetic requests (two per candidate) returned HTTP 404; adapter mapped them to `AI_PROVIDER_UNAVAILABLE`; no completion succeeded.
-Classification and recommendation both deferred; fixture accuracy and recommendation relevance are unmeasurable. Failed POST wall latency was 74–328 ms; task end-to-end 1.56–2.83 s; successful token usage 0.
-Each physical attempt received one PostgreSQL quota reservation in two isolated schemas (2 each; 4 total); all failed. Both schemas were dropped; `trendscout` was untouched.
-OpenRouter key usage was 0 before and after. No generation IDs were returned, so per-generation actual cost could not be verified; no inference completion was billed according to key usage.
-G5 PASS — PostgreSQL quota reservation was shared within each isolated AIService run; failure attempts consumed quota. G6 PASS — `test_ai_engine.py`: 28 passed, 2 subtests passed; Ruff, compileall, diff check, and cleanup passed.
-AI01C's 2 skips were Linux-only owner-host tests, skipped on this Windows host; they are unrelated to root ENV acceptance and are not required AI01D gates.
-No inference retry was made after the four 404s; no source provider, Production ENV, or inference budget setting was changed.
-References (checked 2026-11-27): [models](https://openrouter.ai/docs/api/api-reference/models/get-models), [model endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints), [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection), [generation cost metadata](https://openrouter.ai/docs/api/api-reference/generations/get-generation), [ZDR endpoint list](https://openrouter.ai/api/v1/endpoints/zdr).
+Progress: [67%] AI01 BLOCKED; G1/G2/G5/G6 PASS, G3/G4 BLOCKED.
+
+G1 PASS — AI lifecycle, failure-state, and sanitized-diagnostic contracts pass focused tests.
+G2 PASS — Root `.env` key direct `/key` and adapter checks previously returned HTTP 200; current usage was 0 before and after AI01E.
+G3 BLOCKED — The prior 441-model scan found 11 exact free text models and two candidates meeting zero-price, active, structured-output, and ZDR metadata checks.
+Candidates: `liquid/lfm-3-1.7b:free` (tag `liquid`) and `particle-ai/particle-1:free` (tag `particle-ai/us`).
+Targeted endpoint metadata recheck: both remain active, zero-priced, support `temperature`, `max_tokens`, and JSON Schema; `/endpoints/zdr` lists both with `safety_retention=false`.
+The endpoint metadata for neither candidate exposes a data-collection policy; ZDR metadata alone does not establish compliance with `data_collection=deny`.
+AI01D's four synthetic inference attempts returned HTTP 404; AI01E used the only two remaining attempts, one classification and one recommendation.
+Both AI01E responses returned HTTP 404, `error.code=404`, `failed_routing_step="Filter by Data Policy"`, and a routing funnel beginning with one `Initial Endpoints` candidate.
+No request ID was returned. No generation ID or completion was created; per-generation token usage and cost are unavailable.
+OpenRouter key usage was `$0.00` before and after both attempts; no source provider or paid route was called.
+Root cause — OpenRouter's Data Policy filter rejected the selected endpoints for the request's `data_collection="deny"`; this is not a `require_parameters` mismatch.
+Official documentation says `deny` routes only to providers that do not collect user data and can also be enforced account-wide; public endpoint metadata and `/key` do not identify whether the exclusion is endpoint policy or account/workspace privacy settings.
+AI01E fix — Preserve strict routing and expose only bounded HTTP/error/routing diagnostics; routing-policy 404s now map to `AI_POLICY_DENIED` / `POLICY_DENIED`, preventing deferred retries.
+No fallback, ZDR, JSON Schema, or zero-price protection was relaxed. No model selection, root `.env`, or durable allowlist setting was changed.
+Synthetic-only smoke used a process-local config and Wikimedia-labeled synthetic fixture; no root `.env` or durable allowlist changed. Its isolated PostgreSQL schema carried forward four prior reservations, recorded exactly two new reservations (six total), and was dropped; `trendscout` was untouched.
+G4 BLOCKED — Neither task completed, so structured-output validity, actual provider/model, and zero per-generation cost cannot be verified.
+G5 PASS — PostgreSQL quota guard accounted for the four previous attempts plus exactly two AI01E attempts; provider usage remained zero.
+G6 PASS — `test_ai_engine.py`: 35 passed, 2 subtests passed; Ruff, targeted `compileall`, and `git diff --check` passed; isolated schema cleanup passed.
+Owner action — Verify OpenRouter account/workspace Data Collection privacy settings and approved providers; select endpoints proven compatible with `deny`, ZDR, JSON Schema, and zero price. Do not relax these request protections to clear the filter.
+
+References checked 2026-11-27: [provider routing and data policy](https://openrouter.ai/docs/guides/routing/provider-selection), [chat completion request](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion), [error format](https://openrouter.ai/docs/api_reference/errors-and-debugging), [generation metadata](https://openrouter.ai/docs/api/api-reference/generations/get-generation).
