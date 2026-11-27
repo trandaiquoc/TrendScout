@@ -257,15 +257,15 @@ class OpenRouterAdapterTests(unittest.TestCase):
         def handler(request):
             self.requests.append(request)
             path = request.url.path
-            if request.method == "GET" and path.endswith("/models"):
-                if path == "/api/v1/models":
-                    body = {"data": [{"id": self.model, "pricing": self.model_pricing}]}
-                else:
-                    body = {"data": {"endpoints": [{
-                        "provider_name": "Liquid", "tag": "liquid", "status": 0,
-                        "pricing": self.endpoint_pricing, "supported_parameters": self.parameters,
-                        "context_length": 262144, "max_completion_tokens": 8192,
-                    }]}}
+            if request.method == "GET" and path == "/api/v1/models":
+                body = {"data": [{"id": self.model, "pricing": self.model_pricing}]}
+                return httpx.Response(200, json=body)
+            if request.method == "GET" and path.endswith("/endpoints"):
+                body = {"data": {"endpoints": [{
+                    "provider_name": "Liquid", "tag": "liquid", "status": 0,
+                    "pricing": self.endpoint_pricing, "supported_parameters": self.parameters,
+                    "context_length": 262144, "max_completion_tokens": 8192,
+                }]}}
                 return httpx.Response(200, json=body)
             if path == "/api/v1/endpoints/zdr":
                 return httpx.Response(200, json={"data": [{
@@ -324,7 +324,8 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.endpoint_pricing = {"prompt": "0", "completion": "0", "image": "0.01"}
         with self.assertRaises(OpenRouterError) as caught:
             self.adapter.verify_model(self.model)
-        self.assertEqual(caught.exception.code, "AI_MODEL_UNAVAILABLE")
+        # The contract leaves every nonzero or unknown price field pending.
+        self.assertEqual(caught.exception.code, "AI_PRICING_UNVERIFIED")
 
     def test_missing_structured_output_or_zdr_endpoint_is_rejected(self):
         self.parameters = []
@@ -478,6 +479,46 @@ class AIServiceTests(unittest.TestCase):
             thread.join(5)
         self.assertEqual(len(successes), ROLLING_MINUTE_LIMIT)
         self.assertEqual(errors.count("AI_RATE_LIMITED"), 30 - ROLLING_MINUTE_LIMIT)
+
+    def test_model_unavailable_and_unverified_pricing_keep_distinct_job_statuses(self):
+        class VerificationFailureProvider(FakeProvider):
+            def __init__(self, code):
+                super().__init__()
+                self.code = code
+
+            def verify_model(self, _model_id):
+                raise OpenRouterError(self.code)
+
+        for code, expected_status in (
+            ("AI_MODEL_UNAVAILABLE", "MODEL_UNAVAILABLE"),
+            ("AI_PRICING_UNVERIFIED", "PENDING"),
+        ):
+            with self.subTest(code=code):
+                provider = VerificationFailureProvider(code)
+                service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                                    utcnow=lambda: NOW)
+                result = service.classify_keyword_ids(
+                    FakeCollectionStore(), ["keyword-1"], idempotency_key="verify-status-" + code,
+                )
+                self.assertEqual((result["status"], result["error_code"]),
+                                 (expected_status, code))
+                self.assertEqual(service.get_job(result["job_id"])["status"], expected_status)
+                self.assertEqual(service._quota()["daily_used"], 0)
+                self.assertEqual(provider.calls, [])
+
+    def test_storage_unavailable_is_reported_without_provider_access(self):
+        class UnavailableState:
+            def transact(self, _key, _operation):
+                raise RuntimeError("storage unavailable")
+
+        provider = FakeProvider()
+        service = AIService(UnavailableState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        capabilities = service.capabilities()
+        self.assertEqual(capabilities["storage"], "UNAVAILABLE")
+        self.assertEqual(capabilities["error_code"], "AI_STORAGE_UNAVAILABLE")
+        self.assertIsNone(capabilities["provider_quota"])
+        self.assertEqual(provider.calls, [])
 
     def test_preview_never_persists_and_prompt_treats_keyword_as_untrusted(self):
         provider = FakeProvider([classification_response])

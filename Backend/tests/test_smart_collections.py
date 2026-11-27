@@ -593,9 +593,9 @@ class SmartCollectionsTests(unittest.TestCase):
 
         live_store = CollectionStore(path, data_mode_scope="LIVE")
         live_service = CollectionService(live_store)
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            outcome = live_service._process_fetch("current-live", live_source([dict(row)]))
-        self.assertEqual(outcome["status"], "COMPLETED")
+        outcome = live_service._process_fetch("current-live", live_source([dict(row)]))
+        self.assertEqual((outcome["status"], outcome["error_code"]),
+                         ("MODEL_UNAVAILABLE", "AI_DISABLED"))
         with live_store.connect() as db:
             after = {
                 "keyword": tuple(db.execute("SELECT data_mode,eligible,evidence FROM keywords WHERE id=?", (legacy_id,)).fetchone()),
@@ -812,9 +812,11 @@ class SmartCollectionsTests(unittest.TestCase):
             "observation_date": "2026-11-10",
             "fetched_at": "2026-11-12T00:00:00Z",
         }
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            seeded = self.service._process_fetch("existing-google-safe-baseline", live_source([row]))
-        self.assertEqual(seeded["processed"], 1)
+        seeded = self.service._process_fetch("existing-google-safe-baseline", live_source([row]))
+        self.assertEqual((seeded["status"], seeded["error_code"], seeded["available"]),
+                         ("MODEL_UNAVAILABLE", "AI_DISABLED", 1))
+        candidate = keyword_record(row, "wikimedia_pageviews_top_per_country", "LIVE")
+        self.store.feedback_action(collection_id, candidate, "ADD")
         self.assertEqual(len(self.store.keywords_for(collection_id)), 1)
 
         table_rows = (
@@ -926,11 +928,10 @@ class SmartCollectionsTests(unittest.TestCase):
         }
         google_source = [{"source_id": "google_web_serp", "data_mode": "LIVE",
             "status": "SUCCESS", "record_count": 1, "records": [google_record]}]
-        with patch.object(embeddings, "embed", side_effect=fake_embed):
-            outcome = service._process_fetch("google-only-live", google_source)
+        outcome = service._process_fetch("google-only-live", google_source)
 
-        self.assertEqual(outcome["status"], "COMPLETED")
-        self.assertEqual(outcome["available"], 1)
+        self.assertEqual((outcome["status"], outcome["error_code"], outcome["available"]),
+                         ("MODEL_UNAVAILABLE", "AI_DISABLED", 1))
         self.assertEqual(read_integrity(), before)
         with live_store.connect() as db:
             self.assertEqual(db.execute(
@@ -1376,13 +1377,13 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
         self.assertEqual(self.store.latest_dataset()["dataset_id"], "offline")
 
-    def test_deferred_fetch_model_keeps_raw_keyword_and_skips_embedding(self):
+    def test_fetch_without_ai_engine_reports_disabled_and_skips_embedding(self):
         source = live_source([
             {"article_display": "Mars Rover", "article_original": "Mars_Rover", "project": "en.wikipedia",
              "observation_date": "2026-11-10", "fetched_at": "2026-11-12T00:00:00Z"}])
         service = CollectionService(self.store, fetch_model_inference_enabled=False)
         with patch.object(embeddings, "embed", side_effect=AssertionError("legacy model must not run")):
-            result = service._process_fetch("deferred-model", source)
+            result = service._process_fetch("fetch-disabled-model", source)
 
         self.assertEqual(result["status"], "MODEL_UNAVAILABLE")
         self.assertEqual(result["error_code"], "AI_DISABLED")
@@ -1393,15 +1394,18 @@ class SmartCollectionsTests(unittest.TestCase):
                 "SELECT keyword,eligible FROM keywords WHERE keyword='Mars Rover'"
             ).fetchone()
             job = db.execute(
-                "SELECT status,error_code FROM fetch_jobs WHERE fetch_id='deferred-model'"
+                "SELECT status,error_code FROM fetch_jobs WHERE fetch_id='fetch-disabled-model'"
             ).fetchone()
             snapshot = db.execute(
-                "SELECT data_mode,received_record_count,processing_status FROM dataset_snapshots "
-                "WHERE dataset_id='deferred-model'"
+                "SELECT data_mode,received_record_count,source_manifest,processing_status "
+                "FROM dataset_snapshots "
+                "WHERE dataset_id='fetch-disabled-model'"
             ).fetchone()
         self.assertEqual(tuple(keyword), ("Mars Rover", 1))
-        self.assertEqual(tuple(job), ("MODEL_UNAVAILABLE", "MODEL_INFERENCE_DEFERRED"))
-        self.assertEqual(tuple(snapshot), ("LIVE", 1, "MODEL_UNAVAILABLE"))
+        self.assertEqual(tuple(job), ("MODEL_UNAVAILABLE", "AI_DISABLED"))
+        self.assertEqual(tuple(snapshot[:2]), ("LIVE", 1))
+        self.assertEqual(json.loads(snapshot["source_manifest"])[0]["status"], "SUCCESS")
+        self.assertEqual(snapshot["processing_status"], "MODEL_UNAVAILABLE")
 
     def test_model_unavailable_keeps_keyword_and_algorithm_ledger_for_retry(self):
         live_store = CollectionStore(Path(self.temp.name) / "deferred-resume.sqlite",

@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
-import re
-import math
 from urllib.parse import quote
 
 import httpx
-
 
 API_BASE = "https://openrouter.ai/api/v1"
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,90}/[a-z0-9][a-z0-9_.:-]{0,150}:free$")
