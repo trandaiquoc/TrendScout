@@ -132,7 +132,7 @@ class RecommendationCaptureProvider:
             "uncertainty": "The available source evidence is limited and needs independent review.",
             "research_steps": ["Review current US marketplace listings."],
         }]}
-        self.last_generation_id = "gen-pg-recommendation"
+        self.last_generation_id = f"gen-pg-recommendation-{len(self.inputs)}"
         self.last_resolved_model = "liquid/lfm-3-1.7b-revision:free"
         return json.dumps(response), {"input_tokens": 12, "output_tokens": 9}, None
 
@@ -727,12 +727,30 @@ def test_postgres_ai_recommendation_uses_active_lineage_and_bounded_algorithm_pr
         assert len(result["lineage"]["input_digest"]) == 64
         assert len(result["lineage"]["source_policy_digest"]) == 64
         assert result["lineage"]["model_provider"]["status"] == "RECORDED"
-        assert result["lineage"]["model_provider"]["generation_id"] == "gen-pg-recommendation"
+        assert result["lineage"]["model_provider"]["generation_id"] == "gen-pg-recommendation-1"
         stored_state = service._transact(lambda state: (state, state))
         assert stored_state["jobs"][result["job_id"]]["lineage"] == result["lineage"]
         assert stored_state["recommendations"][result["lineage"]["input_digest"]]["value"][
             "lineage"] == result["lineage"]
         assert service.get_job(result["job_id"])["lineage"] == result["lineage"]
+
+        resumed_service = AIService(PostgresAtomicStateStore(environment, schema=schema),
+                                    config=_ai_config(), provider=provider, utcnow=lambda: now)
+        cached = resumed_service.recommend(
+            store, [keyword_id], idempotency_key="pg-recommendation-cache-hit",
+        )
+        assert cached["cached"] is True
+        assert cached["lineage"] == result["lineage"]
+        assert len(provider.inputs) == 1
+        regenerated = resumed_service.recommend(
+            store, [keyword_id], idempotency_key="pg-recommendation-regenerate",
+            regenerate=True,
+        )
+        assert regenerated["cached"] is False
+        assert regenerated["lineage"]["input_digest"] == result["lineage"]["input_digest"]
+        assert regenerated["lineage"]["model_provider"]["generation_id"] == "gen-pg-recommendation-2"
+        assert len(provider.inputs) == 2
+        assert resumed_service._quota()["daily_used"] == 2
         payload_keyword = provider.inputs[0]["keywords"][0]
         assert payload_keyword["durable_keyword_ids"] == [keyword_id]
         assert payload_keyword["categories"] == ["products_brands"]
@@ -771,9 +789,10 @@ def test_postgres_ai_quota_is_shared_across_service_instances():
 
 def test_postgres_provider_rate_limit_cooldown_is_shared_across_tasks():
     with isolated_schema() as (environment, schema, _connection):
+        clock = {"now": NOW}
         services = [
             AIService(PostgresAtomicStateStore(environment, schema=schema),
-                      config=_ai_config(), provider=object(), utcnow=lambda: NOW)
+                      config=_ai_config(), provider=object(), utcnow=lambda: clock["now"])
             for _ in range(2)
         ]
         attempt = services[0]._reserve("provider-limited-classification", "classification")
@@ -787,6 +806,13 @@ def test_postgres_provider_rate_limit_cooldown_is_shared_across_tasks():
         assert caught.value.code == "AI_RATE_LIMITED"
         assert caught.value.retry_at == retry_at
         assert services[0]._quota()["daily_used"] == 1
+
+        clock["now"] = datetime.fromisoformat(retry_at) + timedelta(seconds=1)
+        recovered = services[1]._reserve("after-shared-provider-cooldown", "recommendations")
+        assert recovered.startswith("att_")
+        state = services[0]._transact(lambda current: (current, current))
+        assert state["provider_retry_at"] is None
+        assert services[0]._quota()["daily_used"] == 2
 
 
 def test_public_demo_profile_is_bound_to_attested_synthetic_postgres_schema():
