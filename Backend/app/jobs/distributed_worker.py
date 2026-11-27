@@ -16,8 +16,8 @@ from typing import Awaitable, Callable, Mapping
 
 from app.collections.source_digest import (
     COLLECTION_INPUT_DIGEST_VERSION,
+    collection_manifest_reuse_fallback_reason,
     legacy_source_input_digest_candidates,
-    reusable_collection_manifest,
     source_input_digest,
 )
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
@@ -73,6 +73,7 @@ class SourceWorkContext:
     heartbeat: Callable[[], str]
     request_metadata: dict = field(default_factory=dict)
     completed_sources: dict = field(default_factory=dict)
+    diagnostic_callback: Callable[[str], None] | None = None
 
 
 SourceHandler = Callable[[SourceWorkContext], dict | Awaitable[dict]]
@@ -131,6 +132,7 @@ class DistributedFetchWorker:
         self.resolve_grant = resolve_grant
         self.utcnow = utcnow
         self.journal = SourceCheckpointJournal(admission, snapshot_blobs=snapshot_blobs)
+        self._last_cache_reuse_diagnostic = None
 
     async def run_once(self, owner: str, *, job_id: str | None = None,
                        max_sources: int | None = None,
@@ -158,6 +160,7 @@ class DistributedFetchWorker:
             return None
         job_id, fence = claim["job_id"], claim["fence"]
         job_expires_at = datetime.fromisoformat(claim["expires_at"])
+        self._last_cache_reuse_diagnostic = None
         outcomes = {}
         deferred_until = None
         processed_sources = 0
@@ -218,17 +221,20 @@ class DistributedFetchWorker:
                 or not set(selected_sources) <= set(self.handlers)):
             raise AdmissionDenied("REQUEST_SCOPE_INVALID")
         selected = set(selected_sources)
-        if ((continue_cached or reuse_unchanged_dataset)
-                and request_metadata.get("cache_only") is True
-                and isinstance(previous_dataset_summary, dict)):
-            reused = self._reuse_unchanged_dataset(
-                claim, job_id=job_id, owner=owner, fence=fence,
-                job_expires_at=job_expires_at, selected_sources=selected_sources,
-                previous_source_manifest=previous_source_manifest,
-                previous_dataset_summary=previous_dataset_summary,
-            )
-            if reused is not None:
-                return reused
+        if request_metadata.get("cache_only") is True:
+            if not (continue_cached or reuse_unchanged_dataset):
+                self._diagnose_cache_reuse_fallback("UNCHANGED_DATASET_REUSE_NOT_ENABLED")
+            elif not isinstance(previous_dataset_summary, dict):
+                self._diagnose_cache_reuse_fallback("PREVIOUS_DATASET_SUMMARY_UNAVAILABLE")
+            else:
+                reused = self._reuse_unchanged_dataset(
+                    claim, job_id=job_id, owner=owner, fence=fence,
+                    job_expires_at=job_expires_at, selected_sources=selected_sources,
+                    previous_source_manifest=previous_source_manifest,
+                    previous_dataset_summary=previous_dataset_summary,
+                )
+                if reused is not None:
+                    return reused
         for source_id in self.source_order:
             if source_id not in selected:
                 continue
@@ -454,30 +460,50 @@ class DistributedFetchWorker:
                 "created_at": claim.get("created_at"),
                 "finished_at": finished.get("finished_at") if isinstance(finished, dict) else None}
 
+    def _diagnose_cache_reuse_fallback(self, reason):
+        self._last_cache_reuse_diagnostic = reason
+        _logger.info("CACHE_ONLY metadata-only dataset reuse fallback reason=%s", reason)
+
     def _reuse_unchanged_dataset(self, claim, *, job_id, owner, fence, job_expires_at,
                                  selected_sources, previous_source_manifest,
                                  previous_dataset_summary):
         """Finish an exact cache-only replay from compact digests under the job fence."""
-        if (previous_dataset_summary.get("materialization_status") != "COMPLETED"
-                or not isinstance(previous_source_manifest, list)
-                or not isinstance(previous_dataset_summary.get("dataset_id"), str)
-                or claim.get("source_checkpoints")):
+        self._last_cache_reuse_diagnostic = None
+
+        def fallback(reason):
+            self._diagnose_cache_reuse_fallback(reason)
             return None
+
+        if previous_dataset_summary.get("materialization_status") != "COMPLETED":
+            return fallback("DATASET_MATERIALIZATION_INCOMPLETE")
+        if not isinstance(previous_source_manifest, list):
+            return fallback("PREVIOUS_SOURCE_MANIFEST_MISSING_OR_INVALID")
+        dataset_id = previous_dataset_summary.get("dataset_id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            return fallback("PREVIOUS_DATASET_ID_INVALID")
+        if claim.get("source_checkpoints"):
+            return fallback("SOURCE_CHECKPOINTS_ALREADY_PRESENT")
+
         grants, compact_results = {}, {}
         request_metadata = claim.get("request_metadata", {})
         for source_id in selected_sources:
             handler = (self.cache_only_handlers or {}).get(source_id)
             reader = getattr(handler, "__trendscout_cache_manifest_reader__", None)
             if not callable(reader):
-                return None
+                return fallback("CACHE_MANIFEST_READER_UNAVAILABLE")
             now = self.utcnow()
             try:
                 grant = self.resolve_grant(source_id, now)
             except Exception:
-                return None
-            if (not isinstance(grant, CheckpointGrant) or grant.source_id != source_id
-                    or self.source_modes[source_id] not in {None, grant.data_mode}):
-                return None
+                return fallback("CHECKPOINT_GRANT_UNAVAILABLE")
+            if not isinstance(grant, CheckpointGrant) or grant.source_id != source_id:
+                return fallback("CHECKPOINT_GRANT_INVALID")
+            if grant.allowed is not True:
+                return fallback("CHECKPOINT_GRANT_DENIED")
+            if grant.expires_at <= now:
+                return fallback("CHECKPOINT_GRANT_EXPIRED")
+            if self.source_modes[source_id] not in {None, grant.data_mode}:
+                return fallback("SOURCE_DATA_MODE_POLICY_MISMATCH")
 
             def heartbeat():
                 return self.admission.heartbeat(job_id, owner, fence, now=self.utcnow())
@@ -487,25 +513,44 @@ class DistributedFetchWorker:
                 self.admission.policy.plan_fingerprint, job_expires_at, None,
                 lambda _progress: 0, heartbeat,
                 request_metadata=request_metadata, completed_sources={},
+                diagnostic_callback=self._diagnose_cache_reuse_fallback,
             )
             try:
                 context.heartbeat()
+            except Exception:
+                return fallback("CACHE_MANIFEST_HEARTBEAT_FAILED")
+            try:
                 result = reader(context)
             except Exception:
-                return None
-            if (not isinstance(result, dict)
-                    or result.get("status") not in {"SUCCESS", "PARTIAL"}
-                    or result.get("data_mode") != grant.data_mode
-                    or result.get("delivery_state") not in _CACHE_DELIVERY_STATES
-                    or type(result.get("record_count")) is not int
-                    or result["record_count"] < 0
-                    or result.get("records") != []
-                    or type(result.get("provider_request_count")) is not int
-                    or result["provider_request_count"] != 0
-                    or not isinstance(result.get("coverage"), dict)
-                    or not isinstance(result.get("source_input_digest"), str)
-                    or type(result.get("source_input_digest_version")) is not int):
-                return None
+                return fallback("CACHE_MANIFEST_READER_FAILED")
+            if result is None:
+                if self._last_cache_reuse_diagnostic is not None:
+                    return None
+                return fallback("CACHE_MANIFEST_UNAVAILABLE")
+            if not isinstance(result, dict):
+                return fallback("CACHE_MANIFEST_RESULT_INVALID")
+            if result.get("status") not in {"SUCCESS", "PARTIAL"}:
+                return fallback("CACHE_MANIFEST_SOURCE_STATUS_INVALID")
+            if result.get("data_mode") != grant.data_mode:
+                return fallback("CACHE_MANIFEST_DATA_MODE_MISMATCH")
+            if result.get("delivery_state") not in _CACHE_DELIVERY_STATES:
+                return fallback("CACHE_MANIFEST_DELIVERY_STATE_INVALID")
+            if type(result.get("record_count")) is not int or result["record_count"] < 0:
+                return fallback("CACHE_MANIFEST_RECORD_COUNT_INVALID")
+            if result.get("records") != []:
+                return fallback("CACHE_MANIFEST_CONTAINS_RECORDS")
+            if type(result.get("provider_request_count")) is not int:
+                return fallback("CACHE_MANIFEST_PROVIDER_REQUEST_COUNT_INVALID")
+            if result["provider_request_count"] != 0:
+                return fallback("CACHE_MANIFEST_PROVIDER_REQUEST_COUNT_NOT_ZERO")
+            if not isinstance(result.get("coverage"), dict):
+                return fallback("CACHE_MANIFEST_COVERAGE_INVALID")
+            if not isinstance(result.get("quality_flags"), list):
+                return fallback("CACHE_MANIFEST_QUALITY_FLAGS_INVALID")
+            if not isinstance(result.get("source_input_digest"), str):
+                return fallback("CACHE_MANIFEST_SOURCE_INPUT_DIGEST_MISSING")
+            if type(result.get("source_input_digest_version")) is not int:
+                return fallback("CACHE_MANIFEST_SOURCE_INPUT_DIGEST_VERSION_INVALID")
             compact_results[source_id] = result
             grants[source_id] = grant
 
@@ -521,11 +566,13 @@ class DistributedFetchWorker:
             "source_input_digest": result["source_input_digest"],
             "source_input_digest_version": result["source_input_digest_version"],
         } for source_id, result in sorted(compact_results.items())]
-        if not reusable_collection_manifest(
-                current_manifest, previous_source_manifest,
-                processing_status=previous_dataset_summary.get("processing_status"),
-                materialization_status=previous_dataset_summary.get("materialization_status")):
-            return None
+        reason = collection_manifest_reuse_fallback_reason(
+            current_manifest, previous_source_manifest,
+            processing_status=previous_dataset_summary.get("processing_status"),
+            materialization_status=previous_dataset_summary.get("materialization_status"),
+        )
+        if reason is not None:
+            return fallback(reason)
 
         now = self.utcnow()
         checkpoints = []
@@ -549,7 +596,7 @@ class DistributedFetchWorker:
                 "source_input_digest": result["source_input_digest"],
                 "source_input_digest_version": result["source_input_digest_version"],
                 "dataset_reused": True,
-                "dataset_id": previous_dataset_summary["dataset_id"],
+                "dataset_id": dataset_id,
             }
             checkpoints.append({
                 "source_id": source_id,
@@ -573,7 +620,7 @@ class DistributedFetchWorker:
             "created_at": claim.get("created_at"),
             "finished_at": finished.get("finished_at") if isinstance(finished, dict) else None,
             "dataset_reused": True,
-            "dataset_id": previous_dataset_summary["dataset_id"],
+            "dataset_id": dataset_id,
         }
 
     @staticmethod

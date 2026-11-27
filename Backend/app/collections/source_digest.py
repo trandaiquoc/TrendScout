@@ -346,43 +346,75 @@ def _dataset_materialized(processing_status, materialization_status):
     return processing_status == "COMPLETED"
 
 
-def reusable_collection_manifest(current_manifest, previous_manifest, *, processing_status,
-                                 materialization_status=None):
-    """Match compact Fetch history manifests against a saved dataset manifest."""
+def collection_manifest_reuse_fallback_reason(
+        current_manifest, previous_manifest, *, processing_status,
+        materialization_status=None):
+    """Explain why compact Fetch metadata cannot reuse a saved dataset."""
     if (not _dataset_materialized(processing_status, materialization_status)
             or not isinstance(current_manifest, list) or not current_manifest
             or not isinstance(previous_manifest, list)):
-        return False
+        if not _dataset_materialized(processing_status, materialization_status):
+            return "DATASET_MATERIALIZATION_INCOMPLETE"
+        if not isinstance(current_manifest, list) or not current_manifest:
+            return "CURRENT_SOURCE_MANIFEST_MISSING_OR_EMPTY"
+        return "PREVIOUS_SOURCE_MANIFEST_INVALID"
     previous = {}
     for item in previous_manifest:
-        if (not isinstance(item, dict)
-                or not isinstance(item.get("source_id"), str)
-                or not item.get("source_id")
-                or item["source_id"] in previous
-                or not _valid_digest(item.get("source_input_digest"))):
-            return False
+        if not isinstance(item, dict):
+            return "PREVIOUS_SOURCE_MANIFEST_ITEM_INVALID"
+        source_id = item.get("source_id")
+        if not isinstance(source_id, str) or not source_id:
+            return "PREVIOUS_SOURCE_ID_INVALID"
+        if source_id in previous:
+            return "PREVIOUS_SOURCE_ID_DUPLICATED"
+        if not _valid_digest(item.get("source_input_digest")):
+            return "PREVIOUS_SOURCE_INPUT_DIGEST_INVALID"
         previous[item["source_id"]] = item
     current_ids = set()
     for source in current_manifest:
-        if (not isinstance(source, dict)
-                or source.get("status") not in {"SUCCESS", "PARTIAL"}
-                or source.get("data_mode") != "LIVE"
-                or source.get("delivery_state") not in {"CACHED", "STALE_CACHE"}
-                or not _reports_zero_provider_requests(source)
-                or not _valid_digest(source.get("source_input_digest"))):
-            return False
+        if not isinstance(source, dict):
+            return "CURRENT_SOURCE_MANIFEST_ITEM_INVALID"
+        if source.get("status") not in {"SUCCESS", "PARTIAL"}:
+            return "CURRENT_SOURCE_STATUS_INCOMPATIBLE"
+        if source.get("data_mode") != "LIVE":
+            return "CURRENT_DATA_MODE_INCOMPATIBLE"
+        if source.get("delivery_state") not in {"CACHED", "STALE_CACHE"}:
+            return "CURRENT_CACHE_DELIVERY_STATE_INCOMPATIBLE"
+        if not _reports_zero_provider_requests(source):
+            return "CURRENT_PROVIDER_REQUEST_COUNT_NOT_ZERO"
+        if not _valid_digest(source.get("source_input_digest")):
+            return "CURRENT_SOURCE_INPUT_DIGEST_INVALID"
         source_id = source.get("source_id")
-        if not isinstance(source_id, str) or not source_id or source_id in current_ids:
-            return False
+        if not isinstance(source_id, str) or not source_id:
+            return "CURRENT_SOURCE_ID_INVALID"
+        if source_id in current_ids:
+            return "CURRENT_SOURCE_ID_DUPLICATED"
         current_ids.add(source_id)
         saved = previous.get(source_id)
         if not isinstance(saved, dict):
-            return False
+            return "CURRENT_SOURCE_MISSING_FROM_PREVIOUS_MANIFEST"
         saved_version = saved.get("source_input_digest_version")
         current_version = source.get("source_input_digest_version")
         if (saved_version == current_version == COLLECTION_INPUT_DIGEST_VERSION
                 and saved["source_input_digest"] == source.get("source_input_digest")):
             continue
+        if saved_version == current_version == COLLECTION_INPUT_DIGEST_VERSION:
+            if saved.get("status") != source.get("status"):
+                return "SOURCE_STATUS_CHANGED"
+            if saved.get("data_mode") != source.get("data_mode"):
+                return "SOURCE_DATA_MODE_CHANGED"
+            if saved.get("record_count") != source.get("record_count"):
+                return "SOURCE_RECORD_COUNT_CHANGED"
+            saved_coverage = saved.get("coverage")
+            current_coverage = source.get("coverage")
+            if not isinstance(saved_coverage, dict) or not isinstance(current_coverage, dict):
+                return "SOURCE_COVERAGE_METADATA_INCOMPLETE"
+            if _stable_coverage(saved_coverage) != _stable_coverage(current_coverage):
+                return "SOURCE_COVERAGE_CHANGED"
+            if (_stable_quality_flags(saved.get("quality_flags", []))
+                    != _stable_quality_flags(source.get("quality_flags", []))):
+                return "SOURCE_QUALITY_FLAGS_CHANGED"
+            return "SOURCE_RECORD_CONTENT_CHANGED"
         if saved_version is None and _valid_digest(saved.get("source_input_digest")):
             candidates = source.get("legacy_source_input_digests")
             if not isinstance(candidates, list):
@@ -393,5 +425,17 @@ def reusable_collection_manifest(current_manifest, previous_manifest, *, process
                 and _valid_digest(saved.get("source_input_digest"))
                 and saved["source_input_digest"] == source.get("source_input_digest")):
             continue
-        return False
-    return current_ids == set(previous)
+        return "SOURCE_INPUT_DIGEST_VERSION_INCOMPATIBLE"
+    if current_ids != set(previous):
+        return "SOURCE_SET_CHANGED"
+    return None
+
+
+def reusable_collection_manifest(current_manifest, previous_manifest, *, processing_status,
+                                 materialization_status=None):
+    """Match compact Fetch history manifests against a saved dataset manifest."""
+    return collection_manifest_reuse_fallback_reason(
+        current_manifest, previous_manifest,
+        processing_status=processing_status,
+        materialization_status=materialization_status,
+    ) is None

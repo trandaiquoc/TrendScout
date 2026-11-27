@@ -35,6 +35,7 @@ from app.sources.catalog import (
     YOUTUBE_SOURCE_ID,
     source_capability,
 )
+from app.sources.google_trends.workflow import GoogleDiscoveryFallbackHandler
 from app.sources.guarded_collector import CollectionLimits, GuardedQueryCollector
 from app.sources.live_gateway import LivePageGateway
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
@@ -271,6 +272,197 @@ class DistributedWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(entry["snapshot"]["dataset_reused"])
         self.assertEqual(entry["snapshot"]["result"]["record_count"], 1500)
         self.assertEqual(entry["snapshot"]["result"]["records"], [])
+
+    async def test_cache_manifest_fallback_diagnostics_preserve_full_cache_fallback(self):
+        cases = (
+            "input_changed", "cache_expired", "manifest_missing", "manifest_invalid",
+            "dataset_unavailable", "data_mode_mismatch",
+        )
+        expected_reasons = {
+            "input_changed": "SOURCE_RECORD_CONTENT_CHANGED",
+            "cache_expired": "SHARED_CACHE_EXPIRED_RETENTION_EXPIRED",
+            "manifest_missing": "SOURCE_INPUT_MANIFEST_MISSING",
+            "manifest_invalid": "CACHE_MANIFEST_CONTAINS_RECORDS",
+            "dataset_unavailable": "PREVIOUS_DATASET_SUMMARY_UNAVAILABLE",
+            "data_mode_mismatch": "CACHE_MANIFEST_DATA_MODE_MISMATCH",
+        }
+        for index, case in enumerate(cases):
+            with self.subTest(case=case):
+                source_id = GOOGLE_SOURCE_ID
+                saved_digest = "a" * 64
+                current_digest = "b" * 64 if case == "input_changed" else saved_digest
+                saved_manifest = [{
+                    "source_id": source_id, "status": "SUCCESS", "data_mode": "LIVE",
+                    "delivery_state": "CACHED", "record_count": 1,
+                    "provider_request_count": 0, "quality_flags": [],
+                    "coverage": {"query": "fixture", "provider_request_count": 0},
+                    "source_input_digest": saved_digest,
+                    "source_input_digest_version": 2,
+                }]
+                summary = {
+                    "dataset_id": f"dataset-{index}",
+                    "processing_status": "MODEL_UNAVAILABLE",
+                    "materialization_status": "COMPLETED",
+                    "source_manifest": saved_manifest,
+                }
+                job_id = self.admission.admit(
+                    f"fallback-diagnostic-{index}", now=self.clock(),
+                    request_metadata={"sources": [source_id], "cache_only": True},
+                )["job_id"]
+                fallback_calls = []
+
+                def live_handler(_context):
+                    raise AssertionError("cache-only fallback reached a live handler")
+
+                def cache_handler(context):
+                    fallback_calls.append(context.source_id)
+                    return {
+                        "status": "SUCCESS", "data_mode": "LIVE",
+                        "records": [{"keyword": "fallback keyword"}], "record_count": 1,
+                        "provider_request_count": 0, "coverage": {"query": "fixture"},
+                    }
+
+                def read_manifest(context):
+                    if case == "cache_expired":
+                        context.diagnostic_callback("SHARED_CACHE_EXPIRED_RETENTION_EXPIRED")
+                        return None
+                    if case == "manifest_missing":
+                        context.diagnostic_callback("SOURCE_INPUT_MANIFEST_MISSING")
+                        return None
+                    return {
+                        "status": "SUCCESS",
+                        "data_mode": "SYNTHETIC" if case == "data_mode_mismatch" else "LIVE",
+                        "delivery_state": "CACHED", "record_count": 1,
+                        "records": ([{"keyword": "must fallback"}]
+                                    if case == "manifest_invalid" else []),
+                        "coverage": {"query": "fixture", "provider_request_count": 0},
+                        "quality_flags": [], "provider_request_count": 0,
+                        "source_input_digest": current_digest,
+                        "source_input_digest_version": 2,
+                    }
+
+                for handler in (live_handler, cache_handler):
+                    handler.__trendscout_data_mode__ = "LIVE"
+                cache_handler.__trendscout_cache_manifest_reader__ = read_manifest
+                worker = DistributedFetchWorker(
+                    self.admission,
+                    handlers={source: live_handler for source in SOURCES},
+                    cache_only_handlers={source: cache_handler for source in SOURCES},
+                    resolve_grant=lambda selected, now: CheckpointGrant(
+                        selected, "LIVE", "fixture-policy-v1",
+                        now + timedelta(minutes=10), 300, True,
+                    ),
+                    utcnow=self.clock,
+                )
+                outcome = await worker.run_once(
+                    "fallback-diagnostic-worker", job_id=job_id,
+                    reuse_unchanged_dataset=True,
+                    previous_source_manifest=saved_manifest,
+                    previous_dataset_summary=(None if case == "dataset_unavailable" else summary),
+                )
+                self.assertIn(outcome["state"], {"COMPLETED", "PARTIAL"})
+                self.assertEqual(fallback_calls, [source_id])
+                self.assertEqual(
+                    worker._last_cache_reuse_diagnostic, expected_reasons[case]
+                )
+                self.clock.value += timedelta(seconds=self.config.window_seconds + 1)
+
+    async def test_denied_checkpoint_policy_cannot_enter_metadata_reuse(self):
+        source_id = GOOGLE_SOURCE_ID
+        job_id = self.admission.admit(
+            "denied-metadata-reuse-policy", now=self.clock(),
+            request_metadata={"sources": [source_id], "cache_only": True},
+        )["job_id"]
+        reader_calls = []
+        cache_calls = []
+
+        def live_handler(_context):
+            raise AssertionError("cache-only policy denial reached a live handler")
+
+        def cache_handler(_context):
+            cache_calls.append("payload")
+            return {"status": "SUCCESS", "data_mode": "LIVE", "records": [],
+                    "record_count": 0, "provider_request_count": 0}
+
+        def read_manifest(_context):
+            reader_calls.append("metadata")
+            return None
+
+        live_handler.__trendscout_data_mode__ = "LIVE"
+        cache_handler.__trendscout_data_mode__ = "LIVE"
+        cache_handler.__trendscout_cache_manifest_reader__ = read_manifest
+        worker = DistributedFetchWorker(
+            self.admission,
+            handlers={source: live_handler for source in SOURCES},
+            cache_only_handlers={source: cache_handler for source in SOURCES},
+            resolve_grant=lambda selected, now: CheckpointGrant(
+                selected, "LIVE", "revoked-policy", now + timedelta(minutes=10),
+                300, False,
+            ),
+            utcnow=self.clock,
+        )
+
+        with self.assertRaises(AdmissionDenied) as denied:
+            await worker.run_once(
+                "denied-metadata-reuse-worker", job_id=job_id,
+                reuse_unchanged_dataset=True,
+                previous_source_manifest=[{"source_id": source_id,
+                                           "source_input_digest": "a" * 64}],
+                previous_dataset_summary={
+                    "dataset_id": "dataset-denied",
+                    "processing_status": "COMPLETED",
+                    "materialization_status": "COMPLETED",
+                },
+            )
+
+        self.assertEqual(denied.exception.code, "CHECKPOINT_POLICY_UNAVAILABLE")
+        self.assertEqual(worker._last_cache_reuse_diagnostic, "CHECKPOINT_GRANT_DENIED")
+        self.assertEqual(reader_calls, [])
+        self.assertEqual(cache_calls, [])
+
+    def test_google_workflow_exposes_trending_now_cache_manifest_reader(self):
+        class ManifestHandler:
+            async def __call__(self, _context):
+                return {"status": "SUCCESS", "data_mode": "LIVE", "records": [],
+                        "record_count": 0}
+
+            @staticmethod
+            def __call_mode__():
+                return "LIVE"
+
+            @staticmethod
+            def cached_input_manifest(context):
+                return {
+                    "status": "SUCCESS", "data_mode": "LIVE",
+                    "request_cache_only": context.request_metadata.get("cache_only"),
+                }
+
+        workflow = GoogleDiscoveryFallbackHandler(trending_now=ManifestHandler())
+        source_handlers = D5SourceHandlers(
+            query_collectors={
+                "google_web_serp": None,
+                "bing_web_serp": None,
+                "youtube_video_search": None,
+            },
+            wikimedia=None,
+            google_trends_handler=workflow,
+            plan=DEFAULT_QUERY_PLAN,
+            limits=CollectionLimits(
+                max_queries=1, max_pages_per_query=1, max_requests=1,
+                max_retries_per_page=0, deadline_seconds=10,
+            ),
+            unavailable_mode="LIVE",
+        )
+        cache_handler = source_handlers.build_cache_only()[GOOGLE_SOURCE_ID]
+        context = SourceWorkContext(
+            "cache-manifest-delegation", "worker", 1, GOOGLE_SOURCE_ID,
+            "a" * 64, NOW + timedelta(minutes=5), None,
+            lambda _progress: 0, lambda: "ok", request_metadata={},
+        )
+
+        result = cache_handler.__trendscout_cache_manifest_reader__(context)
+
+        self.assertEqual(result["request_cache_only"], True)
 
     async def test_cache_only_handler_renews_lease_around_slow_cached_work(self):
         source = GOOGLE_SOURCE_ID

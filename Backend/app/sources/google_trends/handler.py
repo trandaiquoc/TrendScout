@@ -246,42 +246,74 @@ class GoogleTrendsDiscoveryHandler:
 
     def cached_input_manifest(self, context):
         """Read only validated cache metadata for an unchanged-dataset fast path."""
-        if (self.cache is None or context.source_id != GOOGLE_SOURCE_ID
-                or not isinstance(context.request_metadata, dict)
-                or context.request_metadata.get("cache_only") is not True):
+        def fallback(reason):
+            diagnostic = getattr(context, "diagnostic_callback", None)
+            if callable(diagnostic):
+                diagnostic(reason)
             return None
+
+        if (self.cache is None or context.source_id != GOOGLE_SOURCE_ID
+                or not isinstance(context.request_metadata, dict)):
+            return fallback("CACHE_MANIFEST_CONTEXT_INVALID")
+        if context.request_metadata.get("cache_only") is not True:
+            return fallback("CACHE_MANIFEST_REQUEST_NOT_CACHE_ONLY")
         try:
             cache_scope, cache_grant = self._cache_scope(context)
+        except Exception:
+            return fallback("CACHE_SCOPE_OR_POLICY_UNAVAILABLE")
+        try:
             cached = self.cache.get(
                 cache_scope, grant=cache_grant, now=self.utcnow(), include_payload=False,
             )
-            if not isinstance(cached, dict):
-                return None
-            manifest = cached.get("source_input_manifest")
-            if (cached.get("status") not in {"CACHED", "STALE"}
-                    or not isinstance(manifest, dict)
-                    or manifest.get("data_mode") != self.data_mode
-                    or manifest.get("status") not in {"SUCCESS", "PARTIAL"}
-                    or not isinstance(manifest.get("coverage"), dict)):
-                return None
-            coverage = dict(manifest["coverage"])
-            coverage.update(provider_request_count=0, attempted_calls=0,
-                            serp_verification_attempted=0)
-            delivery_state = "CACHED" if cached["status"] == "CACHED" else "STALE_CACHE"
-            return {
-                "status": manifest["status"],
-                "data_mode": manifest["data_mode"],
-                "delivery_state": delivery_state,
-                "record_count": manifest["record_count"],
-                "records": [],
-                "coverage": coverage,
-                "quality_flags": manifest["quality_flags"],
-                "provider_request_count": 0,
-                "source_input_digest": manifest["source_input_digest"],
-                "source_input_digest_version": manifest["source_input_digest_version"],
-            }
         except Exception:
-            return None
+            return fallback("CACHE_METADATA_LOOKUP_FAILED")
+        if not isinstance(cached, dict):
+            return fallback("CACHE_METADATA_UNAVAILABLE")
+        cache_status = cached.get("status")
+        if cache_status not in {"CACHED", "STALE"}:
+            cache_reason = cached.get("reason")
+            if (isinstance(cache_reason, str)
+                    and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", cache_reason)):
+                return fallback(f"SHARED_CACHE_{cache_status}_{cache_reason}")
+            return fallback("SHARED_CACHE_STATUS_NOT_REUSABLE")
+        manifest = cached.get("source_input_manifest")
+        if manifest is None:
+            return fallback("SOURCE_INPUT_MANIFEST_MISSING")
+        if not isinstance(manifest, dict):
+            return fallback("SOURCE_INPUT_MANIFEST_INVALID")
+        if manifest.get("data_mode") != self.data_mode:
+            return fallback("SOURCE_INPUT_DATA_MODE_MISMATCH")
+        if manifest.get("status") not in {"SUCCESS", "PARTIAL"}:
+            return fallback("SOURCE_INPUT_STATUS_INVALID")
+        if (type(manifest.get("record_count")) is not int
+                or manifest["record_count"] < 0):
+            return fallback("SOURCE_INPUT_RECORD_COUNT_INVALID")
+        if not isinstance(manifest.get("coverage"), dict):
+            return fallback("SOURCE_INPUT_COVERAGE_INVALID")
+        if not isinstance(manifest.get("quality_flags"), list):
+            return fallback("SOURCE_INPUT_QUALITY_FLAGS_INVALID")
+        if (type(manifest.get("source_input_digest_version")) is not int
+                or manifest["source_input_digest_version"] <= 0):
+            return fallback("SOURCE_INPUT_DIGEST_VERSION_INVALID")
+        digest = manifest.get("source_input_digest")
+        if not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None:
+            return fallback("SOURCE_INPUT_DIGEST_INVALID")
+        coverage = dict(manifest["coverage"])
+        coverage.update(provider_request_count=0, attempted_calls=0,
+                        serp_verification_attempted=0)
+        delivery_state = "CACHED" if cache_status == "CACHED" else "STALE_CACHE"
+        return {
+            "status": manifest["status"],
+            "data_mode": manifest["data_mode"],
+            "delivery_state": delivery_state,
+            "record_count": manifest["record_count"],
+            "records": [],
+            "coverage": coverage,
+            "quality_flags": manifest["quality_flags"],
+            "provider_request_count": 0,
+            "source_input_digest": digest,
+            "source_input_digest_version": manifest["source_input_digest_version"],
+        }
 
     async def __call__(self, context):
         if context.source_id != GOOGLE_SOURCE_ID:

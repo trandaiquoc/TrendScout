@@ -13,6 +13,16 @@ class GoogleDiscoveryFallbackHandler:
         self.trending_now, self.rss = trending_now, rss
         self.cached_fallback = cached_fallback
 
+    def cached_input_manifest(self, context):
+        """Expose the primary source's metadata-only cache reader to the worker."""
+        reader = getattr(self.trending_now, "cached_input_manifest", None)
+        if callable(reader):
+            return reader(context)
+        diagnostic = getattr(context, "diagnostic_callback", None)
+        if callable(diagnostic):
+            diagnostic("GOOGLE_TRENDS_CACHE_MANIFEST_READER_UNAVAILABLE")
+        return None
+
     @staticmethod
     def _successful_result(result):
         return (isinstance(result, dict)

@@ -54,6 +54,7 @@ from app.sources.google_trends.trending_now import (
     normalize_keyword,
     normalize_trending_candidates,
 )
+from app.sources.google_trends.verification_plan import MAX_VERIFICATION_QUERIES
 from app.sources.query_plan import DEFAULT_QUERY_PLAN
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_config import postgres_environment as read_postgres_environment
@@ -82,6 +83,7 @@ class Measurement:
         self.network_block_count = 0
         self.openrouter_count = 0
         self.counts: Counter[str] = Counter()
+        self.diagnostics: list[dict[str, str]] = []
 
 
 class Instrumentation:
@@ -244,6 +246,7 @@ class Instrumentation:
             "provider_network_requests_blocked": measurement.network_block_count,
             "openrouter_requests_blocked": measurement.openrouter_count,
             "counts": dict(measurement.counts),
+            "diagnostics": list(measurement.diagnostics),
         }
 
 
@@ -472,6 +475,25 @@ def install_instrumentation():
     _instrument_method(DistributedPublicFetch, "submit", "fetch_admission")
     _instrument_method(DistributedPublicFetch, "status", "terminal_status_availability")
     _instrument_method(DistributedFetchWorker, "run_once", "job_lease_checkpoint_coordination")
+
+    original_run_once = DistributedFetchWorker.run_once
+
+    @wraps(original_run_once)
+    async def measured_run_once(self, *args, **kwargs):
+        result = await original_run_once(self, *args, **kwargs)
+        if tracker.enabled and tracker.current is not None:
+            reason = getattr(self, "_last_cache_reuse_diagnostic", None)
+            if isinstance(reason, str):
+                tracker.count("metadata_only_reuse_fallbacks")
+                tracker.current.diagnostics.append({
+                    "kind": "metadata_only_reuse_fallback", "reason": reason,
+                })
+            elif isinstance(result, dict) and result.get("dataset_reused") is True:
+                tracker.count("metadata_only_reuse_hits")
+        return result
+
+    measured_run_once._db06_instrumented = True
+    DistributedFetchWorker.run_once = measured_run_once
     _instrument_method(SharedCache, "get", "cache_lookup")
     _instrument_method(PostgresAtomicStateStore, "transact", "atomic_state_operations")
     _instrument_method(PostgresAtomicStateStore, "read_many", "atomic_state_operations")
@@ -756,6 +778,10 @@ def seed_cache(schema: str, count: int, tag: str, revision: int = 0) -> dict:
         raise RuntimeError("database configuration is unavailable")
     now = datetime.now(timezone.utc)
     records = _fixture_records(count, tag, revision, now)
+    # Match the canonical record shape emitted by GoogleTrendsDiscoveryHandler
+    # before its result enters SharedCache, including the no-verification value.
+    for record in records:
+        record["serp_verification"] = {"status": "NOT_CONFIGURED", "results": []}
     grant = CacheGrant(
         GOOGLE_SOURCE_ID,
         GOOGLE_POLICY_VERSION,
@@ -780,8 +806,18 @@ def seed_cache(schema: str, count: int, tag: str, revision: int = 0) -> dict:
             "rejected_record_count": 0,
             "provider_request_count": 0,
             "attempted_calls": 0,
+            "trending_candidate_count": len(records),
+            "distinct_keyword_count": len({
+                record.get("canonical_keyword_identity") for record in records
+            }),
             "fetched_at": now.isoformat(),
             "db06_fixture": True,
+            "serp_verification_attempted": 0,
+            "serp_verified_candidate_count": 0,
+            "serp_verification_failed_count": 0,
+            "serp_admission_blocked_count": 0,
+            "serp_max_queries_per_batch": MAX_VERIFICATION_QUERIES,
+            "serp_pages_per_query": 1,
         },
         "quality_flags": ["DB06_SYNTHETIC_PROVIDER_FIXTURE"],
         "provider_request_count": 0,
@@ -857,6 +893,8 @@ def _ready_data(schema: str, fetch_id: str) -> dict:
     namespace = sql.Identifier(schema)
     with postgres_connection(_runtime_environment) as connection:
         row = connection.execute(sql.SQL("""SELECT d.status,d.processing_status,
+            d.materialization_status,d.algorithm_processing_status,
+            d.ai_classification_status,d.source_ingestion_status,
             d.provider_record_count,d.received_record_count,d.retained_keyword_count,
             (SELECT count(*) FROM {}.dataset_evidence de WHERE de.dataset_id=d.dataset_id),
             (SELECT count(DISTINCT ek.keyword_id)
@@ -870,11 +908,15 @@ def _ready_data(schema: str, fetch_id: str) -> dict:
     return {
         "dataset_status": row[0],
         "processing_status": row[1],
-        "provider_record_count": row[2],
-        "received_record_count": row[3],
-        "persisted_keyword_count": row[4],
-        "source_evidence_count": row[5],
-        "distinct_evidence_keyword_count": row[6],
+        "materialization_status": row[2],
+        "algorithm_processing_status": row[3],
+        "ai_classification_status": row[4],
+        "source_ingestion_status": row[5],
+        "provider_record_count": row[6],
+        "received_record_count": row[7],
+        "persisted_keyword_count": row[8],
+        "source_evidence_count": row[9],
+        "distinct_evidence_keyword_count": row[10],
     }
 
 
@@ -901,11 +943,25 @@ def _assert_result(measurement_result: dict, expected_count: int,
     if (measurement_result["label"].startswith("case2-warm-changed-")
             and measurement_result["collection_input_unchanged"] is True):
         raise RuntimeError("changed CACHE_ONLY input was incorrectly treated as unchanged")
-    if measurement_result["label"].startswith("case3-warm-unchanged-"):
+    if (measurement_result["label"].startswith("case3-warm-unchanged-")
+            or measurement_result["label"].startswith("warm-unchanged-")):
         if (measurement_result["collection_input_unchanged"] is not True
                 or measurement_result["dataset_reused"] is not True
                 or measurement_result["dataset_id"] == measurement_result["fetch_id"]):
             raise RuntimeError("unchanged CACHE_ONLY input did not reuse its durable dataset")
+        if measurement_result.get("require_metadata_fast_path"):
+            if not measurement_result.get("metadata_only_fast_path_hit"):
+                raise RuntimeError("unchanged CACHE_ONLY Fetch missed the metadata-only path")
+            if measurement_result["source_payload_bytes_read"] != 0:
+                raise RuntimeError("metadata-only Fetch read source payload bytes")
+            counts = measurement_result["instrumentation"]["counts"]
+            if any(counts.get(key, 0) != 0 for key in (
+                    "keyword_persistence_input_records", "source_evidence_input_rows",
+                    "dataset_evidence_link_input_rows", "keyword_normalization_records")):
+                raise RuntimeError("metadata-only Fetch repeated Collection persistence work")
+            if measurement_result["instrumentation"]["stages"].get(
+                    "algorithm_processing", {}).get("calls", 0):
+                raise RuntimeError("metadata-only Fetch reran collection algorithms")
     if measurement_result["provider_network_requests_blocked"] != 0:
         raise RuntimeError("a provider network request was attempted")
     if measurement_result["openrouter_requests_blocked"] != 0:
@@ -913,7 +969,8 @@ def _assert_result(measurement_result: dict, expected_count: int,
 
 
 def _run_fetch(client: TestClient, schema: str, expected_count: int, *, label: str,
-               warmup: bool = False, fixture_input_digest: str | None = None) -> dict:
+               warmup: bool = False, fixture_input_digest: str | None = None,
+               require_metadata_fast_path: bool = False) -> dict:
     measurement = tracker.start(label)
     started = time.perf_counter()
     key = "db06-" + uuid.uuid4().hex
@@ -986,14 +1043,23 @@ def _run_fetch(client: TestClient, schema: str, expected_count: int, *, label: s
         "provider_network_requests_blocked": measurement.network_block_count,
         "openrouter_requests_blocked": measurement.openrouter_count,
         "fixture_input_digest": fixture_input_digest,
+        "require_metadata_fast_path": require_metadata_fast_path,
     }
     tracker.stop()
     if not warmup:
         result["instrumentation"] = tracker.snapshot(measurement)
+    result["source_payload_bytes_read"] = (
+        result.get("instrumentation", {}).get("counts", {}).get("payload_blob_read_bytes", 0)
+    )
+    result["metadata_only_fast_path_hit"] = (
+        result.get("instrumentation", {}).get("counts", {}).get(
+            "metadata_only_reuse_hits", 0
+        ) == 1
+    )
     result["source_input_digest"] = _read_source_input_digest(schema, fetch_id)
-    _assert_result(result, expected_count, fixture_input_digest)
     if not warmup:
         emit({"event": "fetch_measurement", **result})
+    _assert_result(result, expected_count, fixture_input_digest)
     return result
 
 
@@ -1054,7 +1120,7 @@ def _profile_mode(record_counts=(10, 100, 500)) -> dict:
             "mode": "profile",
             "profile_record_counts": list(record_counts),
             "schema": schema,
-            "baseline_commit": "45c1f2f74bd31d08eb3fe700a2804bfec5eeb0e6",
+            "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
             "migration_and_fixture_setup_excluded": True,
             "application_startup": tracker.snapshot(startup_measurement),
             "scaling_samples": [
@@ -1180,7 +1246,7 @@ def _acceptance_mode(*, skip_cold: bool = False, skip_changed: bool = False) -> 
         summary = {
             "mode": "acceptance",
             "schema": schema,
-            "baseline_commit": "45c1f2f74bd31d08eb3fe700a2804bfec5eeb0e6",
+            "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
             "setup_ms_excluded": round(setup_seconds * 1000, 2),
             "cold_samples_skipped_for_resume": skip_cold,
             "changed_samples_skipped_for_resume": skip_changed,
@@ -1225,6 +1291,112 @@ def _stats(values: list[float]) -> dict:
         "median_ms": round(statistics.median(values), 2),
         "max_ms": round(max(values), 2),
     }
+
+
+def _warm_unchanged_case(count: int, sample_count: int, *, require_fast_path: bool) -> dict:
+    schema, setup_seconds = create_isolated_schema()
+    fixture = seed_cache(schema, count, tag=f"warm-unchanged-{count}", revision=0)
+    tracker.start(f"warm_{count}_application_startup")
+    app, client = _instrumented_app(
+        schema, label=f"warm_{count}_application_startup", include_startup=True
+    )
+    startup_measurement = tracker.stop()
+    heartbeat = Heartbeat()
+    heartbeat.start()
+    samples = []
+    membership = None
+    try:
+        prime = _run_fetch(
+            client, schema, count, label=f"warm-prime-{count}", warmup=True,
+            fixture_input_digest=fixture["source_input_digest"],
+        )
+        membership = _preserve_user_membership(schema, prime["fetch_id"])
+        preserved_status = {
+            key: prime["data_ready"][key] for key in (
+                "materialization_status", "algorithm_processing_status",
+                "ai_classification_status", "source_ingestion_status",
+            )
+        }
+        for index in range(1, sample_count + 1):
+            result = _run_fetch(
+                client, schema, count,
+                label=f"warm-unchanged-{count}-{index}",
+                fixture_input_digest=fixture["source_input_digest"],
+                require_metadata_fast_path=require_fast_path,
+            )
+            if result["source_input_digest"] != prime["source_input_digest"]:
+                raise RuntimeError("warm CACHE_ONLY input digest changed after priming")
+            if result["dataset_id"] != prime["dataset_id"]:
+                raise RuntimeError("warm CACHE_ONLY Fetch did not reuse the primed dataset ID")
+            if {key: result["data_ready"][key] for key in preserved_status} != preserved_status:
+                raise RuntimeError("warm CACHE_ONLY Fetch changed independent processing status")
+            samples.append(result)
+        membership_after = _verify_user_membership(schema, membership)
+        return {
+            "record_count": count,
+            "sample_count": sample_count,
+            "dataset_id": prime["dataset_id"],
+            "setup_ms_excluded": round(setup_seconds * 1000, 2),
+            "application_startup": tracker.snapshot(startup_measurement),
+            "warm_latency_ms": _stats([item["end_to_end_ms"] for item in samples]),
+            "source_payload_bytes_read": [
+                item["source_payload_bytes_read"] for item in samples
+            ],
+            "sql_dispatches": [
+                item["instrumentation"]["sql"]["synchronous_dispatches"]
+                for item in samples
+            ],
+            "metadata_only_fast_path_hits": sum(
+                item["metadata_only_fast_path_hit"] for item in samples
+            ),
+            "provider_network_requests_blocked": sum(
+                item["provider_network_requests_blocked"] for item in samples
+            ),
+            "openrouter_requests_blocked": sum(
+                item["openrouter_requests_blocked"] for item in samples
+            ),
+            "processing_status_preserved": preserved_status,
+            "user_membership": {"before": membership, "after": membership_after},
+            "samples": samples,
+        }
+    finally:
+        tracker.stop()
+        heartbeat.stop()
+        client.__exit__(None, None, None)
+        drop_owned_schema(schema)
+        emit({"event": "warm_unchanged_schema_cleanup", "schema": schema,
+              "cleaned": schema not in _owned_schemas})
+
+
+def _warm_unchanged_mode(*, require_fast_path: bool, warm_case: str,
+                         large_samples: int) -> dict:
+    cases = []
+    if warm_case in {"all", "smoke"}:
+        cases.append(_warm_unchanged_case(100, 1, require_fast_path=require_fast_path))
+    if warm_case in {"all", "large"}:
+        cases.append(_warm_unchanged_case(
+            1500, large_samples, require_fast_path=require_fast_path
+        ))
+    summary = {
+        "mode": "warm-unchanged",
+        "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
+        "warm_case": warm_case,
+        "large_samples_requested": large_samples if warm_case in {"all", "large"} else 0,
+        "require_fast_path": require_fast_path,
+        "cases": cases,
+        "warm_1500_latency_min_median_max_ms": next(
+            (case["warm_latency_ms"] for case in cases if case["record_count"] == 1500),
+            None,
+        ),
+        "provider_network_requests_blocked": sum(
+            case["provider_network_requests_blocked"] for case in cases
+        ),
+        "openrouter_requests_blocked": sum(
+            case["openrouter_requests_blocked"] for case in cases
+        ),
+    }
+    emit({"event": "warm_unchanged_complete", **summary})
+    return summary
 
 
 def _preserve_user_membership(schema: str, fetch_id: str) -> dict:
@@ -1292,7 +1464,21 @@ def _verify_test_url_targets_runtime_database(environment: dict[str, str], test_
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("profile", "acceptance"), default="profile")
+    parser.add_argument(
+        "--mode", choices=("profile", "acceptance", "warm-unchanged"), default="profile"
+    )
+    parser.add_argument(
+        "--require-fast-path", action="store_true",
+        help="fail warm-unchanged runs unless each sample used metadata-only reuse",
+    )
+    parser.add_argument(
+        "--warm-case", choices=("all", "smoke", "large"), default="all",
+        help="select the 100-record smoke, three 1500-record samples, or both",
+    )
+    parser.add_argument(
+        "--large-samples", type=int, choices=(1, 2, 3), default=3,
+        help="number of warm unchanged 1500-record samples (default: 3)",
+    )
     parser.add_argument(
         "--profile-count", type=int, choices=(10, 100, 500),
         help="run one existing profile fixture size as a smoke measurement",
@@ -1312,6 +1498,12 @@ def main() -> int:
         parser.error("--skip-changed requires --mode acceptance and --skip-cold")
     if arguments.profile_count is not None and arguments.mode != "profile":
         parser.error("--profile-count is only valid with --mode profile")
+    if arguments.require_fast_path and arguments.mode != "warm-unchanged":
+        parser.error("--require-fast-path is only valid with --mode warm-unchanged")
+    if arguments.warm_case != "all" and arguments.mode != "warm-unchanged":
+        parser.error("--warm-case is only valid with --mode warm-unchanged")
+    if arguments.large_samples != 3 and arguments.mode != "warm-unchanged":
+        parser.error("--large-samples is only valid with --mode warm-unchanged")
     if os.environ.get("VERCEL"):
         raise RuntimeError("DB06 local benchmark refuses a Vercel process")
     explicit_test_url = bool(os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL"))
@@ -1327,16 +1519,21 @@ def main() -> int:
     # value is never read from or written to a dotenv file.
     os.environ["OPENROUTER_API_KEY"] = ""
     emit({"event": "benchmark_started", "mode": arguments.mode,
-          "baseline_commit": "45c1f2f74bd31d08eb3fe700a2804bfec5eeb0e6",
+          "baseline_commit": "6e72b698e936038b7c6547270f403d178a595c18",
           "database_identity_validated": True,
           "schema_prefix": "ts_test_db06_",
           "provider_network": "blocked",
           "openrouter": "blocked"})
     if arguments.mode == "profile":
         _profile_mode((arguments.profile_count,) if arguments.profile_count else (10, 100, 500))
-    else:
+    elif arguments.mode == "acceptance":
         _acceptance_mode(skip_cold=arguments.skip_cold,
                          skip_changed=arguments.skip_changed)
+    else:
+        _warm_unchanged_mode(
+            require_fast_path=arguments.require_fast_path, warm_case=arguments.warm_case,
+            large_samples=arguments.large_samples,
+        )
     cleanup_owned_schemas()
     return 0
 

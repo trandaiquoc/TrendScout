@@ -846,6 +846,74 @@ class GoogleRuntimeAndStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["record_count"], 0)
         self.assertEqual(result["coverage"]["provider_request_count"], 0)
 
+    async def test_cached_input_manifest_is_metadata_only_and_reports_fallback_reasons(self):
+        grant = CacheGrant(
+            GOOGLE_SOURCE_ID, "NORMAL_GOOGLE_LIVE_V1", NOW + timedelta(hours=1),
+            3600, 7200, 7200, allowed=True,
+        )
+        manifest = {
+            "status": "SUCCESS", "data_mode": "LIVE", "record_count": 1,
+            "coverage": {"query": "fixture"}, "quality_flags": [],
+            "source_input_digest": "a" * 64, "source_input_digest_version": 2,
+        }
+
+        class Cache:
+            def __init__(self):
+                self.result = None
+                self.include_payload = None
+
+            def get(self, _scope, *, grant, now, include_payload):
+                self.include_payload = include_payload
+                return self.result
+
+        cache = Cache()
+        handler = GoogleTrendsDiscoveryHandler(
+            policy_fingerprint="a" * 64, utcnow=lambda: NOW, cache=cache,
+            resolve_cache_grant=lambda _source, _now: grant, data_mode="LIVE",
+        )
+
+        def read(result):
+            diagnostics = []
+            cache.result = result
+            context = SourceWorkContext(
+                "cache-manifest-test", "worker", 1, GOOGLE_SOURCE_ID, "a" * 64,
+                NOW + timedelta(minutes=5), None, lambda _value: 1, lambda: "ACTIVE",
+                request_metadata={"cache_only": True},
+                diagnostic_callback=diagnostics.append,
+            )
+            return handler.cached_input_manifest(context), diagnostics
+
+        cached, diagnostics = read({
+            "status": "CACHED", "fetched_at": NOW.isoformat(),
+            "source_input_manifest": manifest,
+        })
+        self.assertEqual(cached["records"], [])
+        self.assertEqual(cached["record_count"], 1)
+        self.assertFalse(cache.include_payload)
+        self.assertEqual(diagnostics, [])
+
+        expired, diagnostics = read({"status": "EXPIRED", "reason": "RETENTION_EXPIRED"})
+        self.assertIsNone(expired)
+        self.assertEqual(diagnostics, ["SHARED_CACHE_EXPIRED_RETENTION_EXPIRED"])
+
+        missing, diagnostics = read({"status": "CACHED"})
+        self.assertIsNone(missing)
+        self.assertEqual(diagnostics, ["SOURCE_INPUT_MANIFEST_MISSING"])
+
+        invalid_manifest = {**manifest, "source_input_digest": "invalid"}
+        invalid, diagnostics = read({
+            "status": "CACHED", "source_input_manifest": invalid_manifest,
+        })
+        self.assertIsNone(invalid)
+        self.assertEqual(diagnostics, ["SOURCE_INPUT_DIGEST_INVALID"])
+
+        incompatible_manifest = {**manifest, "data_mode": "SYNTHETIC"}
+        incompatible, diagnostics = read({
+            "status": "CACHED", "source_input_manifest": incompatible_manifest,
+        })
+        self.assertIsNone(incompatible)
+        self.assertEqual(diagnostics, ["SOURCE_INPUT_DATA_MODE_MISMATCH"])
+
     async def test_stale_trends_cache_is_not_delivered_as_cached_or_paid_verified(self):
         candidate = _candidate("portable outdoor blanket", ["Home & Garden"], increase=900)
         candidate.update({
