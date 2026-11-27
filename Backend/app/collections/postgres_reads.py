@@ -50,6 +50,107 @@ class PostgresCollectionReader:
     def _table(self, name):
         return sql.SQL("{}.{}").format(sql.Identifier(self._schema), sql.Identifier(name))
 
+    def _algorithm_result_freshness_sql(self, alias):
+        """Hide completed source scores whose persisted evidence has expired or been removed."""
+        if alias not in {"r", "ar"}:
+            raise ValueError("unsupported algorithm result alias")
+        payload = (
+            f"CASE WHEN pg_input_is_valid({alias}.result_json, 'jsonb') "
+            f"THEN {alias}.result_json::jsonb ELSE '{{}}'::jsonb END"
+        )
+        refs = (
+            f"CASE WHEN jsonb_typeof(({payload})->'evidence_references')='array' "
+            f"THEN ({payload})->'evidence_references' ELSE '[]'::jsonb END"
+        )
+        active_window = """se.expires_at > statement_timestamp()
+            AND se.collected_at >= (
+                date_trunc('day', statement_timestamp() AT TIME ZONE 'Asia/Ho_Chi_Minh')
+                - interval '6 days'
+            ) AT TIME ZONE 'Asia/Ho_Chi_Minh'"""
+        return f"""(
+            {alias}.status <> 'COMPLETED'
+            OR ({payload})->>'source_id' IS NULL
+            OR (
+                jsonb_array_length({refs}) > 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM jsonb_array_elements({refs}) AS input_ref(item)
+                    WHERE (
+                        COALESCE(input_ref.item->>'source_evidence_id',
+                                 input_ref.item->>'evidence_id') IS NOT NULL
+                        AND NOT EXISTS (
+                            SELECT 1 FROM {self._schema}.source_evidence se
+                            JOIN {self._schema}.evidence_keywords ek ON ek.evidence_id=se.id
+                            WHERE se.id=COALESCE(input_ref.item->>'source_evidence_id',
+                                                 input_ref.item->>'evidence_id')
+                              AND ek.keyword_id={alias}.keyword_id
+                              AND (input_ref.item->>'source_id' IS NULL
+                                   OR se.source_id=input_ref.item->>'source_id')
+                              AND {active_window}
+                        )
+                    ) OR (
+                        input_ref.item->>'observation_date' IS NOT NULL
+                        AND input_ref.item->>'input_digest' IS NOT NULL
+                        AND (
+                            NOT EXISTS (
+                                SELECT 1 FROM {self._schema}.algorithm_observations o
+                                WHERE o.keyword_id={alias}.keyword_id
+                                  AND o.source=input_ref.item->>'source_id'
+                                  AND o.observation_date::text=input_ref.item->>'observation_date'
+                                  AND o.metric=input_ref.item->>'metric'
+                                  AND o.unit=input_ref.item->>'unit'
+                                  AND o.input_digest=input_ref.item->>'input_digest'
+                                  AND (input_ref.item->>'status' IS NULL
+                                       OR o.status=input_ref.item->>'status')
+                            )
+                            OR EXISTS (
+                            SELECT 1 FROM {self._schema}.algorithm_observations o
+                            WHERE o.keyword_id={alias}.keyword_id
+                              AND o.source=input_ref.item->>'source_id'
+                              AND o.observation_date::text=input_ref.item->>'observation_date'
+                              AND o.metric=input_ref.item->>'metric'
+                              AND o.unit=input_ref.item->>'unit'
+                              AND o.input_digest=input_ref.item->>'input_digest'
+                              AND (input_ref.item->>'status' IS NULL
+                                   OR o.status=input_ref.item->>'status')
+                              AND NOT (
+                                  (o.status='OBSERVED' AND EXISTS (
+                                      SELECT 1 FROM {self._schema}.evidence_keywords ek
+                                      JOIN {self._schema}.source_evidence se ON se.id=ek.evidence_id
+                                      WHERE ek.keyword_id=o.keyword_id
+                                        AND se.source_id=o.source
+                                        AND COALESCE(se.query_scope->>'observation_date',
+                                            (se.observed_at AT TIME ZONE 'UTC')::date::text)
+                                            =o.observation_date::text
+                                        AND (se.query_scope->>'country_scope' IS NULL
+                                             OR se.query_scope->>'country_scope'=o.country)
+                                        AND (se.query_scope->>'access' IS NULL
+                                             OR se.query_scope->>'access'=o.access)
+                                        AND (se.query_scope->>'project' IS NULL
+                                             OR se.query_scope->>'project'=o.project)
+                                        AND {active_window}
+                                  ))
+                                  OR (o.status<>'OBSERVED' AND EXISTS (
+                                      SELECT 1 FROM {self._schema}.source_evidence se
+                                      WHERE se.source_id=o.source
+                                        AND COALESCE(se.query_scope->>'observation_date',
+                                            (se.observed_at AT TIME ZONE 'UTC')::date::text)
+                                            =o.observation_date::text
+                                        AND (se.query_scope->>'country_scope' IS NULL
+                                             OR se.query_scope->>'country_scope'=o.country)
+                                        AND (se.query_scope->>'access' IS NULL
+                                             OR se.query_scope->>'access'=o.access)
+                                        AND (se.query_scope->>'project' IS NULL
+                                             OR se.query_scope->>'project'=o.project)
+                                        AND {active_window}
+                                  ))
+                              )
+                            )
+                        )
+                    )
+                )
+            )
+        )"""
+
     def _read(self, operation):
         try:
             with postgres_connection(self._environment) as db:
@@ -368,7 +469,7 @@ class PostgresCollectionReader:
                 COALESCE((SELECT jsonb_agg(jsonb_build_object('algorithm_id',ar.algorithm_id,
                     'version',ar.version,'status',ar.status,'reason_code',ar.reason_code,
                     'value',ar.value,'metric',ar.metric,'unit',ar.unit) ORDER BY ar.algorithm_id)
-                    FROM {} ar WHERE ar.keyword_id=k.id), '[]'::jsonb) AS algorithm_results,
+                    FROM {} ar WHERE ar.keyword_id=k.id AND {}), '[]'::jsonb) AS algorithm_results,
                 COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'name',c.name)
                     ORDER BY c.name COLLATE "C") FROM {} m JOIN {} c ON c.id=m.collection_id
                     WHERE m.keyword_id=k.id AND c.status='ACTIVE'), '[]'::jsonb) AS collections
@@ -377,7 +478,10 @@ class PostgresCollectionReader:
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
-                    self._table("algorithm_results"), self._table("memberships"),
+                    self._table("algorithm_results"), sql.SQL(
+                        self._algorithm_result_freshness_sql("ar")
+                    ),
+                    self._table("memberships"),
                     self._table("collections"), self._table("keywords"),
                     self._table("keyword_decisions"), self._table("classification_results"),
                     mode_filter), params).fetchall()
@@ -585,7 +689,10 @@ class PostgresCollectionReader:
 
     def algorithm_results_overview(self, *, limit=100, offset=0, source="",
                                    algorithm_id="", status=""):
-        base_filters = [sql.SQL("COALESCE(cr.classification_status,'')<>'INELIGIBLE'")]
+        base_filters = [
+            sql.SQL("COALESCE(cr.classification_status,'')<>'INELIGIBLE'"),
+            sql.SQL(self._algorithm_result_freshness_sql("r")),
+        ]
         base_parameters = []
         if self.data_mode_scope:
             base_filters.append(sql.SQL("k.data_mode=%s"))
@@ -690,8 +797,9 @@ class PostgresCollectionReader:
             algorithm_rows = db.execute(sql.SQL("""SELECT r.keyword_id,r.algorithm_id,r.version,
                 r.status,r.reason_code,r.value,r.metric,r.unit,r.input_digest,r.result_json,r.updated_at
                 FROM {} r JOIN {} k ON k.id=r.keyword_id WHERE r.keyword_id=ANY(%s)
-                  AND k.data_mode=%s ORDER BY r.keyword_id,r.algorithm_id""").format(
-                    self._table("algorithm_results"), self._table("keywords")),
+                  AND k.data_mode=%s AND {} ORDER BY r.keyword_id,r.algorithm_id""").format(
+                    self._table("algorithm_results"), self._table("keywords"),
+                    sql.SQL(self._algorithm_result_freshness_sql("r"))),
                 (identifiers, mode)).fetchall()
             return build_multi_source_profile(
                 canonical_keyword=target["keyword"],
@@ -784,10 +892,12 @@ class PostgresCollectionReader:
                     self._table("keywords"), scope), parameters).fetchone()
             algorithm_rows = db.execute(sql.SQL("""SELECT r.algorithm_id,r.version,r.status,count(*) AS count
                 FROM {} r JOIN {} k ON k.id=r.keyword_id LEFT JOIN {} cr ON cr.keyword_id=k.id
-                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE' {}
+                WHERE COALESCE(cr.classification_status,'')<>'INELIGIBLE'
+                  AND {} {}
                 GROUP BY r.algorithm_id,r.version,r.status ORDER BY r.algorithm_id,r.status""").format(
                     self._table("algorithm_results"), self._table("keywords"),
-                    self._table("classification_results"), scope), parameters).fetchall()
+                    self._table("classification_results"),
+                    sql.SQL(self._algorithm_result_freshness_sql("r")), scope), parameters).fetchall()
             observations = db.execute(sql.SQL("""SELECT o.source,o.observation_date,
                 count(DISTINCT o.keyword_id) AS keywords,
                 count(*) FILTER (WHERE o.status='OBSERVED') AS observed,
@@ -801,11 +911,13 @@ class PostgresCollectionReader:
                 WHERE r.algorithm_id='observed-volume-rank' AND r.status='COMPLETED' AND r.value IS NOT NULL
                 AND k.eligible=1 AND COALESCE((SELECT classification_status FROM {} cr
                     WHERE cr.keyword_id=k.id),'')<>'INELIGIBLE' {}
+                AND {}
                 ORDER BY r.updated_at DESC,
                 translate(k.keyword,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') COLLATE "C",
                 k.keyword COLLATE "C" LIMIT 1000""").format(
                     self._table("algorithm_results"), self._table("keywords"),
-                    self._table("classification_results"), scope), parameters).fetchall()
+                    self._table("classification_results"), scope,
+                    sql.SQL(self._algorithm_result_freshness_sql("r"))), parameters).fetchall()
             latest = db.execute(sql.SQL("""SELECT dataset_id,status,data_mode,source_manifest,
                 provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
                 observation_start,observation_end,fetched_at,created_at,quality_flags,processing_status,
@@ -1127,7 +1239,9 @@ class PostgresCollectionReader:
             clauses.append("cr.classification_status=%s")
             parameters.append(classification)
         metric = "(k.evidence->>'views_ceil' IS NOT NULL OR k.evidence->>'approximate_views' IS NOT NULL)"
-        algorithm = "EXISTS(SELECT 1 FROM " + algorithms + " ar WHERE ar.keyword_id=k.id AND ar.status='COMPLETED')"
+        algorithm = ("EXISTS(SELECT 1 FROM " + algorithms
+                     + " ar WHERE ar.keyword_id=k.id AND ar.status='COMPLETED' AND "
+                     + self._algorithm_result_freshness_sql("ar") + ")")
         if evidence == "metric":
             clauses.append(metric)
         elif evidence == "algorithm":
@@ -1209,7 +1323,9 @@ class PostgresCollectionReader:
             by_keyword = {}
             if include_algorithm_results and rows:
                 result_rows = db.execute("SELECT keyword_id,algorithm_id,version,status,reason_code,value,metric,unit,"
-                    "result_json FROM " + algorithms + " WHERE keyword_id=ANY(%s) ORDER BY keyword_id,algorithm_id",
+                    "result_json FROM " + algorithms + " ar WHERE keyword_id=ANY(%s) AND "
+                    + self._algorithm_result_freshness_sql("ar")
+                    + " ORDER BY keyword_id,algorithm_id",
                     ([row["id"] for row in rows],)).fetchall()
                 for result in result_rows:
                     item = dict(result)

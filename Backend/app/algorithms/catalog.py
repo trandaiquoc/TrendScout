@@ -172,6 +172,63 @@ def _execution_for(metadata):
     }
 
 
+def _retention_requirements(metadata):
+    """Describe the input days available under the seven-day Fetch contract."""
+    adapters = [adapter for adapter in PERSISTED_INPUT_ADAPTERS
+                if adapter.supports(metadata)]
+    snapshot = bool(
+        "snapshot_cohort" in metadata.runtime_requirements
+        or metadata.family == "popularity"
+    )
+    if snapshot:
+        required_history_days = 0
+        required_observation_days = 1
+    elif "legacy_result" in metadata.runtime_requirements:
+        # Its score requires three observed baseline values inside a seven-date baseline.
+        required_history_days = metadata.minimum_samples
+        required_observation_days = metadata.minimum_samples + 1
+    else:
+        minimum_window = min(metadata.supported_windows or (metadata.minimum_samples,))
+        required_history_days = max(metadata.minimum_samples, minimum_window)
+        required_observation_days = required_history_days + 1
+
+    available_history_days = max((adapter.max_history_days for adapter in adapters), default=0)
+    if snapshot:
+        retention_compatible = bool(adapters)
+        available_observation_days = 1 if adapters else 0
+    else:
+        retention_compatible = bool(adapters) and available_history_days >= required_history_days
+        available_observation_days = available_history_days + 1 if adapters else 0
+    if retention_compatible:
+        limitation = "Seven-day rolling retention bounds stored input history."
+    elif "legacy_result" in metadata.runtime_requirements:
+        limitation = (
+            "The legacy method requires a seven-day baseline window, while retention "
+            "keeps six prior days; partial baseline dates must remain explicit."
+        )
+    elif required_history_days > 6:
+        limitation = (
+            f"Requires {required_history_days} prior observations; only six prior days fit "
+            "the seven-day rolling retention window."
+        )
+    else:
+        limitation = "No persisted source adapter currently satisfies this input contract."
+    return {
+        "minimum_history_days": required_history_days,
+        "required_observation_days": required_observation_days,
+        "available_retained_observation_days": available_observation_days,
+        "calendar_window_days": (
+            max(metadata.supported_windows or (metadata.max_window_days,)) + 1
+            if "legacy_result" in metadata.runtime_requirements
+            else required_observation_days
+        ),
+        "available_persisted_history_days": available_history_days,
+        "rolling_retention_days": 7,
+        "retention_compatible": retention_compatible,
+        "retention_limitation": limitation,
+    }
+
+
 def source_compatibility(metadata, source):
     """Return a source capability status and reason for a registered method."""
     if source.source_id in metadata.excluded_sources:
@@ -226,6 +283,7 @@ def catalog(source_capabilities=SOURCE_CAPABILITIES):
         item['input_metric'] = item['input_metric'] or meta.metric
         item['input_unit'] = item['input_unit'] or meta.unit
         item['execution'] = _execution_for(meta)
+        item['retention'] = _retention_requirements(meta)
         compatible = []
         for source_id, source in sources.items():
             status, reason = source_compatibility(meta, source)

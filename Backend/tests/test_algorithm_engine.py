@@ -242,6 +242,21 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual(execution['wikimedia-trend'], 'LEGACY_PATH_ONLY')
         self.assertEqual(execution['robust-z-mad'], 'NOT_EXECUTED_SOURCE_AND_RETENTION')
         self.assertEqual(execution['relative-source-rank'], 'REGISTERED_NO_QUERY_COHORT')
+        self.assertEqual(len(response['algorithms']), 13)
+        retention = {item['algorithm_id']: item['retention']
+                     for item in response['algorithms']}
+        self.assertEqual(retention['growth-ratio']['minimum_history_days'], 3)
+        self.assertEqual(retention['growth-ratio']['required_observation_days'], 4)
+        self.assertEqual(retention['growth-ratio']['available_retained_observation_days'], 7)
+        self.assertTrue(retention['growth-ratio']['retention_compatible'])
+        self.assertEqual(retention['robust-z-mad']['minimum_history_days'], 14)
+        self.assertEqual(retention['robust-z-mad']['required_observation_days'], 15)
+        self.assertFalse(retention['robust-z-mad']['retention_compatible'])
+        self.assertEqual(retention['ewma']['minimum_history_days'], 7)
+        self.assertEqual(retention['rolling-mean-baseline']['minimum_history_days'], 7)
+        self.assertEqual(retention['wikimedia-trend']['calendar_window_days'], 8)
+        self.assertIn('seven-day baseline', retention['wikimedia-trend']['retention_limitation'])
+        self.assertEqual(retention['google-trends-increase-rank']['required_observation_days'], 1)
         growth = next(item for item in response['algorithms']
                       if item['algorithm_id'] == 'growth-ratio')
         self.assertEqual(growth['execution']['sources'], (SOURCE,))

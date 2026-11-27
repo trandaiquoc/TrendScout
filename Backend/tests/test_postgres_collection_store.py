@@ -934,6 +934,7 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
                     "source_id": observation[0],
                     "keyword_id": record["id"],
                     "observation_date": observation[1],
+                    "status": "OBSERVED",
                     "metric": observation[3],
                     "unit": observation[4],
                     "input_digest": observation[5],
@@ -1036,8 +1037,14 @@ def test_google_trends_increase_rank_persists_lineage_and_skips_unchanged_inputs
                 "provider_region_filter": "US", "language_filter": "en",
                 "market_evidence": "US_FILTER_ONLY", "audience_residence_claimed": False,
             }
+            assert completed_payload["available_observation_days"] == 1
+            assert completed_payload["required_observation_days"] == 1
+            assert completed_payload["actual_observation_window"]["start_date"] == (
+                completed_payload["actual_observation_window"]["end_date"]
+            )
             assert completed_payload["evidence_references"]
             reference_id = completed_payload["evidence_references"][0]["source_evidence_id"]
+            assert completed_payload["evidence_references"][0]["expires_at"]
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
                                       .format(sql.Identifier(schema, "source_evidence")),
                                       (reference_id,)).fetchone()[0] == 1
@@ -1084,6 +1091,35 @@ def test_google_trends_increase_rank_persists_lineage_and_skips_unchanged_inputs
                 engine_factory.return_value.run.assert_not_called()
             assert second["unchanged_keywords"] == 3
             assert second["recomputed_algorithms"] == 0
+
+            expired_keyword_id = connection.execute(sql.SQL(
+                "SELECT keyword_id FROM {} WHERE algorithm_id='google-trends-increase-rank' "
+                "AND input_digest=%s"
+            ).format(sql.Identifier(schema, "algorithm_results")),
+                (completed_payload["input_digest"],)).fetchone()[0]
+            connection.execute(sql.SQL("UPDATE {} SET expires_at=%s WHERE id=%s").format(
+                sql.Identifier(schema, "source_evidence")),
+                (datetime.now(timezone.utc) - timedelta(seconds=1), reference_id))
+            after_expiry = store.algorithm_results_overview(
+                algorithm_id="google-trends-increase-rank", status="COMPLETED",
+            )
+            assert after_expiry["total"] == 2
+            assert all(item["keyword_id"] != expired_keyword_id
+                       for item in after_expiry["items"])
+            expired_api_response = asyncio.run(read_algorithm_results())
+            assert expired_api_response.status_code == 200
+            assert expired_api_response.json()["total"] == 2
+            assert all(item["keyword_id"] != expired_keyword_id
+                       for item in expired_api_response.json()["items"])
+            keyword_page = store.search_keywords(keyword_id=expired_keyword_id)
+            assert keyword_page["items"][0]["algorithm_results"] == []
+            ai_context = store.ai_recommendation_context(
+                [expired_keyword_id], allowed_sources=[GOOGLE_SOURCE_ID],
+            )
+            assert ai_context["keywords"][0]["algorithm_results"] == []
+            profile = store.multi_source_trend_profile(expired_keyword_id)
+            assert all(not item["source_specific_rankings"]
+                       for item in profile["source_breakdown"])
 
             refreshed_rows = [dict(row) for row in rows]
             refreshed_rows[0] = {
@@ -1269,6 +1305,22 @@ def test_postgres_multi_source_profile_keeps_metrics_roles_and_lineage_separate(
                 persisted_source_evidence_ids=google_saved["source_evidence_ids"],
             )
             assert google_analysis["executed_keywords"] == 2
+            google_result_rows = connection.execute(sql.SQL("""SELECT keyword_id,result_json FROM {}
+                WHERE algorithm_id='google-trends-increase-rank'""").format(
+                    sql.Identifier(schema, "algorithm_results"))).fetchall()
+            for result_keyword_id, raw_payload in google_result_rows:
+                result_payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                references = result_payload["evidence_references"]
+                assert references
+                assert all(reference["source_id"] == GOOGLE_SOURCE_ID for reference in references)
+                linked_google_ids = {
+                    row[0] for row in connection.execute(sql.SQL("""SELECT se.id FROM {} se
+                        JOIN {} ek ON ek.evidence_id=se.id WHERE ek.keyword_id=%s AND se.source_id=%s""")
+                        .format(sql.Identifier(schema, "source_evidence"),
+                                sql.Identifier(schema, "evidence_keywords")),
+                        (result_keyword_id, GOOGLE_SOURCE_ID)).fetchall()
+                }
+                assert {reference["source_evidence_id"] for reference in references} <= linked_google_ids
 
             wikimedia_rows = [{
                 "article_display": phrase,
@@ -1354,6 +1406,7 @@ def test_postgres_multi_source_profile_keeps_metrics_roles_and_lineage_separate(
                  "unit": "provider_reported_percentage", "value": 250.0},
             ]
             assert wikimedia["evidence_role"] == "OBSERVED_ACTIVITY"
+            assert wikimedia["source_specific_rankings"]
             assert {"views_ceil", "provider_rank"} <= {
                 metric["metric"] for metric in wikimedia["metric_observations"]
             }
@@ -1420,6 +1473,9 @@ def test_postgres_multi_source_profile_keeps_metrics_roles_and_lineage_separate(
             assert any(item["source_id"] == WIKIMEDIA_SOURCE_ID
                        and item["evidence_status"] == "NO_STORED_EVIDENCE"
                        for item in retained_profile["source_breakdown"])
+            assert all(not item["source_specific_rankings"]
+                       for item in retained_profile["source_breakdown"]
+                       if item["source_id"] == WIKIMEDIA_SOURCE_ID)
         finally:
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 

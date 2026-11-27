@@ -5,9 +5,17 @@ from datetime import date, datetime, timedelta
 
 from app.discovery.contracts import Assessment, Candidate, CoverageDay, ProcessingGrant
 from app.discovery.extraction import _utc
+from app.retention.policy import (
+    effective_retention_deadline,
+    rolling_retention_window,
+)
+from app.retention.source_policy import effective_source_retention_deadline
 
 CURRENT_DAYS = 3
-BASELINE_DAYS = 7
+BASELINE_DAYS = 4
+ASSESSMENT_ALGORITHM_VERSION = "sample-presence-v2"
+MINIMUM_WINDOW_SUPPORT = 2
+MINIMUM_ACTIVE_DAYS = 2
 
 
 def _days(end: date, count: int) -> tuple[date, ...]:
@@ -27,6 +35,17 @@ def _coverage_map(rows: tuple[CoverageDay, ...]) -> dict:
                     type(row.eligible_documents) is not int
                     or not 0 <= row.eligible_documents <= 10_000_000))):
             raise ValueError("Invalid coverage record")
+        if (row.collected_at is None) != (row.expires_at is None):
+            raise ValueError("Coverage collection and expiry must be supplied together")
+        if row.collected_at is not None:
+            try:
+                collected_at = _utc(row.collected_at)
+                expires_at = _utc(row.expires_at)
+                retention_deadline = effective_retention_deadline(row.collected_at)
+            except (TypeError, ValueError):
+                raise ValueError("Coverage collection and expiry timestamps must be aware") from None
+            if (expires_at <= collected_at or expires_at > retention_deadline):
+                raise ValueError("Coverage expiry exceeds the seven-day retention policy")
         key = (row.source_id, row.scope, row.parser_version, row.data_mode, row.day)
         if key in result:
             raise ValueError("Duplicate coverage record")
@@ -34,10 +53,12 @@ def _coverage_map(rows: tuple[CoverageDay, ...]) -> dict:
     return result
 
 
-def _window(days, key, coverage, counts):
+def _window(days, key, coverage, counts, *, now):
     entries = [coverage.get((*key, day)) for day in days]
     if any(row is None or row.status != "COMPLETE" or row.eligible_documents is None
-           or not row.absence_observable_in_sample for row in entries):
+           or not row.absence_observable_in_sample or row.collected_at is None
+           or row.expires_at is None or _utc(row.collected_at) > now
+           or _utc(row.expires_at) <= now for row in entries):
         return None
     support = sum(len(counts.get(day, set())) for day in days)
     exposure = sum(row.eligible_documents for row in entries)
@@ -49,19 +70,6 @@ def _window(days, key, coverage, counts):
     return support, exposure, active_days, support / exposure
 
 
-def _seasonal(as_of, key, coverage, counts) -> bool:
-    """Require two comparable past windows; this remains an unvalidated heuristic."""
-    for years in (1, 2):
-        historical_end = as_of - timedelta(days=365 * years)
-        recent = _window(_days(historical_end, CURRENT_DAYS), key, coverage, counts)
-        baseline_end = historical_end - timedelta(days=CURRENT_DAYS)
-        previous = _window(_days(baseline_end, BASELINE_DAYS), key, coverage, counts)
-        if (recent is None or previous is None or recent[0] < 2 or recent[2] < 2
-                or previous[0] == 0 or recent[3] / previous[3] < 1.5):
-            return False
-    return True
-
-
 def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
                      as_of: date, now: datetime,
                      grants: tuple[ProcessingGrant, ...] = ()) -> tuple[Assessment, ...]:
@@ -69,8 +77,11 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
     if not isinstance(candidate, Candidate) or type(as_of) is not date:
         raise ValueError("Candidate and as-of date required")
     now = _utc(now)
-    if as_of > now.date():
+    retention = rolling_retention_window(now)
+    if as_of > retention.business_date:
         raise ValueError("Assessment date cannot be in the future")
+    if as_of - timedelta(days=CURRENT_DAYS + BASELINE_DAYS - 1) < retention.first_retained_date:
+        raise ValueError("Assessment window exceeds rolling source retention")
     grants_by_source = {item.source_id: item for item in grants}
     if len(grants_by_source) != len(grants):
         raise ValueError("Duplicate source processing grant")
@@ -80,6 +91,14 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
         if (_utc(evidence.fetched_at) > now
                 or _utc(evidence.observed_at) > _utc(evidence.fetched_at)):
             raise ValueError("Invalid evidence timestamp")
+        try:
+            evidence_expires_at = effective_source_retention_deadline(
+                evidence.source_id, evidence.fetched_at,
+            )
+        except ValueError:
+            continue
+        if evidence_expires_at <= now:
+            continue
         key = (evidence.source_id, evidence.scope, evidence.parser_version, evidence.data_mode)
         if evidence.observed_at.date() <= as_of:
             partitions[key].append(evidence)
@@ -97,8 +116,8 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
         counts = defaultdict(set)
         for item in evidence_rows:
             counts[item.observed_at.date()].add(item.content_fingerprint)
-        current = _window(current_days, key, coverage_by_day, counts)
-        baseline = _window(baseline_days, key, coverage_by_day, counts)
+        current = _window(current_days, key, coverage_by_day, counts, now=now)
+        baseline = _window(baseline_days, key, coverage_by_day, counts, now=now)
         # The weakest evidence in the current window limits the claim. Historical
         # US-scoped records cannot confer a US label on unrelated current data.
         current_market = {item.market_evidence for item in evidence_rows
@@ -110,31 +129,30 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
             market = "US_FILTER_ONLY"
         elif current_market == {"GLOBAL"}:
             market = "GLOBAL"
-        limits = ("SAMPLE_NOT_US_POPULATION", "RULE_BASED_NOT_PROBABILITY", "COVERAGE_LIMITED")
+        limits = ("SAMPLE_NOT_US_POPULATION", "RULE_BASED_NOT_PROBABILITY", "COVERAGE_LIMITED",
+                  "SHORT_WINDOW_NOT_BACKTESTED", "SEASONALITY_OUTSIDE_RETENTION")
         if any(item.delivery_mode == "CACHED" for item in evidence_rows):
             limits += ("INCLUDES_CACHED_EVIDENCE",)
         classification, confidence, ratio = "INSUFFICIENT_EVIDENCE", "LOW", None
         reason = "Comparable complete sample coverage and baseline are required."
         if current is not None and baseline is not None:
-            if baseline[0] == 0 and current[0] >= 2 and current[2] >= 2:
+            if (baseline[0] == 0 and current[0] >= MINIMUM_WINDOW_SUPPORT
+                    and current[2] >= MINIMUM_ACTIVE_DAYS):
                 classification = "EMERGING"
                 reason = "New within the observed baseline sample; not new across the Internet."
-            elif baseline[0] and baseline[3] > 0:
+            elif (baseline[0] >= MINIMUM_WINDOW_SUPPORT
+                  and baseline[2] >= MINIMUM_ACTIVE_DAYS and baseline[3] > 0
+                  and current[0] >= MINIMUM_WINDOW_SUPPORT
+                  and current[2] >= MINIMUM_ACTIVE_DAYS):
                 ratio = current[3] / baseline[3]
-                if ratio <= 2 / 3 and baseline[0] >= 2 and baseline[2] >= 2:
+                if ratio <= 2 / 3:
                     classification, reason = "DECLINING", "Sample presence rate declined from baseline."
-                elif current[0] >= 2 and current[2] >= 2:
-                    if ratio >= 1.5:
-                        if _seasonal(as_of, key, coverage_by_day, counts):
-                            classification = "SEASONAL"
-                            reason = "Two comparable prior yearly windows show recurring increases."
-                            limits += ("SEASONALITY_HEURISTIC_UNVALIDATED",)
-                        else:
-                            classification, reason = "ACCELERATING", "Sample presence rate rose across multiple days."
-                    elif current[2] == CURRENT_DAYS and baseline[2] >= 3:
-                        classification, reason = "SUSTAINED", "Evidence persists across current and baseline windows."
-                    else:
-                        classification, reason = "STABLE", "Sample presence is comparable to the baseline."
+                elif ratio >= 1.5:
+                    classification, reason = "ACCELERATING", "Sample presence rate rose across multiple days."
+                elif current[2] == CURRENT_DAYS and baseline[2] >= MINIMUM_ACTIVE_DAYS:
+                    classification, reason = "SUSTAINED", "Evidence persists across current and baseline windows."
+                else:
+                    classification, reason = "STABLE", "Sample presence is comparable to the baseline."
             if classification != "INSUFFICIENT_EVIDENCE" and current[0] >= 5:
                 confidence = "MODERATE"
             if classification == "INSUFFICIENT_EVIDENCE":
@@ -146,5 +164,6 @@ def assess_candidate(candidate: Candidate, coverage: tuple[CoverageDay, ...], *,
             baseline[1] if baseline else None, current[3] if current else None,
             baseline[3] if baseline else None, ratio, (current_days[0], current_days[-1]),
             (baseline_days[0], baseline_days[-1]), reason, limits,
+            algorithm_version=ASSESSMENT_ALGORITHM_VERSION,
         ))
     return tuple(results)

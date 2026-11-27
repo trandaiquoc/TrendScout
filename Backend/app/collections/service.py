@@ -25,7 +25,12 @@ from app.collections.store import (
     keyword_record,
     now,
 )
-from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE_ID
+from app.retention.source_policy import effective_source_retention_deadline
+from app.sources.catalog import (
+    BING_SOURCE_ID,
+    GOOGLE_SOURCE_ID,
+    YOUTUBE_SOURCE_ID,
+)
 from app.taxonomy.registry import resolve as resolve_category
 
 INITIAL_TOPIC_ROOTS = ("fashion", "home_living", "technology", "entertainment", "sports", "gaming")
@@ -993,6 +998,7 @@ class CollectionService:
                         "source_id": WIKIMEDIA_SOURCE_ID,
                         "keyword_id": keyword_id,
                         "observation_date": point["observation_date"],
+                        "status": point.get("status"),
                         "metric": metric,
                         "unit": unit,
                         "input_digest": point.get("input_digest"),
@@ -1004,15 +1010,67 @@ class CollectionService:
                         "source_id": WIKIMEDIA_SOURCE_ID,
                         "keyword_id": keyword_id,
                         "observation_date": analysis_date.isoformat(),
+                        "status": value.get("observation_status", "OBSERVED"),
                         "metric": metric,
                         "unit": unit,
                         "input_digest": current_observation_digest,
                     })
                     result_payload = asdict(result)
+                    observed_days = set()
+                    for point in history_rows:
+                        if point.get("status") == "OBSERVED":
+                            try:
+                                observed_days.add(date.fromisoformat(
+                                    point["observation_date"][:10]
+                                ))
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                    if (current is not None
+                            and value.get("snapshot_status") in {"SUCCESS", "PARTIAL"}):
+                        observed_days.add(analysis_date)
+                    snapshot_algorithm = metadata.family == "popularity"
+                    complete_daily_window = (
+                        "daily_numeric_series" in metadata.supported_capabilities
+                        or "legacy_result" in metadata.runtime_requirements
+                    )
+                    required_observation_days = (
+                        1 if snapshot_algorithm else result.window_days + 1
+                        if complete_daily_window else result.minimum_samples + 1
+                    )
+                    history_window_days = 0 if snapshot_algorithm else result.window_days
+                    collection_timestamp = value.get("collected_at")
+                    collection_expiry = None
+                    if isinstance(collection_timestamp, str):
+                        try:
+                            collected_at = datetime.fromisoformat(
+                                collection_timestamp.replace("Z", "+00:00")
+                            )
+                            collection_expiry = effective_source_retention_deadline(
+                                WIKIMEDIA_SOURCE_ID, collected_at,
+                            ).isoformat()
+                        except (TypeError, ValueError):
+                            collection_expiry = None
                     result_payload.update({
                         "source_id": WIKIMEDIA_SOURCE_ID,
                         "observation_date": analysis_date.isoformat(),
                         "collected_at": value.get("collected_at"),
+                        "expires_at": collection_expiry,
+                        "available_observation_days": len(observed_days),
+                        "required_observation_days": required_observation_days,
+                        "actual_observation_window": {
+                            "start_date": (analysis_date - timedelta(
+                                days=history_window_days
+                            )).isoformat(),
+                            "end_date": analysis_date.isoformat(),
+                            "as_of_date": analysis_date.isoformat(),
+                            "observation_dates": sorted(
+                                day.isoformat() for day in observed_days
+                            ),
+                        },
+                        "retention_limitation": (
+                            "Seven-day rolling retention limits persisted observations; "
+                            "missing and censored days remain explicit."
+                        ),
                         "input_scope": asdict(scope),
                         "input_metric": metric,
                         "input_unit": unit,
@@ -1147,15 +1205,21 @@ class CollectionService:
             rows = build_source_evidence([source])["rows"]
             rows = remap_source_evidence_keyword_ids(rows, keyword_id_map or {})
             for row in rows:
-                evidence_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(row, dict) or row.get("source_id") != GOOGLE_SOURCE_ID:
+                    continue
+                evidence_id = row.get("id")
                 if not isinstance(evidence_id, str) or evidence_id not in evidence_ids:
                     continue
                 for keyword_id in row.get("keyword_ids", ()):
                     evidence_by_keyword[keyword_id].append({
                         "source_evidence_id": evidence_id,
                         "source_id": GOOGLE_SOURCE_ID,
+                        "observed_at": (row.get("observed_at").isoformat()
+                                        if row.get("observed_at") else None),
                         "collected_at": (row.get("collected_at").isoformat()
                                          if row.get("collected_at") else None),
+                        "expires_at": (row.get("expires_at").isoformat()
+                                       if row.get("expires_at") else None),
                         "content_digest": row.get("content_digest"),
                     })
 
@@ -1366,6 +1430,21 @@ class CollectionService:
                                          if current["provider_data_at"] else None),
                     "provider_created_at": evidence.get("provider_created_at"),
                 },
+                "available_observation_days": int(item["observation_date"] is not None),
+                "required_observation_days": 1,
+                "actual_observation_window": {
+                    "start_date": (item["observation_date"].isoformat()
+                                   if item["observation_date"] else None),
+                    "end_date": (item["observation_date"].isoformat()
+                                 if item["observation_date"] else None),
+                    "as_of_date": (item["observation_date"].isoformat()
+                                   if item["observation_date"] else None),
+                    "time_window_hours": evidence.get("time_window_hours"),
+                },
+                "retention_limitation": (
+                    "Snapshot cohort uses one provider observation day and is subject to "
+                    "seven-day rolling retention."
+                ),
                 "freshness": {
                     "provider_data_at": (current["provider_data_at"].isoformat()
                                          if current["provider_data_at"] else None),

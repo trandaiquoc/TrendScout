@@ -5,12 +5,20 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import replace
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.analysis.keyword_identity import canonical_keyword_digest
-from app.discovery.assessment import assess_candidate
+from app.discovery.assessment import (
+    ASSESSMENT_ALGORITHM_VERSION,
+    BASELINE_DAYS,
+    CURRENT_DAYS,
+    assess_candidate,
+)
 from app.discovery.contracts import Observation, ProcessingGrant
-from app.discovery.extraction import extract_candidates
+from app.discovery.extraction import _utc, extract_candidates
+from app.retention.policy import DEFAULT_BUSINESS_TIMEZONE
+from app.retention.source_policy import effective_source_retention_deadline
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -24,6 +32,7 @@ _MAX_SOURCE_RESULTS = 32
 _MAX_CANDIDATES_SHOWN = 100
 _MAX_OBSERVATIONS = 10_000
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+_BUSINESS_ZONE = ZoneInfo(DEFAULT_BUSINESS_TIMEZONE)
 
 
 def _timestamp(value: object, *, allow_date: bool = False) -> datetime:
@@ -253,6 +262,8 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
     if (not isinstance(source_results, list) or len(source_results) > _MAX_SOURCE_RESULTS
             or empty_mode not in {"SYNTHETIC", "LIVE"}):
         raise ValueError("bounded source results required")
+    now = _utc(now)
+    as_of = now.astimezone(_BUSINESS_ZONE).date()
     grants = {grant.source_id: grant for grant in processing_grants
               if isinstance(grant, ProcessingGrant)}
     if len(grants) != len(processing_grants):
@@ -339,7 +350,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                            if item.data_mode == "SYNTHETIC"
                            or grants[item.source_id].derived_metrics_allowed is True)
         assessments = (assess_candidate(replace(candidate, evidence=assessable), (),
-                                        as_of=now.date(), now=now, grants=processing_grants)
+                                        as_of=as_of, now=now, grants=processing_grants)
                        if assessable else ())
         withheld = {(item.source_id, item.scope, item.market_evidence)
                     for item in candidate.evidence if item not in assessable}
@@ -356,19 +367,20 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
             "data_mode": (next(iter({item.data_mode for item in candidate.evidence}))
                           if len({item.data_mode for item in candidate.evidence}) == 1 else "MIXED"),
             "quality_flags": list(candidate.quality_flags),
-            "assessments": [{
-                "source_id": item.source_id,
-                "scope": item.scope,
-                "market_evidence": item.market_evidence,
-                "classification": item.classification,
-                "reason": item.reason,
-                "limitations": list(item.limitations),
-                "algorithm_version": item.algorithm_version,
-            } for item in assessments] + [{
+            "assessments": [_assessment_payload(item, candidate, as_of, now)
+                            for item in assessments] + [{
+                "algorithm_id": "sample-presence",
                 "source_id": source_id, "scope": scope, "market_evidence": market,
                 "classification": "INSUFFICIENT_EVIDENCE",
+                "result_status": "INSUFFICIENT_EVIDENCE",
                 "reason": "DERIVED_METRICS_NOT_APPROVED",
-                "limitations": ["NO_BASELINE"],
+                "limitations": ["DERIVED_METRICS_NOT_APPROVED", "SEASONALITY_OUTSIDE_RETENTION"],
+                "algorithm_version": ASSESSMENT_ALGORITHM_VERSION,
+                "available_observation_days": 0,
+                "required_observation_days": CURRENT_DAYS + BASELINE_DAYS,
+                "actual_observation_window": _assessment_window(as_of),
+                "retention_limitation": "Seven-day rolling retention; complete seven-day coverage is required.",
+                "evidence_references": [],
             } for source_id, scope, market in sorted(withheld)],
             "evidence": [{
                 "source_id": item.source_id,
@@ -410,4 +422,61 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                           if any(item.get("source_id") == YOUTUBE_SOURCE_ID
                                  for item in source_results if isinstance(item, dict)) else [])
                        + ["NO_BASELINE", "COVERAGE_LIMITED", "US_FILTER_IS_NOT_US_AUDIENCE"],
+    }
+
+
+def _assessment_window(as_of: date) -> dict:
+    current_start = as_of - timedelta(days=CURRENT_DAYS - 1)
+    baseline_end = current_start - timedelta(days=1)
+    baseline_start = baseline_end - timedelta(days=BASELINE_DAYS - 1)
+    return {
+        "as_of_date": as_of.isoformat(),
+        "current_start": current_start.isoformat(),
+        "current_end": as_of.isoformat(),
+        "baseline_start": baseline_start.isoformat(),
+        "baseline_end": baseline_end.isoformat(),
+    }
+
+
+def _assessment_payload(assessment, candidate, as_of, now):
+    start = assessment.baseline_window[0]
+    end = assessment.current_window[1]
+    references = []
+    observation_days = set()
+    for item in candidate.evidence:
+        if ((item.source_id, item.scope, item.parser_version, item.data_mode)
+                != (assessment.source_id, assessment.scope,
+                    assessment.parser_version, assessment.data_mode)):
+            continue
+        observed_day = item.observed_at.date()
+        if not start <= observed_day <= end:
+            continue
+        expires_at = effective_source_retention_deadline(item.source_id, item.fetched_at)
+        if expires_at <= now:
+            continue
+        observation_days.add(observed_day)
+        references.append({
+            "source_id": item.source_id,
+            "document_id": item.document_id,
+            "provider_observation_date": observed_day.isoformat(),
+            "collection_date": item.fetched_at.astimezone(_BUSINESS_ZONE).date().isoformat(),
+            "fetched_at": item.fetched_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "scope": item.scope,
+        })
+    return {
+        "algorithm_id": "sample-presence",
+        "source_id": assessment.source_id,
+        "scope": assessment.scope,
+        "market_evidence": assessment.market_evidence,
+        "classification": assessment.classification,
+        "result_status": assessment.classification,
+        "reason": assessment.reason,
+        "limitations": list(assessment.limitations),
+        "algorithm_version": assessment.algorithm_version,
+        "available_observation_days": len(observation_days),
+        "required_observation_days": CURRENT_DAYS + BASELINE_DAYS,
+        "actual_observation_window": _assessment_window(as_of),
+        "retention_limitation": "Seven-day rolling retention; seasonality and longer history are unavailable.",
+        "evidence_references": references,
     }

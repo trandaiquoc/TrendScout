@@ -129,8 +129,10 @@ class WikimediaSyntheticEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue({"SYNTHETIC_ONLY", "NOT_LIVE_VERIFIED", "NO_BASELINE",
                          "COVERAGE_LIMITED"}.issubset(discovery["limitations"]))
         candidates = discovery["candidates"]
-        self.assertEqual(discovery["candidate_count"], 36)
-        self.assertEqual(discovery["shown_count"], 36)
+        # The current extraction contract returns one canonical candidate per
+        # unique provider keyword (the duplicate Linen row remains as evidence).
+        self.assertEqual(discovery["candidate_count"], 9)
+        self.assertEqual(discovery["shown_count"], 9)
         self.assertTrue(all(candidate["score"] is None for candidate in candidates))
         self.assertTrue(all(candidate["data_mode"] == "SYNTHETIC" for candidate in candidates))
         self.assertTrue(all(candidate["taxonomy_version"] and candidate["extraction_version"]
@@ -139,10 +141,11 @@ class WikimediaSyntheticEndToEndTests(unittest.IsolatedAsyncioTestCase):
             assessment["classification"] == "INSUFFICIENT_EVIDENCE"
             and "Comparable complete sample coverage and baseline are required."
                 in assessment["reason"]
-            and assessment["algorithm_version"] == "sample-presence-v1"
+            and assessment["algorithm_version"] == "sample-presence-v2"
             for candidate in candidates for assessment in candidate["assessments"]
         ))
-        candidate_by_text = {candidate["keyword"]: candidate for candidate in candidates}
+        candidate_by_text = {candidate["keyword"].casefold(): candidate
+                              for candidate in candidates}
         self.assertIn("linen pants", candidate_by_text)
         self.assertIn("fashion", candidate_by_text["linen pants"]["categories"])
         self.assertIn("RULE_BASED_UNVALIDATED", candidate_by_text["linen pants"]["quality_flags"])

@@ -57,6 +57,10 @@ class CoverageDay:
     status: Literal["COMPLETE", "PARTIAL", "UNAVAILABLE"]
     eligible_documents: int | None
     absence_observable_in_sample: bool
+    # Keep provider observation date (`day`) separate from collection and expiry.
+    # Older callers may omit these fields, but v2 assessment fails closed without them.
+    collected_at: datetime | None = None
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)

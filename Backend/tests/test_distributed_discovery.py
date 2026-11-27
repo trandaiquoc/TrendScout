@@ -108,7 +108,7 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertIn("YOUTUBE_KEYWORD_EXTRACTION_DISABLED", result["limitations"])
         self.assertEqual({item["parser_version"] for item in candidate["evidence"]}, {"source-v1"})
         self.assertEqual({item["algorithm_version"] for item in candidate["assessments"]},
-                         {"sample-presence-v1"})
+                         {"sample-presence-v2"})
         self.assertEqual(result, discover_fetch_results(four_source_results(), now=NOW))
 
     def test_fetch_display_order_uses_identity_not_business_category_priority(self):
