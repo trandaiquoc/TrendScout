@@ -82,6 +82,8 @@ class FakeProvider:
         self.responses = list(responses)
         self.calls = []
         self.verifications = []
+        self.last_generation_id = None
+        self.last_resolved_model = None
 
     def verify_model(self, model_id):
         self.verifications.append(model_id)
@@ -93,6 +95,8 @@ class FakeProvider:
         )
 
     def complete(self, verified, *, messages, schema, max_tokens):
+        self.last_generation_id = None
+        self.last_resolved_model = None
         self.calls.append({
             "model": verified.model_id, "messages": deepcopy(messages),
             "schema": deepcopy(schema), "max_tokens": max_tokens,
@@ -104,6 +108,9 @@ class FakeProvider:
             raise response
         if callable(response):
             response = response(messages)
+        self.last_generation_id = f"gen-mock-{len(self.calls)}"
+        if verified.model_id.endswith(":free"):
+            self.last_resolved_model = verified.model_id[:-5] + "-revision:free"
         return response, {"input_tokens": 17, "output_tokens": 11}, None
 
     def key_quota_metadata(self):
@@ -691,6 +698,7 @@ class OpenRouterAdapterTests(unittest.TestCase):
         finally:
             client.close()
         self.assertEqual((content, usage), ("{}", {"input_tokens": 9, "output_tokens": 4}))
+        self.assertEqual(adapter.last_resolved_model, self.model)
         self.assertEqual(metadata, {
             "id": "gen-safe123", "model": self.model, "provider_name": "Liquid",
             "tokens_prompt": 9, "tokens_completion": 4, "total_cost": 0.0,
@@ -1636,7 +1644,8 @@ class AIServiceTests(unittest.TestCase):
 
     def test_recommendation_evidence_limits_and_cache_regeneration(self):
         provider = FakeProvider([recommendation_response, recommendation_response])
-        service = AIService(MemoryAtomicState(), config=config(), provider=provider, utcnow=lambda: NOW)
+        atomic = MemoryAtomicState()
+        service = AIService(atomic, config=config(), provider=provider, utcnow=lambda: NOW)
         store = FakeCollectionStore()
         first = service.recommend(store, ["keyword-1"], research_constraints="Handmade goods",
                                   idempotency_key="recommend-first")
@@ -1655,13 +1664,51 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(source_result["input_digest"], "algorithm-input-keyword-1")
         self.assertTrue(input_payload["evidence_expiry"])
         self.assertIn("evidence_role", input_payload["source_evidence_profile"][0]["evidence_references"][0])
+        first_lineage = first["lineage"]
+        self.assertEqual(len(first_lineage["input_digest"]), 64)
+        self.assertEqual(first_lineage["source_policy_digest"],
+                         service._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
+        self.assertEqual(first_lineage["model_provider"]["status"], "RECORDED")
+        self.assertEqual(first_lineage["model_provider"]["requested_model"], MODEL_ID)
+        self.assertEqual(first_lineage["model_provider"]["provider_name"], "Liquid")
+        self.assertEqual(first_lineage["model_provider"]["generation_id"], "gen-mock-1")
+        self.assertTrue(first_lineage["model_provider"]["resolved_model"].endswith("-revision:free"))
+        state = service._transact(lambda current: (current, current))
+        attempt = next(item for item in state["attempts"] if item["job_id"] == first["job_id"])
+        self.assertEqual(attempt["model_lineage"]["generation_id"], "gen-mock-1")
+        self.assertEqual(state["recommendations"][first_lineage["input_digest"]]["value"]["lineage"],
+                         first_lineage)
+        self.assertEqual(service.get_job(first["job_id"])["lineage"], first_lineage)
         cached = service.recommend(store, ["keyword-1"], research_constraints="Handmade goods",
                                    idempotency_key="recommend-cached")
         self.assertTrue(cached["cached"])
+        self.assertEqual(cached["lineage"], first_lineage)
         regenerated = service.recommend(store, ["keyword-1"], research_constraints="Handmade goods",
                                         idempotency_key="recommend-regenerate", regenerate=True)
         self.assertFalse(regenerated["cached"])
+        self.assertEqual(regenerated["lineage"]["input_digest"], first_lineage["input_digest"])
+        self.assertEqual(regenerated["lineage"]["model_provider"]["generation_id"], "gen-mock-2")
         self.assertEqual(len(provider.calls), 2)
+
+    def test_legacy_recommendation_cache_marks_missing_model_lineage(self):
+        provider = FakeProvider([recommendation_response])
+        atomic = MemoryAtomicState()
+        service = AIService(atomic, config=config(), provider=provider, utcnow=lambda: NOW)
+        store = FakeCollectionStore()
+        initial = service.recommend(store, ["keyword-1"], idempotency_key="recommend-seed-cache")
+        digest = initial["lineage"]["input_digest"]
+
+        def remove_lineage(state):
+            state["recommendations"][digest]["value"].pop("lineage", None)
+            return state, True
+
+        service._transact(remove_lineage)
+        cached = service.recommend(store, ["keyword-1"], idempotency_key="recommend-legacy-cache")
+        self.assertTrue(cached["cached"])
+        self.assertEqual(cached["lineage"]["model_provider"], {"status": "NOT_RECORDED"})
+        self.assertEqual(len(provider.calls), 1)
+        state = service._transact(lambda current: (current, current))
+        self.assertEqual(state["recommendations"][digest]["value"]["lineage"], cached["lineage"])
 
     def test_recommendation_groups_cross_source_records_and_returns_durable_ids(self):
         provider = FakeProvider([recommendation_response])

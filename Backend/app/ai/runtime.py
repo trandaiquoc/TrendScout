@@ -58,6 +58,11 @@ CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD = 160
 MAX_CLASSIFICATION_BATCH_SIZE = 40
 MAX_CLASSIFICATION_PROMPT_BYTES = 80_000
 ATTEMPT_RETENTION_SECONDS = 24 * 60 * 60
+_SAFE_LINEAGE_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,249}$")
+_SAFE_LINEAGE_PROVIDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._/-]{0,79}$")
+_SAFE_LINEAGE_TAG = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,79}$")
+_SAFE_LINEAGE_GENERATION = re.compile(r"^gen-[0-9A-Za-z-]{1,124}$")
+_SAFE_DIGEST = re.compile(r"^[a-f0-9]{64}$")
 JOB_RETENTION = timedelta(days=30)
 CACHE_RETENTION = timedelta(days=7)
 RECOMMENDATION_CACHE_RETENTION = timedelta(days=7)
@@ -683,8 +688,45 @@ class AIService:
                                    retry_at=result.get("retry_at"))
         return attempt_id
 
+    @staticmethod
+    def _model_provider_lineage(verified, provider, *, include_response=False):
+        """Retain bounded model-routing identifiers, never request content."""
+        lineage = {}
+        model_id = getattr(verified, "model_id", None)
+        if isinstance(model_id, str) and _SAFE_LINEAGE_MODEL.fullmatch(model_id):
+            lineage["requested_model"] = model_id
+        provider_name = getattr(verified, "provider_name", None)
+        if isinstance(provider_name, str) and _SAFE_LINEAGE_PROVIDER.fullmatch(provider_name):
+            lineage["provider_name"] = provider_name
+        provider_tag = getattr(verified, "provider_tag", None)
+        if isinstance(provider_tag, str) and _SAFE_LINEAGE_TAG.fullmatch(provider_tag):
+            lineage["provider_tag"] = provider_tag
+        if include_response:
+            generation_id = getattr(provider, "last_generation_id", None)
+            if isinstance(generation_id, str) and _SAFE_LINEAGE_GENERATION.fullmatch(generation_id):
+                lineage["generation_id"] = generation_id
+            resolved_model = getattr(provider, "last_resolved_model", None)
+            if isinstance(resolved_model, str) and _SAFE_LINEAGE_MODEL.fullmatch(resolved_model):
+                lineage["resolved_model"] = resolved_model
+        return lineage
+
+    @staticmethod
+    def _recommendation_model_lineage(verified, provider, *, include_response=False):
+        lineage = AIService._model_provider_lineage(
+            verified, provider, include_response=include_response,
+        )
+        has_verified_route = all(lineage.get(key) for key in (
+            "requested_model", "provider_name", "provider_tag",
+        ))
+        has_response_route = all(lineage.get(key) for key in (
+            "generation_id", "resolved_model",
+        ))
+        lineage["status"] = ("RECORDED" if has_verified_route and has_response_route
+                             else "PARTIAL" if has_verified_route else "NOT_RECORDED")
+        return lineage
+
     def _finish_attempt(self, attempt_id, *, outcome, usage=None, error_code=None, retry_at=None,
-                        latency_ms=0):
+                        latency_ms=0, model_lineage=None):
         now = self._now()
         stamp = _iso_now(now)
 
@@ -696,10 +738,19 @@ class AIService:
                            "error_code": error_code, "retry_at": retry_at,
                            "input_tokens": usage.get("input_tokens", 0) if usage else 0,
                            "output_tokens": usage.get("output_tokens", 0) if usage else 0})
+            if isinstance(model_lineage, dict) and model_lineage:
+                target["model_lineage"] = dict(model_lineage)
             job = state["jobs"].get(target.get("job_id"))
             if isinstance(job, dict):
                 job["input_tokens"] = int(job.get("input_tokens", 0)) + target["input_tokens"]
                 job["output_tokens"] = int(job.get("output_tokens", 0)) + target["output_tokens"]
+                if isinstance(model_lineage, dict) and model_lineage:
+                    lineage = job.get("lineage")
+                    if not isinstance(lineage, dict):
+                        lineage = {}
+                    lineage = dict(lineage)
+                    lineage["model_provider"] = dict(model_lineage)
+                    job["lineage"] = lineage
                 job["updated_at"] = stamp
             if error_code == "AI_RATE_LIMITED":
                 retry_time = _parse_time(retry_at)
@@ -740,6 +791,7 @@ class AIService:
         if estimated_input + max_tokens > verified.context_tokens:
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
         attempt_id = self._reserve(job_id, task)
+        model_lineage = self._model_provider_lineage(verified, self.provider)
         started = time.monotonic()
         try:
             content, usage, retry_at = self.provider.complete(
@@ -754,7 +806,8 @@ class AIService:
                     retry_at = _iso_now(self._now() + timedelta(seconds=60))
             self._finish_attempt(attempt_id, outcome="FAILED", usage=exc.usage,
                                  error_code=exc.code,
-                                 retry_at=retry_at, latency_ms=provider_latency_ms)
+                                 retry_at=retry_at, latency_ms=provider_latency_ms,
+                                 model_lineage=model_lineage)
             if exc.code == "AI_RATE_LIMITED" or exc.code == "AI_PROVIDER_UNAVAILABLE":
                 raise AIExecutionError(exc.code, status="DEFERRED", retry_at=retry_at,
                                        diagnostics=exc.diagnostics) from None
@@ -767,8 +820,11 @@ class AIService:
             raise AIExecutionError(exc.code, status="MODEL_UNAVAILABLE",
                                    diagnostics=exc.diagnostics) from None
         provider_latency_ms = (time.monotonic() - started) * 1000
+        model_lineage = self._model_provider_lineage(
+            verified, self.provider, include_response=True,
+        )
         self._finish_attempt(attempt_id, outcome="COMPLETED", usage=usage, retry_at=retry_at,
-                             latency_ms=provider_latency_ms)
+                             latency_ms=provider_latency_ms, model_lineage=model_lineage)
         return content, usage, provider_latency_ms
 
     def _remember_classifications(self, cache_items, *, expires_at):
@@ -2046,17 +2102,31 @@ class AIService:
         result_expiry = self._result_expiry(
             evidence_ids, evidence_expiry, RECOMMENDATION_CACHE_RETENTION,
         )
+        source_policy_digest = self._source_policy_digest({
+            source_id for item in safe_context for source_id in item["source_ids"]
+        })
         cache_digest = _digest({"task": "recommendations", "context": safe_context,
                                 "evidence_expiry": evidence_expiry,
                                 "constraints": _clean_text(research_constraints, 500),
                                 "model": self.config.recommendation_model,
                                 "prompt": PROMPT_VERSION, "schema": SCHEMA_VERSION,
                                 "policy": POLICY_VERSION,
-                                "source_policy_digest": self._source_policy_digest({
-                                    source_id for item in safe_context
-                                    for source_id in item["source_ids"]
-                                }),
+                                "source_policy_digest": source_policy_digest,
                                 "input_contract": INPUT_CONTRACT_VERSION})
+        result_expiry_value = (result_expiry.astimezone(timezone.utc).isoformat()
+                               if result_expiry is not None else None)
+        lineage_context = {
+            "input_digest": cache_digest,
+            "result_expires_at": result_expiry_value,
+            "data_profile": self.config.data_profile,
+            "data_profile_version": AI_DATA_PROFILE_VERSION,
+            "policy_version": POLICY_VERSION,
+            "transfer_policy_version": AI_TRANSFER_POLICY_VERSION,
+            "source_policy_digest": source_policy_digest,
+            "input_contract_version": INPUT_CONTRACT_VERSION,
+            "prompt_version": PROMPT_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        }
         request_digest = _digest({"business_digest": cache_digest, "regenerate": bool(regenerate)})
         job = self._new_job(task="recommendations", ids=ids, request_digest=request_digest,
                             idempotency_key=idempotency_key, constraints={
@@ -2071,16 +2141,34 @@ class AIService:
                 return dict(existing["result"])
             return {"job_id": existing.get("job_id", job_id), "status": existing.get("status", "RUNNING"),
                     "processed": existing.get("processed", 0), "recommendations": [],
-                    "retry_at": existing.get("retry_at"), "error_code": existing.get("error_code")}
+                    "retry_at": existing.get("retry_at"), "error_code": existing.get("error_code"),
+                    "lineage": existing.get("lineage") if isinstance(existing.get("lineage"), dict)
+                    else None}
         job = job.get("job", job.get("existing"))
         job_id = job["job_id"]
+        self._update_job(job_id, lineage=lineage_context)
         if not self.config.enabled:
             return self._complete_with_error(job_id, "AI_DISABLED", "MODEL_UNAVAILABLE")
         try:
             cached_result = self._read_recommendation(cache_digest) if not regenerate else None
             if cached_result is not None:
-                result = {**cached_result, "job_id": job_id, "status": "COMPLETED", "cached": True}
+                cached_lineage = cached_result.get("lineage")
+                cached_lineage_is_current = (
+                    isinstance(cached_lineage, dict)
+                    and cached_lineage.get("input_digest") == cache_digest
+                    and cached_lineage.get("source_policy_digest") == source_policy_digest
+                )
+                cached_model_provider = (cached_lineage.get("model_provider")
+                                         if cached_lineage_is_current else None)
+                if not isinstance(cached_model_provider, dict) or cached_model_provider.get(
+                        "status") not in {"RECORDED", "PARTIAL", "NOT_RECORDED"}:
+                    cached_model_provider = {"status": "NOT_RECORDED"}
+                result_lineage = {**lineage_context, "model_provider": cached_model_provider}
+                stored_result = {**cached_result, "lineage": result_lineage}
+                self._write_recommendation(cache_digest, stored_result, expires_at=result_expiry)
+                result = {**stored_result, "job_id": job_id, "status": "COMPLETED", "cached": True}
                 self._update_job(job_id, status="COMPLETED", processed=len(ids), result=result,
+                                 lineage=result_lineage, result_expires_at=result_expiry_value,
                                  error_code=None, retry_at=None)
                 return result
             if not self.config.api_key_present:
@@ -2097,6 +2185,9 @@ class AIService:
                 ),
                 output_cap=min(verified.max_output_tokens, 2048),
                 verified=verified,
+            )
+            model_provider_lineage = self._recommendation_model_lineage(
+                verified, self.provider, include_response=True,
             )
             parsed = parse_json(content)
             groups_by_id = {group["id"]: group for group in keyword_groups}
@@ -2115,8 +2206,10 @@ class AIService:
                     "marketplace_research_links": self._recommendation_links(
                         item["product_name"], item["product_category"]),
                 })
+            result_lineage = {**lineage_context, "model_provider": model_provider_lineage}
             result = {"job_id": job_id, "status": "COMPLETED", "cached": False,
                       "processed": len(ids), "recommendations": recommendations,
+                      "lineage": result_lineage,
                       "evidence_scope": [
                           {"keyword_id": durable_keyword_id,
                            "canonical_keyword_identity": item["canonical_keyword_identity"],
@@ -2136,8 +2229,7 @@ class AIService:
                 self._write_recommendation(cache_digest, result, expires_at=result_expiry)
             self._update_job(job_id, status="COMPLETED", processed=len(ids),
                              result=result if result_expiry is not None else None,
-                             result_expires_at=(result_expiry.isoformat()
-                                                if result_expiry is not None else None),
+                             lineage=result_lineage, result_expires_at=result_expiry_value,
                              error_code=None, retry_at=None)
             return result
         except InvalidAIOutput as exc:
@@ -2197,6 +2289,7 @@ class AIService:
         return {
             **{key: job.get(key) for key in ("job_id", "task", "status", "created_at", "updated_at",
                 "processed", "attempt_count", "input_tokens", "output_tokens", "error_code", "retry_at")},
+            "lineage": job.get("lineage") if isinstance(job.get("lineage"), dict) else None,
             "progress": {"processed": job.get("processed", 0),
                          "total": len(job.get("input_ids", []))},
             "preview_result": preview_result,

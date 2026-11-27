@@ -102,12 +102,16 @@ def _ai_config():
 class RecommendationCaptureProvider:
     def __init__(self):
         self.inputs = []
+        self.last_generation_id = None
+        self.last_resolved_model = None
 
     def verify_model(self, model_id):
         assert model_id == MODEL_ID
         return VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 8192, True)
 
     def complete(self, verified, *, messages, schema, max_tokens):
+        self.last_generation_id = None
+        self.last_resolved_model = None
         payload = json.loads(messages[1]["content"])
         self.inputs.append(payload)
         keyword = payload["keywords"][0]
@@ -128,6 +132,8 @@ class RecommendationCaptureProvider:
             "uncertainty": "The available source evidence is limited and needs independent review.",
             "research_steps": ["Review current US marketplace listings."],
         }]}
+        self.last_generation_id = "gen-pg-recommendation"
+        self.last_resolved_model = "liquid/lfm-3-1.7b-revision:free"
         return json.dumps(response), {"input_tokens": 12, "output_tokens": 9}, None
 
 
@@ -718,6 +724,15 @@ def test_postgres_ai_recommendation_uses_active_lineage_and_bounded_algorithm_pr
                             config=_ai_config(), provider=provider, utcnow=lambda: now)
         result = service.recommend(store, [keyword_id], idempotency_key="pg-recommendation-contract")
         assert result["status"] == "COMPLETED"
+        assert len(result["lineage"]["input_digest"]) == 64
+        assert len(result["lineage"]["source_policy_digest"]) == 64
+        assert result["lineage"]["model_provider"]["status"] == "RECORDED"
+        assert result["lineage"]["model_provider"]["generation_id"] == "gen-pg-recommendation"
+        stored_state = service._transact(lambda state: (state, state))
+        assert stored_state["jobs"][result["job_id"]]["lineage"] == result["lineage"]
+        assert stored_state["recommendations"][result["lineage"]["input_digest"]]["value"][
+            "lineage"] == result["lineage"]
+        assert service.get_job(result["job_id"])["lineage"] == result["lineage"]
         payload_keyword = provider.inputs[0]["keywords"][0]
         assert payload_keyword["durable_keyword_ids"] == [keyword_id]
         assert payload_keyword["categories"] == ["products_brands"]

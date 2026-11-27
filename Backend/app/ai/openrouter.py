@@ -344,6 +344,15 @@ class OpenRouterAdapter:
     def last_generation_id(self, value):
         self._completion_state.generation_id = value
 
+    @property
+    def last_resolved_model(self):
+        """Resolved model ID from the last completion in the current thread."""
+        return getattr(self._completion_state, "resolved_model", None)
+
+    @last_resolved_model.setter
+    def last_resolved_model(self, value):
+        self._completion_state.resolved_model = value
+
     def close(self):
         if self._owns_client:
             self._client.close()
@@ -467,6 +476,7 @@ class OpenRouterAdapter:
     def complete(self, verified: VerifiedModel, *, messages: list[dict], schema: dict,
                  max_tokens: int) -> tuple[str, dict | None, str | None]:
         self.last_generation_id = None
+        self.last_resolved_model = None
         if self._api_key is None:
             raise OpenRouterError("AI_KEY_MISSING")
         if (not isinstance(verified, VerifiedModel) or max_tokens < 1
@@ -500,6 +510,9 @@ class OpenRouterAdapter:
         generation_id = payload.get("id")
         if isinstance(generation_id, str) and _SAFE_GENERATION_ID.fullmatch(generation_id):
             self.last_generation_id = generation_id
+        resolved_model = payload.get("model")
+        if isinstance(resolved_model, str) and _SAFE_MODEL_METADATA.fullmatch(resolved_model):
+            self.last_resolved_model = resolved_model
         usage = payload.get("usage")
         if not isinstance(usage, dict):
             usage = None
