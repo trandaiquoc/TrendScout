@@ -896,7 +896,10 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
             assert first["executed_keywords"] == 1
             assert first["registered_algorithms"] == 12
             assert first["persisted_algorithms"] == 4
-            replay = service._analyze_persisted_keywords(changed)
+            from unittest.mock import patch
+            with patch("app.collections.service._algorithm_digest_input",
+                       side_effect=AssertionError("PostgreSQL state cache should hit")):
+                replay = service._analyze_persisted_keywords(changed)
             assert replay["executed_keywords"] == 0
             assert replay["unchanged_keywords"] == 1
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")

@@ -29,6 +29,7 @@ from app.sources.catalog import BING_SOURCE_ID, GOOGLE_SOURCE_ID, YOUTUBE_SOURCE
 from app.taxonomy.registry import resolve as resolve_category
 
 INITIAL_TOPIC_ROOTS = ("fashion", "home_living", "technology", "entertainment", "sports", "gaming")
+_ALGORITHM_ANALYSIS_CACHE_KEY = "algorithm_analysis_state_cache_v1"
 
 _COHORT_MARKER = {"__trendscout_cohort_payload__": True}
 _COHORT_MARKER_JSON = b'{"__trendscout_cohort_payload__":true}'
@@ -795,6 +796,71 @@ class CollectionService:
                         "evidence_url": prior_evidence.get("source_url"),
                         "observation_status": missing_status,
                     }
+
+            analysis_rows = dict(eligible_current)
+            missing_ids = list(missing_current)
+            for offset in range(0, len(missing_ids), 500):
+                rows = session.eligible_keywords(
+                    source=WIKIMEDIA_SOURCE_ID, ids=missing_ids[offset:offset + 500],
+                )
+                analysis_rows.update({row["id"]: row for row in rows})
+
+            state_records = [analysis_rows[key] for key in sorted(analysis_rows)]
+            algorithm_input_manifest = {
+                "observations": observations,
+                "prepared_metadata": [{
+                    "keyword_id": value["id"],
+                    "article": value["article"],
+                    "collected_at": value["collected_at"],
+                    "evidence_url": value["evidence_url"],
+                } for value in sorted(prepared.values(), key=lambda item: item["id"])],
+                "missing_current": [{
+                    "keyword_id": keyword_id,
+                    "date": value["date"].isoformat(),
+                    "country": value["country"],
+                    "access": value["access"],
+                    "project": value["project"],
+                    "article": value["article"],
+                    "snapshot_status": value["snapshot_status"],
+                    "collected_at": value["collected_at"],
+                    "evidence_url": value["evidence_url"],
+                    "observation_status": value["observation_status"],
+                } for keyword_id, value in sorted(missing_current.items())],
+            }
+            cache_state_records = [*state_records, {
+                "algorithm_input_manifest": algorithm_input_manifest,
+            }]
+            cache_scope = hashlib.sha256(json.dumps({
+                "keyword_ids": sorted(analysis_rows),
+                "algorithm_keys": keys,
+                "result_contract_version": RESULT_CONTRACT_VERSION,
+            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            persisted_state_digest = session.state_digest(
+                cache_state_records, metadata_by_key,
+            )
+            if persisted_state_digest is not None:
+                cached_raw = session.setting(_ALGORITHM_ANALYSIS_CACHE_KEY)
+                try:
+                    cached_state = json.loads(cached_raw) if isinstance(cached_raw, str) else None
+                except (TypeError, ValueError):
+                    cached_state = None
+                cached_summary = (cached_state.get("summary")
+                                  if isinstance(cached_state, dict) else None)
+                if (isinstance(cached_state, dict)
+                        and cached_state.get("scope") == cache_scope
+                        and cached_state.get("state_digest") == persisted_state_digest
+                        and isinstance(cached_summary, dict)
+                        and cached_summary.get("analysis_status") == "COMPLETED"
+                        and cached_summary.get("eligible_keywords") == len(analysis_rows)):
+                    return {
+                        "eligible_keywords": len(analysis_rows), "executed_keywords": 0,
+                        "unchanged_keywords": len(analysis_rows), "recomputed_algorithms": 0,
+                        "registered_algorithms": registered_count,
+                        "persisted_algorithms": len(keys), "analysis_status": "COMPLETED",
+                        "source_id": WIKIMEDIA_SOURCE_ID, "window_days": 6,
+                        "retention_calendar_days": 7,
+                    }
+
             observation_digest_by_id_date = {
                 (value["id"], value["date"].isoformat()): value["observation_digest"]
                 for value in prepared.values()
@@ -804,14 +870,6 @@ class CollectionService:
                 for keyword_id, value in missing_current.items()
             })
             session.upsert_observations(observations)
-
-            analysis_rows = dict(eligible_current)
-            missing_ids = list(missing_current)
-            for offset in range(0, len(missing_ids), 500):
-                rows = session.eligible_keywords(
-                    source=WIKIMEDIA_SOURCE_ID, ids=missing_ids[offset:offset + 500],
-                )
-                analysis_rows.update({row["id"]: row for row in rows})
 
             snapshot_cohorts = defaultdict(list)
             for keyword_id, value in prepared.items():
@@ -970,7 +1028,7 @@ class CollectionService:
                 recomputed_algorithms += len(missing_keys)
                 if len(produced_keys) != len(missing_keys) or set(produced_keys) != set(missing_keys):
                     cacheable = False
-            return {
+            summary = {
                 "eligible_keywords": len(analysis_rows), "executed_keywords": executed,
                 "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
                 "registered_algorithms": registered_count, "persisted_algorithms": len(keys),
@@ -978,6 +1036,20 @@ class CollectionService:
                 "source_id": WIKIMEDIA_SOURCE_ID, "window_days": 6,
                 "retention_calendar_days": 7,
             }
+            if cacheable and summary["analysis_status"] == "COMPLETED":
+                final_state_digest = session.state_digest(
+                    cache_state_records, metadata_by_key,
+                )
+                if final_state_digest is not None:
+                    session.set_setting(_ALGORITHM_ANALYSIS_CACHE_KEY, json.dumps({
+                        "scope": cache_scope,
+                        "state_digest": final_state_digest,
+                        "summary": {
+                            "eligible_keywords": summary["eligible_keywords"],
+                            "analysis_status": summary["analysis_status"],
+                        },
+                    }, sort_keys=True, separators=(",", ":")))
+            return summary
 
         return self.store.run_algorithm_analysis(analyze)
 

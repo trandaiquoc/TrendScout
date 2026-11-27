@@ -84,7 +84,7 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual((odd[0].status,odd[0].value,odd[0].baseline_value,odd[0].sample_count), ('COMPLETED',4,200,3))
         self.assertEqual((odd[1].value,odd[1].metric_unit), (200,UNIT))
         self.assertEqual(odd[0].metric_unit, 'dimensionless')
-        self.assertEqual(len(dict(odd[0].evidence)['observations']), 3)
+        self.assertEqual(len(dict(odd[0].evidence)['observation_dates']), 3)
         self.assertIn('CENSORED_TOP_LIST', odd[0].quality_flags)
         self.assertIn('INCOMPLETE_BASELINE_COVERAGE', odd[0].quality_flags)
         even = self.runner.run(make_input((100,200,300,400)), self.keys)
@@ -184,7 +184,9 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         results = self.runner.run(item, ['robust-z-mad@v0.2', 'ewma@v0.2'])
         self.assertEqual([result.status for result in results], ['COMPLETED', 'COMPLETED'])
         self.assertTrue(all('CENSORED_TOP_LIST' not in result.quality_flags for result in results))
-        self.assertEqual((results[1].metric_name, results[1].metric_unit), ('ewma', 'items'))
+        by_algorithm = {result.algorithm_id: result for result in results}
+        self.assertEqual((by_algorithm['ewma'].metric_name, by_algorithm['ewma'].metric_unit),
+                         ('ewma', 'items'))
 
     def test_kendall_trend_uses_tau_b_when_values_tie(self):
         scope = Scope('provider_daily_series', 'US', 'public', 'search', 'robot vacuum',
@@ -196,7 +198,9 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
                               minimum_samples=3, current_snapshot_status='SUCCESS')
         result = self.runner.run(item, ['kendall-trend@v2'])[0]
         self.assertEqual(result.status, 'COMPLETED')
-        self.assertAlmostEqual(result.value, (3 / 4) ** 0.5)
+        # Seven history points plus current produce 28 pairs: 24 concordant,
+        # four tied in value, and none tied in time (tau-b = 24/sqrt(28*24)).
+        self.assertAlmostEqual(result.value, (6 / 7) ** 0.5)
 
     def test_registry_catalog_is_metadata_driven_and_marks_unavailable_methods(self):
         response = catalog()

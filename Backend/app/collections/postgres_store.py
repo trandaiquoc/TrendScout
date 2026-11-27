@@ -112,7 +112,8 @@ class PostgresAlgorithmAnalysisSession:
             WHERE k.eligible=1 {} ORDER BY o.keyword_id,o.source,o.observation_date,o.metric,o.unit""")
             .format(self._table("algorithm_observations"), self._table("keywords"), scope),
             parameters).fetchall()
-        results = self._db.execute(sql.SQL("""SELECT r.keyword_id,r.algorithm_id,r.input_digest
+        results = self._db.execute(sql.SQL("""SELECT r.keyword_id,r.algorithm_id,r.version,r.status,
+            r.reason_code,r.value,r.metric,r.unit,r.result_json,r.input_digest
             FROM {} r JOIN {} k ON k.id=r.keyword_id WHERE k.eligible=1 {}
             ORDER BY r.keyword_id,r.algorithm_id""").format(
                 self._table("algorithm_results"), self._table("keywords"), scope), parameters).fetchall()

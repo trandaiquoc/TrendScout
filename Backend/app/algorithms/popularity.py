@@ -29,9 +29,9 @@ class ObservedVolumeRanking:
         if item.current_snapshot_status not in {'SUCCESS', 'PARTIAL'}:
             return 'CURRENT_COVERAGE_UNCONFIRMED'
         if not count_ok(item.current_value):
-            return ('CURRENT_OBSERVATION_MISSING'
-                    if item.current_snapshot_status in {'SUCCESS', 'PARTIAL'}
-                    else 'CURRENT_COVERAGE_UNCONFIRMED')
+            if item.current_value is None:
+                return 'CURRENT_OBSERVATION_MISSING'
+            return 'INVALID_CURRENT'
         values = self._values(item)
         if len(values) < 2:
             return 'INSUFFICIENT_COHORT'
@@ -148,8 +148,6 @@ class RelativeSourceRank:
                (item.scope.source, item.scope.country, item.scope.access, item.scope.project,
                 item.scope.metric, item.scope.unit) for point in item.cohort):
             return 'INCOMPATIBLE_COHORT'
-        if any(point.date != item.analysis_date for point in item.cohort):
-            return 'INCOMPATIBLE_COHORT'
         if any(point.status != 'OBSERVED' or point.snapshot_status != 'SUCCESS'
                for point in item.cohort):
             return 'INCOMPATIBLE_COHORT'
@@ -166,6 +164,8 @@ class RelativeSourceRank:
         # exclude self-inclusion and collapse exact duplicate rows.
         peers = {}
         for point in item.cohort:
+            if point.date != item.analysis_date:
+                continue
             article = point.scope.article
             if not isinstance(article, str) or not article or article == item.scope.article:
                 continue

@@ -89,7 +89,8 @@ class SQLiteAlgorithmAnalysisSession:
             " ORDER BY o.keyword_id,o.source,o.observation_date,o.metric,o.unit", parameters
         )
         results = self._db.execute(
-            "SELECT r.keyword_id,r.algorithm_id,r.input_digest FROM algorithm_results r "
+            "SELECT r.keyword_id,r.algorithm_id,r.version,r.status,r.reason_code,r.value,"
+            "r.metric,r.unit,r.result_json,r.input_digest FROM algorithm_results r "
             "JOIN keywords k ON k.id=r.keyword_id WHERE k.eligible=1" + scope +
             " ORDER BY r.keyword_id,r.algorithm_id", parameters
         )
