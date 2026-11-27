@@ -1,5 +1,6 @@
 """Public Fetch results feed source-scoped discovery without growth claims."""
 
+import hashlib
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,7 @@ from app.sources.catalog import (
     WIKIMEDIA_SOURCE_ID,
     YOUTUBE_SOURCE_ID,
 )
+from app.sources.google_trends.trending_now import normalize_keyword
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 FETCHED = "2026-11-12T12:00:00+00:00"
@@ -108,6 +110,35 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertEqual({item["algorithm_version"] for item in candidate["assessments"]},
                          {"sample-presence-v1"})
         self.assertEqual(result, discover_fetch_results(four_source_results(), now=NOW))
+
+    def test_fetch_display_order_uses_identity_not_business_category_priority(self):
+        records = []
+        for phrase in ("linen dress", "portable solar generator"):
+            _, identity = normalize_keyword(phrase)
+            records.append({
+                "data_source": "GOOGLE_TRENDS",
+                "canonical_keyword": phrase,
+                "canonical_keyword_identity": hashlib.sha256(
+                    identity.encode("utf-8")
+                ).hexdigest(),
+                "provider_id": "serpapi_google_trends_trending_now",
+                "transport_id": "serpapi",
+                "discovery_mode": "SERPAPI_TRENDING_NOW",
+                "region": "US", "language": "en", "time_window_hours": 24,
+                "fetched_at": FETCHED,
+                "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
+                "trend_clusters": [{"trend_cluster_id": phrase,
+                                    "increase_percentage": 50}],
+            })
+        result = discover_fetch_results([{
+            "source_id": GOOGLE_SOURCE_ID, "status": "SUCCESS",
+            "data_mode": "SYNTHETIC", "records": records,
+        }], now=NOW)
+        candidates = result["candidates"]
+        self.assertEqual([item["keyword_id"] for item in candidates],
+                         sorted(item["keyword_id"] for item in candidates))
+        self.assertEqual({item["keyword"] for item in candidates},
+                         {"linen dress", "portable solar generator"})
 
     def test_global_wikimedia_scope_stays_unknown_beside_us_filtered_trends(self):
         sources = four_source_results()

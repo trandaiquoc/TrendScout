@@ -11,7 +11,6 @@ from app.analysis.keyword_identity import canonical_keyword_digest
 from app.discovery.assessment import assess_candidate
 from app.discovery.contracts import Observation, ProcessingGrant
 from app.discovery.extraction import extract_candidates
-from app.discovery.prioritization import prioritize_for_research
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -323,8 +322,13 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
             except (TypeError, ValueError):
                 rejected_records += 1
 
-    candidates = prioritize_for_research(extract_candidates(
-        tuple(observations), grants=processing_grants, now=now))
+    # This response contains source evidence, not business research priority.
+    # Fetch has no compatible history here, so every trend assessment is
+    # insufficient; use identity as the deterministic display tie-breaker and
+    # leave Fashion/Home preference to the separate verification queue.
+    candidates = tuple(sorted(extract_candidates(
+        tuple(observations), grants=processing_grants, now=now),
+        key=lambda item: item.keyword_id))
     modes = {observation.data_mode for observation in observations}
     result_mode = next(iter(modes)) if len(modes) == 1 else "MIXED" if modes else empty_mode
     shown = []

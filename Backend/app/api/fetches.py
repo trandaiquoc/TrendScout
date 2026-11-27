@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import secrets
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, Response
@@ -43,6 +44,17 @@ def _distributed_for_request(request):
 
 def _is_vercel_postgres_runtime(distributed) -> bool:
     return bool(getattr(distributed, "vercel_postgres_live", False))
+
+
+def _collection_processing_grants(distributed):
+    resolver = getattr(distributed, "resolve_processing_grants", None)
+    if not callable(resolver):
+        return ()
+    try:
+        grants = resolver(datetime.now(timezone.utc))
+    except Exception:
+        return ()
+    return tuple(grants) if isinstance(grants, (list, tuple)) else ()
 
 
 def _require_youtube_policy_consent(request: Request, distributed) -> None:
@@ -325,7 +337,10 @@ async def _process_fetch_collections(request: Request, distributed, fetch_id: st
                 fetch_id, result.get("sources", []), cached_context_only=True
             )
         else:
-            processed = await service.process_fetch(fetch_id, result.get("sources", []))
+            processed = await service.process_fetch(
+                fetch_id, result.get("sources", []),
+                processing_grants=_collection_processing_grants(distributed),
+            )
         if processed.get("status") == "FAILED":
             raise RuntimeError("Fetch Collections processing failed")
         if firestore_shared_live and processed.get("dataset_reused") is True:

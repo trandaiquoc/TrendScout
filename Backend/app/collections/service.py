@@ -119,11 +119,12 @@ class CollectionService:
 
     async def process_fetch(self, fetch_id: str, sources: list[dict], *,
                             cached_context_only: bool = False,
-                            resume_model_unavailable: bool = False):
+                            resume_model_unavailable: bool = False,
+                            processing_grants=()):
         try:
             return await asyncio.to_thread(
                 self._process_fetch, fetch_id, sources, cached_context_only,
-                resume_model_unavailable,
+                resume_model_unavailable, processing_grants,
             )
         except Exception:
             try:
@@ -133,7 +134,7 @@ class CollectionService:
             return {"fetch_id": fetch_id, "status": "FAILED", "error_code": "COLLECTION_PROCESSING_FAILED"}
 
     def _process_fetch(self, fetch_id, sources, cached_context_only=False,
-                       resume_model_unavailable=False):
+                       resume_model_unavailable=False, processing_grants=()):
         if self.store.data_mode_scope:
             sources = [source for source in sources
                        if source.get("data_mode") == self.store.data_mode_scope]
@@ -295,6 +296,15 @@ class CollectionService:
         analysis = self._analyze_persisted_keywords(
             records, sources=sources, cache_only=cached_context_only,
         )
+        trends_analysis = self._analyze_google_trends_keywords(
+            records, sources=sources, cache_only=cached_context_only,
+            processing_grants=processing_grants,
+            keyword_id_map=keyword_id_map,
+            persisted_source_evidence_ids=persisted_source_evidence_ids,
+        )
+        if trends_analysis.get("analysis_status") not in {
+                "NO_COMPATIBLE_SOURCE_INPUT", "CACHE_ONLY"}:
+            analysis.setdefault("source_profiles", {})["google_trends_us_en_24h"] = trends_analysis
         # The source response can be capped or paginated. Classification operates on every
         # eligible persisted keyword still awaiting a decision, not only this response or UI page.
         loaded_keywords = self.store.load_keywords_for_fetch(
@@ -1052,6 +1062,417 @@ class CollectionService:
             return summary
 
         return self.store.run_algorithm_analysis(analyze)
+
+    def _analyze_google_trends_keywords(
+            self, changed_records, *, sources=(), cache_only=False,
+            processing_grants=(), keyword_id_map=None,
+            persisted_source_evidence_ids=()):
+        """Persist provider-increase ranks only for a permitted, traceable cohort."""
+        if cache_only:
+            return {"analysis_status": "CACHE_ONLY", "executed_keywords": 0,
+                    "unchanged_keywords": 0, "insufficient_keywords": 0,
+                    "skipped_keywords": 0}
+        if not getattr(self.store, "supports_source_evidence_lineage", False):
+            return {"analysis_status": "SKIPPED_LINEAGE_UNAVAILABLE",
+                    "executed_keywords": 0, "unchanged_keywords": 0,
+                    "insufficient_keywords": 0, "skipped_keywords": 0}
+
+        from app.algorithms.catalog import registry
+        from app.algorithms.contracts import (
+            RESULT_CONTRACT_VERSION,
+            AlgorithmInput,
+            AlgorithmResult,
+            Observation,
+            Scope,
+        )
+        from app.algorithms.google_trends import INCREASE_METRIC, INCREASE_UNIT
+        from app.collections.source_lineage import (
+            build_source_evidence,
+            remap_source_evidence_keyword_ids,
+        )
+        from app.composition import algorithm_engine
+        from app.discovery.contracts import ProcessingGrant
+        from app.sources.catalog import GOOGLE_SOURCE_ID
+
+        def parsed_object(value):
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                try:
+                    decoded = json.loads(value)
+                except (TypeError, ValueError):
+                    return None
+                return decoded if isinstance(decoded, dict) else None
+            return None
+
+        def aware_instant(value):
+            if not isinstance(value, str) or len(value) > 64:
+                return None
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            return parsed.astimezone(timezone.utc)
+
+        def valid_percentage(value):
+            if type(value) not in {int, float} or value < 0 or value > 1_000_000_000:
+                return False
+            if type(value) is float:
+                import math
+                return math.isfinite(value)
+            return True
+
+        keywords = {}
+        for record in changed_records:
+            if not isinstance(record, dict) or record.get("source") != GOOGLE_SOURCE_ID:
+                continue
+            evidence = parsed_object(record.get("evidence"))
+            if (not isinstance(record.get("id"), str)
+                    or not isinstance(evidence, dict)
+                    or evidence.get("data_source") != "GOOGLE_TRENDS"):
+                continue
+            keywords[record["id"]] = {"record": record, "evidence": evidence}
+        if not keywords:
+            return {"analysis_status": "NO_COMPATIBLE_SOURCE_INPUT", "executed_keywords": 0,
+                    "unchanged_keywords": 0, "insufficient_keywords": 0,
+                    "skipped_keywords": 0}
+
+        evidence_ids = set(persisted_source_evidence_ids or ())
+        evidence_by_keyword = defaultdict(list)
+        for source in sources:
+            if not isinstance(source, dict) or source.get("source_id") != GOOGLE_SOURCE_ID:
+                continue
+            rows = build_source_evidence([source])["rows"]
+            rows = remap_source_evidence_keyword_ids(rows, keyword_id_map or {})
+            for row in rows:
+                evidence_id = row.get("id") if isinstance(row, dict) else None
+                if not isinstance(evidence_id, str) or evidence_id not in evidence_ids:
+                    continue
+                for keyword_id in row.get("keyword_ids", ()):
+                    evidence_by_keyword[keyword_id].append({
+                        "source_evidence_id": evidence_id,
+                        "source_id": GOOGLE_SOURCE_ID,
+                        "collected_at": (row.get("collected_at").isoformat()
+                                         if row.get("collected_at") else None),
+                        "content_digest": row.get("content_digest"),
+                    })
+
+        grants = {
+            grant.source_id: grant for grant in processing_grants
+            if isinstance(grant, ProcessingGrant)
+        }
+        now_utc = datetime.now(timezone.utc)
+        google_grant = grants.get(GOOGLE_SOURCE_ID)
+        live_grant_allowed = bool(
+            isinstance(google_grant, ProcessingGrant)
+            and google_grant.extraction_allowed is True
+            and google_grant.derived_metrics_allowed is True
+            and isinstance(google_grant.policy_version, str)
+            and google_grant.policy_version.strip()
+            and isinstance(google_grant.expires_at, datetime)
+            and google_grant.expires_at.tzinfo is not None
+            and google_grant.expires_at.utcoffset() is not None
+            and google_grant.expires_at.astimezone(timezone.utc) > now_utc
+        )
+
+        cohorts = defaultdict(list)
+        for keyword_id, item in sorted(keywords.items()):
+            evidence = item["evidence"]
+            fetched_at = aware_instant(evidence.get("fetched_at"))
+            provider_data_at = aware_instant(
+                evidence.get("provider_data_at") or evidence.get("provider_created_at")
+            )
+            data_mode = item["record"].get("data_mode")
+            snapshot_status = evidence.get("snapshot_status")
+            profile_key = (
+                evidence.get("provider_id"), evidence.get("discovery_mode"),
+                evidence.get("region"), evidence.get("language"),
+                evidence.get("time_window_hours"),
+                provider_data_at.isoformat() if provider_data_at else None,
+                data_mode,
+            )
+            clusters = evidence.get("trend_clusters")
+            cluster = clusters[0] if isinstance(clusters, list) and len(clusters) == 1 \
+                and isinstance(clusters[0], dict) else None
+            percentage = cluster.get("increase_percentage") if cluster else None
+            cluster_id = cluster.get("trend_cluster_id") if cluster else None
+            if not isinstance(cluster_id, str) or not cluster_id:
+                cluster_id = None
+            if not isinstance(clusters, list) or not clusters:
+                input_reason = "CURRENT_OBSERVATION_MISSING"
+            elif len(clusters) != 1 or cluster is None or cluster_id is None:
+                input_reason = "AMBIGUOUS_CLUSTER_METRICS"
+            elif not valid_percentage(percentage):
+                input_reason = "CURRENT_OBSERVATION_MISSING"
+            else:
+                input_reason = None
+            profile_compatible = (
+                evidence.get("data_source") == "GOOGLE_TRENDS"
+                and evidence.get("provider_id") == "serpapi_google_trends_trending_now"
+                and evidence.get("discovery_mode") == "SERPAPI_TRENDING_NOW"
+                and evidence.get("region") == "US"
+                and evidence.get("language") == "en"
+                and evidence.get("time_window_hours") == 24
+            )
+            lineage = sorted(
+                evidence_by_keyword.get(keyword_id, ()),
+                key=lambda ref: ref["source_evidence_id"],
+            )
+            cohorts[profile_key].append({
+                "keyword_id": keyword_id,
+                "keyword": item["record"].get("keyword"),
+                "evidence": evidence,
+                "data_mode": data_mode,
+                "snapshot_status": snapshot_status,
+                "provider_data_at": provider_data_at,
+                "fetched_at": fetched_at,
+                "percentage": percentage if valid_percentage(percentage) else None,
+                "cluster_id": cluster_id,
+                "profile_compatible": profile_compatible,
+                "input_reason": input_reason,
+                "lineage": lineage,
+            })
+
+        registered = registry()
+        engine = algorithm_engine()
+        method_key = "google-trends-increase-rank@v1"
+        method = registered.get(method_key)
+        metadata = method.metadata
+        prepared_results = []
+        now_text = now()
+        rankable_cohort_count = 0
+
+        for profile_key, cohort_items in sorted(cohorts.items(), key=lambda item: str(item[0])):
+            cohort_items.sort(key=lambda item: item["keyword_id"])
+            cohort_manifest = [{
+                "keyword_id": item["keyword_id"],
+                "provider_reported_increase_percentage": item["percentage"],
+                "input_reason": item["input_reason"],
+                "snapshot_status": item["snapshot_status"],
+            } for item in cohort_items]
+            cohort_digest = hashlib.sha256(json.dumps({
+                "algorithm": metadata.key,
+                "profile": profile_key,
+                "inputs": cohort_manifest,
+                "result_contract_version": RESULT_CONTRACT_VERSION,
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                allow_nan=False).encode("utf-8")).hexdigest()
+            rankable = [item for item in cohort_items if (
+                item["percentage"] is not None
+                and item["profile_compatible"]
+                and item["data_mode"] in {"SYNTHETIC", "LIVE"}
+                and item["snapshot_status"] == "SUCCESS"
+                and item["provider_data_at"] is not None
+                and item["lineage"]
+                and (item["data_mode"] == "SYNTHETIC" or live_grant_allowed)
+            )]
+            rankable_cohort_count += int(len(rankable) >= 2)
+            for current in cohort_items:
+                evidence = current["evidence"]
+                source_profile = "google_trends_us_en_24h"
+                mode = current["data_mode"]
+                if mode == "LIVE" and not live_grant_allowed:
+                    reason_code, status = "POLICY_RESTRICTED", "SKIPPED"
+                elif not current["profile_compatible"]:
+                    reason_code, status = "INCOMPATIBLE_SOURCE_PROFILE", "SKIPPED"
+                elif current["snapshot_status"] != "SUCCESS":
+                    reason_code, status = "CURRENT_COVERAGE_UNCONFIRMED", "INSUFFICIENT_DATA"
+                elif current["provider_data_at"] is None:
+                    reason_code, status = "FRESHNESS_UNAVAILABLE", "INSUFFICIENT_DATA"
+                elif current["input_reason"] is not None:
+                    reason_code, status = current["input_reason"], "INSUFFICIENT_DATA"
+                elif not current["lineage"]:
+                    reason_code, status = "EVIDENCE_LINEAGE_UNAVAILABLE", "SKIPPED"
+                elif mode not in {"SYNTHETIC", "LIVE"}:
+                    reason_code, status = "INVALID_DATA_MODE", "SKIPPED"
+                elif len(rankable) < 2:
+                    reason_code, status = "INSUFFICIENT_COHORT", "INSUFFICIENT_DATA"
+                else:
+                    reason_code, status = None, None
+
+                observation_date = (current["provider_data_at"].date()
+                                    if current["provider_data_at"] else None)
+                input_item = None
+                if reason_code is None:
+                    scope = Scope(
+                        GOOGLE_SOURCE_ID, "US_FILTER_ONLY", "en", source_profile,
+                        current["keyword_id"], INCREASE_METRIC, INCREASE_UNIT,
+                    )
+                    peer_points = tuple(Observation(
+                        observation_date,
+                        Scope(GOOGLE_SOURCE_ID, "US_FILTER_ONLY", "en", source_profile,
+                              peer["keyword_id"], INCREASE_METRIC, INCREASE_UNIT),
+                        "OBSERVED", peer["percentage"], "SUCCESS",
+                    ) for peer in rankable if peer["keyword_id"] != current["keyword_id"])
+                    input_item = AlgorithmInput(
+                        current["keyword_id"], scope, observation_date,
+                        current["percentage"], (), window_days=1, minimum_samples=2,
+                        evidence_url=evidence.get("source_url"),
+                        current_snapshot_status=current["snapshot_status"] or "UNKNOWN",
+                        cohort=peer_points,
+                    )
+
+                expected_status = status or "COMPLETED"
+                expected_reason = reason_code
+
+                input_digest = hashlib.sha256(json.dumps({
+                    "algorithm": metadata.key,
+                    "cohort_digest": cohort_digest,
+                    "keyword_id": current["keyword_id"],
+                    "reason_code": expected_reason,
+                    "provider_reported_increase_percentage": current["percentage"],
+                    "result_status": expected_status,
+                    "result_contract_version": RESULT_CONTRACT_VERSION,
+                }, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    allow_nan=False).encode("utf-8")).hexdigest()
+                cluster = evidence.get("trend_clusters", [{}])
+                cluster = cluster[0] if isinstance(cluster, list) and len(cluster) == 1 \
+                    and isinstance(cluster[0], dict) else {}
+                prepared_results.append({
+                    "current": current, "evidence": evidence, "mode": mode,
+                    "source_profile": source_profile, "input_item": input_item,
+                    "observation_date": observation_date, "expected_status": expected_status,
+                    "reason_code": expected_reason, "input_digest": input_digest,
+                    "cohort_digest": cohort_digest, "cohort_size": len(rankable),
+                    "cluster": cluster,
+                })
+
+        def result_metadata(item):
+            current = item["current"]
+            evidence = item["evidence"]
+            return {
+                "source_id": GOOGLE_SOURCE_ID,
+                "source_profile_id": item["source_profile"],
+                "data_mode": item["mode"],
+                "input_metric": INCREASE_METRIC,
+                "input_unit": INCREASE_UNIT,
+                "provider_reported_increase_percentage": current["percentage"],
+                "approximate_search_volume_bucket": {
+                    "value": item["cluster"].get("search_volume"),
+                    "display": item["cluster"].get("search_volume_display"),
+                    "semantics": item["cluster"].get("search_volume_semantics"),
+                },
+                "geography": {
+                    "provider_region_filter": evidence.get("region"),
+                    "language_filter": evidence.get("language"),
+                    "market_evidence": "US_FILTER_ONLY",
+                    "audience_residence_claimed": False,
+                },
+                "observation_window": {
+                    "time_window_hours": evidence.get("time_window_hours"),
+                    "provider_data_at": (current["provider_data_at"].isoformat()
+                                         if current["provider_data_at"] else None),
+                    "provider_created_at": evidence.get("provider_created_at"),
+                },
+                "freshness": {
+                    "provider_data_at": (current["provider_data_at"].isoformat()
+                                         if current["provider_data_at"] else None),
+                    "fetched_at": (current["fetched_at"].isoformat()
+                                   if current["fetched_at"] else None),
+                },
+                "trend_cluster_ids": ([current["cluster_id"]]
+                                       if current["cluster_id"] else []),
+                "result_contract_version": RESULT_CONTRACT_VERSION,
+                "input_digest": item["input_digest"],
+                "cohort_input_digest": item["cohort_digest"],
+                "evidence_references": current["lineage"],
+                "limitations": list(metadata.limitations),
+            }
+
+        def canonical_json(value):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+
+        def persist(session):
+            existing = {}
+            identifiers = [item["current"]["keyword_id"] for item in prepared_results]
+            for offset in range(0, len(identifiers), 500):
+                existing.update(session.result_digests_for(identifiers[offset:offset + 500]))
+            existing_payloads = {}
+            for offset in range(0, len(identifiers), 500):
+                existing_payloads.update(session.result_payloads_for(
+                    identifiers[offset:offset + 500], metadata.algorithm_id,
+                ))
+            changed = []
+            unchanged = 0
+            metadata_updated = 0
+            recomputed = 0
+            result_statuses = []
+            for item in prepared_results:
+                current = item["current"]
+                keyword_id = current["keyword_id"]
+                if existing.get(keyword_id, {}).get(metadata.algorithm_id) == item["input_digest"]:
+                    stored_payload = existing_payloads.get(keyword_id)
+                    try:
+                        prior_payload = (json.loads(stored_payload)
+                                         if isinstance(stored_payload, str) else stored_payload)
+                    except (TypeError, ValueError):
+                        prior_payload = None
+                    if isinstance(prior_payload, dict):
+                        refreshed_payload = {**prior_payload, **result_metadata(item)}
+                        serialized = canonical_json(refreshed_payload)
+                        if serialized != canonical_json(prior_payload):
+                            changed.append((
+                                keyword_id, metadata.algorithm_id, metadata.version,
+                                refreshed_payload.get("status", item["expected_status"]),
+                                refreshed_payload.get("reason_code"),
+                                refreshed_payload.get("value"),
+                                refreshed_payload.get("metric_name", metadata.metric),
+                                refreshed_payload.get("metric_unit", metadata.unit),
+                                serialized, item["input_digest"], now_text,
+                            ))
+                            metadata_updated += 1
+                        unchanged += 1
+                        result_statuses.append(
+                            refreshed_payload.get("status", item["expected_status"])
+                        )
+                        continue
+
+                evidence = item["evidence"]
+                if item["reason_code"] is None:
+                    result = engine.run(item["input_item"], (method_key,))[0]
+                else:
+                    result = AlgorithmResult(
+                        keyword_id, metadata.algorithm_id, metadata.version,
+                        item["expected_status"], None, metadata.metric, metadata.unit,
+                        current["percentage"], None, 1, item["cohort_size"],
+                        (("source_profile", item["source_profile"]),
+                         ("observation_date", item["observation_date"].isoformat()
+                          if item["observation_date"] else None),
+                         ("evidence_url", evidence.get("source_url"))),
+                        ("PROVIDER_REPORTED_INCREASE", "SINGLE_SNAPSHOT_COHORT"),
+                        item["reason_code"], item["reason_code"].replace("_", " ").lower(),
+                        minimum_samples=metadata.minimum_samples,
+                        config_version="google-trends-increase-rank-v1",
+                    )
+                result_payload = asdict(result)
+                result_payload.update(result_metadata(item))
+                payload = canonical_json(result_payload)
+                changed.append((
+                    keyword_id, metadata.algorithm_id, metadata.version,
+                    result.status, result.reason_code, result.value, result.metric_name,
+                    result.metric_unit, payload, item["input_digest"], now_text,
+                ))
+                result_statuses.append(result.status)
+                recomputed += 1
+            session.upsert_results(changed)
+            return {
+                "analysis_status": "COMPLETED",
+                "executed_keywords": sum(status == "COMPLETED" for status in result_statuses),
+                "unchanged_keywords": unchanged,
+                "insufficient_keywords": sum(status == "INSUFFICIENT_DATA" for status in result_statuses),
+                "skipped_keywords": sum(status == "SKIPPED" for status in result_statuses),
+                "recomputed_algorithms": recomputed,
+                "metadata_updated_results": metadata_updated,
+                "registered_algorithms": len(registered.keys()),
+                "persisted_algorithms": 1,
+                "source_id": GOOGLE_SOURCE_ID,
+                "source_profile_id": "google_trends_us_en_24h",
+                "rankable_cohort_count": rankable_cohort_count,
+            }
+
+        return self.store.run_algorithm_analysis(persist)
 
     def _unassigned_count(self):
         return self.store.unassigned_keyword_count()

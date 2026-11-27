@@ -1,6 +1,11 @@
 """Public machine-readable registry view; frontend must not own algorithm lists."""
 from dataclasses import asdict, dataclass, replace
 
+from app.algorithms.google_trends import (
+    INCREASE_METRIC,
+    INCREASE_UNIT,
+    GoogleTrendsIncreaseRank,
+)
 from app.algorithms.popularity import (
     ObservedPercentileRank,
     ObservedVolumeRanking,
@@ -30,6 +35,9 @@ class PersistedInputAdapter:
     runtime_capabilities: tuple[str, ...]
     max_history_days: int
     minimum_cohort_size: int = 0
+    profile_id: str = "source_default"
+    provider_id: str | None = None
+    policy_requirements: tuple[str, ...] = ()
 
     def supports(self, metadata):
         if self.source_id in metadata.excluded_sources:
@@ -47,6 +55,8 @@ class PersistedInputAdapter:
         if ("top_list_censored" in self.source_capabilities
                 and not metadata.accepts_censored_top_list):
             return False
+        if "snapshot_cohort" in metadata.runtime_requirements:
+            return metadata.minimum_samples <= self.minimum_cohort_size
         if metadata.family == "popularity":
             return metadata.minimum_samples <= self.minimum_cohort_size
         minimum_window = min(metadata.supported_windows or (metadata.minimum_samples,))
@@ -73,6 +83,24 @@ PERSISTED_INPUT_ADAPTERS = (
         # The Fetch retention contract keeps the current snapshot and six prior days.
         max_history_days=6,
         minimum_cohort_size=2,
+        profile_id="wikimedia_us_country_snapshot",
+        provider_id="wikimedia_aqs",
+    ),
+    PersistedInputAdapter(
+        adapter_id="google_trends_reported_increase_snapshot",
+        source_id="google_web_serp",
+        metric=INCREASE_METRIC,
+        unit=INCREASE_UNIT,
+        source_capabilities=("trending_snapshot", "provider_increase"),
+        runtime_capabilities=("snapshot_cohort", "input_digest", "evidence_lineage"),
+        max_history_days=0,
+        minimum_cohort_size=2,
+        profile_id="google_trends_us_en_24h",
+        provider_id="serpapi_google_trends_trending_now",
+        policy_requirements=(
+            "LIVE execution requires a valid source ProcessingGrant allowing derived metrics.",
+            "The current Google live policy denies application-derived metrics.",
+        ),
     ),
 )
 
@@ -85,6 +113,17 @@ def _execution_for(metadata):
             "status": "PERSISTED_SOURCE_ADAPTER",
             "sources": tuple(adapter.source_id for adapter in adapters),
             "input_adapters": tuple(adapter.adapter_id for adapter in adapters),
+            "input_profiles": tuple({
+                "profile_id": adapter.profile_id,
+                "source_id": adapter.source_id,
+                "provider_id": adapter.provider_id,
+                "metric": adapter.metric,
+                "unit": adapter.unit,
+            } for adapter in adapters),
+            "policy_requirements": tuple(sorted({
+                requirement for adapter in adapters
+                for requirement in adapter.policy_requirements
+            })),
             "reason": "Selected by the registered persisted input contract when compatible observations are available.",
         }
     if "legacy_result" in metadata.runtime_requirements:
@@ -166,7 +205,7 @@ def registry(scorer=score_trends):
     result = AlgorithmRegistry()
     legacy = WikimediaLegacy(scorer)
     legacy.metadata = replace(legacy.metadata, runtime_requirements=("legacy_result",))
-    for method in (legacy, GrowthRatio(), MedianBaseline(),
+    for method in (legacy, GrowthRatio(), MedianBaseline(), GoogleTrendsIncreaseRank(),
                    RobustZMad(), EWMA(), RollingMeanBaseline(), RelativeChange(),
                    TheilSenSlope(), KendallTrend(), ObservedVolumeRanking(),
                    ObservedPercentileRank(), RelativeSourceRank()):
@@ -198,6 +237,30 @@ def catalog(source_capabilities=SOURCE_CAPABILITIES):
                 'runtime_availability': 'LIVE_CAPABLE' if 'LIVE' in source.supported_data_modes else 'OFFLINE_ONLY',
                 'local_live_verification_status': source.local_live_verification_status,
                 'production_readiness': source.production_readiness})
+            if status == "INCOMPATIBLE":
+                for adapter in PERSISTED_INPUT_ADAPTERS:
+                    if adapter.source_id != source_id or not adapter.supports(meta):
+                        continue
+                    policy_gated = bool(adapter.policy_requirements)
+                    compatible.append({
+                        "source_id": source_id,
+                        "source_profile_id": adapter.profile_id,
+                        "provider_id": adapter.provider_id or source.provider_id,
+                        "display_name": adapter.profile_id.replace("_", " ").title(),
+                        "icon": source.icon,
+                        "status": ("SUPPORTED_BUT_POLICY_GATED" if policy_gated
+                                   else "SUPPORTED_AND_AVAILABLE"),
+                        "reason": (" ".join(adapter.policy_requirements)
+                                   if policy_gated else None),
+                        "metric": adapter.metric,
+                        "unit": adapter.unit,
+                        "capabilities": adapter.source_capabilities,
+                        "adapter_status": "PERSISTED_SOURCE_PROFILE",
+                        "runtime_availability": ("POLICY_GATED" if policy_gated
+                                                  else "PERSISTED"),
+                        "local_live_verification_status": "NOT_VERIFIED",
+                        "production_readiness": source.production_readiness,
+                    })
         item['sources'] = compatible
         methods.append(item)
     return {'version': 'algorithm-registry-v1', 'evaluation_status': 'NOT_YET_EVALUATED',

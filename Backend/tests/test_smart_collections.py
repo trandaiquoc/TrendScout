@@ -525,9 +525,9 @@ class SmartCollectionsTests(unittest.TestCase):
 
         catalog_response, results_response = __import__("asyncio").run(request())
         self.assertEqual(catalog_response.status_code, 200)
-        self.assertEqual(len(catalog_response.json()["algorithms"]), 12)
+        self.assertEqual(len(catalog_response.json()["algorithms"]), 13)
         self.assertEqual(results_response.status_code, 200)
-        self.assertEqual(len(results_response.json()["catalog"]["algorithms"]), 12)
+        self.assertEqual(len(results_response.json()["catalog"]["algorithms"]), 13)
         summaries = {row["algorithm_id"]: row for row in results_response.json()["summary"]}
         self.assertEqual(summaries["observed-volume-rank"]["completed"], 2)
         self.assertIn("NOT_YET_EVALUATED", results_response.json()["evaluation_status"])
@@ -1116,7 +1116,7 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(result["skipped"], 0)
         self.assertEqual(result["algorithms"]["eligible_keywords"], 212)
         self.assertEqual(result["algorithms"]["executed_keywords"], 212)
-        self.assertEqual(result["algorithms"]["registered_algorithms"], 12)
+        self.assertEqual(result["algorithms"]["registered_algorithms"], 13)
         self.assertEqual(self.store.search_keywords(limit=None, ids_only=True)["total"], 212)
         self.assertEqual(len(self.store.search_keywords(limit=None, ids_only=True)["ids"]), 212)
         with self.store.connect() as db:

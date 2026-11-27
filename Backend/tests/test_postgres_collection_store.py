@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,9 @@ from app.collections.postgres_store import PostgresCollectionStore
 from app.collections.service import CollectionService
 from app.collections.source_lineage import build_source_evidence
 from app.collections.store import keyword_record
-from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+from app.discovery.contracts import ProcessingGrant
+from app.sources.catalog import GOOGLE_SOURCE_ID, WIKIMEDIA_SOURCE_ID
+from app.sources.google_trends.trending_now import normalize_keyword
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import apply_migrations
 
@@ -894,7 +897,7 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
             first = service._analyze_persisted_keywords(changed)
             assert first["eligible_keywords"] == 1
             assert first["executed_keywords"] == 1
-            assert first["registered_algorithms"] == 12
+            assert first["registered_algorithms"] == 13
             assert first["persisted_algorithms"] == 4
             from unittest.mock import patch
             with patch("app.collections.service._algorithm_digest_input",
@@ -942,6 +945,248 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
                 "growth-ratio", "median-baseline", "observed-volume-rank",
                 "observed-percentile-rank",
             }
+        finally:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_google_trends_increase_rank_persists_lineage_and_skips_unchanged_inputs():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema)
+            service = CollectionService(store, fetch_model_inference_enabled=False)
+            fetched_at = "2026-11-26T12:00:00+00:00"
+            provider_data_at = "2026-11-26T11:30:00+00:00"
+            rows = []
+            for phrase, increase, volume in (
+                    ("linen pants", 300.0, 20000),
+                    ("portable solar generator", 100.0, 5000),
+                    ("quiet coffee maker", 300.0, 10000)):
+                _, identity = normalize_keyword(phrase)
+                rows.append({
+                    "data_source": "GOOGLE_TRENDS",
+                    "provider_id": "serpapi_google_trends_trending_now",
+                    "transport_id": "serpapi",
+                    "discovery_mode": "SERPAPI_TRENDING_NOW",
+                    "canonical_keyword": phrase,
+                    "canonical_keyword_identity": hashlib.sha256(
+                        identity.encode("utf-8")
+                    ).hexdigest(),
+                    "region": "US", "language": "en", "time_window_hours": 24,
+                    "provider_data_at": provider_data_at,
+                    "provider_created_at": provider_data_at,
+                    "fetched_at": fetched_at,
+                    "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
+                    "delivery_state": "FRESH", "quality_flags": [],
+                    "trend_clusters": [{
+                        "trend_cluster_id": "cluster-" + hashlib.sha256(
+                            phrase.encode("utf-8")
+                        ).hexdigest()[:12],
+                        "increase_percentage": increase,
+                        "search_volume": volume,
+                        "search_volume_display": f"{volume // 1000}K+",
+                        "search_volume_semantics": "PROVIDER_REPORTED_APPROXIMATE_BUCKET",
+                        "started_at": provider_data_at,
+                        "ended_at": fetched_at,
+                    }],
+                })
+            source = {
+                "source_id": GOOGLE_SOURCE_ID, "status": "SUCCESS",
+                "data_mode": "SYNTHETIC", "record_count": len(rows), "records": rows,
+            }
+            cleaned = [keyword_record(row, GOOGLE_SOURCE_ID, "SYNTHETIC") for row in rows]
+            assert all(cleaned)
+            lineage = build_source_evidence([source])["rows"]
+            persisted = store.persist_cleaned_keywords(
+                cleaned, source_evidence_rows=lineage,
+            )
+            first = service._analyze_google_trends_keywords(
+                persisted["records"], sources=[source],
+                keyword_id_map=persisted["id_remap"],
+                persisted_source_evidence_ids=persisted["source_evidence_ids"],
+            )
+            assert first["executed_keywords"] == 3
+            assert first["recomputed_algorithms"] == 3
+            assert first["rankable_cohort_count"] == 1
+
+            result_rows = connection.execute(sql.SQL("""SELECT k.keyword,r.status,r.value,
+                r.reason_code,r.result_json,r.input_digest FROM {} r JOIN {} k ON k.id=r.keyword_id
+                WHERE r.algorithm_id='google-trends-increase-rank' ORDER BY k.keyword""").format(
+                    sql.Identifier(schema, "algorithm_results"),
+                    sql.Identifier(schema, "keywords"))).fetchall()
+            ranks = {row[0]: row[2] for row in result_rows}
+            assert ranks == {"linen pants": 1, "portable solar generator": 3,
+                             "quiet coffee maker": 1}
+            completed_payload = json.loads(result_rows[0][4])
+            assert completed_payload["input_metric"] == "provider_increase_percentage"
+            assert completed_payload["provider_reported_increase_percentage"] in {100, 300}
+            assert completed_payload["approximate_search_volume_bucket"]["semantics"] == (
+                "PROVIDER_REPORTED_APPROXIMATE_BUCKET"
+            )
+            assert completed_payload["geography"] == {
+                "provider_region_filter": "US", "language_filter": "en",
+                "market_evidence": "US_FILTER_ONLY", "audience_residence_claimed": False,
+            }
+            assert completed_payload["evidence_references"]
+            reference_id = completed_payload["evidence_references"][0]["source_evidence_id"]
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE id=%s")
+                                      .format(sql.Identifier(schema, "source_evidence")),
+                                      (reference_id,)).fetchone()[0] == 1
+            assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")
+                                      .format(sql.Identifier(schema, "evidence_keywords")),
+                                      (reference_id,)).fetchone()[0] >= 1
+            exposed = store.algorithm_results_overview(
+                algorithm_id="google-trends-increase-rank", status="COMPLETED",
+            )
+            assert exposed["total"] == 3
+
+            import httpx
+
+            from app.main import create_app
+            from app.settings import Settings
+
+            app = create_app(read_only=True, settings=Settings.from_environment({
+                "TREND_SCOUT_ENVIRONMENT": "test", "TREND_SCOUT_READ_ONLY": "true",
+            }))
+            app.state.collection_service = service
+
+            async def read_algorithm_results():
+                async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://testserver") as client:
+                    return await client.get("/api/v1/algorithms/results", params={
+                        "algorithm_id": "google-trends-increase-rank",
+                        "status": "COMPLETED",
+                    })
+
+            api_response = asyncio.run(read_algorithm_results())
+            assert api_response.status_code == 200
+            assert api_response.json()["total"] == 3
+            assert all(item["algorithm_id"] == "google-trends-increase-rank"
+                       for item in api_response.json()["items"])
+
+            from unittest.mock import patch
+            with patch("app.composition.algorithm_engine") as engine_factory:
+                second = service._analyze_google_trends_keywords(
+                    persisted["records"], sources=[source],
+                    keyword_id_map=persisted["id_remap"],
+                    persisted_source_evidence_ids=persisted["source_evidence_ids"],
+                )
+                engine_factory.return_value.run.assert_not_called()
+            assert second["unchanged_keywords"] == 3
+            assert second["recomputed_algorithms"] == 0
+
+            refreshed_rows = [dict(row) for row in rows]
+            refreshed_rows[0] = {
+                **refreshed_rows[0],
+                "fetched_at": "2026-11-26T12:05:00+00:00",
+                "trend_clusters": [{
+                    **refreshed_rows[0]["trend_clusters"][0],
+                    "search_volume": 21000,
+                    "search_volume_display": "21K+",
+                }],
+            }
+            refreshed_source = {**source, "records": refreshed_rows}
+            refreshed_cleaned = [keyword_record(row, GOOGLE_SOURCE_ID, "SYNTHETIC")
+                                 for row in refreshed_rows]
+            refreshed_persisted = store.persist_cleaned_keywords(
+                refreshed_cleaned,
+                source_evidence_rows=build_source_evidence([refreshed_source])["rows"],
+            )
+            with patch("app.composition.algorithm_engine") as engine_factory:
+                metadata_refresh = service._analyze_google_trends_keywords(
+                    refreshed_persisted["records"], sources=[refreshed_source],
+                    keyword_id_map=refreshed_persisted["id_remap"],
+                    persisted_source_evidence_ids=refreshed_persisted["source_evidence_ids"],
+                )
+                engine_factory.return_value.run.assert_not_called()
+            assert metadata_refresh["unchanged_keywords"] == 3
+            assert metadata_refresh["recomputed_algorithms"] == 0
+            assert metadata_refresh["metadata_updated_results"] == 1
+            refreshed_payload = connection.execute(sql.SQL("""SELECT r.result_json FROM {} r
+                JOIN {} k ON k.id=r.keyword_id WHERE k.keyword='linen pants'
+                AND r.algorithm_id='google-trends-increase-rank'""").format(
+                    sql.Identifier(schema, "algorithm_results"),
+                    sql.Identifier(schema, "keywords"))).fetchone()[0]
+            refreshed_payload = (json.loads(refreshed_payload)
+                                 if isinstance(refreshed_payload, str) else refreshed_payload)
+            assert refreshed_payload["approximate_search_volume_bucket"]["value"] == 21000
+            assert refreshed_payload["freshness"]["fetched_at"] == (
+                "2026-11-26T12:05:00+00:00"
+            )
+            linked_evidence_ids = {
+                row[0] for row in connection.execute(sql.SQL("""SELECT evidence_id FROM {}
+                    WHERE keyword_id=%s""").format(sql.Identifier(schema, "evidence_keywords")),
+                    (refreshed_payload["keyword_id"],)).fetchall()
+            }
+            expected_evidence_ids = sorted(
+                linked_evidence_ids.intersection(refreshed_persisted["source_evidence_ids"])
+            )
+            assert [ref["source_evidence_id"]
+                    for ref in refreshed_payload["evidence_references"]] == expected_evidence_ids
+
+            changed_rows = [dict(row) for row in rows]
+            changed_rows[0]["trend_clusters"] = [{
+                **changed_rows[0]["trend_clusters"][0], "increase_percentage": 50.0,
+            }]
+            changed_source = {**source, "records": changed_rows}
+            changed_cleaned = [keyword_record(row, GOOGLE_SOURCE_ID, "SYNTHETIC")
+                               for row in changed_rows]
+            changed_persisted = store.persist_cleaned_keywords(
+                changed_cleaned,
+                source_evidence_rows=build_source_evidence([changed_source])["rows"],
+            )
+            changed = service._analyze_google_trends_keywords(
+                changed_persisted["records"], sources=[changed_source],
+                keyword_id_map=changed_persisted["id_remap"],
+                persisted_source_evidence_ids=changed_persisted["source_evidence_ids"],
+            )
+            assert changed["executed_keywords"] == 3
+            assert changed["recomputed_algorithms"] == 3
+
+            live_phrase = "live trend sample"
+            _, live_identity = normalize_keyword(live_phrase)
+            live_row = {
+                **rows[0],
+                "canonical_keyword": live_phrase,
+                "canonical_keyword_identity": hashlib.sha256(
+                    live_identity.encode("utf-8")
+                ).hexdigest(),
+                "trend_clusters": [{**rows[0]["trend_clusters"][0],
+                                    "trend_cluster_id": "live-cluster"}],
+            }
+            live_source = {**source, "data_mode": "LIVE", "records": [live_row],
+                           "record_count": 1}
+            live_cleaned = keyword_record(live_row, GOOGLE_SOURCE_ID, "LIVE")
+            live_lineage = build_source_evidence([live_source])["rows"]
+            live_persisted = store.persist_cleaned_keywords(
+                [live_cleaned], source_evidence_rows=live_lineage,
+            )
+            denied = ProcessingGrant(
+                GOOGLE_SOURCE_ID, True, False,
+                datetime.now(timezone.utc) + timedelta(minutes=5), "test-policy",
+            )
+            policy_result = service._analyze_google_trends_keywords(
+                live_persisted["records"], sources=[live_source],
+                processing_grants=(denied,),
+                keyword_id_map=live_persisted["id_remap"],
+                persisted_source_evidence_ids=live_persisted["source_evidence_ids"],
+            )
+            assert policy_result["skipped_keywords"] == 1
+            policy_row = connection.execute(sql.SQL("SELECT status,reason_code,value FROM {} "
+                "WHERE keyword_id=%s AND algorithm_id='google-trends-increase-rank'").format(
+                    sql.Identifier(schema, "algorithm_results")),
+                (live_persisted["records"][0]["id"],)).fetchone()
+            assert policy_row == ("SKIPPED", "POLICY_RESTRICTED", None)
         finally:
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 

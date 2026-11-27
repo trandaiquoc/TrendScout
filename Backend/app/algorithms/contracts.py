@@ -22,7 +22,7 @@ class Observation:
     date: date
     scope: Scope
     status: str
-    value: int | None
+    value: int | float | None
     snapshot_status: str = 'SUCCESS'
     rank: int | None = None
 
@@ -32,7 +32,7 @@ class AlgorithmInput:
     keyword_id: str
     scope: Scope
     analysis_date: date
-    current_value: int | None
+    current_value: int | float | None
     history: tuple[Observation, ...]
     window_days: int = 7
     minimum_samples: int = 3
@@ -81,7 +81,7 @@ class AlgorithmResult:
     value: float | int | None
     metric_name: str
     metric_unit: str
-    current_value: int | None
+    current_value: int | float | None
     baseline_value: float | None
     window_days: int
     sample_count: int

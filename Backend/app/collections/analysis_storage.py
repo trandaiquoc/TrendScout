@@ -153,6 +153,18 @@ class SQLiteAlgorithmAnalysisSession:
             result.setdefault(row["keyword_id"], {})[row["algorithm_id"]] = row["input_digest"]
         return result
 
+    def result_payloads_for(self, keyword_ids, algorithm_id):
+        identifiers = tuple(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" for _ in identifiers)
+        rows = self._db.execute(
+            "SELECT keyword_id,result_json FROM algorithm_results WHERE keyword_id IN ("
+            + placeholders + ") AND algorithm_id=?",
+            (*identifiers, algorithm_id),
+        ).fetchall()
+        return {row["keyword_id"]: row["result_json"] for row in rows}
+
     def upsert_results(self, results):
         self._db.executemany("""INSERT INTO algorithm_results(keyword_id,algorithm_id,version,status,
             reason_code,value,metric,unit,result_json,input_digest,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)

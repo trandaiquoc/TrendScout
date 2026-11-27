@@ -178,6 +178,16 @@ class PostgresAlgorithmAnalysisSession:
             result.setdefault(row["keyword_id"], {})[row["algorithm_id"]] = row["input_digest"]
         return result
 
+    def result_payloads_for(self, keyword_ids, algorithm_id):
+        identifiers = list(dict.fromkeys(keyword_ids))
+        if not identifiers:
+            return {}
+        rows = self._db.execute(sql.SQL("SELECT keyword_id,result_json FROM {} "
+                                        "WHERE keyword_id=ANY(%s) AND algorithm_id=%s")
+                                .format(self._table("algorithm_results")),
+                                (identifiers, algorithm_id)).fetchall()
+        return {row["keyword_id"]: row["result_json"] for row in rows}
+
     def upsert_results(self, results):
         if not results:
             return

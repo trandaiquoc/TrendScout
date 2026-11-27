@@ -12,6 +12,7 @@ from test_golden_contract import build_golden
 from app.algorithms.catalog import PersistedInputAdapter, catalog, persisted_keys_for_source
 from app.algorithms.catalog import registry as algorithm_registry
 from app.algorithms.contracts import AlgorithmInput, AlgorithmMetadata, Observation, Scope
+from app.algorithms.google_trends import INCREASE_METRIC, INCREASE_UNIT
 from app.algorithms.registry import AlgorithmRegistry
 from app.algorithms.runner import AlgorithmRunner
 from app.algorithms.strategies import (
@@ -22,7 +23,7 @@ from app.algorithms.strategies import (
     WikimediaLegacy,
 )
 from app.composition import algorithm_engine
-from app.sources.catalog import SOURCE_CAPABILITIES
+from app.sources.catalog import GOOGLE_SOURCE_ID, SOURCE_CAPABILITIES
 
 DAY = date(2026,1,8)
 SCOPE = Scope(SOURCE,'US','all-access','en.wikipedia','Example',METRIC,UNIT)
@@ -202,6 +203,30 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         # four tied in value, and none tied in time (tau-b = 24/sqrt(28*24)).
         self.assertAlmostEqual(result.value, (6 / 7) ** 0.5)
 
+    def test_google_trends_increase_rank_uses_only_same_snapshot_provider_signal(self):
+        scope = Scope(GOOGLE_SOURCE_ID, 'US_FILTER_ONLY', 'en',
+                      'google_trends_us_en_24h', 'keyword-a',
+                      INCREASE_METRIC, INCREASE_UNIT)
+        cohort = (
+            Observation(DAY, replace(scope, article='keyword-b'), 'OBSERVED', 120.5, 'SUCCESS'),
+            Observation(DAY, replace(scope, article='keyword-c'), 'OBSERVED', 110.0, 'SUCCESS'),
+            Observation(DAY, replace(scope, article='keyword-d'), 'OBSERVED', 80.0, 'SUCCESS'),
+        )
+        item = AlgorithmInput(
+            'keyword-a', scope, DAY, 110.0, (), window_days=1, minimum_samples=2,
+            current_snapshot_status='SUCCESS', cohort=cohort,
+        )
+        result = self.runner.run(item, ['google-trends-increase-rank@v1'])[0]
+        self.assertEqual((result.status, result.value, result.sample_count), ('COMPLETED', 2, 4))
+        self.assertEqual((result.metric_name, result.metric_unit),
+                         ('provider_increase_rank', 'ordinal_rank'))
+        self.assertIn('SINGLE_SNAPSHOT_COHORT', result.quality_flags)
+
+        partial = replace(item, current_snapshot_status='PARTIAL')
+        skipped = self.runner.run(partial, ['google-trends-increase-rank@v1'])[0]
+        self.assertEqual((skipped.status, skipped.reason_code, skipped.value),
+                         ('INSUFFICIENT_DATA', 'CURRENT_COVERAGE_UNCONFIRMED', None))
+
     def test_registry_catalog_is_metadata_driven_and_marks_unavailable_methods(self):
         response = catalog()
         ids = {item['algorithm_id'] for item in response['algorithms']}
@@ -212,8 +237,8 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual({key for key, status in execution.items()
                           if status == 'PERSISTED_SOURCE_ADAPTER'},
                          {'growth-ratio', 'median-baseline', 'observed-volume-rank',
-                          'observed-percentile-rank'})
-        self.assertEqual(len(execution), 12)
+                          'observed-percentile-rank', 'google-trends-increase-rank'})
+        self.assertEqual(len(execution), 13)
         self.assertEqual(execution['wikimedia-trend'], 'LEGACY_PATH_ONLY')
         self.assertEqual(execution['robust-z-mad'], 'NOT_EXECUTED_SOURCE_AND_RETENTION')
         self.assertEqual(execution['relative-source-rank'], 'REGISTERED_NO_QUERY_COHORT')
@@ -222,6 +247,18 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         self.assertEqual(growth['execution']['sources'], (SOURCE,))
         self.assertEqual(growth['execution']['input_adapters'],
                          ('wikimedia_pageviews_observation_projection',))
+        trends = next(item for item in response['algorithms']
+                      if item['algorithm_id'] == 'google-trends-increase-rank')
+        self.assertEqual(trends['execution']['input_profiles'][0]['profile_id'],
+                         'google_trends_us_en_24h')
+        self.assertIn('valid source ProcessingGrant',
+                      trends['execution']['policy_requirements'][0])
+        trend_profile = next(
+            source for source in trends['sources']
+            if source.get('source_profile_id') == 'google_trends_us_en_24h'
+        )
+        self.assertEqual(trend_profile['status'], 'SUPPORTED_BUT_POLICY_GATED')
+        self.assertEqual(trend_profile['metric'], 'provider_increase_percentage')
         relative = next(item for item in response['algorithms']
                         if item['algorithm_id'] == 'relative-source-rank')
         self.assertEqual(relative['execution']['sources'], ())
@@ -336,6 +373,9 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
             'growth-ratio', 'median-baseline', 'observed-volume-rank',
             'observed-percentile-rank',
         })
+        google_keys = persisted_keys_for_source(registered, 'google_web_serp')
+        self.assertEqual({registered.get(key).metadata.algorithm_id for key in google_keys},
+                         {'google-trends-increase-rank'})
 
     def test_relative_source_rank_uses_one_query_cohort_without_self_or_duplicate_items(self):
         scope = Scope('mock_web_search', 'US', 'web', 'query:portable power station',
