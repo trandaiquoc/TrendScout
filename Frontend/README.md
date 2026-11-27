@@ -14,6 +14,8 @@ To use a different port, set `$env:TREND_SCOUT_DEMO_PORT = '8123'` before runnin
 
 Collection counts show keywords placed directly in a Collection; parent counts include unique keywords in subcollections. Missing counts display as unavailable, not zero. Keyword details keep source records, analysis results and data limitations collapsed until opened. Wikimedia pageviews are approximate observed pageviews; they do not measure search volume or purchase intent.
 
+After a Fetch, source progress is shown separately from dataset materialization, algorithm processing and AI classification. AI jobs can remain pending, be policy-restricted, rate-limited or deferred; the UI shows processed counts and retry time when the server reports them. The Products view lets a user explicitly select up to 20 saved keywords from Keywords, Trends or Collections and request AI product hypotheses. Opening Products does not request inference. Regeneration is a deliberate action and consumes shared quota; cached results are labeled. Settings shows the server-reported models, shared/provider quota, cooldown and eligible/restricted sources. Product output is a research hypothesis, not a validated sales or market claim.
+
 ## Frontend structure
 
 - **public/index.html** contains the semantic workspace shell and all ten views.

@@ -1076,10 +1076,29 @@ class AIServiceTests(unittest.TestCase):
         resumed = service.resume_job(store, "automatic-fetch-job")
         self.assertEqual(resumed["status"], "COMPLETED")
         self.assertEqual(resumed["assigned"], [])
-        self.assertEqual(resumed["unassigned_keyword_ids"], ["keyword-1", "keyword-2"])
-        self.assertEqual(resumed["proposal_ids"], [])
-        self.assertEqual(store.persist_calls[0]["proposals"], [])
+        self.assertEqual(resumed["unassigned_keyword_ids"], [])
+        self.assertEqual(len(resumed["proposal_ids"]), 1)
+        self.assertEqual(store.persist_calls[0]["proposals"][0]["support_ids"],
+                         ["keyword-1", "keyword-2"])
+        self.assertEqual(store.persist_calls[0]["proposals"][0]["job_id"],
+                         "automatic-fetch-job")
         self.assertEqual(len(provider.calls), 2)
+
+    def test_capabilities_exposes_only_effective_source_policy_and_retry_time(self):
+        state = MemoryAtomicState()
+        state.transact("trendscout-ai-engine-v1", lambda value: (
+            {**value, "provider_retry_at": "2026-11-28T12:05:00+00:00"}, True,
+        ))
+        service = AIService(state, config=public_data_config(), provider=FakeProvider([]),
+                            utcnow=lambda: NOW)
+
+        capabilities = service.capabilities()
+
+        self.assertEqual(capabilities["provider_retry_at"], "2026-11-28T12:05:00+00:00")
+        self.assertEqual(capabilities["source_policy"]["profile"], PUBLIC_DATA)
+        self.assertEqual(capabilities["source_policy"]["eligible_sources"], [WIKIMEDIA_SOURCE_ID])
+        self.assertIn("youtube_video_search", capabilities["source_policy"]["restricted_sources"])
+        self.assertNotIn("api_key", capabilities)
 
     def test_exact_cross_source_keyword_is_one_prompt_group_and_fans_out_durable_ids(self):
         provider = FakeProvider([classification_response])

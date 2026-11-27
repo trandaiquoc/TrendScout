@@ -1538,13 +1538,13 @@ class CollectionStore:
     def collection_job(self, fetch_id):
         with self.connect() as db:
             if self.data_mode_scope:
-                row = db.execute("""SELECT f.*,d.algorithm_processing_status,
-                    d.ai_classification_status FROM fetch_jobs f JOIN dataset_snapshots d
+                row = db.execute("""SELECT f.*,d.materialization_status,
+                    d.algorithm_processing_status,d.ai_classification_status FROM fetch_jobs f JOIN dataset_snapshots d
                     ON d.dataset_id=f.fetch_id AND d.data_mode=? WHERE f.fetch_id=?""",
                     (self.data_mode_scope, fetch_id)).fetchone()
             else:
-                row = db.execute("""SELECT f.*,d.algorithm_processing_status,
-                    d.ai_classification_status FROM fetch_jobs f LEFT JOIN dataset_snapshots d
+                row = db.execute("""SELECT f.*,d.materialization_status,
+                    d.algorithm_processing_status,d.ai_classification_status FROM fetch_jobs f LEFT JOIN dataset_snapshots d
                     ON d.dataset_id=f.fetch_id WHERE f.fetch_id=?""", (fetch_id,)).fetchone()
             created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? "
                                  "ORDER BY created_at", (f"%{fetch_id}%",)).fetchall()

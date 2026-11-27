@@ -477,9 +477,15 @@ class AIService:
         else:
             error = None
         try:
-            verifications = self._transact(lambda state: (state, dict(state["model_verifications"])))
+            state_summary = self._transact(lambda state: (state, {
+                "verifications": dict(state["model_verifications"]),
+                "provider_retry_at": state.get("provider_retry_at"),
+            }))
+            verifications = state_summary.get("verifications", {})
+            provider_retry_at = state_summary.get("provider_retry_at")
         except Exception:
             verifications = {}
+            provider_retry_at = None
             storage_status = "UNAVAILABLE"
 
         def verification(model_id):
@@ -498,6 +504,14 @@ class AIService:
                 "recommendation": verification(self.config.recommendation_model),
             },
             "quota": quota,
+            "provider_retry_at": (provider_retry_at if isinstance(provider_retry_at, str)
+                                  and len(provider_retry_at) <= 64 else None),
+            "source_policy": {
+                "version": AI_TRANSFER_POLICY_VERSION,
+                "profile": self.config.data_profile,
+                "eligible_sources": sorted(self._allowed_sources),
+                "restricted_sources": sorted(known_ai_source_ids() - self._allowed_sources),
+            },
             "provider_quota": (self.provider.key_quota_metadata()
                                 if error is None and storage_status == "AVAILABLE" else None),
             "error_code": "AI_STORAGE_UNAVAILABLE" if storage_status != "AVAILABLE" else error,
@@ -1372,9 +1386,6 @@ class AIService:
                 expanded = {**proposal, "keyword_ids": support_ids}
                 expanded_proposals[_digest(expanded)] = expanded
             proposals_by_digest = expanded_proposals
-            if automatic:
-                proposals_by_digest = {}
-
             to_persist = []
             for item in eligible:
                 classification = results[item["id"]]

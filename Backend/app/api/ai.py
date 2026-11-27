@@ -119,7 +119,8 @@ def ai_capabilities(request: Request):
                 "classification": {"status": "NOT_CHECKED", "verified_at": None},
                 "recommendation": {"status": "NOT_CHECKED", "verified_at": None}},
             "quota": {"daily_used": None, "daily_limit": 40, "minute_used": None,
-                      "minute_limit": 20}, "provider_quota": None,
+                      "minute_limit": 20}, "provider_retry_at": None,
+            "source_policy": None, "provider_quota": None,
             "error_code": "AI_STORAGE_UNAVAILABLE"}
     try:
         return service.capabilities()
@@ -129,7 +130,8 @@ def ai_capabilities(request: Request):
                 "classification": {"status": "NOT_CHECKED", "verified_at": None},
                 "recommendation": {"status": "NOT_CHECKED", "verified_at": None}},
             "quota": {"daily_used": None, "daily_limit": 40, "minute_used": None,
-                      "minute_limit": 20}, "provider_quota": None,
+                      "minute_limit": 20}, "provider_retry_at": None,
+            "source_policy": None, "provider_quota": None,
             "error_code": "AI_STORAGE_UNAVAILABLE"}
 
 

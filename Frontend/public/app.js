@@ -6,6 +6,7 @@ import { formatDate, formatNumber, formatTimestamp } from './modules/format.js';
 import { applyLocale, getLocale, initializeLocale, t } from './modules/i18n.js';
 import { initializeTheme } from './modules/theme.js';
 import { initializeKeywordWorkbench } from './modules/keyword-workbench.js';
+import { initializeAiUi } from './modules/ai-ui.js';
 import { initializeSourceLibrary } from './modules/source-library.js';
 import { initializeResearchWorkspace } from './modules/research-workspace.js';
 import { initializeRunHistory } from './modules/run-history.js';
@@ -1102,6 +1103,58 @@ function renderFetchProgressSummary(fetchStatus) {
   return root;
 }
 
+function aiProcessingState(value) {
+  if (typeof value !== 'string') return t('common.unavailable');
+  const key = `ai.fetch.status.${value}`;
+  return t(key) === key ? value : t(key);
+}
+
+function renderFetchAiStatus(job, terminalFetch) {
+  const root = $('#fetch-ai-status');
+  if (!root) return;
+  root.replaceChildren();
+  root.hidden = !job;
+  if (!job) return;
+  root.append(element('h3', t('ai.fetch.title')));
+  const aiJobs = Array.isArray(job.ai_jobs) ? job.ai_jobs : [];
+  const processed = aiJobs.reduce((sum, item) => sum + (Number.isInteger(item?.processed) ? item.processed : 0), 0);
+  const eligible = Number.isInteger(job.eligible) ? job.eligible : null;
+  const pending = eligible === null ? null : Math.max(0, eligible - processed);
+  const countBy = (predicate) => aiJobs.filter(predicate).length;
+  const deferred = countBy((item) => item?.status === 'DEFERRED')
+    + (job.ai_classification_status === 'DEFERRED' && !aiJobs.length ? 1 : 0);
+  const policyRestricted = countBy((item) => item?.error_code === 'AI_POLICY_DENIED')
+    + (job.ai_classification_status === 'POLICY_RESTRICTED' && !aiJobs.length ? 1 : 0);
+  const rateLimited = countBy((item) => item?.error_code === 'AI_RATE_LIMITED')
+    + (job.ai_classification_status === 'RATE_LIMITED' && !aiJobs.length ? 1 : 0);
+  const unavailable = countBy((item) => ['MODEL_UNAVAILABLE', 'AI_DISABLED', 'AI_STORAGE_UNAVAILABLE',
+    'AI_MODEL_UNAVAILABLE', 'AI_KEY_MISSING', 'AI_PROVIDER_UNAVAILABLE'].includes(item?.error_code)
+    || item?.status === 'MODEL_UNAVAILABLE');
+  const retryAt = aiJobs.map((item) => item?.retry_at).find((value) => typeof value === 'string')
+    || job.retry_at || null;
+  const fields = [
+    [t('ai.fetch.source-fetch'), aiProcessingState(terminalFetch?.status)],
+    [t('ai.fetch.materialization'), aiProcessingState(job.materialization_status)],
+    [t('ai.fetch.algorithms'), aiProcessingState(job.algorithm_processing_status)],
+    [t('ai.fetch.classification'), aiProcessingState(job.ai_classification_status)],
+    [t('ai.fetch.processed-total'), eligible === null ? t('common.unavailable')
+      : t('ai.fetch.processed-total-value', { processed: number(processed), total: number(eligible) })],
+    [t('ai.fetch.pending'), number(pending)],
+    [t('ai.fetch.deferred'), number(deferred)],
+    [t('ai.fetch.policy-restricted'), number(policyRestricted)],
+    [t('ai.fetch.unavailable'), number(unavailable)],
+    [t('ai.fetch.rate-limited'), number(rateLimited)],
+    [t('ai.fetch.retry-at'), retryAt ? formatTimestamp(retryAt) : t('common.unavailable')],
+  ];
+  const dl = document.createElement('dl');
+  for (const [term, value] of fields) {
+    const row = document.createElement('div');
+    row.append(element('dt', term), element('dd', value));
+    dl.append(row);
+  }
+  root.append(dl);
+}
+
 function renderFetchPresentation() {
   const presentation = state.fetchPresentation;
   const messageKey = FETCH_STATE_MESSAGES[presentation.kind];
@@ -1127,6 +1180,10 @@ function renderFetchPresentation() {
     && !acceptedYoutubePolicyVersion();
 
   const showCapabilityNote = state.capabilitiesStale || state.capabilityCheckFailed;
+  if (busy) {
+    const aiStatus = $('#fetch-ai-status');
+    if (aiStatus) { aiStatus.hidden = true; aiStatus.replaceChildren(); }
+  }
   if (capabilityNote) {
     capabilityNote.hidden = !showCapabilityNote;
     capabilityNote.textContent = showCapabilityNote
@@ -1320,6 +1377,7 @@ function refreshCollectionJob(fetchId, terminalFetch = null) {
   const poll = async (attempt = 0, viewsAlreadyRefreshed = false) => {
     try {
       const job = await getJson(`/api/v1/collections/jobs/${encodeURIComponent(fetchId)}`, { locale: getLocale() });
+      renderFetchAiStatus(job, terminalFetch);
       if (job.status === 'NOT_PROCESSED' && isVercelSharedLive(state.capabilities)
           && terminalFetch?.fetch_id === fetchId) {
         const recovered = await recoverLatestVercelCollectionSnapshot(terminalFetch);
@@ -2864,6 +2922,9 @@ function renderRoute(route, { refresh = true, loadDashboard = true } = {}) {
   const selected = route.page;
   const dashboardTab = route.tab || 'overview';
   const viewChanged = state.activeView !== selected || state.activeNav !== route.nav;
+  document.documentElement.classList.toggle(
+    'keyword-discovery-route', selected === 'overview' && route.nav === 'keywords',
+  );
   state.activeView = selected;
   state.activeNav = route.nav;
   state.activeRoute = route;
@@ -3407,6 +3468,18 @@ function bindEvents() {
     state.selectedKeywordIds.clear();
     updateKeywordBulkUi();
   });
+  $('#keyword-recommend').addEventListener('click', () => {
+    if (state.selectAllFiltered) {
+      announce(t('ai.products.select-explicitly'), true);
+      return;
+    }
+    const keywordIds = [...state.selectedKeywordIds];
+    if (!keywordIds.length || keywordIds.length > 20) {
+      announce(t(keywordIds.length > 20 ? 'ai.products.scope-limit' : 'ai.products.select-keywords', { max: 20 }), true);
+      return;
+    }
+    document.dispatchEvent(new CustomEvent('trendscout:recommend-keywords', { detail: { keywordIds } }));
+  });
   $('#keyword-bulk-action').addEventListener('change', (event) => {
     const target = $('#keyword-bulk-target');
     target.disabled = ['EXCLUDE', 'RESTORE'].includes(event.currentTarget.value);
@@ -3494,6 +3567,7 @@ function bindEvents() {
 initializeLocale();
 initializeTheme();
 initializeScheduleForm();
+initializeAiUi();
 const sourceLibrary = initializeSourceLibrary();
 const researchWorkspace = initializeResearchWorkspace({ announce, localizedSourceName });
 const runHistory = initializeRunHistory({

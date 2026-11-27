@@ -18,7 +18,7 @@ The AI boundary is implemented in this branch. The Database goal owns the genera
 - Source geography and observation time remain evidence metadata. English text or a US-targeted product hypothesis does not establish US authorship, readership, or demand.
 - An AI failure does not discard persisted keywords, evidence, existing Collection assignments, or algorithm results. Resuming a Fetch's stored AI batches does not run Fetch, source adapters, or algorithms.
 - When the server-side AI feature switch is enabled for `PUBLIC_DATA` or `STRICT_PRIVATE`, automatic Collection matching runs after Fetch through the existing Collection processing handoff. Source Fetch becomes terminal before inference; local processing continues after its response, while Vercel uses the subsequent retained-checkpoint Collection recovery request. This AI execution is represented by PostgreSQL-backed AI jobs, not a Vercel fire-and-forget task.
-- Automatic Fetch classification considers current active Collections and only writes to those with `auto_match=true`. The model's score is a heuristic compared with the configured assignment threshold. Unmatched keywords remain unassigned; model-produced new-Collection proposals are ignored by this automatic path and are handled by the proposal workflow separately.
+- Automatic Fetch classification considers current active Collections and only writes to those with `auto_match=true`. The model's score is a heuristic compared with the configured assignment threshold. Valid model-produced new-Collection proposals are persisted as pending proposals from the same inference output; they are never auto-accepted or turned into Collections. Duplicate suppression, eligible source/evidence checks and proposal expiry still apply. Unmatched keywords without a valid proposal remain unassigned.
 
 ## 2. OpenRouter and free-only admission
 
@@ -96,7 +96,7 @@ retry_at is returned only when a provider Retry-After or supported reset header 
 
 ### GET /api/v1/ai/capabilities
 
-Returns feature state, configured model IDs, last metadata verification, internal quota, and safe provider quota counters when GET /api/v1/key succeeds. Key labels, hashes, and key values are never returned.
+Returns feature state, configured model IDs, last metadata verification, internal quota, safe provider quota counters when GET /api/v1/key succeeds, server-side source-policy eligibility/restrictions, and the shared provider retry timestamp when known. Key labels, hashes, profile secrets, and key values are never returned. The source policy and retry fields are read-only diagnostics; clients cannot choose a data profile.
 
     {
       "enabled": false,
@@ -107,6 +107,13 @@ Returns feature state, configured model IDs, last metadata verification, interna
         "recommendation": {"status": "NOT_CONFIGURED", "verified_at": null}
       },
       "quota": {"daily_used": 0, "daily_limit": 40, "minute_used": 0, "minute_limit": 20},
+      "provider_retry_at": null,
+      "source_policy": {
+        "version": "ai-transfer-policy-2026-11-27-v1",
+        "profile": "PUBLIC_DATA",
+        "eligible_sources": ["wikimedia_pageviews_top_per_country"],
+        "restricted_sources": ["google_web_serp", "bing_web_serp", "youtube_video_search", "wikimedia_entity_context"]
+      },
       "provider_quota": null,
       "error_code": "AI_DISABLED"
     }
@@ -123,7 +130,7 @@ Resumes only PENDING, DEFERRED, MODEL_UNAVAILABLE, INVALID_OUTPUT, or expired RU
 
 ### GET /api/v1/collections/jobs/{fetch_id}
 
-Returns the persisted Collection-processing status plus stable `ai_job_ids` and per-batch status, progress, retry time, and sanitized error code.
+Returns the persisted Collection-processing status, dataset `materialization_status`, algorithm and AI classification states, stable `ai_job_ids`, and per-batch status, progress, retry time, and sanitized error code.
 
 ### POST /api/v1/collections/jobs/{fetch_id}/resume
 
@@ -165,7 +172,7 @@ Classification is batched. Initial batch size is bounded by model limits and tok
 
 The score is a model self-assessment used with an initial 0.82 assignment threshold; it is not a probability, calibrated confidence, or validated accuracy. Only active Collections with auto_match=true can receive automatic assignments. A matching Collection listed in a user's removal feedback is excluded.
 
-For automatic Fetch classification (`automatic=true`), model-proposed new Collections are not persisted. Keywords below threshold or without a matching eligible Collection remain unassigned until the separate proposal workflow is used.
+For automatic Fetch classification (`automatic=true`), valid new-Collection proposals from the returned model output are persisted into the existing pending proposal workflow. The system does not call inference again to recreate them and does not create a Collection until a user accepts a proposal. Proposal source/evidence freshness, minimum support, duplicate suppression, user state and content validity are checked before persistence. Keywords below threshold without a valid proposal remain unassigned.
 
 Setting `preview=true` returns proposed assignments and proposal drafts with `mode="PREVIEW"`. It creates no Collection, proposal record, assignment, or reconciliation run. The preview separates `UNCHANGED_MEMBERSHIP`, `AI_ASSIGNMENT_CHANGE`, `AI_ASSIGNMENT_REMOVAL`, `AI_ASSIGNMENT_REMOVAL_TO_PROPOSAL`, `NEW_AI_ASSIGNMENT`, `NEW_COLLECTION_PROPOSAL`, `NO_COLLECTION`, `USER_PROTECTED`, and other skipped states. The validated AI result may still be cached and the preview job/quota usage is recorded.
 

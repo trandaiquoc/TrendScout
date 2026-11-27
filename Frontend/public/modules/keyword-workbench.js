@@ -22,6 +22,9 @@ const state = { items: [], suggestions: [], summary: null, rows: [], total: null
   selected: new Set(), allFiltered: false, mode: 'AUTO_CREATE', expanded: new Set(), query: '',
   collectionId: '', filterState: 'all', classification: 'all', source: '', evidence: 'all', sort: 'recent',
   dateFrom: '', dateTo: '', detailSequence: 0, detailTrigger: null, detailId: null, collectionSequence: 0, mobileOpen: false };
+let aiPreview = null;
+let aiPreviewRequestDigest = null;
+let aiPreviewRequestKey = null;
 
 function option(select, value, key, fallback = key) {
   const node = make('option', labels(key, fallback)); node.value = value; select.append(node); return node;
@@ -318,6 +321,178 @@ function collectionPicker(options, label) {
 function status(text, error = false) { const node = $('#workbench-status'); node.textContent = text; node.classList.toggle('notice--error', error); }
 function idsInQuery() { return state.collectionId ? [state.collectionId] : []; }
 
+function sendProductRecommendationRequest(ids) {
+  const keywordIds = [...new Set(ids)].filter((id) => typeof id === 'string' && id.length <= 64);
+  if (!keywordIds.length || keywordIds.length > 20) {
+    status(formatted('ai.products.scope-limit', { max: 20 }, 'Select between 1 and {max} keywords.'), true);
+    return;
+  }
+  document.dispatchEvent(new CustomEvent('trendscout:recommend-keywords', { detail: { keywordIds } }));
+}
+
+function buildAiReclassificationControls() {
+  const details = make('details', '', 'workbench-ai-tools');
+  details.append(make('summary', labels('ai.reclassify.title', 'AI reclassification')));
+  const content = make('div', '', 'workbench-ai-tools-content');
+  const scopeLabel = make('label', '', 'workbench-ai-field');
+  scopeLabel.append(make('span', labels('ai.reclassify.scope', 'Keywords to review')));
+  const scope = make('select'); scope.id = 'workbench-ai-scope';
+  option(scope, 'selected', 'ai.reclassify.selected', 'Selected keywords');
+  option(scope, 'collection', 'ai.reclassify.collection', 'A selected Collection');
+  option(scope, 'unassigned', 'ai.reclassify.unassigned', 'Unassigned keywords');
+  scopeLabel.append(scope);
+  const collectionLabel = make('label', '', 'workbench-ai-field');
+  collectionLabel.id = 'workbench-ai-collection-field'; collectionLabel.hidden = true;
+  collectionLabel.append(make('span', labels('ai.reclassify.choose-collection', 'Choose Collection')));
+  const collection = make('select'); collection.id = 'workbench-ai-collection';
+  option(collection, '', 'dataset.choose-collection', 'Choose Collection');
+  collectionLabel.append(collection);
+  scope.addEventListener('change', () => { collectionLabel.hidden = scope.value !== 'collection'; });
+  const previewButton = button(labels('ai.reclassify.preview', 'Preview AI changes'), 'button button-secondary');
+  previewButton.id = 'workbench-ai-preview-trigger';
+  previewButton.addEventListener('click', () => startAiPreview());
+  const ideasButton = button(labels('ai.products.open-selected', 'Explore product ideas from selected keywords'));
+  ideasButton.addEventListener('click', () => sendProductRecommendationRequest([...state.selected]));
+  content.append(scopeLabel, collectionLabel, previewButton, ideasButton);
+  const preview = make('div', '', 'workbench-ai-preview');
+  preview.id = 'workbench-ai-preview'; preview.hidden = true;
+  preview.setAttribute('role', 'status'); preview.setAttribute('aria-live', 'polite');
+  content.append(preview); details.append(content);
+  return details;
+}
+
+function classificationRequestError(error) {
+  const code = error?.body?.detail?.code || error?.body?.code;
+  const known = {
+    AI_INPUT_CHANGED: 'ai.reclassify.stale', AI_PREVIEW_EXPIRED: 'ai.reclassify.expired',
+    AI_QUOTA_EXHAUSTED: 'ai.error.quota', AI_RATE_LIMITED: 'ai.error.rate-limited',
+    AI_POLICY_DENIED: 'ai.error.restricted', AI_DISABLED: 'ai.error.unavailable',
+  };
+  if (known[code]) return labels(known[code], code);
+  if (error?.status === 429) return labels('ai.error.rate-limited', 'AI provider rate limited the request.');
+  return labels('ai.error.request', 'The AI request could not be completed. Existing data was kept.');
+}
+
+function renderAiPreview() {
+  const root = $('#workbench-ai-preview');
+  if (!root) return;
+  const trigger = $('#workbench-ai-preview-trigger');
+  if (trigger) trigger.disabled = aiPreview?.loading === true;
+  root.replaceChildren(); root.hidden = !aiPreview;
+  if (!aiPreview) return;
+  if (aiPreview.loading) { root.append(make('p', labels('ai.reclassify.loading', 'Preparing the classification preview…'))); return; }
+  if (aiPreview.error) { root.append(make('p', aiPreview.error, 'notice notice--error')); return; }
+  const result = aiPreview.result || {};
+  root.append(make('h3', labels('ai.reclassify.preview-title', 'Review before applying')));
+  if (aiPreview.applied) root.append(make('p', labels('ai.reclassify.applied', 'The saved preview was applied.')));
+  if (aiPreview.rolledBack) root.append(make('p', labels('ai.reclassify.rolled-back', 'The AI membership change was rolled back.')));
+  const statusCounts = new Map();
+  for (const row of Array.isArray(result.classification_statuses) ? result.classification_statuses : []) {
+    if (typeof row?.status === 'string') statusCounts.set(row.status, (statusCounts.get(row.status) || 0) + 1);
+  }
+  const changed = Array.isArray(result.changed_assignments) ? result.changed_assignments : [];
+  const entries = [
+    ['ai.reclassify.unchanged', 'Unchanged', result.unchanged_memberships?.length ?? statusCounts.get('UNCHANGED_MEMBERSHIP') ?? 0],
+    ['ai.reclassify.new', 'New assignments', result.new_assignments?.length ?? statusCounts.get('NEW_AI_ASSIGNMENT') ?? 0],
+    ['ai.reclassify.changed', 'Changed AI assignments', changed.filter((item) => item.collection_id !== null).length || statusCounts.get('AI_ASSIGNMENT_CHANGE') || 0],
+    ['ai.reclassify.removed', 'Removed AI assignments', changed.filter((item) => item.collection_id === null).length || statusCounts.get('AI_ASSIGNMENT_REMOVAL') || 0],
+    ['ai.reclassify.proposals', 'New proposals', result.proposals?.length ?? 0],
+    ['ai.reclassify.unassigned-count', 'Unassigned', result.unassigned_keyword_ids?.length ?? 0],
+    ['ai.reclassify.protected', 'User-protected', result.user_protected_keyword_ids?.length ?? statusCounts.get('USER_PROTECTED') ?? 0],
+    ['ai.reclassify.skipped', 'Skipped', result.skipped_keyword_ids?.length ?? statusCounts.get('SKIPPED') ?? 0],
+  ];
+  const list = make('ul');
+  for (const [key, fallback, value] of entries) {
+    list.append(make('li', formatted('ai.reclassify.count', { label: labels(key, fallback), count: number(value) }, '{label}: {count}')));
+  }
+  root.append(list);
+  for (const proposal of Array.isArray(result.proposals) ? result.proposals : []) {
+    if (typeof proposal?.name === 'string') root.append(make('p', proposal.name));
+  }
+  const actions = make('div', '', 'workbench-proposal-actions');
+  if (result.status === 'COMPLETED' && result.mode === 'PREVIEW' && !aiPreview.applied) {
+    const apply = button(labels('ai.reclassify.apply', 'Apply this saved preview'), 'button button-primary');
+    apply.addEventListener('click', () => applyAiPreview(aiPreview.job_id)); actions.append(apply);
+  }
+  if (!['COMPLETED', 'RUNNING'].includes(result.status) && aiPreview.job_id) {
+    const resume = button(labels('ai.reclassify.resume', 'Resume deferred classification'));
+    resume.addEventListener('click', () => resumeAiPreview(aiPreview.job_id)); actions.append(resume);
+  }
+  if (aiPreview.applied && result.membership_reconciliation_id && !aiPreview.rolledBack) {
+    const rollback = button(labels('ai.reclassify.rollback', 'Roll back AI assignments'));
+    rollback.addEventListener('click', () => rollbackAiPreview(result.membership_reconciliation_id)); actions.append(rollback);
+  }
+  if (actions.childElementCount) root.append(actions);
+}
+
+async function startAiPreview({ keywordIds = null } = {}) {
+  if (aiPreview?.loading) return;
+  let disclosure = $('#workbench-ai-preview')?.closest('details');
+  while (disclosure) {
+    disclosure.open = true;
+    disclosure = disclosure.parentElement?.closest('details') || null;
+  }
+  const selectedScope = $('#workbench-ai-scope')?.value || 'selected';
+  const body = { keyword_ids: [], collection_ids: [], include_unassigned: false, preview: true };
+  if (Array.isArray(keywordIds)) body.keyword_ids = [...new Set(keywordIds)];
+  else if (selectedScope === 'selected') {
+    if (state.allFiltered) { status(labels('ai.reclassify.select-explicitly', 'Select up to 200 visible keywords; select-all-filtered is not a bounded AI scope.'), true); return; }
+    body.keyword_ids = [...state.selected];
+  } else if (selectedScope === 'collection') {
+    const id = $('#workbench-ai-collection')?.value;
+    const item = state.items.find((value) => value.id === id);
+    if (!id || !item) { status(labels('ai.reclassify.choose-collection', 'Choose Collection first.'), true); return; }
+    const size = item.subtree_unique_keyword_count ?? item.membership_count;
+    if (Number.isInteger(size) && size > 200) { status(labels('ai.reclassify.collection-too-large', 'This Collection exceeds the 200-keyword job limit. Select a smaller set of keywords.'), true); return; }
+    body.collection_ids = [id];
+  } else {
+    const size = state.summary?.unclassified_keywords;
+    if (!Number.isInteger(size)) { status(labels('ai.reclassify.scope-unavailable', 'The unassigned keyword count is unavailable. Reload Collections before continuing.'), true); return; }
+    if (size > 200) { status(labels('ai.reclassify.unassigned-too-large', 'There are more than 200 unassigned keywords. Select a smaller set from the keyword table.'), true); return; }
+    body.include_unassigned = true;
+  }
+  if (!body.keyword_ids.length && !body.collection_ids.length && !body.include_unassigned) { status(labels('ai.reclassify.no-selection', 'Select keywords or choose a Collection scope.'), true); return; }
+  if (body.keyword_ids.length > 200) { status(labels('ai.reclassify.too-many', 'Select no more than 200 keywords.'), true); return; }
+  const requestDigest = JSON.stringify(body);
+  if (requestDigest !== aiPreviewRequestDigest) {
+    aiPreviewRequestDigest = requestDigest;
+    aiPreviewRequestKey = `ui-${crypto.randomUUID()}`;
+  }
+  aiPreview = { loading: true }; renderAiPreview();
+  try {
+    const result = await requestJson('/api/v1/ai/classifications/reclassify', {
+      method: 'POST', body, locale: getLocale(), headers: { 'Idempotency-Key': aiPreviewRequestKey },
+    });
+    aiPreview = { job_id: result.job_id, result }; renderAiPreview();
+  } catch (error) { aiPreview = { error: classificationRequestError(error) }; renderAiPreview(); }
+}
+
+async function resumeAiPreview(jobId) {
+  try {
+    const result = await requestJson(`/api/v1/ai/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST', locale: getLocale() });
+    aiPreview = { ...aiPreview, result };
+  } catch (error) { aiPreview = { ...aiPreview, error: classificationRequestError(error) }; }
+  renderAiPreview();
+}
+
+async function applyAiPreview(jobId) {
+  if (!jobId) return;
+  try {
+    const result = await requestJson(`/api/v1/ai/classifications/previews/${encodeURIComponent(jobId)}/apply`, { method: 'POST', locale: getLocale() });
+    aiPreview = { ...aiPreview, applied: true, result }; await refresh();
+  } catch (error) { aiPreview = { ...aiPreview, error: classificationRequestError(error) }; }
+  renderAiPreview();
+}
+
+async function rollbackAiPreview(runId) {
+  if (!runId || !window.confirm(labels('ai.reclassify.confirm-rollback', 'Roll back the AI assignment change?'))) return;
+  try {
+    await requestJson(`/api/v1/collections/reconciliation/${encodeURIComponent(runId)}/rollback`, { method: 'POST', locale: getLocale() });
+    aiPreview = { ...aiPreview, rolledBack: true }; await refresh();
+  } catch (error) { aiPreview = { ...aiPreview, error: classificationRequestError(error) }; }
+  renderAiPreview();
+}
+
 function build() {
   const root = $('#workbench-root'); root.replaceChildren();
   const toolbar = make('div', '', 'workbench-toolbar');
@@ -334,11 +509,10 @@ function build() {
     catch (error) { status(error.message || labels('collections.error', 'Could not save setting'), true); mode.value = state.mode; }
   });
   modeLabel.append(mode);
-  const reclassify=button(labels('workbench.reclassify','Organize saved keywords again'),'button button-secondary');reclassify.addEventListener('click',async()=>{reclassify.disabled=true;status(labels('workbench.reclassify-running','Organizing from saved evidence…'));try{const job=await requestJson('/api/v1/collections/reclassify',{method:'POST',locale:getLocale()});await refresh();if(job.status==='MODEL_UNAVAILABLE')status(labels('collections.model-unavailable','Keywords could not be organized automatically. Existing data was kept.'),true);else if(job.status==='COMPLETED')status(formatted('workbench.reclassify-complete',{processed:number(job.processed),eligible:number(job.eligible),assigned:number(job.assigned),unassigned:number(job.unassigned)},'Reviewed {processed} of {eligible} keywords; placed {assigned}; left {unassigned} outside Collections.'));else if(job.status==='FAILED')status(labels('workbench.reclassify-failed','Keywords could not be organized. Existing data was kept.'),true);else status(labels('workbench.reclassify-pending','Organization is still running. Check back shortly.'));}catch(error){status(error.message||labels('collections.error','Could not organize keywords'),true);}finally{reclassify.disabled=false;}});
   const organization = make('details', '', 'workbench-organization');
   organization.append(make('summary', labels('collections.mode', 'Automatic classification')));
   const organizationContent = make('div', '', 'workbench-organization-content');
-  organizationContent.append(modeLabel, reclassify);
+  organizationContent.append(modeLabel, buildAiReclassificationControls());
   organization.append(organizationContent);
   toolbar.append(toggle, organization);
   root.append(toolbar);
@@ -540,10 +714,11 @@ async function refresh() {
     const mode=$('#workbench-mode');if(mode)mode.value=state.mode;
     const source=$('#workbench-source');if(source){const current=state.source;source.replaceChildren();option(source,'','workbench.all-sources','All sources');for(const value of response.summary?.sources||[]){const op=make('option',sourceName(value));op.value=value;source.append(op);}source.value=current;}
     const target=$('#workbench-target'),moveSource=$('#workbench-source-target'); if(target){target.replaceChildren();option(target,'','dataset.choose-collection','Choose Collection');for(const item of state.items){const op=make('option',nameOf(item));op.value=item.id;target.append(op);}}
+    const aiTarget=$('#workbench-ai-collection');if(aiTarget){const current=aiTarget.value;aiTarget.replaceChildren();option(aiTarget,'','dataset.choose-collection','Choose Collection');for(const item of state.items){const op=make('option',nameOf(item));op.value=item.id;aiTarget.append(op);}if(state.items.some(item=>item.id===current))aiTarget.value=current;}
     if(moveSource){moveSource.replaceChildren();option(moveSource,'','workbench.source-collection','Source Collection');for(const item of state.items){const op=make('option',nameOf(item));op.value=item.id;moveSource.append(op);}}
-    renderTree();renderSuggestions();renderSummary();
+    renderTree();renderSuggestions();renderSummary();renderAiPreview();
     await loadRows(usesDefaultKeywordPage() ? response.keyword_page : null);
-  } catch(error){state.items=[];state.suggestions=[];state.summary=null;state.rows=[];state.total=null;state.selected.clear();state.allFiltered=false;renderTree();renderSuggestions();renderSummary();renderTable();status(error.message||labels('collections.error','Could not load Collections'),true);}
+  } catch(error){state.items=[];state.suggestions=[];state.summary=null;state.rows=[];state.total=null;state.selected.clear();state.allFiltered=false;renderTree();renderSuggestions();renderSummary();renderAiPreview();renderTable();status(error.message||labels('collections.error','Could not load Collections'),true);}
 }
 async function loadRows(preloadedResult = null) {
   const sequence = ++state.sequence;
@@ -588,6 +763,8 @@ function renderSuggestions() {
     card.append(title, description);
 
     const support = parseSupportIds(proposal.support_ids);
+    let supportDetail = null;
+    const selectedSupport = new Set(support);
     card.append(make('small', formatted('workbench.proposal-support', {
       count: number(support.length),
     }, 'Supported by ' + number(support.length) + ' keywords')));
@@ -597,6 +774,14 @@ function renderSuggestions() {
       card.append(make('p', labels('workbench.proposal-reason-unavailable',
         'The proposal reason was not reported.'), 'fine-print'));
     }
+    if (typeof proposal.uncertainty === 'string' && proposal.uncertainty.trim()) {
+      card.append(make('p', formatted('ai.proposal.uncertainty', { value: proposal.uncertainty }, 'Uncertainty: {value}'), 'fine-print'));
+    }
+    const sourceIds = Array.isArray(proposal.source_ids) ? proposal.source_ids : [];
+    card.append(make('small', formatted('ai.proposal.evidence-meta', {
+      sources: sourceIds.map(sourceName).join(', ') || labels('common.unavailable', 'Unavailable'),
+      count: number(Array.isArray(proposal.evidence_ids) ? proposal.evidence_ids.length : 0),
+    }, 'Sources: {sources} · Evidence references: {count}')));
 
     const edit = make('details', '', 'workbench-proposal-edit');
     edit.append(make('summary', labels('workbench.proposal-edit', 'Review and edit')));
@@ -624,42 +809,58 @@ function renderSuggestions() {
     evidence.append(make('summary', labels('workbench.proposal-supporting-keywords',
       'Supporting keywords')));
     const evidenceList = make('ul');
-    const evidenceStatus = make('p', labels('workbench.proposal-support-prompt',
-      'Open to load up to five saved keyword names.'), 'fine-print');
+    const evidenceStatus = make('p', labels('ai.proposal.support-prompt',
+      'Open to load all saved keywords, sources, and observation dates.'), 'fine-print');
     evidence.append(evidenceList, evidenceStatus);
-    evidence.addEventListener('toggle', async () => {
-      if (!evidence.open || evidence.dataset.loaded === 'true' || evidence.dataset.loaded === 'loading') return;
+    async function loadProposalSupport() {
+      if (supportDetail) return supportDetail;
+      if (evidence.dataset.loaded === 'loading') return null;
       evidence.dataset.loaded = 'loading';
       evidenceStatus.textContent = labels('common.loading', 'Loading');
-      const ids = support.filter((id) => typeof id === 'string' && id.length <= 64).slice(0, 5);
+      const ids = support.filter((id) => typeof id === 'string' && id.length <= 64);
       if (!ids.length) {
         evidenceStatus.textContent = labels('workbench.proposal-support-unavailable',
           'Supporting keyword records are unavailable.');
         evidence.dataset.loaded = 'true';
-        return;
+        return null;
       }
       try {
-        const records = await Promise.all(ids.map((id) => getJson(
-          '/api/v1/collections/keywords/' + encodeURIComponent(id), { locale: getLocale() },
-        )));
+        supportDetail = await getJson('/api/v1/collections/suggestions/'
+          + encodeURIComponent(proposal.id), { locale: getLocale() });
+        const records = Array.isArray(supportDetail.keywords) ? supportDetail.keywords : [];
+        selectedSupport.clear();
+        for (const id of parseSupportIds(supportDetail.support_ids)) selectedSupport.add(id);
         evidenceList.replaceChildren();
         for (const record of records) {
-          const keyword = typeof record?.keyword === 'string' && record.keyword.trim()
-            ? record.keyword : labels('common.unavailable', 'Unavailable');
-          const source = typeof record?.source === 'string' ? ' · ' + sourceName(record.source) : '';
-          evidenceList.append(make('li', keyword + source));
+          const item = make('li');
+          const label = make('label', '', 'workbench-proposal-keyword');
+          const checkbox = make('input'); checkbox.type = 'checkbox'; checkbox.value = record.id || '';
+          checkbox.checked = selectedSupport.has(record.id); checkbox.disabled = record.available !== true;
+          checkbox.addEventListener('change', () => {
+            if (checkbox.checked) selectedSupport.add(record.id);
+            else selectedSupport.delete(record.id);
+          });
+          const observedAt = record.observed_at ? formatTimestamp(record.observed_at, getLocale()) : labels('common.unavailable', 'Unavailable');
+          const copy = make('span', [record.keyword || labels('common.unavailable', 'Unavailable'),
+            record.source_id ? sourceName(record.source_id) : labels('common.unavailable', 'Unavailable'),
+            observedAt].join(' · '));
+          label.append(checkbox, copy); item.append(label); evidenceList.append(item);
         }
-        evidenceStatus.textContent = support.length > ids.length
-          ? formatted('workbench.proposal-support-limit', {
-            shown: number(ids.length), total: number(support.length),
-          }, 'Showing ' + number(ids.length) + ' of ' + number(support.length) + ' supported keywords.')
-          : '';
+        evidenceStatus.textContent = supportDetail.expired
+          ? labels('ai.proposal.expired', 'Supporting evidence has expired; this proposal cannot be accepted.')
+          : records.length < support.length
+            ? labels('ai.proposal.support-missing', 'Some supporting keyword records are unavailable.') : '';
         evidence.dataset.loaded = 'true';
+        return supportDetail;
       } catch (error) {
         evidenceStatus.textContent = error.message
           || labels('workbench.proposal-support-unavailable', 'Supporting keyword records are unavailable.');
         evidence.dataset.loaded = '';
+        return null;
       }
+    }
+    evidence.addEventListener('toggle', () => {
+      if (evidence.open && evidence.dataset.loaded !== 'true' && evidence.dataset.loaded !== 'loading') void loadProposalSupport();
     });
     card.append(edit, evidence);
 
@@ -679,13 +880,32 @@ function renderSuggestions() {
       accept.disabled = true;
       reject.disabled = true;
       try {
-        await requestJson('/api/v1/collections/suggestions/' + encodeURIComponent(proposal.id) + '/accept', {
+        const detail = await loadProposalSupport();
+        if (!detail) throw new Error(labels('ai.proposal.support-unavailable', 'Supporting keyword records are unavailable.'));
+        if (detail.expired) throw new Error(labels('ai.proposal.expired', 'Supporting evidence has expired; this proposal cannot be accepted.'));
+        const keywordIds = [...selectedSupport];
+        if (keywordIds.length < 2) throw new Error(labels('ai.proposal.minimum-keywords', 'Keep at least two supporting keywords selected.'));
+        await requestJson('/api/v1/ai/proposals/' + encodeURIComponent(proposal.id), {
+          method: 'PATCH', body: { name, description: descriptionInput.value.trim(), keyword_ids: keywordIds },
+          locale: getLocale(),
+        });
+        const accepted = await requestJson('/api/v1/collections/suggestions/' + encodeURIComponent(proposal.id) + '/accept', {
           method: 'POST',
           body: { name, description: descriptionInput.value.trim() },
           locale: getLocale(),
         });
         await refresh();
-        status(labels('workbench.proposal-accepted', 'Topic proposal added as a Collection.'));
+        const statusNode = $('#workbench-status');
+        statusNode.replaceChildren(make('span', labels('workbench.proposal-accepted', 'Topic proposal added as a Collection.')));
+        statusNode.classList.remove('notice--error');
+        const reclassifyIds = parseSupportIds(accepted.reclassification_keyword_ids);
+        if (reclassifyIds.length) {
+          statusNode.append(make('span', formatted('ai.proposal.reclass-scope', { count: number(reclassifyIds.length) }, ' Optional reclassification scope: {count} keywords.')));
+          const targeted = button(labels('ai.proposal.preview-reclass', 'Preview reclassification for these keywords'));
+          targeted.disabled = reclassifyIds.length > 200;
+          targeted.addEventListener('click', () => startAiPreview({ keywordIds: reclassifyIds }));
+          statusNode.append(targeted);
+        }
       } catch (error) {
         accept.disabled = false;
         reject.disabled = false;

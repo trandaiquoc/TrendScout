@@ -322,12 +322,13 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
         atomic = PostgresAtomicStateStore(environment, schema=schema)
         service = AIService(atomic, config=_ai_config(), provider=provider, utcnow=lambda: NOW)
         proposed = service.classify_keyword_ids(
-            store, keyword_ids, idempotency_key="pg-proposal-integration",
+            store, keyword_ids, job_id="pg-automatic-proposal-integration", automatic=True,
         )
         assert proposed["status"] == "COMPLETED", (
             proposed.get("status"), proposed.get("error_code"), proposed.get("processed"),
         )
         assert len(proposed["proposal_ids"]) == 1
+        assert proposed["unassigned_keyword_ids"] == []
         proposal = store.suggestions()[0]
         assert len(proposal["evidence_ids"]) == 21
         assert "ai-pg-evidence-1" in proposal["evidence_ids"]
