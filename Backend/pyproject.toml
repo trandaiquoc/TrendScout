@@ -88,3 +88,6 @@ select = ["E4", "E7", "E9", "F", "I"]
 # Existing browser harness contains a compact literal driver; keep its fixture stable.
 [tool.ruff.lint.per-file-ignores]
 "tests/browser_workspace_offline.py" = ["E701", "E702"]
+
+[tool.pytest.ini_options]
+addopts = ["--no-showlocals"]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import logging
+import re
 import threading
 from contextlib import ExitStack, contextmanager
 from typing import Iterator, Mapping
@@ -18,7 +19,7 @@ from typing import Iterator, Mapping
 import certifi
 import psycopg
 from psycopg.rows import tuple_row
-from psycopg_pool import ConnectionPool, PoolTimeout
+from psycopg_pool import ConnectionPool
 
 
 class PostgresConfigurationError(ValueError):
@@ -32,6 +33,8 @@ class PostgresConnectionError(RuntimeError):
 _POOL_MAX_SIZE = 4
 _POOL_TIMEOUT_SECONDS = 10
 _POOL_MAX_IDLE_SECONDS = 30
+_SAFE_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
+_SAFE_ERROR_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")
 _pool_lock = threading.Lock()
 _connection_pools: dict[str, ConnectionPool] = {}
 
@@ -41,10 +44,18 @@ class _PoolLogRedactor(logging.Filter):
 
     def filter(self, record):
         if record.levelno >= logging.WARNING:
+            details = []
+            if isinstance(record.exc_info, tuple) and len(record.exc_info) > 1:
+                error = record.exc_info[1]
+                if isinstance(error, BaseException):
+                    details = _safe_exception_details(error)
             record.msg = "PostgreSQL connection pool operation failed"
+            if details:
+                record.msg += f" ({'; '.join(details)})"
             record.args = ()
             record.exc_info = None
             record.exc_text = None
+            record.stack_info = None
         return True
 
 
@@ -55,6 +66,47 @@ _pool_logger.addFilter(_PoolLogRedactor())
 def _reset_pooled_connection(connection: psycopg.Connection) -> None:
     """Restore mutable connection defaults before another runtime lease."""
     connection.row_factory = tuple_row
+
+
+def _safe_exception_details(error: BaseException) -> list[str]:
+    """Extract fixed-form metadata and allowlisted failure classes, never raw text."""
+    error_type = type(error).__name__
+    if not _SAFE_ERROR_TYPE.fullmatch(error_type):
+        error_type = "PostgresError"
+    details = [error_type]
+    sqlstate = getattr(error, "sqlstate", None)
+    if isinstance(sqlstate, str) and _SAFE_SQLSTATE.fullmatch(sqlstate):
+        details.append(f"SQLSTATE {sqlstate}")
+    try:
+        message = str(error).casefold()
+    except Exception:
+        message = ""
+    categories = (
+        ("authentication_failed", ("password authentication failed", "authentication failed",
+                                    "no password supplied")),
+        ("tls_validation_failed", ("certificate verify failed", "certificate validation failed",
+                                   "ssl error", "tls error")),
+        ("timeout", ("timed out", "timeout")),
+        ("name_resolution_failed", ("could not translate host name", "name or service not known",
+                                    "temporary failure in name resolution")),
+        ("connection_refused", ("connection refused",)),
+        ("network_unavailable", ("network is unreachable", "no route to host")),
+        ("server_unavailable", ("server closed the connection unexpectedly",
+                                 "connection reset by peer", "connection lost")),
+    )
+    for category, markers in categories:
+        if any(marker in message for marker in markers):
+            details.append(f"failure={category}")
+            break
+    return details
+
+
+def _connection_error(name: str, error: Exception) -> PostgresConnectionError:
+    """Build a useful connection diagnostic without consulting the driver message."""
+    details = _safe_exception_details(error)
+    return PostgresConnectionError(
+        f"{name} connection failed ({'; '.join(details)})"
+    )
 
 
 def _pool_for(url: str) -> ConnectionPool:
@@ -129,6 +181,7 @@ def postgres_connection(
     if not isinstance(url, str) or not url.strip():
         raise PostgresConfigurationError(f"{name} is required")
     if direct:
+        failure = None
         try:
             connection = psycopg.connect(
                 url,
@@ -137,24 +190,32 @@ def postgres_connection(
                 connect_timeout=_POOL_TIMEOUT_SECONDS,
                 prepare_threshold=None,
             )
-        except psycopg.Error:
-            raise PostgresConnectionError(f"{name} connection failed") from None
+        except Exception as error:
+            failure = _connection_error(name, error)
+        if failure is not None:
+            raise failure from None
         try:
             yield connection
         finally:
             connection.close()
         return
 
+    failure = None
     try:
         pool = _pool_for(url)
-    except psycopg.Error:
-        raise PostgresConnectionError(f"{name} connection failed") from None
+    except Exception as error:
+        failure = _connection_error(name, error)
+    if failure is not None:
+        raise failure from None
     with ExitStack() as stack:
+        failure = None
         try:
             connection = stack.enter_context(
                 pool.connection(timeout=_POOL_TIMEOUT_SECONDS)
             )
-        except (PoolTimeout, psycopg.Error):
-            # Driver diagnostics can contain the DSN; do not expose them.
-            raise PostgresConnectionError(f"{name} connection failed") from None
+        except Exception as error:
+            # Driver diagnostics can contain the DSN; preserve only safe metadata.
+            failure = _connection_error(name, error)
+        if failure is not None:
+            raise failure from None
         yield connection
