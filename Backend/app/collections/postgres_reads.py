@@ -390,20 +390,41 @@ class PostgresCollectionReader:
         if any(not isinstance(value, str) or not value or len(value) > 100 for value in sources):
             raise ValueError("AI_POLICY_DENIED")
         mode_filter = sql.SQL("AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
-        parameters = [identifiers, sources]
-        if self.data_mode_scope:
-            parameters.append(self.data_mode_scope)
+        mode_parameters = (self.data_mode_scope,) if self.data_mode_scope else ()
 
         def read(db):
-            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.observed_at,
+            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.project,k.observed_at,
                 k.data_mode,k.eligible,COALESCE(kd.decision,'') AS decision,
                 COALESCE(cr.classification_status,'') AS classification_status,
+                COALESCE(cr.entity_id,'') AS entity_id,
+                COALESCE(cr.topic_category_ids,'[]'::jsonb) AS categories,
                 COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
                     FROM {} ek JOIN {} se ON se.id=ek.evidence_id
-                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                      AND se.expires_at>statement_timestamp()
+                      AND (se.query_scope->>'data_mode' IS NULL
+                           OR se.query_scope->>'data_mode'=k.data_mode)), '[]'::jsonb) AS evidence_ids,
                 COALESCE((SELECT jsonb_object_agg(se.id,se.expires_at::text)
                     FROM {} ek JOIN {} se ON se.id=ek.evidence_id
-                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '{{}}'::jsonb) AS evidence_expiry,
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                      AND se.expires_at>statement_timestamp()
+                      AND (se.query_scope->>'data_mode' IS NULL
+                           OR se.query_scope->>'data_mode'=k.data_mode)), '{{}}'::jsonb) AS evidence_expiry,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                    'evidence_id',se.id,'source_id',se.source_id,'display_name',se.display_name,
+                    'content_digest',se.content_digest,'query_scope',se.query_scope,
+                    'geography',se.geography,'observed_at',se.observed_at,
+                    'collected_at',se.collected_at,'expires_at',se.expires_at)
+                    ORDER BY se.source_id,se.collected_at,se.id)
+                    FROM (SELECT se.id,se.source_id,s.display_name,se.content_digest,se.query_scope,
+                        se.geography,se.observed_at,se.collected_at,se.expires_at
+                        FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        JOIN {} s ON s.id=se.source_id
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                          AND se.expires_at>statement_timestamp()
+                          AND (se.query_scope->>'data_mode' IS NULL
+                               OR se.query_scope->>'data_mode'=k.data_mode)
+                        ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '[]'::jsonb) AS evidence_context,
                 EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
                 EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
                 COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
@@ -413,11 +434,12 @@ class PostgresCollectionReader:
                 LEFT JOIN {} cr ON cr.keyword_id=k.id WHERE k.id=ANY(%s) {}""").format(
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("sources"),
                     self._table("memberships"), self._table("memberships"), self._table("feedback"),
                     self._table("keywords"),
                     self._table("keyword_decisions"), self._table("classification_results"),
-                    mode_filter), [sources, sources, identifiers, *parameters[2:]] if self.data_mode_scope
-                    else [sources, sources, identifiers]).fetchall()
+                    mode_filter), [sources, sources, sources, identifiers, *mode_parameters]).fetchall()
             found = {row["id"] for row in rows}
             if found != set(identifiers):
                 raise ValueError("AI_KEYWORD_NOT_FOUND")
@@ -450,25 +472,45 @@ class PostgresCollectionReader:
             sources, sources, sources, identifiers)
 
         def read(db):
-            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.project,
+            rows = db.execute(sql.SQL("""SELECT k.id,k.keyword,k.normalized,k.source,k.project,k.evidence,
                 k.observed_at,k.data_mode,k.eligible,COALESCE(kd.decision,'') AS decision,
                 COALESCE(cr.classification_status,'') AS classification_status,
+                COALESCE(cr.entity_id,'') AS entity_id,
+                COALESCE(cr.topic_category_ids,'[]'::jsonb) AS categories,
                 COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
                     FROM {} ek JOIN {} se ON se.id=ek.evidence_id
-                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                      AND se.expires_at>statement_timestamp()
+                      AND (se.query_scope->>'data_mode' IS NULL
+                           OR se.query_scope->>'data_mode'=k.data_mode)), '[]'::jsonb) AS evidence_ids,
                 COALESCE((SELECT jsonb_object_agg(se.id,se.expires_at::text)
                     FROM {} ek JOIN {} se ON se.id=ek.evidence_id
-                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '{{}}'::jsonb) AS evidence_expiry,
-                COALESCE((SELECT jsonb_agg(jsonb_build_object('evidence_id',e.id,
-                    'source_id',e.source_id,'geography',e.geography,'observed_at',e.observed_at,
-                    'collected_at',e.collected_at) ORDER BY e.collected_at DESC,e.id)
-                    FROM (SELECT se.id,se.source_id,se.geography,se.observed_at,se.collected_at
+                    WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                      AND se.expires_at>statement_timestamp()
+                      AND (se.query_scope->>'data_mode' IS NULL
+                           OR se.query_scope->>'data_mode'=k.data_mode)), '{{}}'::jsonb) AS evidence_expiry,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                    'evidence_id',e.id,'source_id',e.source_id,'display_name',e.display_name,
+                    'geography',e.geography,'observed_at',e.observed_at,
+                    'collected_at',e.collected_at,'expires_at',e.expires_at,
+                    'content_digest',e.content_digest,'query_scope',e.query_scope)
+                    ORDER BY e.collected_at DESC,e.id)
+                    FROM (SELECT se.id,se.source_id,s.display_name,se.geography,se.observed_at,
+                        se.collected_at,se.expires_at,se.content_digest,se.query_scope
                         FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        JOIN {} s ON s.id=se.source_id
                         WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                          AND se.expires_at>statement_timestamp()
+                          AND (se.query_scope->>'data_mode' IS NULL
+                               OR se.query_scope->>'data_mode'=k.data_mode)
                         ORDER BY se.collected_at DESC,se.id LIMIT 20) e), '[]'::jsonb) AS evidence_context,
                 COALESCE((SELECT jsonb_agg(jsonb_build_object('algorithm_id',ar.algorithm_id,
                     'version',ar.version,'status',ar.status,'reason_code',ar.reason_code,
-                    'value',ar.value,'metric',ar.metric,'unit',ar.unit) ORDER BY ar.algorithm_id)
+                    'value',ar.value,'metric',ar.metric,'unit',ar.unit,
+                    'input_digest',ar.input_digest,'result_json',
+                    CASE WHEN pg_input_is_valid(ar.result_json,'jsonb')
+                         THEN ar.result_json::jsonb ELSE '{{}}'::jsonb END,
+                    'updated_at',ar.updated_at) ORDER BY ar.algorithm_id)
                     FROM {} ar WHERE ar.keyword_id=k.id AND {}), '[]'::jsonb) AS algorithm_results,
                 COALESCE((SELECT jsonb_agg(jsonb_build_object('id',c.id,'name',c.name)
                     ORDER BY c.name COLLATE "C") FROM {} m JOIN {} c ON c.id=m.collection_id
@@ -478,6 +520,7 @@ class PostgresCollectionReader:
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
+                    self._table("sources"),
                     self._table("algorithm_results"), sql.SQL(
                         self._algorithm_result_freshness_sql("ar")
                     ),

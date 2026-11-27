@@ -1,9 +1,9 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.1-draft
-**Status:** Implemented and merged into local main at owner request; regression gates, PostgreSQL cutover, and model quality remain unverified
+**Version:** 1.2-draft
+**Status:** AI input contract updated on `integration/demo-final`; PostgreSQL regression and model quality remain unverified
 **Owner:** AI goal
-**Updated:** 2026-11-26
+**Updated:** 2026-11-27
 
 The AI boundary is implemented in this branch. The Database goal owns PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. The AI goal does not apply or propose a migration.
 
@@ -12,8 +12,9 @@ The AI boundary is implemented in this branch. The Database goal owns PostgreSQL
 - Source adapters, ingestion, normalization, market-signal calculations, and statistical algorithms remain outside the AI service.
 - AI classifies eligible normalized keywords against existing Collections, proposes new Collections for user review, supports user-triggered reclassification, and creates qualitative Vietnam-to-US export product hypotheses.
 - AI does not fetch source data, calculate search volume, create evidence, create a Collection without user acceptance, or claim a product will sell or be profitable.
-- Provider input is built server-side from database IDs, normalized text, selected Collection context, source IDs, and permitted evidence references. Request bodies accept IDs and bounded research constraints only. Raw source payloads, credentials, and YouTube data are excluded.
-- The supported source allowlist is Wikimedia, Google Search/Trends, and Bing. It defaults to empty. YouTube is denied even if configured.
+- Provider input is built server-side from exact canonical keyword groups and retains all durable source keyword IDs. Groups do not cross data modes or resolved entity identities; unresolved records group only with other unresolved records, and conflicting known entities remain separate. Categories, per-source geography/freshness, active evidence references, source-specific algorithm results, and Collection/user constraints are bounded and deterministically ordered. Request bodies accept IDs and bounded research constraints only. Raw source payloads, credentials, and YouTube data are excluded.
+- A source must appear in both `TRENDSCOUT_AI_ALLOWED_SOURCES` and the independent `TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES`. Both default to empty. The second setting is explicit approval for transfer/processing by the configured AI provider; extraction and derived-metric grants do not imply that permission. YouTube is denied even if configured.
+- Expired or expiry-unknown evidence is omitted. AI cache/result lifetime is bounded by the earliest active evidence expiry; Fetch replay does not extend source expiry.
 - Source geography and observation time remain evidence metadata. English text or a US-targeted product hypothesis does not establish US authorship, readership, or demand.
 - An AI failure does not discard persisted keywords or algorithm results. Resuming an AI job reads stored records; it does not run Fetch or call source adapters.
 
@@ -109,9 +110,9 @@ Requires Idempotency-Key with 8–128 printable ASCII characters.
       "preview": false
     }
 
-The request has no text, evidence, source, Collection, model, URL, or credential fields. The service deduplicates IDs and loads eligible normalized text, current Collection IDs/names/descriptions/versions, allowed evidence references, and override state. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, and YouTube rows are not sent.
+The request has no text, evidence, source, Collection, model, URL, or credential fields. The service groups exact canonical phrases within each data mode and resolved entity identity, passes one logical keyword input with its durable source IDs, categories, active evidence IDs, and current Collection context, and fans a validated result back to eligible durable IDs. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, unsupported-mode, evidence-expired, and YouTube rows are not sent. Removed Collection IDs are unioned across grouped source records so a result cannot override a user's removal on any member.
 
-Classification is batched. Initial batch size is bounded by model limits and token estimates, then adjusted using recent latency and structured-output validity. Only cache misses are sent. Cache identity includes the model, prompt/schema/policy versions, normalized keyword, source, evidence references, Collections and versions, and override state. The Postgres write transaction rechecks keyword/evidence/override and Collection state before applying changes.
+Classification is batched. Initial batch size is bounded by model limits and token estimates, then adjusted using recent latency and structured-output validity. Only cache misses are sent. Cache identity includes the model, prompt/schema/input-contract/source-policy versions, canonical group and durable IDs, source/data-mode/categories, active evidence content/expiry, Collections and versions, and per-keyword override state. The Postgres write transaction rechecks keyword, active evidence lineage/expiry, categories, override, data mode, and Collection state before applying changes.
 
     {
       "job_id": "ai_<32 hex characters>",
@@ -147,7 +148,7 @@ User membership, pinned keywords, exclusion, removal feedback, proposal-name sup
 
 ### POST /api/v1/ai/recommendations
 
-Requires Idempotency-Key. keyword_ids accepts 1–20 IDs; research_constraints is optional and at most 500 characters; regenerate is a boolean. The server loads eligible normalized keywords, Collections, bounded algorithm results, freshness/scope, and allowed evidence references.
+Requires Idempotency-Key. keyword_ids accepts 1–20 IDs; research_constraints is optional and at most 500 characters; regenerate is a boolean. The server groups exact canonical phrases within each data mode and resolved entity identity and loads eligible normalized keywords, categories, Collections, active source evidence, and current algorithm results with active evidence lineage. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. The profile keeps metric/unit, source role/platform, independent evidence groups, geography, window, freshness, conflicting/insufficient status, and source limitations separate. It supplies no composite score and no raw provider payload. If current evidence is insufficient, the bounded input says so explicitly.
 
 Each recommendation is labeled AI hypothesis and includes a product name/category, US export target, related keyword/evidence IDs, rationale, potential segment, seasonality, possible materials, manufacturing/export considerations, competition/IP/regulatory risks, uncertainty, research steps, and encoded marketplace search links. A link creates a search URL; it does not mean the marketplace was searched.
 
@@ -164,6 +165,7 @@ Backend/.env.example shows the supported variable names. The checked-in defaults
 | TRENDSCOUT_AI_COLLECTION_MODEL | Exact currently verified :free model ID for classification; unset pending quality review. |
 | TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; may equal the classifier model. |
 | TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated allowlist of Wikimedia, Google, and Bing source IDs; defaults to empty. YouTube is always denied. |
+| TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate comma-separated approval for transferring those source records/evidence to the configured AI provider; defaults to empty and never grants extraction permission. YouTube is always denied. |
 
 ## 9. Provider references
 

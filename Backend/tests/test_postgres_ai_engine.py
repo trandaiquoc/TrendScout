@@ -2,25 +2,24 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.ai.openrouter import VerifiedModel
-from app.ai.runtime import AIConfig, AIExecutionError, AIService, ROLLING_MINUTE_LIMIT
+from app.ai.runtime import ROLLING_MINUTE_LIMIT, AIConfig, AIExecutionError, AIService
 from app.collections.postgres_store import PostgresCollectionStore
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
 from app.storage.postgres_connection import postgres_connection
 from app.storage.postgres_migrations import apply_migrations
-
 
 NOW = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
 MODEL_ID = "liquid/lfm-3-1.7b:free"
@@ -86,8 +85,41 @@ def _ai_config():
         collection_model=MODEL_ID,
         recommendation_model=MODEL_ID,
         allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+        transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
         api_key_present=True,
     )
+
+
+class RecommendationCaptureProvider:
+    def __init__(self):
+        self.inputs = []
+
+    def verify_model(self, model_id):
+        assert model_id == MODEL_ID
+        return VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 8192, True)
+
+    def complete(self, verified, *, messages, schema, max_tokens):
+        payload = json.loads(messages[1]["content"])
+        self.inputs.append(payload)
+        keyword = payload["keywords"][0]
+        response = {"recommendations": [{
+            "product_name": "Handwoven tote",
+            "product_category": "Textile accessories",
+            "related_keyword_ids": [keyword["keyword_id"]],
+            "supporting_evidence_ids": keyword["evidence_ids"][:1],
+            "why_this_product": "A qualitative hypothesis for further export research.",
+            "consumer_segment": "Shoppers interested in handcrafted accessories.",
+            "seasonality": "Review seasonal context during research.",
+            "possible_materials": ["Cotton canvas"],
+            "manufacturing_considerations": ["Confirm supplier capability."],
+            "export_considerations": ["Check current customs requirements."],
+            "competition_risks": ["Review current US listings."],
+            "ip_risks": ["Review relevant trademarks."],
+            "regulatory_risks": ["Confirm current product requirements."],
+            "uncertainty": "The available source evidence is limited and needs independent review.",
+            "research_steps": ["Review current US marketplace listings."],
+        }]}
+        return json.dumps(response), {"input_tokens": 12, "output_tokens": 9}, None
 
 
 def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
@@ -110,12 +142,25 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
                     (keyword_id, f"Outdoor activity {index}", f"outdoor activity {index}",
                      WIKIMEDIA_SOURCE_ID, "en.wikipedia", "2026-11-25T00:00:00Z", Jsonb({})))
                 connection.execute(sql.SQL("""INSERT INTO {}(id,source_id,content_digest,query_scope,
-                    geography,observed_at,collected_at,payload) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""")
+                    geography,observed_at,collected_at,expires_at,payload)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
                     .format(tables["source_evidence"]),
                     (evidence_id, WIKIMEDIA_SOURCE_ID, f"digest-{index}", Jsonb({"scope": "fixture"}),
-                     Jsonb({"country_code": "US"}), stamp, stamp, None))
+                     Jsonb({"country_code": "US"}), stamp, stamp,
+                     stamp + timedelta(days=7), None))
                 connection.execute(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
                     VALUES (%s,%s)""").format(tables["evidence_keywords"]), (evidence_id, keyword_id))
+            for index in range(20):
+                evidence_id = f"ai-pg-evidence-extra-{index:02d}"
+                connection.execute(sql.SQL("""INSERT INTO {}(id,source_id,content_digest,query_scope,
+                    geography,observed_at,collected_at,expires_at,payload)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""").format(tables["source_evidence"]),
+                    (evidence_id, WIKIMEDIA_SOURCE_ID, f"extra-digest-{index}",
+                     Jsonb({"scope": "fixture"}), Jsonb({"country_code": "US"}), stamp,
+                     stamp + timedelta(seconds=index), stamp + timedelta(days=7), None))
+                connection.execute(sql.SQL("""INSERT INTO {}(evidence_id,keyword_id)
+                    VALUES (%s,%s)""").format(tables["evidence_keywords"]),
+                    (evidence_id, keyword_ids[0]))
 
         provider = ProposalThenAssignProvider()
         atomic = PostgresAtomicStateStore(environment, schema=schema)
@@ -123,10 +168,15 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
         proposed = service.classify_keyword_ids(
             store, keyword_ids, idempotency_key="pg-proposal-integration",
         )
-        assert proposed["status"] == "COMPLETED"
+        assert proposed["status"] == "COMPLETED", (
+            proposed.get("status"), proposed.get("error_code"), proposed.get("processed"),
+        )
         assert len(proposed["proposal_ids"]) == 1
         proposal = store.suggestions()[0]
-        assert proposal["evidence_ids"] == evidence_ids
+        assert len(proposal["evidence_ids"]) == 21
+        assert "ai-pg-evidence-1" in proposal["evidence_ids"]
+        assert "ai-pg-evidence-extra-00" not in proposal["evidence_ids"]
+        assert "ai-pg-evidence-extra-19" in proposal["evidence_ids"]
         assert proposal["source_ids"] == [WIKIMEDIA_SOURCE_ID]
 
         collection_id = store.resolve_proposal(
@@ -163,6 +213,98 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
                                     .format(sql.Identifier(schema, "memberships")),
                                     (keyword_ids[0],)).fetchone()
         assert tuple(manual) == ("USER", 1)
+
+
+def test_postgres_ai_recommendation_uses_active_lineage_and_bounded_algorithm_profile():
+    with isolated_schema() as (environment, schema, connection):
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        tables = {name: sql.Identifier(schema, name) for name in (
+            "sources", "keywords", "source_evidence", "evidence_keywords",
+            "classification_results", "algorithm_results",
+        )}
+        keyword_id = "ai-recommendation-keyword"
+        active_evidence_id = "ai-recommendation-active-evidence"
+        expired_evidence_id = "ai-recommendation-expired-evidence"
+        now = datetime.now(timezone.utc)
+        observed = now - timedelta(hours=1)
+        with connection.transaction():
+            connection.execute(sql.SQL("INSERT INTO {}(id,display_name,configuration) VALUES (%s,%s,%s)")
+                               .format(tables["sources"]),
+                               (WIKIMEDIA_SOURCE_ID, "Wikimedia", Jsonb({})))
+            connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence) VALUES (%s,%s,%s,%s,%s,%s,'LIVE',%s)""")
+                .format(tables["keywords"]),
+                (keyword_id, "Handwoven tote", "handwoven tote", WIKIMEDIA_SOURCE_ID,
+                 "en.wikipedia", observed.isoformat(), Jsonb({"views_ceil": 23})))
+            connection.execute(sql.SQL("""INSERT INTO {}(keyword_id,entity_type,topic_category_ids,
+                classification_status,confidence_level,classification_method,classification_version,
+                taxonomy_version,review_status,classified_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
+                .format(tables["classification_results"]),
+                (keyword_id, "product", Jsonb(["products_brands"]), "CLASSIFIED", "HIGH",
+                 "rules", "test-v1", "taxonomy-test-v1", "UNREVIEWED", now))
+            for evidence_id, expires_at in (
+                (active_evidence_id, now + timedelta(days=5)),
+                (expired_evidence_id, now - timedelta(minutes=1)),
+            ):
+                scope = {
+                    "data_mode": "LIVE", "country_scope": "US",
+                    "source_metric_name": "views_ceil",
+                    "source_metric_unit": "approx_pageviews_upper_bound",
+                }
+                connection.execute(sql.SQL("""INSERT INTO {}(id,source_id,content_digest,query_scope,
+                    geography,observed_at,collected_at,expires_at,payload)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
+                    .format(tables["source_evidence"]),
+                    (evidence_id, WIKIMEDIA_SOURCE_ID, "digest-" + evidence_id, Jsonb(scope),
+                     Jsonb({"country_code": "US", "field": "country_scope", "value": "US"}),
+                     observed, observed, expires_at, Jsonb({"raw": "PRIVATE_RAW_PAYLOAD_SENTINEL"})))
+                connection.execute(sql.SQL("INSERT INTO {}(evidence_id,keyword_id) VALUES (%s,%s)")
+                                   .format(tables["evidence_keywords"]), (evidence_id, keyword_id))
+            algorithm_result = {
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "window_days": 7,
+                "evidence_references": [{
+                    "source_evidence_id": active_evidence_id,
+                    "source_id": WIKIMEDIA_SOURCE_ID,
+                    "metric": "views_ceil",
+                    "unit": "approx_pageviews_upper_bound",
+                }],
+            }
+            connection.execute(sql.SQL("""INSERT INTO {}(keyword_id,algorithm_id,version,status,
+                reason_code,value,metric,unit,result_json,input_digest,updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
+                .format(tables["algorithm_results"]),
+                (keyword_id, "observed-volume-rank", "v1", "COMPLETED", "OBSERVED",
+                 1.0, "provider_rank", "ordinal_top_list_position",
+                 json.dumps(algorithm_result), "rank-input-digest", now))
+
+        context = store.ai_recommendation_context(
+            [keyword_id], allowed_sources={WIKIMEDIA_SOURCE_ID},
+        )
+        record = context["keywords"][0]
+        assert record["categories"] == ["products_brands"]
+        assert record["evidence_ids"] == [active_evidence_id]
+        assert expired_evidence_id not in record["evidence_expiry"]
+        assert record["algorithm_results"][0]["input_digest"] == "rank-input-digest"
+        assert "PRIVATE_RAW_PAYLOAD_SENTINEL" not in repr(record)
+
+        provider = RecommendationCaptureProvider()
+        service = AIService(PostgresAtomicStateStore(environment, schema=schema),
+                            config=_ai_config(), provider=provider, utcnow=lambda: now)
+        result = service.recommend(store, [keyword_id], idempotency_key="pg-recommendation-contract")
+        assert result["status"] == "COMPLETED"
+        payload_keyword = provider.inputs[0]["keywords"][0]
+        assert payload_keyword["durable_keyword_ids"] == [keyword_id]
+        assert payload_keyword["categories"] == ["products_brands"]
+        assert payload_keyword["evidence_ids"] == [active_evidence_id]
+        assert payload_keyword["source_evidence_profile"][0]["evidence_references"][0][
+            "evidence_role"] == "OBSERVED_ACTIVITY"
+        ranking = payload_keyword["source_evidence_profile"][0]["source_specific_results"][0]
+        assert ranking["input_digest"] == "rank-input-digest"
+        assert ranking["source_scope"]["window_days"] == 7
+        assert payload_keyword["market_relevance"]["status"] == "US_COUNTRY_SCOPED"
+        assert payload_keyword["multi_source_corroboration"]["composite_score"] is None
+        assert "PRIVATE_RAW_PAYLOAD_SENTINEL" not in json.dumps(provider.inputs)
 
 
 def test_postgres_ai_quota_is_shared_across_service_instances():

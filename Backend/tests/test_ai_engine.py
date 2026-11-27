@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timedelta, timezone
 import json
 import threading
 import unittest
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastapi import FastAPI
 import httpx
+from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.requests import Request
 
+from app.ai.input_contract import group_keyword_records
 from app.ai.openrouter import (
     OpenRouterAdapter,
     OpenRouterError,
@@ -22,15 +23,14 @@ from app.ai.openrouter import (
     _retry_at,
 )
 from app.ai.runtime import (
+    DAILY_REQUEST_LIMIT,
+    ROLLING_MINUTE_LIMIT,
     AIConfig,
     AIExecutionError,
     AIService,
-    DAILY_REQUEST_LIMIT,
-    ROLLING_MINUTE_LIMIT,
 )
-from app.api.ai import ClassificationInput, RecommendationInput, reclassify, _error
+from app.api.ai import ClassificationInput, RecommendationInput, _error, reclassify
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
-
 
 NOW = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
 MODEL_ID = "liquid/lfm-3-1.7b:free"
@@ -105,6 +105,18 @@ class FakeCollectionStore:
                 "evidence_expiry": deepcopy(item.get("evidence_expiry", {
                     "evidence-" + item["id"]: (NOW + timedelta(days=7)).isoformat(),
                 })),
+                "evidence_context": deepcopy(item.get("evidence_context", [{
+                    "evidence_id": evidence_id,
+                    "source_id": item.get("source", WIKIMEDIA_SOURCE_ID),
+                    "geography": {"country_code": "US"},
+                    "observed_at": item.get("observed_at", "2026-11-25T00:00:00+00:00"),
+                    "collected_at": "2026-11-26T00:00:00+00:00",
+                    "expires_at": (item.get("evidence_expiry") or {}).get(
+                        evidence_id, (NOW + timedelta(days=7)).isoformat()),
+                    "content_digest": "digest-" + evidence_id,
+                    "query_scope": {"data_mode": item.get("data_mode", "LIVE")},
+                } for evidence_id in item.get(
+                    "evidence_ids", ["evidence-" + item["id"]])])),
                 "user_assigned": item.get("user_assigned", False),
                 "user_pinned": item.get("user_pinned", False),
                 "removed_collection_ids": list(item.get("removed_collection_ids", [])),
@@ -167,11 +179,21 @@ class FakeCollectionStore:
                 "collections": [{"id": COLLECTION_ID, "name": "Outdoor equipment"}],
                 "algorithm_results": [{"algorithm_id": "observed-volume-rank", "version": "v1",
                     "status": "COMPLETED", "reason_code": "OBSERVED", "metric": "pageviews",
-                    "unit": "views", "value": 123}],
+                    "unit": "views", "value": 123,
+                    "input_digest": "algorithm-input-" + identifier,
+                    "updated_at": "2026-11-26T00:00:00+00:00",
+                    "result_json": {"source_id": row["source"], "window_days": 7,
+                        "evidence_references": [{"evidence_id": row["evidence_ids"][0],
+                            "source_id": row["source"], "metric": "views_ceil",
+                            "unit": "approx_pageviews_upper_bound",
+                            "input_digest": "algorithm-input-" + identifier}]}}],
                 "evidence_context": [{
                     "evidence_id": row["evidence_ids"][0], "source_id": row["source"],
                     "geography": {"country_code": "US"}, "observed_at": row["observed_at"],
                     "collected_at": "2026-11-26T00:00:00+00:00",
+                    "expires_at": row["evidence_expiry"][row["evidence_ids"][0]],
+                    "content_digest": "digest-" + row["evidence_ids"][0],
+                    "query_scope": {"data_mode": row["data_mode"]},
                 }],
                 "raw_payload": self.raw_payload,
             })
@@ -182,6 +204,8 @@ def config(*, key_present=True, sources=None, enabled=True):
     return AIConfig(
         enabled=enabled, collection_model=MODEL_ID, recommendation_model=MODEL_ID,
         allowed_sources=frozenset(sources if sources is not None else {WIKIMEDIA_SOURCE_ID}),
+        transfer_approved_sources=frozenset(
+            sources if sources is not None else {WIKIMEDIA_SOURCE_ID}),
         api_key_present=key_present,
     )
 
@@ -193,7 +217,7 @@ def classification_response(messages, *, collection_id=COLLECTION_ID, score=0.93
             "keyword_id": row["id"], "collection_id": collection_id,
             "score": score, "reason": "The keyword fits this existing topic.",
         } for row in payload["keywords"]],
-        "proposals": [proposal] if proposal else [],
+        "proposals": [proposal(messages) if callable(proposal) else proposal] if proposal else [],
     }
     return json.dumps(output)
 
@@ -387,6 +411,18 @@ class AIServiceTests(unittest.TestCase):
             service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="same-request",
                                          preview=True)
         store.keywords["keyword-1"]["evidence_ids"] = ["evidence-changed"]
+        store.keywords["keyword-1"]["evidence_expiry"] = {
+            "evidence-changed": (NOW + timedelta(days=6)).isoformat(),
+        }
+        store.keywords["keyword-1"]["evidence_context"] = [{
+            "evidence_id": "evidence-changed", "source_id": WIKIMEDIA_SOURCE_ID,
+            "geography": {"country_code": "US"},
+            "observed_at": "2026-11-25T00:00:00+00:00",
+            "collected_at": "2026-11-26T00:00:00+00:00",
+            "expires_at": (NOW + timedelta(days=6)).isoformat(),
+            "content_digest": "changed-digest",
+            "query_scope": {"data_mode": "LIVE"},
+        }]
         service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="changed-input")
         self.assertEqual(len(provider.calls), 2)
 
@@ -405,12 +441,22 @@ class AIServiceTests(unittest.TestCase):
                          ("MODEL_UNAVAILABLE", "AI_KEY_MISSING"))
         self.assertEqual(provider.calls, [])
 
-        for index in range(DAILY_REQUEST_LIMIT):
+        for index in range(ROLLING_MINUTE_LIMIT):
             service._reserve(f"job-{index}", "classification")
         with self.assertRaises(AIExecutionError) as caught:
-            service._reserve("job-over-limit", "classification")
+            service._reserve("job-over-minute", "classification")
+        self.assertEqual(caught.exception.code, "AI_RATE_LIMITED")
+        daily_service = AIService(MemoryAtomicState(), config=config(), provider=FakeProvider(),
+                                  utcnow=lambda: NOW)
+        daily_state = daily_service.state_store._states.setdefault("trendscout-ai-engine-v1", {})
+        daily_state["attempts"] = [{
+            "id": f"old-{index}", "job_id": f"old-job-{index}", "task": "classification",
+            "epoch": NOW.timestamp() - 61, "at": (NOW - timedelta(seconds=61)).isoformat(),
+            "outcome": "RESERVED",
+        } for index in range(DAILY_REQUEST_LIMIT)]
+        with self.assertRaises(AIExecutionError) as caught:
+            daily_service._reserve("job-over-day", "classification")
         self.assertEqual(caught.exception.code, "AI_QUOTA_EXHAUSTED")
-        self.assertEqual(service._quota()["daily_used"], DAILY_REQUEST_LIMIT)
 
         concurrent = AIService(MemoryAtomicState(), config=config(), provider=FakeProvider(),
                               utcnow=lambda: NOW)
@@ -448,13 +494,15 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("Ignore safeguards", provider.calls[0]["messages"][1]["content"])
 
     def test_new_collection_proposal_is_evidence_bound_and_not_created(self):
-        proposal = {
-            "name": "Outdoor recreation", "description": "Activities involving outdoor equipment",
-            "keyword_ids": ["keyword-1", "keyword-2"],
-            "reason": "The two terms form a coherent outdoor topic.", "score": 0.81,
-            "uncertainty": "More review may change the suggested grouping.",
-            "evidence_ids": ["evidence-keyword-1", "evidence-keyword-2"],
-        }
+        def proposal(messages):
+            groups = json.loads(messages[1]["content"])["keywords"]
+            return {
+                "name": "Outdoor recreation", "description": "Activities involving outdoor equipment",
+                "keyword_ids": [item["id"] for item in groups],
+                "reason": "The two terms form a coherent outdoor topic.", "score": 0.81,
+                "uncertainty": "More review may change the suggested grouping.",
+                "evidence_ids": sorted({value for item in groups for value in item["evidence_ids"]}),
+            }
         provider = FakeProvider([lambda messages: classification_response(
             messages, collection_id=None, score=0.4, proposal=proposal)])
         service = AIService(MemoryAtomicState(), config=config(), provider=provider,
@@ -472,6 +520,165 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(store.persist_calls[0]["proposals"][0]["evidence_ids"],
                          ["evidence-keyword-1", "evidence-keyword-2"])
         self.assertEqual(result["assigned"], [])
+
+    def test_exact_cross_source_keyword_is_one_prompt_group_and_fans_out_durable_ids(self):
+        provider = FakeProvider([classification_response])
+        service = AIService(MemoryAtomicState(), config=config(
+            sources={WIKIMEDIA_SOURCE_ID, "google_web_serp"}), provider=provider,
+            utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[
+            {"id": "wiki-cafe", "keyword": "Caf\u00e9 & Tea", "normalized": "Caf\u00e9 & Tea",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC",
+             "topic_category_ids": ["food"]},
+            {"id": "google-cafe", "keyword": "cafe\u0301 & tea", "normalized": "cafe\u0301 & tea",
+             "source": "google_web_serp", "data_mode": "SYNTHETIC",
+             "topic_category_ids": ["food"]},
+            {"id": "wiki-cafe-different", "keyword": "Caf\u00e9 tea", "normalized": "Caf\u00e9 tea",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC",
+             "topic_category_ids": ["food"]},
+        ])
+        result = service.classify_keyword_ids(
+            store, ["wiki-cafe", "google-cafe", "wiki-cafe-different"],
+            idempotency_key="cross-source-group",
+        )
+        payload = json.loads(provider.calls[0]["messages"][1]["content"])
+        self.assertEqual(len(payload["keywords"]), 2)
+        self.assertLess(len(provider.calls[0]["messages"][1]["content"].encode("utf-8")), 48_000)
+        self.assertNotIn("source_specific_results", repr(payload))
+        group = next(item for item in payload["keywords"]
+                     if item["canonical_keyword_identity"] == "café & tea")
+        self.assertEqual(set(group["durable_keyword_ids"]), {"wiki-cafe", "google-cafe"})
+        self.assertEqual(set(group["source_ids"]), {WIKIMEDIA_SOURCE_ID, "google_web_serp"})
+        self.assertEqual(group["categories"], ["food"])
+        self.assertEqual({item["keyword_id"] for item in result["assigned"]},
+                         {"wiki-cafe", "google-cafe", "wiki-cafe-different"})
+
+    def test_same_phrase_with_distinct_entity_identities_stays_separate(self):
+        groups = group_keyword_records([
+            {"id": "wiki-mercury-planet", "keyword": "Mercury", "normalized": "mercury",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC", "entity_id": "Q308"},
+            {"id": "google-mercury-planet", "keyword": "mercury", "normalized": "mercury",
+             "source": "google_web_serp", "data_mode": "SYNTHETIC", "entity_id": "Q308"},
+            {"id": "wiki-mercury-element", "keyword": "Mercury", "normalized": "mercury",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC", "entity_id": "Q925"},
+            {"id": "wiki-mercury-unresolved", "keyword": "Mercury", "normalized": "mercury",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC"},
+        ], allowed_sources={WIKIMEDIA_SOURCE_ID, "google_web_serp"}, now=NOW)
+
+        self.assertEqual(len(groups), 3)
+        groups_by_entity = {tuple(group["entity_identity"]["entity_ids"]): group for group in groups}
+        self.assertEqual(set(groups_by_entity[("Q308",)]["durable_keyword_ids"]),
+                         {"wiki-mercury-planet", "google-mercury-planet"})
+        self.assertEqual(groups_by_entity[("Q925",)]["durable_keyword_ids"],
+                         ["wiki-mercury-element"])
+        self.assertEqual(groups_by_entity[()]["entity_identity"]["status"], "UNRESOLVED")
+
+    def test_transfer_approval_is_independent_of_ai_source_allowlist(self):
+        configured = AIConfig.from_environment({
+            "TRENDSCOUT_AI_ENABLED": "true",
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": WIKIMEDIA_SOURCE_ID,
+            "TRENDSCOUT_AI_COLLECTION_MODEL": MODEL_ID,
+            "OPENROUTER_API_KEY": "present",
+        })
+        self.assertEqual(configured.transfer_approved_sources, frozenset())
+        provider = FakeProvider()
+        service = AIService(MemoryAtomicState(), config=configured,
+                            provider=provider, utcnow=lambda: NOW)
+        denied_by_default = service.classify_keyword_ids(
+            FakeCollectionStore(), ["keyword-1"], idempotency_key="transfer-not-approved-env",
+        )
+        self.assertEqual(denied_by_default["error_code"], "AI_POLICY_DENIED")
+        self.assertEqual(provider.calls, [])
+        approved = AIConfig.from_environment({
+            "TRENDSCOUT_AI_ENABLED": "true",
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": WIKIMEDIA_SOURCE_ID,
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": WIKIMEDIA_SOURCE_ID,
+            "TRENDSCOUT_AI_COLLECTION_MODEL": MODEL_ID,
+            "OPENROUTER_API_KEY": "present",
+        })
+        self.assertEqual(AIService(MemoryAtomicState(), config=approved,
+                                  provider=FakeProvider(), utcnow=lambda: NOW)._allowed_sources,
+                         frozenset({WIKIMEDIA_SOURCE_ID}))
+
+    def test_source_policy_digest_only_tracks_sources_in_the_input(self):
+        base = AIConfig(
+            enabled=True, collection_model=MODEL_ID,
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID, "google_web_serp"}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            api_key_present=True,
+        )
+        unrelated_change = AIConfig(
+            enabled=True, collection_model=MODEL_ID,
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID, "google_web_serp", "bing_web_serp"}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID, "bing_web_serp"}),
+            api_key_present=True,
+        )
+        relevant_change = AIConfig(
+            enabled=True, collection_model=MODEL_ID,
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID, "google_web_serp"}),
+            transfer_approved_sources=frozenset({"google_web_serp"}),
+            api_key_present=True,
+        )
+        first = AIService(MemoryAtomicState(), config=base, provider=FakeProvider(),
+                          utcnow=lambda: NOW)
+        second = AIService(MemoryAtomicState(), config=unrelated_change, provider=FakeProvider(),
+                           utcnow=lambda: NOW)
+        third = AIService(MemoryAtomicState(), config=relevant_change, provider=FakeProvider(),
+                          utcnow=lambda: NOW)
+        self.assertEqual(first._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
+                         second._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
+        self.assertNotEqual(first._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
+                            third._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
+
+    def test_expired_or_missing_evidence_and_incompatible_mode_are_blocked(self):
+        provider = FakeProvider([classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        for expiry in ((NOW - timedelta(seconds=1)).isoformat(), None):
+            store = FakeCollectionStore()
+            evidence_id = store.keywords["keyword-1"]["evidence_ids"][0]
+            store.keywords["keyword-1"]["evidence_expiry"] = (
+                {evidence_id: expiry} if expiry else {}
+            )
+            store.keywords["keyword-1"]["evidence_context"][0]["expires_at"] = expiry
+            result = service.classify_keyword_ids(
+                store, ["keyword-1"], idempotency_key="expired-evidence-" + str(expiry),
+            )
+            self.assertEqual(result["error_code"], "AI_POLICY_DENIED")
+        mode_mismatch = FakeCollectionStore(keywords=[{
+            "id": "google-live", "keyword": "Search trend",
+            "source": "google_web_serp", "data_mode": "LIVE",
+        }])
+        mode_service = AIService(MemoryAtomicState(), config=config(
+            sources={WIKIMEDIA_SOURCE_ID, "google_web_serp"}),
+            provider=provider, utcnow=lambda: NOW)
+        mismatch = mode_service.classify_keyword_ids(
+            mode_mismatch, ["google-live"], idempotency_key="unsupported-google-mode",
+        )
+        self.assertEqual(mismatch["error_code"], "AI_POLICY_DENIED")
+        self.assertEqual(provider.calls, [])
+
+    def test_classification_cache_digest_tracks_evidence_expiry(self):
+        provider = FakeProvider([classification_response, classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore()
+        service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="expiry-cache-first")
+        record = store.keywords["keyword-1"]
+        evidence_id = record["evidence_ids"][0]
+        updated_expiry = (NOW + timedelta(days=6)).isoformat()
+        record["evidence_expiry"][evidence_id] = updated_expiry
+        record["evidence_context"][0]["expires_at"] = updated_expiry
+        service.classify_keyword_ids(store, ["keyword-1"], idempotency_key="expiry-cache-updated")
+        self.assertEqual(len(provider.calls), 2)
+        denied = AIService(MemoryAtomicState(), config=AIConfig(
+            enabled=True, collection_model=MODEL_ID, allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            transfer_approved_sources=frozenset(), api_key_present=True,
+        ), provider=FakeProvider(), utcnow=lambda: NOW)
+        result = denied.classify_keyword_ids(
+            FakeCollectionStore(), ["keyword-1"], idempotency_key="transfer-not-approved",
+        )
+        self.assertEqual(result["error_code"], "AI_POLICY_DENIED")
 
     def test_invalid_json_unknown_ids_and_unknown_collections_are_rejected(self):
         for response in (
@@ -563,6 +770,15 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(first["recommendations"][0]["marketplace_research_links"][0]["marketplace"],
                          "Amazon US")
         self.assertNotIn(store.raw_payload, provider.calls[0]["messages"][1]["content"])
+        input_payload = json.loads(provider.calls[0]["messages"][1]["content"])["keywords"][0]
+        self.assertEqual(input_payload["product_research_hypothesis"], "QUALITATIVE_HYPOTHESIS_ONLY")
+        self.assertIn("source_evidence_profile", input_payload)
+        self.assertIn("market_relevance", input_payload)
+        self.assertIsNone(input_payload["multi_source_corroboration"]["composite_score"])
+        source_result = input_payload["source_evidence_profile"][0]["source_specific_results"][0]
+        self.assertEqual(source_result["input_digest"], "algorithm-input-keyword-1")
+        self.assertTrue(input_payload["evidence_expiry"])
+        self.assertIn("evidence_role", input_payload["source_evidence_profile"][0]["evidence_references"][0])
         cached = service.recommend(store, ["keyword-1"], research_constraints="Handmade goods",
                                    idempotency_key="recommend-cached")
         self.assertTrue(cached["cached"])
@@ -570,6 +786,27 @@ class AIServiceTests(unittest.TestCase):
                                         idempotency_key="recommend-regenerate", regenerate=True)
         self.assertFalse(regenerated["cached"])
         self.assertEqual(len(provider.calls), 2)
+
+    def test_recommendation_groups_cross_source_records_and_returns_durable_ids(self):
+        provider = FakeProvider([recommendation_response])
+        sources = {WIKIMEDIA_SOURCE_ID, "google_web_serp"}
+        service = AIService(MemoryAtomicState(), config=config(sources=sources),
+                            provider=provider, utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[
+            {"id": "wiki-cafe", "keyword": "Caf\u00e9 & Tea", "normalized": "Caf\u00e9 & Tea",
+             "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC"},
+            {"id": "google-cafe", "keyword": "cafe\u0301 & tea", "normalized": "cafe\u0301 & tea",
+             "source": "google_web_serp", "data_mode": "SYNTHETIC"},
+        ])
+        result = service.recommend(
+            store, ["wiki-cafe", "google-cafe"], idempotency_key="recommend-cross-source",
+        )
+        self.assertEqual(result["status"], "COMPLETED")
+        payload = json.loads(provider.calls[0]["messages"][1]["content"])["keywords"]
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(set(payload[0]["durable_keyword_ids"]), {"wiki-cafe", "google-cafe"})
+        self.assertEqual(set(result["recommendations"][0]["related_keyword_ids"]),
+                         {"wiki-cafe", "google-cafe"})
 
     def test_recommendation_rejects_unknown_evidence_and_unapproved_sources(self):
         provider = FakeProvider([lambda messages: json.dumps({"recommendations": [{
@@ -590,8 +827,9 @@ class AIServiceTests(unittest.TestCase):
         disallowed = FakeCollectionStore(keywords=[{
             "id": "keyword-1", "keyword": "A video topic", "source": YOUTUBE_SOURCE_ID,
         }])
-        blocked = service.recommend(disallowed, ["keyword-1"], idempotency_key="youtube-blocked")
-        self.assertEqual(blocked["error_code"], "AI_POLICY_DENIED")
+        with self.assertRaises(AIExecutionError) as caught:
+            service.recommend(disallowed, ["keyword-1"], idempotency_key="youtube-blocked")
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
 
     def test_public_inputs_accept_ids_only_and_enforce_bounds(self):
         with self.assertRaises(ValidationError):

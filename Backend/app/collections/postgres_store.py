@@ -1722,12 +1722,41 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 raise ValueError("AI_INPUT_CHANGED")
             if expected_keyword_states:
                 sources = sorted(set(allowed_sources or ()))
-                states = db.execute(sql.SQL("""SELECT k.id,k.normalized,k.source,k.eligible,
+                states = db.execute(sql.SQL("""SELECT k.id,k.normalized,k.source,k.data_mode,k.eligible,
                     COALESCE(kd.decision,'') AS decision,
                     COALESCE(cr.classification_status,'') AS classification_status,
-                    COALESCE((SELECT jsonb_agg(DISTINCT ek.evidence_id ORDER BY ek.evidence_id)
+                    COALESCE(cr.entity_id,'') AS entity_id,
+                    COALESCE(cr.topic_category_ids,'[]'::jsonb) AS categories,
+                    COALESCE((SELECT jsonb_agg(DISTINCT se.id ORDER BY se.id) FROM (
+                        SELECT se.id,se.collected_at FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                          AND se.expires_at>statement_timestamp()
+                          AND (se.query_scope->>'data_mode' IS NULL
+                               OR se.query_scope->>'data_mode'=k.data_mode)
+                        ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '[]'::jsonb) AS evidence_ids,
+                    COALESCE((SELECT jsonb_object_agg(se.id,se.expires_at::text) FROM (
+                        SELECT se.id,se.expires_at,se.collected_at
                         FROM {} ek JOIN {} se ON se.id=ek.evidence_id
-                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)), '[]'::jsonb) AS evidence_ids,
+                        WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                          AND se.expires_at>statement_timestamp()
+                          AND (se.query_scope->>'data_mode' IS NULL
+                               OR se.query_scope->>'data_mode'=k.data_mode)
+                        ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '{{}}'::jsonb) AS evidence_expiry,
+                    COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                        'evidence_id',se.id,'source_id',se.source_id,'display_name',se.display_name,
+                        'content_digest',se.content_digest,'query_scope',se.query_scope,
+                        'geography',se.geography,'observed_at',se.observed_at,
+                        'collected_at',se.collected_at,'expires_at',se.expires_at)
+                        ORDER BY se.source_id,se.collected_at,se.id)
+                        FROM (SELECT se.id,se.source_id,s.display_name,se.content_digest,se.query_scope,
+                            se.geography,se.observed_at,se.collected_at,se.expires_at
+                            FROM {} ek JOIN {} se ON se.id=ek.evidence_id
+                            JOIN {} s ON s.id=se.source_id
+                            WHERE ek.keyword_id=k.id AND se.source_id=ANY(%s)
+                              AND se.expires_at>statement_timestamp()
+                              AND (se.query_scope->>'data_mode' IS NULL
+                                   OR se.query_scope->>'data_mode'=k.data_mode)
+                            ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '[]'::jsonb) AS evidence_context,
                     EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
                     EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
                     COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
@@ -1738,10 +1767,13 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     LEFT JOIN {} cr ON cr.keyword_id=k.id
                     WHERE k.id=ANY(%s)""").format(
                         self._table("evidence_keywords"), self._table("source_evidence"),
+                        self._table("evidence_keywords"), self._table("source_evidence"),
+                        self._table("evidence_keywords"), self._table("source_evidence"),
+                        self._table("sources"),
                         self._table("memberships"), self._table("memberships"),
                         self._table("feedback"), self._table("keywords"),
                         self._table("keyword_decisions"), self._table("classification_results")),
-                    (sources, identifiers)).fetchall()
+                    (sources, sources, sources, identifiers)).fetchall()
                 actual_states = {row["id"]: row for row in states}
                 if set(actual_states) != set(identifiers):
                     raise ValueError("AI_INPUT_CHANGED")
@@ -1749,9 +1781,10 @@ class PostgresCollectionStore(PostgresCollectionReader):
                     actual = actual_states.get(identifier)
                     if not isinstance(expected, dict) or actual is None or any(
                             actual.get(field) != expected.get(field) for field in (
-                                "normalized", "source", "eligible", "decision", "classification_status",
+                                "normalized", "source", "data_mode", "eligible", "decision",
+                                "classification_status", "entity_id", "categories",
                                 "evidence_ids", "user_assigned", "user_pinned", "removed_collection_ids",
-                                "override_updated_at")):
+                                "override_updated_at", "evidence_expiry", "evidence_context")):
                         raise ValueError("AI_INPUT_CHANGED")
             if expected_collection_versions:
                 collection_ids = list(expected_collection_versions)
