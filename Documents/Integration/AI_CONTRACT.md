@@ -1,7 +1,7 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.6-draft
-**Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, AI03 automatic Collection matching, and the AI04 proposal review lifecycle are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
+**Version:** 1.7-draft
+**Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, AI03 automatic Collection matching, AI04 proposal review, and AI05 preview/apply reclassification are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
@@ -137,12 +137,16 @@ Requires Idempotency-Key with 8–128 printable ASCII characters.
 
     {
       "keyword_ids": ["keyword-id-1", "keyword-id-2"],
+      "collection_ids": [],
+      "include_unassigned": false,
       "preview": false
     }
 
-The request has no text, evidence, source, Collection, model, URL, or credential fields. The service groups exact canonical phrases within each data mode and resolved entity identity, passes one logical keyword input with its durable source IDs, categories, active evidence IDs, and eligible Collection context, and fans a validated result back to eligible durable IDs. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, unsupported-mode, evidence-expired, and YouTube rows are not sent. Removed Collection IDs remain part of the server-side write guard and are never included in PUBLIC_DATA prompts. PUBLIC_DATA sends only fields allowed by the source policy matrix; Collection names/descriptions require the server-side public Collection ID allowlist and a content screen.
+At least one scope selector is required. `keyword_ids` selects only those IDs; `collection_ids` selects keywords directly assigned to those active Collections; `include_unassigned=true` adds currently unassigned eligible keywords. Selectors combine as a union, duplicate IDs are removed, and the resolved job is capped at 200 keywords. Collection descendants are not expanded automatically. The scope selectors and resolved IDs are part of the job digest; Apply rejects a scope that changed after Preview.
 
-Classification is batched. Initial batch size is bounded by model limits and token estimates, then adjusted using recent latency and structured-output validity. Only cache misses are sent. Cache identity includes the model, prompt/schema/input-contract/source-policy versions, canonical group and durable IDs, source/data-mode/categories, active evidence content/expiry, Collections and versions, and per-keyword override state. The Postgres write transaction rechecks keyword, active evidence lineage/expiry, categories, override, data mode, and Collection state before applying changes.
+The request has no keyword text, evidence, source name/content, Collection name/description, model, URL, or credential fields. The service groups exact canonical phrases within each data mode and resolved entity identity, passes one logical keyword input with its durable source IDs, categories, active evidence IDs, and eligible Collection context, and fans a validated result back to eligible durable IDs. Unresolved records do not merge with resolved identities; conflicting known entities remain separate. Ineligible, excluded, user-assigned, user-pinned, disallowed-source, unsupported-mode, evidence-expired, and YouTube rows are not sent. Removed Collection IDs remain part of the server-side write guard and are never included in PUBLIC_DATA prompts. PUBLIC_DATA sends only fields allowed by the source policy matrix; Collection names/descriptions require the server-side public Collection ID allowlist and a content screen.
+
+Classification is batched. Initial batch size is bounded by model limits and token estimates, then adjusted using recent latency and structured-output validity. Only cache misses are sent. Cache identity includes the model, prompt/schema/input-contract/source-policy versions, canonical group and durable IDs, source/data-mode/categories, active evidence content/expiry, Collections and versions, per-keyword override state, and current membership state. The Postgres write transaction rechecks keyword, active evidence lineage/expiry, categories, override, data mode, user and AI memberships, and Collection state before applying changes.
 
     {
       "job_id": "ai_<32 hex characters>",
@@ -163,7 +167,13 @@ The score is a model self-assessment used with an initial 0.82 assignment thresh
 
 For automatic Fetch classification (`automatic=true`), model-proposed new Collections are not persisted. Keywords below threshold or without a matching eligible Collection remain unassigned until the separate proposal workflow is used.
 
-Setting preview=true returns proposed assignments and proposal drafts with mode="PREVIEW". It creates no Collection, proposal record, assignment, or reconciliation run. The validated AI result may still be cached and the preview job/quota usage is recorded.
+Setting `preview=true` returns proposed assignments and proposal drafts with `mode="PREVIEW"`. It creates no Collection, proposal record, assignment, or reconciliation run. The preview separates `UNCHANGED_MEMBERSHIP`, `AI_ASSIGNMENT_CHANGE`, `AI_ASSIGNMENT_REMOVAL`, `AI_ASSIGNMENT_REMOVAL_TO_PROPOSAL`, `NEW_AI_ASSIGNMENT`, `NEW_COLLECTION_PROPOSAL`, `NO_COLLECTION`, `USER_PROTECTED`, and other skipped states. The validated AI result may still be cached and the preview job/quota usage is recorded.
+
+### POST /api/v1/ai/classifications/previews/{preview_job_id}/apply
+
+Applies the exact saved Preview payload without another model call. It rejects expired or non-preview jobs and rechecks the digest, scope membership, Collection set/versions/`auto_match`, user state, current AI memberships, active evidence IDs/expiry, and removal feedback. The write transaction reconciles only eligible, unprotected keywords. Repeating Apply is idempotent for the same preview job. A stale preview returns `AI_INPUT_CHANGED`; it must be previewed again.
+
+The returned summary includes `mode="APPLIED"`, assignment/proposal IDs, counts for unchanged, changed, new, no-Collection and user-protected keywords, and the reconciliation ID. `GET /api/v1/ai/jobs/{job_id}` provides processed/total progress, preview/apply result summaries, rollback availability, and sanitized deferred/error state; `POST /api/v1/ai/jobs/{job_id}/resume` resumes only retryable jobs with current context. `POST /api/v1/collections/reconciliation/{run_id}/rollback` restores only the targeted AI reconciliation when it has not been superseded; user-origin, pinned, and newer membership changes are protected.
 
 ### Proposal lifecycle
 

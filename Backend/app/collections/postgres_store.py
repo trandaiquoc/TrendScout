@@ -1684,6 +1684,7 @@ class PostgresCollectionStore(PostgresCollectionReader):
                                   expected_collection_versions=None, expected_keyword_texts=None,
                                   expected_collection_ids=None, expected_collection_auto_match=None,
                                   expected_keyword_states=None,
+                                  expected_input_states=None, expected_scope=None,
                                   allowed_sources=None):
         """Atomically reconcile only the submitted keywords and create pending proposals."""
         identifiers = list(dict.fromkeys(keyword_ids))
@@ -1695,6 +1696,8 @@ class PostgresCollectionStore(PostgresCollectionReader):
         expected_keyword_texts = dict(expected_keyword_texts or {})
         expected_collection_auto_match = dict(expected_collection_auto_match or {})
         expected_keyword_states = dict(expected_keyword_states or {})
+        expected_input_states = dict(expected_input_states or {})
+        expected_scope = dict(expected_scope or {}) if expected_scope is not None else None
         if (not isinstance(run_id, str) or not run_id or len(run_id) > 128
                 or not isinstance(job_id, str) or not job_id or len(job_id) > 128
                 or not identifiers or len(identifiers) > 200
@@ -1744,8 +1747,9 @@ class PostgresCollectionStore(PostgresCollectionReader):
             if any(not row["eligible"] or row["normalized"] != expected_keyword_texts.get(row["id"], row["normalized"])
                    for row in keywords):
                 raise ValueError("AI_INPUT_CHANGED")
-            if expected_keyword_states:
+            if expected_keyword_states or expected_input_states:
                 sources = sorted(set(allowed_sources or ()))
+                snapshot_ids = sorted(set(identifiers) | set(expected_input_states))
                 states = db.execute(sql.SQL("""SELECT k.id,k.normalized,k.source,k.data_mode,k.eligible,
                     COALESCE(kd.decision,'') AS decision,
                     COALESCE(cr.classification_status,'') AS classification_status,
@@ -1783,6 +1787,13 @@ class PostgresCollectionStore(PostgresCollectionReader):
                             ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '[]'::jsonb) AS evidence_context,
                     EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
                     EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
+                    COALESCE((SELECT jsonb_agg(jsonb_build_object('collection_id',m.collection_id,
+                        'origin',m.origin,'pinned',m.pinned,
+                        'score',CASE WHEN m.origin='LOCAL_AI' THEN m.score ELSE NULL END,
+                        'reason',CASE WHEN m.origin='LOCAL_AI' THEN m.reason ELSE NULL END)
+                        ORDER BY m.collection_id,m.origin,m.pinned,m.created_at)
+                        FROM {} m WHERE m.keyword_id=k.id),
+                        '[]'::jsonb) AS current_memberships,
                     COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
                         FROM {} f WHERE f.keyword_id=k.id AND f.action='REMOVE'), '[]'::jsonb)
                         AS removed_collection_ids,
@@ -1794,22 +1805,61 @@ class PostgresCollectionStore(PostgresCollectionReader):
                         self._table("evidence_keywords"), self._table("source_evidence"),
                         self._table("evidence_keywords"), self._table("source_evidence"),
                         self._table("sources"),
-                        self._table("memberships"), self._table("memberships"),
+                        self._table("memberships"), self._table("memberships"), self._table("memberships"),
                         self._table("feedback"), self._table("keywords"),
                         self._table("keyword_decisions"), self._table("classification_results")),
-                    (sources, sources, sources, identifiers)).fetchall()
+                    (sources, sources, sources, snapshot_ids)).fetchall()
                 actual_states = {row["id"]: row for row in states}
-                if set(actual_states) != set(identifiers):
+                if set(actual_states) != set(snapshot_ids):
                     raise ValueError("AI_INPUT_CHANGED")
-                for identifier, expected in expected_keyword_states.items():
+                state_expectations = {**expected_input_states, **expected_keyword_states}
+                for identifier, expected in state_expectations.items():
                     actual = actual_states.get(identifier)
                     if not isinstance(expected, dict) or actual is None or any(
-                            actual.get(field) != expected.get(field) for field in (
+                            field in expected and actual.get(field) != expected.get(field) for field in (
                                 "normalized", "source", "data_mode", "eligible", "decision",
                                 "classification_status", "entity_id", "categories",
                                 "evidence_ids", "user_assigned", "user_pinned", "removed_collection_ids",
-                                "override_updated_at", "evidence_expiry", "evidence_context")):
+                                "override_updated_at", "evidence_expiry", "evidence_context",
+                                "current_memberships")):
                         raise ValueError("AI_INPUT_CHANGED")
+            if expected_scope is not None:
+                selected_keywords = list(dict.fromkeys(expected_scope.get("keyword_ids", [])))
+                selected_collections = list(dict.fromkeys(expected_scope.get("collection_ids", [])))
+                include_unassigned = expected_scope.get("include_unassigned")
+                resolved_ids = list(dict.fromkeys(expected_scope.get("resolved_ids", [])))
+                if (type(include_unassigned) is not bool or not resolved_ids
+                        or any(not isinstance(value, str) or not value or len(value) > 64
+                               for value in (*selected_keywords, *selected_collections, *resolved_ids))):
+                    raise ValueError("AI_INPUT_CHANGED")
+                if selected_collections:
+                    active = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s) AND status='ACTIVE' FOR SHARE")
+                        .format(self._table("collections")), (selected_collections,)).fetchall()
+                    if {row["id"] for row in active} != set(selected_collections):
+                        raise ValueError("AI_INPUT_CHANGED")
+                scope_parts = []
+                scope_params = []
+                if selected_keywords:
+                    scope_parts.append(sql.SQL("k.id=ANY(%s)"))
+                    scope_params.append(selected_keywords)
+                if selected_collections:
+                    scope_parts.append(sql.SQL("EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id "
+                        "AND m.collection_id=ANY(%s))").format(self._table("memberships")))
+                    scope_params.append(selected_collections)
+                if include_unassigned:
+                    scope_parts.append(sql.SQL("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' "
+                        "AND NOT EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id)")
+                        .format(self._table("memberships")))
+                mode_filter = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+                if self.data_mode_scope:
+                    scope_params.append(self.data_mode_scope)
+                current_scope = db.execute(sql.SQL("SELECT k.id FROM {} k LEFT JOIN {} cr ON cr.keyword_id=k.id ")
+                    .format(self._table("keywords"), self._table("classification_results"))
+                    + sql.SQL("WHERE (") + sql.SQL(" OR ").join(scope_parts) + sql.SQL(")") + mode_filter
+                    + sql.SQL(" ORDER BY k.id COLLATE \"C\" LIMIT 201"), scope_params).fetchall()
+                if (len(current_scope) > 200
+                        or {row["id"] for row in current_scope} != set(resolved_ids)):
+                    raise ValueError("AI_INPUT_CHANGED")
             if expected_collection_ids is not None:
                 current_collection_ids = db.execute(sql.SQL(
                     "SELECT id FROM {} WHERE status='ACTIVE' AND category_id IS NULL").format(

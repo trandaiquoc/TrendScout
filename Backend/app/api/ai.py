@@ -11,15 +11,23 @@ router = APIRouter()
 
 class ClassificationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    keyword_ids: list[str] = Field(min_length=1, max_length=200)
+    keyword_ids: list[str] = Field(default_factory=list, max_length=200)
+    collection_ids: list[str] = Field(default_factory=list, max_length=100)
+    include_unassigned: bool = False
     preview: bool = False
 
-    @field_validator("keyword_ids")
+    @field_validator("keyword_ids", "collection_ids")
     @classmethod
     def bounded_ids(cls, values):
         if any(not value.strip() or len(value) > 64 for value in values):
-            raise ValueError("keyword IDs must be non-empty and at most 64 characters")
+            raise ValueError("selector IDs must be non-empty and at most 64 characters")
         return list(dict.fromkeys(values))
+
+    @model_validator(mode="after")
+    def has_scope(self):
+        if not (self.keyword_ids or self.collection_ids or self.include_unassigned):
+            raise ValueError("at least one reclassification scope selector is required")
+        return self
 
 
 class RecommendationInput(BaseModel):
@@ -89,10 +97,14 @@ def _error(exc):
         "AI_COLLECTION_NOT_FOUND": 404,
         "AI_JOB_NOT_RESUMABLE": 409,
         "AI_INPUT_CHANGED": 409,
+        "AI_PREVIEW_NOT_APPLICABLE": 409,
+        "AI_PREVIEW_EXPIRED": 409,
+        "AI_PREVIEW_INVALID": 409,
         "AI_PROPOSAL_EXPIRED": 409,
         "COLLECTION_NAME_CONFLICT": 409,
         "COLLECTION_CONTENT_CONFLICT": 409,
         "AI_STORAGE_UNAVAILABLE": 503,
+        "AI_DISABLED": 503,
         "AI_POLICY_DENIED": 403,
     }.get(code, 422)
     return HTTPException(status, {"code": code})
@@ -130,11 +142,40 @@ def reclassify(value: ClassificationInput, request: Request,
     collection_service = _collection_service(request)
     if collection_service is None:
         raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"})
+    scope = {"keyword_ids": value.keyword_ids, "collection_ids": value.collection_ids,
+             "include_unassigned": value.include_unassigned}
     try:
+        if value.collection_ids or value.include_unassigned:
+            resolver = getattr(collection_service.store, "resolve_ai_reclassification_scope", None)
+            if resolver is None:
+                raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"})
+            selected_ids = resolver(**scope)
+        else:
+            selected_ids = value.keyword_ids
         return service.classify_keyword_ids(
-            collection_service.store, value.keyword_ids,
-            idempotency_key=idempotency_key, preview=value.preview,
+            collection_service.store, selected_ids,
+            idempotency_key=idempotency_key, preview=value.preview, scope=scope,
         )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        code = str(exc) if str(exc).startswith("AI_") else "AI_STORAGE_UNAVAILABLE"
+        raise HTTPException(422 if code.startswith("AI_RECLASSIFICATION_SCOPE_") else 404,
+                            {"code": code}) from None
+    except AIExecutionError as exc:
+        raise _error(exc) from None
+    except Exception:
+        raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"}) from None
+
+
+@router.post("/ai/classifications/previews/{preview_job_id}/apply")
+def apply_classification_preview(preview_job_id: str, request: Request):
+    service = _service(request, write=True)
+    collection_service = _collection_service(request)
+    if collection_service is None:
+        raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"})
+    try:
+        return service.apply_classification_preview(collection_service.store, preview_job_id)
     except AIExecutionError as exc:
         raise _error(exc) from None
     except Exception:

@@ -384,6 +384,53 @@ class PostgresCollectionReader:
 
         return self._read(read)
 
+    def resolve_ai_reclassification_scope(self, *, keyword_ids=(), collection_ids=(), include_unassigned=False):
+        """Resolve the caller's explicit reclassification selectors to a bounded ID set."""
+        keyword_ids = list(dict.fromkeys(keyword_ids))
+        collection_ids = list(dict.fromkeys(collection_ids))
+        if (type(include_unassigned) is not bool
+                or len(keyword_ids) > 200 or len(collection_ids) > 100
+                or any(not isinstance(value, str) or not value.strip() or len(value) > 64
+                       for value in (*keyword_ids, *collection_ids))
+                or not (keyword_ids or collection_ids or include_unassigned)):
+            raise ValueError("AI_RECLASSIFICATION_SCOPE_INVALID")
+
+        def read(db):
+            if collection_ids:
+                active = db.execute(sql.SQL("SELECT id FROM {} WHERE id=ANY(%s) AND status='ACTIVE'")
+                                    .format(self._table("collections")), (collection_ids,)).fetchall()
+                if {row["id"] for row in active} != set(collection_ids):
+                    raise ValueError("AI_COLLECTION_NOT_FOUND")
+            clauses = []
+            parameters = []
+            if keyword_ids:
+                clauses.append(sql.SQL("k.id=ANY(%s)"))
+                parameters.append(keyword_ids)
+            if collection_ids:
+                clauses.append(sql.SQL("EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id "
+                    "AND m.collection_id=ANY(%s))").format(self._table("memberships")))
+                parameters.append(collection_ids)
+            if include_unassigned:
+                clauses.append(sql.SQL("k.eligible=1 AND COALESCE(cr.classification_status,'')<>'INELIGIBLE' "
+                    "AND NOT EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id)")
+                    .format(self._table("memberships")))
+            mode_filter = sql.SQL(" AND k.data_mode=%s") if self.data_mode_scope else sql.SQL("")
+            if self.data_mode_scope:
+                parameters.append(self.data_mode_scope)
+            rows = db.execute(sql.SQL("SELECT k.id FROM {} k LEFT JOIN {} cr ON cr.keyword_id=k.id ")
+                .format(self._table("keywords"), self._table("classification_results"))
+                + sql.SQL("WHERE (") + sql.SQL(" OR ").join(clauses) + sql.SQL(")") + mode_filter
+                + sql.SQL(" ORDER BY k.id COLLATE \"C\" LIMIT 201"),
+                [*parameters]).fetchall()
+            if len(rows) > 200:
+                raise ValueError("AI_RECLASSIFICATION_SCOPE_TOO_LARGE")
+            identifiers = [row["id"] for row in rows]
+            if not identifiers:
+                raise ValueError("AI_RECLASSIFICATION_SCOPE_EMPTY")
+            return identifiers
+
+        return self._read(read)
+
     def ai_classification_context(self, identifiers, *, allowed_sources):
         """Load only normalized keyword text, override state, approved evidence IDs, and Collections."""
         identifiers = list(dict.fromkeys(identifiers))
@@ -431,6 +478,13 @@ class PostgresCollectionReader:
                         ORDER BY se.collected_at DESC,se.id LIMIT 20) se), '[]'::jsonb) AS evidence_context,
                 EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.origin='USER') AS user_assigned,
                 EXISTS(SELECT 1 FROM {} m WHERE m.keyword_id=k.id AND m.pinned=1) AS user_pinned,
+                COALESCE((SELECT jsonb_agg(jsonb_build_object('collection_id',m.collection_id,
+                    'origin',m.origin,'pinned',m.pinned,
+                    'score',CASE WHEN m.origin='LOCAL_AI' THEN m.score ELSE NULL END,
+                    'reason',CASE WHEN m.origin='LOCAL_AI' THEN m.reason ELSE NULL END)
+                    ORDER BY m.collection_id,m.origin,m.pinned,m.created_at)
+                    FROM {} m WHERE m.keyword_id=k.id),
+                    '[]'::jsonb) AS current_memberships,
                 COALESCE((SELECT jsonb_agg(DISTINCT f.collection_id ORDER BY f.collection_id)
                     FROM {} f WHERE f.keyword_id=k.id AND f.action='REMOVE'), '[]'::jsonb) AS removed_collection_ids,
                 COALESCE(kd.updated_at::text,'') AS override_updated_at
@@ -440,7 +494,8 @@ class PostgresCollectionReader:
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("evidence_keywords"), self._table("source_evidence"),
                     self._table("sources"),
-                    self._table("memberships"), self._table("memberships"), self._table("feedback"),
+                    self._table("memberships"), self._table("memberships"), self._table("memberships"),
+                    self._table("feedback"),
                     self._table("keywords"),
                     self._table("keyword_decisions"), self._table("classification_results"),
                     mode_filter), [sources, sources, sources, identifiers, *mode_parameters]).fetchall()
@@ -459,6 +514,14 @@ class PostgresCollectionReader:
             return {"keywords": result, "collections": [dict(item) for item in collections]}
 
         return self._read(read)
+
+    def membership_reconciliation_status(self, run_id):
+        if not isinstance(run_id, str) or not run_id or len(run_id) > 128:
+            return None
+        row = self._read(lambda db: db.execute(sql.SQL(
+            "SELECT status FROM {} WHERE id=%s").format(
+                self._table("membership_reconciliation_runs")), (run_id,)).fetchone())
+        return row["status"] if row else None
 
     def ai_recommendation_context(self, identifiers, *, allowed_sources):
         """Load bounded business context without source payloads or credentials."""

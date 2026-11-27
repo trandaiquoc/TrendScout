@@ -47,6 +47,7 @@ from app.api.ai import (
     RecommendationInput,
     _collection_service,
     _error,
+    apply_classification_preview,
     reclassify,
 )
 from app.sources.ai_transfer_policy import project_public_data_payload
@@ -155,6 +156,7 @@ class FakeCollectionStore:
         }])
         self.context_reads = 0
         self.persist_calls = []
+        self.applied_reconciliation_ids = set()
         self.recommendation_reads = 0
         self.raw_payload = "PRIVATE_RAW_PAYLOAD_SENTINEL"
 
@@ -166,10 +168,26 @@ class FakeCollectionStore:
             "collections": deepcopy(self.collections),
         }
 
+    def resolve_ai_reclassification_scope(self, *, keyword_ids=(), collection_ids=(), include_unassigned=False):
+        selected = set(keyword_ids)
+        for identifier, item in self.keywords.items():
+            memberships = item.get("current_memberships", [])
+            if collection_ids and any(isinstance(row, dict)
+                    and row.get("collection_id") in collection_ids for row in memberships):
+                selected.add(identifier)
+            if include_unassigned and not memberships and item.get("eligible", 1):
+                selected.add(identifier)
+        if not selected:
+            raise ValueError("AI_RECLASSIFICATION_SCOPE_EMPTY")
+        if len(selected) > 200:
+            raise ValueError("AI_RECLASSIFICATION_SCOPE_TOO_LARGE")
+        return sorted(selected)
+
     def collection_name_candidates(self, _fingerprint):
         return {"suppressed": False, "labels": []}
 
     def persist_ai_classification(self, run_id, keyword_ids, assignments, proposals, **kwargs):
+        self.applied_reconciliation_ids.add(run_id)
         self.persist_calls.append({
             "run_id": run_id, "keyword_ids": deepcopy(keyword_ids),
             "assignments": deepcopy(assignments), "proposals": deepcopy(proposals),
@@ -183,6 +201,9 @@ class FakeCollectionStore:
             "proposal_ids": proposal_ids,
             "membership_reconciliation_id": run_id if assignments else None,
         }
+
+    def membership_reconciliation_status(self, run_id):
+        return "APPLIED" if run_id in self.applied_reconciliation_ids else None
 
     def ai_recommendation_context(self, identifiers, *, allowed_sources):
         self.recommendation_reads += 1
@@ -899,6 +920,96 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("untrusted data", provider.calls[0]["messages"][0]["content"])
         self.assertIn("Ignore safeguards", provider.calls[0]["messages"][1]["content"])
 
+    def test_preview_apply_reuses_exact_result_and_reports_membership_state(self):
+        provider = FakeProvider([classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[{
+            "id": "keyword-1", "keyword": "Outdoor gear",
+            "current_memberships": [{"collection_id": COLLECTION_ID, "origin": "LOCAL_AI",
+                                      "pinned": False, "score": 0.75, "reason": "Existing"}],
+        }])
+        preview = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="preview-apply-001", preview=True)
+        self.assertEqual(preview["classification_statuses"], [
+            {"keyword_id": "keyword-1", "status": "UNCHANGED_MEMBERSHIP"},
+        ])
+        self.assertEqual(len(preview["unchanged_memberships"]), 1)
+        self.assertEqual(store.persist_calls, [])
+        job_summary = service.get_job(preview["job_id"])
+        self.assertTrue(job_summary["can_apply"])
+        self.assertEqual(job_summary["result_summary"]["classification_status_counts"],
+                         {"UNCHANGED_MEMBERSHIP": 1})
+
+        applied = service.apply_classification_preview(store, preview["job_id"])
+        replay = service.apply_classification_preview(store, preview["job_id"])
+        self.assertEqual(applied["mode"], "APPLIED")
+        self.assertEqual(applied["unchanged_count"], 1)
+        self.assertEqual(applied, replay)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(store.persist_calls), 1)
+        self.assertTrue(service.get_job(preview["job_id"])["can_rollback"])
+        self.assertIn("expected_input_states", store.persist_calls[0]["kwargs"])
+        self.assertIn("expected_scope", store.persist_calls[0]["kwargs"])
+
+    def test_preview_apply_rejects_user_state_changed_after_preview(self):
+        provider = FakeProvider([classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore()
+        preview = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="preview-stale-001", preview=True)
+        store.keywords["keyword-1"]["user_assigned"] = True
+        with self.assertRaises(AIExecutionError) as caught:
+            service.apply_classification_preview(store, preview["job_id"])
+        self.assertEqual(caught.exception.code, "AI_INPUT_CHANGED")
+        self.assertEqual(store.persist_calls, [])
+
+    def test_classification_cache_key_changes_with_current_ai_memberships(self):
+        provider = FakeProvider([classification_response, classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore()
+        first = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="membership-cache-first")
+        self.assertEqual(first["status"], "COMPLETED")
+        store.keywords["keyword-1"]["current_memberships"] = [{
+            "collection_id": "another-collection", "origin": "LOCAL_AI",
+            "pinned": False, "score": 0.8, "reason": "Changed membership",
+        }]
+        second = service.classify_keyword_ids(
+            store, ["keyword-1"], idempotency_key="membership-cache-changed")
+        self.assertEqual(second["status"], "COMPLETED")
+        self.assertEqual(len(provider.calls), 2)
+
+    def test_preview_distinguishes_no_collection_from_ai_assignment_removal(self):
+        def response(messages):
+            return classification_response(messages, collection_id=None, score=0.2)
+
+        provider = FakeProvider([response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[
+            {"id": "keyword-new", "keyword": "Unmatched topic"},
+            {"id": "keyword-old", "keyword": "Old topic", "current_memberships": [{
+                "collection_id": "collection-old", "origin": "LOCAL_AI",
+                "pinned": False, "score": 0.8, "reason": "Previous assignment",
+            }]},
+        ])
+        result = service.classify_keyword_ids(
+            store, ["keyword-new", "keyword-old"],
+            idempotency_key="preview-no-collection", preview=True,
+        )
+        statuses = {item["keyword_id"]: item["status"]
+                    for item in result["classification_statuses"]}
+        self.assertEqual(statuses, {
+            "keyword-new": "NO_COLLECTION",
+            "keyword-old": "AI_ASSIGNMENT_REMOVAL",
+        })
+        self.assertEqual(result["no_collection_keyword_ids"], ["keyword-new", "keyword-old"])
+        self.assertEqual(result["changed_assignments"][0]["collection_id"], None)
+        self.assertEqual(store.persist_calls, [])
+
     def test_new_collection_proposal_is_evidence_bound_and_not_created(self):
         def proposal(messages):
             groups = json.loads(messages[1]["content"])["keywords"]
@@ -1614,6 +1725,11 @@ class AIServiceTests(unittest.TestCase):
             })
         with self.assertRaises(ValidationError):
             ClassificationInput.model_validate({"keyword_ids": ["x"] * 201})
+        self.assertEqual(ClassificationInput.model_validate({
+            "collection_ids": ["collection-1"], "include_unassigned": True,
+        }).collection_ids, ["collection-1"])
+        with self.assertRaises(ValidationError):
+            ClassificationInput.model_validate({"preview": True})
 
     def test_reclassify_route_uses_app_scoped_services_and_input_change_is_conflict(self):
         provider = FakeProvider([classification_response])
@@ -1637,6 +1753,33 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETED")
         self.assertEqual(len(provider.calls), 1)
         self.assertEqual(_error(AIExecutionError("AI_INPUT_CHANGED")).status_code, 409)
+
+    def test_reclassify_api_supports_collection_scope_and_preview_apply_routes(self):
+        provider = FakeProvider([classification_response])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[{
+            "id": "keyword-1", "keyword": "Outdoor gear",
+            "current_memberships": [{"collection_id": COLLECTION_ID, "origin": "LOCAL_AI",
+                                      "pinned": False, "score": 0.75, "reason": "Existing"}],
+        }])
+        app = FastAPI()
+        app.state.ai_service = service
+        app.state.collection_service = SimpleNamespace(store=store)
+        request = Request({
+            "type": "http", "method": "POST", "scheme": "http",
+            "server": ("127.0.0.1", 80), "client": ("127.0.0.1", 12345),
+            "path": "/api/v1/ai/classifications/reclassify", "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1")], "app": app, "state": {},
+        })
+        with patch("app.api.ai._origin"):
+            preview = reclassify(ClassificationInput(
+                collection_ids=[COLLECTION_ID], preview=True), request,
+                idempotency_key="collection-preview-route")
+            applied = apply_classification_preview(preview["job_id"], request)
+        self.assertEqual(preview["mode"], "PREVIEW")
+        self.assertEqual(applied["mode"], "APPLIED")
+        self.assertEqual(provider.calls and len(provider.calls), 1)
 
 
 if __name__ == "__main__":

@@ -815,7 +815,7 @@ class AIService:
             member_state = [{key: item.get(key) for key in (
                 "id", "normalized", "source", "data_mode", "eligible", "decision",
                 "classification_status", "user_assigned", "user_pinned",
-                "removed_collection_ids", "override_updated_at")}
+                "removed_collection_ids", "override_updated_at", "current_memberships")}
                 for item in sorted(group["_records"], key=lambda item: item["id"])]
             keys[group["id"]] = _digest({
                 "model": self.config.collection_model, "prompt": PROMPT_VERSION,
@@ -963,11 +963,34 @@ class AIService:
             pass
 
     def classify_keyword_ids(self, store, keyword_ids, *, idempotency_key: str | None = None,
-                             job_id: str | None = None, automatic=False, preview=False):
+                             job_id: str | None = None, automatic=False, preview=False,
+                             scope=None, validate_only=False):
         self._assert_profile_store(store)
         if self.config.config_error:
             raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
         ids = _valid_ids(keyword_ids, maximum=200)
+        if scope is None:
+            scope = {"keyword_ids": ids, "collection_ids": [], "include_unassigned": False}
+        elif not isinstance(scope, dict):
+            raise AIExecutionError("AI_RECLASSIFICATION_SCOPE_INVALID", status="FAILED")
+        raw_keyword_scope = scope.get("keyword_ids", [])
+        raw_collection_scope = scope.get("collection_ids", [])
+        if (not isinstance(raw_keyword_scope, list) or not isinstance(raw_collection_scope, list)
+                or len(raw_keyword_scope) > 200 or len(raw_collection_scope) > 100):
+            raise AIExecutionError("AI_RECLASSIFICATION_SCOPE_INVALID", status="FAILED")
+        if any(not isinstance(value, str) or not value or len(value) > 64
+               for value in (*raw_keyword_scope, *raw_collection_scope)):
+            raise AIExecutionError("AI_RECLASSIFICATION_SCOPE_INVALID", status="FAILED")
+        scope = {
+            "keyword_ids": list(dict.fromkeys(raw_keyword_scope)),
+            "collection_ids": list(dict.fromkeys(raw_collection_scope)),
+            "include_unassigned": scope.get("include_unassigned", False),
+            "resolved_ids": ids,
+        }
+        if (type(scope["include_unassigned"]) is not bool
+                or any(not isinstance(value, str) or not value or len(value) > 64
+                       for key in ("keyword_ids", "collection_ids") for value in scope[key])):
+            raise AIExecutionError("AI_RECLASSIFICATION_SCOPE_INVALID", status="FAILED")
         if idempotency_key is not None and (not isinstance(idempotency_key, str)
                                             or not IDEMPOTENCY_KEY.fullmatch(idempotency_key)):
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE")
@@ -988,24 +1011,66 @@ class AIService:
             raise AIExecutionError("AI_KEYWORD_NOT_FOUND", status="FAILED")
         eligible = []
         skipped = []
+        skip_reasons = {}
         policy_skipped = []
         current_time = self._now()
+        input_state_by_id = {}
+        for item in keywords:
+            expiries = item.get("evidence_expiry")
+            expiries = expiries if isinstance(expiries, dict) else {}
+            references = item.get("evidence_context")
+            references = references if isinstance(references, list) else []
+            active_references = []
+            for reference in references:
+                if not isinstance(reference, dict):
+                    continue
+                evidence_id = reference.get("evidence_id")
+                source_id = reference.get("source_id")
+                expiry = _parse_time(expiries.get(evidence_id))
+                context_expiry = _parse_time(reference.get("expires_at"))
+                scope_context = reference.get("query_scope")
+                scope_context = scope_context if isinstance(scope_context, dict) else {}
+                if (not isinstance(evidence_id, str) or source_id not in self._allowed_sources
+                        or expiry is None or expiry <= current_time
+                        or context_expiry is not None and context_expiry != expiry
+                        or scope_context.get("data_mode") not in (None, item.get("data_mode"))):
+                    continue
+                active_references.append(reference)
+            snapshot_evidence_ids = sorted({reference["evidence_id"]
+                                            for reference in active_references})
+            snapshot = {key: item.get(key) for key in (
+                "normalized", "source", "data_mode", "eligible", "decision",
+                "classification_status", "entity_id", "categories", "user_assigned",
+                "user_pinned", "removed_collection_ids", "override_updated_at")}
+            snapshot["evidence_ids"] = snapshot_evidence_ids
+            snapshot["evidence_expiry"] = {
+                evidence_id: expiries[evidence_id] for evidence_id in snapshot_evidence_ids
+            }
+            snapshot["evidence_context"] = active_references
+            snapshot["current_memberships"] = (item.get("current_memberships")
+                if isinstance(item.get("current_memberships"), list) else [])
+            input_state_by_id[item["id"]] = snapshot
         for item in keywords:
             source_restricted = (
                 not self._source_allowed_for_item(item)
             )
             if source_restricted or item.get("decision") == "EXCLUDED":
                 skipped.append(item["id"])
+                skip_reasons[item["id"]] = ("POLICY_RESTRICTED" if source_restricted
+                                               else "EXCLUDED_BY_USER")
                 if source_restricted:
                     policy_skipped.append(item["id"])
                 continue
             if (not item.get("eligible") or item.get("classification_status") == "INELIGIBLE"
                     or item.get("user_assigned") or item.get("user_pinned")):
                 skipped.append(item["id"])
+                skip_reasons[item["id"]] = ("USER_PROTECTED" if item.get("user_assigned")
+                                               or item.get("user_pinned") else "INELIGIBLE")
                 continue
             text = _clean_text(item.get("normalized") or item.get("keyword"), 256)
             if not text:
                 skipped.append(item["id"])
+                skip_reasons[item["id"]] = "EMPTY_NORMALIZED_KEYWORD"
                 continue
             expiries = item.get("evidence_expiry")
             expiries = expiries if isinstance(expiries, dict) else {}
@@ -1020,6 +1085,7 @@ class AIService:
                              and reference_sources.get(evidence_id) in self._allowed_sources})
             if not active:
                 skipped.append(item["id"])
+                skip_reasons[item["id"]] = "ACTIVE_EVIDENCE_UNAVAILABLE"
                 policy_skipped.append(item["id"])
                 continue
             eligible_item = dict(item)
@@ -1035,6 +1101,7 @@ class AIService:
         if len(grouped_ids) != len(eligible):
             missing = {item["id"] for item in eligible} - grouped_ids
             skipped.extend(sorted(missing))
+            skip_reasons.update({identifier: "POLICY_RESTRICTED" for identifier in missing})
             policy_skipped.extend(sorted(missing))
             eligible = [item for item in eligible if item["id"] in grouped_ids]
             keyword_groups = group_keyword_records(
@@ -1046,9 +1113,13 @@ class AIService:
                 "member_state": [{key: item.get(key) for key in (
                     "id", "normalized", "source", "data_mode", "eligible", "decision",
                     "classification_status", "user_assigned", "user_pinned",
-                    "removed_collection_ids", "override_updated_at")}
+                    "removed_collection_ids", "override_updated_at", "evidence_ids",
+                    "evidence_expiry", "evidence_context", "current_memberships")}
                     for item in sorted(group["_records"], key=lambda item: item["id"])]
             } for group in keyword_groups],
+            "all_keyword_state": [{"id": item["id"], **input_state_by_id[item["id"]]}
+                for item in sorted(keywords, key=lambda item: item["id"])],
+            "scope": scope,
             "collections": [{key: item.get(key) for key in ("id", "name", "description", "version", "auto_match")}
                             for item in sorted(collections, key=lambda item: item["id"])],
             "prompt": PROMPT_VERSION, "schema": SCHEMA_VERSION, "policy": POLICY_VERSION,
@@ -1059,11 +1130,17 @@ class AIService:
             "model": self.config.collection_model, "preview": bool(preview),
         }
         request_digest = _digest(input_identity)
+        if validate_only:
+            return {"request_digest": request_digest, "ids": ids, "keywords": keywords,
+                    "eligible": eligible, "collections": collections,
+                    "collection_ids_at_load": collection_ids_at_load,
+                    "skip_reasons": skip_reasons, "scope": scope}
         key_material = idempotency_key or ("fetch:" + str(job_id or uuid.uuid4()))
         job = self._new_job(task="classification", ids=ids, request_digest=request_digest,
                             idempotency_key=key_material if idempotency_key else None,
                             existing_job_id=job_id,
-                            constraints={"preview": bool(preview), "automatic": bool(automatic)})
+                            constraints={"preview": bool(preview), "automatic": bool(automatic),
+                                         "scope": scope})
         if job.get("conflict"):
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE", status="FAILED")
         if job.get("existing") or not job.get("claimed", True):
@@ -1083,17 +1160,31 @@ class AIService:
         if not self._allowed_sources:
             return self._complete_with_error(job_id, "AI_POLICY_DENIED", "POLICY_DENIED")
         if not eligible:
-            if policy_skipped:
+            if policy_skipped and not preview:
                 return self._complete_with_error(job_id, "AI_POLICY_DENIED", "POLICY_DENIED")
             result = {"job_id": job_id, "status": "COMPLETED", "processed": 0,
-                      **({"mode": "PREVIEW", "proposals": []} if preview else {}),
+                      **({"mode": "PREVIEW", "proposals": [],
+                          "classification_statuses": [{"keyword_id": identifier,
+                              "status": ("USER_PROTECTED" if skip_reasons.get(identifier) == "USER_PROTECTED"
+                                         else "SKIPPED"),
+                              "reason_code": skip_reasons.get(identifier, "INELIGIBLE")}
+                              for identifier in ids],
+                          "unchanged_memberships": [], "changed_assignments": [],
+                          "new_assignments": [], "no_collection_keyword_ids": [],
+                          "user_protected_keyword_ids": [identifier for identifier in ids
+                              if skip_reasons.get(identifier) == "USER_PROTECTED"]} if preview else {}),
                       "assigned": [], "unassigned_keyword_ids": [], "proposal_ids": [],
-                      "skipped_keyword_ids": skipped, "membership_reconciliation_id": None,
+                      "skipped_keyword_ids": list(dict.fromkeys(skipped)),
+                      "membership_reconciliation_id": None,
                       "retry_at": None, "error_code": None}
+            if preview:
+                self._update_job(job_id, preview_payload={"request_digest": request_digest,
+                    "assignments": [], "proposals": [], "eligible_ids": [], "scope": scope})
             self._update_job(job_id, status="COMPLETED", result=result, processed=0,
                              error_code=None, retry_at=None)
             return result
 
+        processed = 0
         try:
             cache_keys = self._classification_keys(keyword_groups, collections)
             cached = self._read_classifications(cache_keys.values())
@@ -1105,10 +1196,18 @@ class AIService:
                     group_results[group["id"]] = value.get("classification", value)
                 else:
                     misses.append(group)
+            missed_group_ids = {group["id"] for group in misses}
+            cached_processed = sum(len(group["durable_keyword_ids"]) for group in keyword_groups
+                                   if group["id"] not in missed_group_ids)
+            processed = cached_processed
+            if cached_processed:
+                self._update_job(job_id, status="RUNNING", processed=cached_processed)
             if misses and not self.config.api_key_present:
-                return self._complete_with_error(job_id, "AI_KEY_MISSING", "MODEL_UNAVAILABLE")
+                return self._complete_with_error(job_id, "AI_KEY_MISSING", "MODEL_UNAVAILABLE",
+                                                 processed=processed)
             if misses and not self.config.collection_model:
-                return self._complete_with_error(job_id, "AI_MODEL_UNAVAILABLE", "MODEL_UNAVAILABLE")
+                return self._complete_with_error(job_id, "AI_MODEL_UNAVAILABLE", "MODEL_UNAVAILABLE",
+                                                 processed=processed)
             evidence_ids = {evidence_id for group in keyword_groups
                             for evidence_id in group.get("evidence_ids", [])}
             evidence_expiry = {evidence_id: expires_at for group in keyword_groups
@@ -1162,6 +1261,7 @@ class AIService:
                                              provider_latency_ms, valid_output=False)
                     return self._complete_with_error(
                         job_id, "AI_INVALID_OUTPUT", "INVALID_OUTPUT",
+                        processed=processed,
                         validation_diagnostics=exc.diagnostics,
                     )
                 except AIExecutionError as exc:
@@ -1183,6 +1283,10 @@ class AIService:
                     for group_id in proposal["keyword_ids"]:
                         group_results[group_id]["_proposal"] = proposal
                 cursor += len(batch)
+                processed = cached_processed + sum(
+                    len(group["durable_keyword_ids"]) for group in misses[:cursor]
+                )
+                self._update_job(job_id, status="RUNNING", processed=processed)
 
             proposals_by_digest = {}
             for group in keyword_groups:
@@ -1224,8 +1328,23 @@ class AIService:
                                   if collection["id"] == collection_id and collection.get("auto_match")), None)
                 if (available and score >= ASSIGNMENT_THRESHOLD
                         and collection_id not in item.get("removed_collection_ids", [])):
-                    to_persist.append((collection_id, item["id"], score,
-                        _clean_text(classification.get("reason"), 400)))
+                    current_ai = [membership for membership in item.get("current_memberships", [])
+                                  if isinstance(membership, dict)
+                                  and membership.get("origin") == "LOCAL_AI"
+                                  and not membership.get("pinned")]
+                    same_membership = next((membership for membership in current_ai
+                                            if membership.get("collection_id") == collection_id), None)
+                    if same_membership is not None:
+                        current_score = same_membership.get("score")
+                        if type(current_score) not in (int, float) or not math.isfinite(current_score):
+                            current_score = score
+                        current_reason = same_membership.get("reason")
+                        if not isinstance(current_reason, str):
+                            current_reason = _clean_text(classification.get("reason"), 400)
+                        to_persist.append((collection_id, item["id"], current_score, current_reason))
+                    else:
+                        to_persist.append((collection_id, item["id"], score,
+                            _clean_text(classification.get("reason"), 400)))
             valid_proposals = []
             assigned_ids = {entry[1] for entry in to_persist}
             for proposal in proposals_by_digest.values():
@@ -1282,10 +1401,77 @@ class AIService:
                     "job_id": job_id,
                     "expires_at": proposal_expires_at.isoformat(),
                 })
+            expected_input_states = input_state_by_id
+            expected_keyword_states = {item["id"]: dict(expected_input_states[item["id"]])
+                                       for item in eligible}
+            expected_collection_versions = {item["id"]: item["version"] for item in collections}
+            expected_collection_auto_match = {item["id"]: bool(item.get("auto_match"))
+                                              for item in collections}
+            expected_keyword_texts = {item["id"]: item.get("normalized") for item in eligible}
             if preview:
                 preview_assigned_ids = {entry[1] for entry in to_persist}
                 preview_proposed_ids = {keyword_id for proposal in valid_proposals
                                         for keyword_id in proposal["support_ids"]}
+                assignments_by_keyword = {entry[1]: entry for entry in to_persist}
+                current_ai_by_keyword = {
+                    item["id"]: [membership for membership in item.get("current_memberships", [])
+                                 if isinstance(membership, dict)
+                                 and membership.get("origin") == "LOCAL_AI"
+                                 and not membership.get("pinned")]
+                    for item in keywords
+                }
+                status_rows = []
+                unchanged_memberships = []
+                changed_assignments = []
+                new_assignments = []
+                no_collection_ids = []
+                user_protected_ids = []
+                for identifier in ids:
+                    entry = assignments_by_keyword.get(identifier)
+                    if skip_reasons.get(identifier) == "USER_PROTECTED":
+                        user_protected_ids.append(identifier)
+                        status_rows.append({"keyword_id": identifier, "status": "USER_PROTECTED",
+                                            "reason_code": "USER_PROTECTED"})
+                    elif identifier in skip_reasons:
+                        status_rows.append({"keyword_id": identifier, "status": "SKIPPED",
+                                            "reason_code": skip_reasons[identifier]})
+                    elif entry is not None:
+                        collection_id, _, score, reason = entry
+                        prior = current_ai_by_keyword.get(identifier, [])
+                        prior_ids = sorted({value.get("collection_id") for value in prior
+                                            if isinstance(value.get("collection_id"), str)})
+                        assignment = {"keyword_id": identifier, "collection_id": collection_id,
+                                      "score": score, "reason": reason}
+                        if prior_ids == [collection_id]:
+                            unchanged_memberships.append(assignment)
+                            status_rows.append({"keyword_id": identifier,
+                                                "status": "UNCHANGED_MEMBERSHIP"})
+                        elif prior_ids:
+                            changed_assignments.append({**assignment,
+                                                        "previous_collection_ids": prior_ids})
+                            status_rows.append({"keyword_id": identifier,
+                                                "status": "AI_ASSIGNMENT_CHANGE"})
+                        else:
+                            new_assignments.append(assignment)
+                            status_rows.append({"keyword_id": identifier,
+                                                "status": "NEW_AI_ASSIGNMENT"})
+                    elif identifier in {item["id"] for item in eligible}:
+                        no_collection_ids.append(identifier)
+                        prior_ids = sorted({value.get("collection_id")
+                                            for value in current_ai_by_keyword.get(identifier, [])
+                                            if isinstance(value.get("collection_id"), str)})
+                        if prior_ids:
+                            changed_assignments.append({"keyword_id": identifier,
+                                "collection_id": None, "previous_collection_ids": prior_ids,
+                                "proposed_collection": identifier in preview_proposed_ids})
+                            status_rows.append({"keyword_id": identifier,
+                                "status": "AI_ASSIGNMENT_REMOVAL_TO_PROPOSAL"
+                                if identifier in preview_proposed_ids else "AI_ASSIGNMENT_REMOVAL"})
+                        elif identifier in preview_proposed_ids:
+                            status_rows.append({"keyword_id": identifier,
+                                                "status": "NEW_COLLECTION_PROPOSAL"})
+                        else:
+                            status_rows.append({"keyword_id": identifier, "status": "NO_COLLECTION"})
                 result = {
                     "job_id": job_id, "status": "COMPLETED", "mode": "PREVIEW",
                     "processed": len(eligible),
@@ -1299,12 +1485,30 @@ class AIService:
                         "name", "description", "support_ids", "reason", "score", "uncertainty",
                         "evidence_ids", "source_ids", "model_id", "job_id", "expires_at")}
                         for proposal in valid_proposals],
-                    "proposal_ids": [], "skipped_keyword_ids": skipped,
+                    "proposal_ids": [], "skipped_keyword_ids": list(dict.fromkeys(skipped)),
+                    "classification_statuses": status_rows,
+                    "unchanged_memberships": unchanged_memberships,
+                    "changed_assignments": changed_assignments,
+                    "new_assignments": new_assignments,
+                    "no_collection_keyword_ids": no_collection_ids,
+                    "user_protected_keyword_ids": user_protected_ids,
                     "membership_reconciliation_id": None,
                     "retry_at": None, "error_code": None,
                 }
+                preview_payload = {"request_digest": request_digest,
+                    "assignments": [list(entry) for entry in to_persist],
+                    "proposals": valid_proposals,
+                    "eligible_ids": [item["id"] for item in eligible], "scope": scope,
+                    "expected_keyword_states": expected_keyword_states,
+                    "expected_input_states": expected_input_states,
+                    "expected_collection_versions": expected_collection_versions,
+                    "expected_collection_auto_match": expected_collection_auto_match,
+                    "expected_keyword_texts": expected_keyword_texts,
+                    "expected_collection_ids": collection_ids_at_load,
+                    "allowed_sources": sorted(self._allowed_sources)}
                 self._update_job(job_id, status="COMPLETED", processed=len(eligible),
                                  error_code=None, retry_at=None,
+                                 preview_payload=preview_payload,
                                  result=result if result_expiry is not None else None,
                                  result_expires_at=(result_expiry.isoformat()
                                                     if result_expiry is not None else None),
@@ -1315,18 +1519,13 @@ class AIService:
                 persisted = store.persist_ai_classification(
                     reconciliation_id, [item["id"] for item in eligible], to_persist,
                     valid_proposals, job_id=job_id,
-                    expected_collection_versions={item["id"]: item["version"] for item in collections},
+                    expected_collection_versions=expected_collection_versions,
                     expected_collection_ids=collection_ids_at_load,
-                    expected_keyword_texts={item["id"]: item.get("normalized") for item in eligible},
-                    expected_collection_auto_match={item["id"]: bool(item.get("auto_match"))
-                                                    for item in collections},
-                    expected_keyword_states={item["id"]: {
-                        key: item.get(key) for key in (
-                            "normalized", "source", "data_mode", "eligible", "decision",
-                            "classification_status", "entity_id", "categories", "evidence_ids",
-                            "evidence_expiry", "evidence_context", "user_assigned", "user_pinned",
-                            "removed_collection_ids", "override_updated_at")
-                    } for item in eligible},
+                    expected_keyword_texts=expected_keyword_texts,
+                    expected_collection_auto_match=expected_collection_auto_match,
+                    expected_keyword_states=expected_keyword_states,
+                    expected_input_states=expected_input_states,
+                    expected_scope={**scope, "resolved_ids": ids},
                     allowed_sources=sorted(self._allowed_sources),
                 )
             except ValueError as exc:
@@ -1362,12 +1561,132 @@ class AIService:
             code, status, retry_at = self._safe_error(exc)
             return self._complete_with_error(
                 job_id, code, status, retry_at=retry_at,
+                processed=processed,
                 diagnostics=getattr(exc, "diagnostics", None),
             )
 
-    def _complete_with_error(self, job_id, code, status, *, retry_at=None, diagnostics=None,
+    def apply_classification_preview(self, store, preview_job_id):
+        """Apply the exact saved preview only while its inputs and selected scope remain current."""
+        if not isinstance(preview_job_id, str) or not 1 <= len(preview_job_id) <= 80:
+            raise AIExecutionError("AI_JOB_NOT_RESUMABLE", status="FAILED")
+        try:
+            job = self._transact(lambda state: (state, state["jobs"].get(preview_job_id)))
+        except Exception:
+            raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+        if not isinstance(job, dict) or job.get("task") != "classification":
+            raise AIExecutionError("AI_JOB_NOT_RESUMABLE", status="FAILED")
+        if isinstance(job.get("apply_result"), dict):
+            return dict(job["apply_result"])
+        if self.config.config_error:
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
+        if not self.config.enabled:
+            raise AIExecutionError("AI_DISABLED", status="MODEL_UNAVAILABLE")
+        if not self._allowed_sources:
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
+        constraints = job.get("constraints") if isinstance(job.get("constraints"), dict) else {}
+        if not constraints.get("preview") or job.get("status") != "COMPLETED":
+            raise AIExecutionError("AI_PREVIEW_NOT_APPLICABLE", status="FAILED")
+        expires = _parse_time(job.get("result_expires_at") or job.get("expires_at"))
+        if expires is None or expires <= self._now():
+            raise AIExecutionError("AI_PREVIEW_EXPIRED", status="FAILED")
+        if (not isinstance(job.get("result"), dict)
+                or job["result"].get("mode") != "PREVIEW"):
+            raise AIExecutionError("AI_PREVIEW_INVALID", status="FAILED")
+        payload = job.get("preview_payload")
+        scope = constraints.get("scope")
+        ids = job.get("input_ids")
+        if (not isinstance(payload, dict) or payload.get("request_digest") != job.get("request_digest")
+                or payload.get("scope") != scope or not isinstance(scope, dict) or not isinstance(ids, list)):
+            raise AIExecutionError("AI_PREVIEW_INVALID", status="FAILED")
+
+        eligible_ids = payload.get("eligible_ids")
+        assignments = payload.get("assignments")
+        proposals = payload.get("proposals")
+        if (not isinstance(eligible_ids, list) or not isinstance(assignments, list)
+                or not isinstance(proposals, list)):
+            raise AIExecutionError("AI_PREVIEW_INVALID", status="FAILED")
+        run_id = "reconcile-" + uuid.uuid5(uuid.NAMESPACE_URL,
+            "trendscout:reclassification-preview:" + preview_job_id).hex
+        try:
+            run_status = store.membership_reconciliation_status(run_id)
+        except Exception:
+            run_status = None
+        replay = run_status == "APPLIED"
+
+        selectors = {key: scope.get(key) for key in ("keyword_ids", "collection_ids", "include_unassigned")}
+        if not replay:
+            try:
+                if selectors["collection_ids"] or selectors["include_unassigned"]:
+                    resolver = getattr(store, "resolve_ai_reclassification_scope", None)
+                    if resolver is None:
+                        raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED")
+                    current_ids = resolver(**selectors)
+                else:
+                    current_ids = list(dict.fromkeys(selectors["keyword_ids"] or []))
+            except AIExecutionError:
+                raise
+            except ValueError as exc:
+                code = str(exc) if str(exc).startswith("AI_") else "AI_STORAGE_UNAVAILABLE"
+                raise AIExecutionError(code, status="FAILED" if code != "AI_STORAGE_UNAVAILABLE"
+                                       else "DEFERRED") from None
+            except Exception:
+                raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+            if current_ids != ids:
+                raise AIExecutionError("AI_INPUT_CHANGED", status="FAILED")
+            current = self.classify_keyword_ids(store, ids, preview=True, scope=selectors,
+                                                validate_only=True)
+            if current.get("request_digest") != job.get("request_digest"):
+                raise AIExecutionError("AI_INPUT_CHANGED", status="FAILED")
+            if set(eligible_ids) != {item["id"] for item in current.get("eligible", [])}:
+                raise AIExecutionError("AI_PREVIEW_INVALID", status="FAILED")
+
+        if eligible_ids:
+            try:
+                persisted = store.persist_ai_classification(
+                    run_id, eligible_ids, assignments, proposals,
+                    job_id="apply_" + preview_job_id,
+                    expected_collection_versions=payload.get("expected_collection_versions"),
+                    expected_keyword_texts=payload.get("expected_keyword_texts"),
+                    expected_collection_ids=payload.get("expected_collection_ids"),
+                    expected_collection_auto_match=payload.get("expected_collection_auto_match"),
+                    expected_keyword_states=payload.get("expected_keyword_states"),
+                    expected_input_states=payload.get("expected_input_states"),
+                    expected_scope=payload.get("scope"),
+                    allowed_sources=payload.get("allowed_sources"),
+                )
+            except ValueError as exc:
+                code = str(exc) if str(exc) in {"AI_KEYWORD_NOT_FOUND", "AI_INPUT_CHANGED"} else "AI_STORAGE_UNAVAILABLE"
+                raise AIExecutionError(code, status="FAILED" if code != "AI_STORAGE_UNAVAILABLE"
+                                       else "DEFERRED") from None
+            except Exception:
+                raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+            assigned = [{"keyword_id": item["keyword_id"], "collection_id": item["collection_id"],
+                         "score": item.get("score"), "reason": item.get("reason", "")}
+                        for item in persisted.get("assignments", []) if isinstance(item, dict)]
+            proposal_ids = persisted.get("proposal_ids", [])
+            reconciliation_id = persisted.get("membership_reconciliation_id")
+        else:
+            assigned, proposal_ids, reconciliation_id = [], [], None
+        preview_result = job["result"]
+        result = {
+            "job_id": preview_job_id, "status": "COMPLETED", "mode": "APPLIED",
+            "processed": len(eligible_ids), "assigned": assigned,
+            "proposal_ids": proposal_ids,
+            "skipped_keyword_ids": preview_result.get("skipped_keyword_ids", []),
+            "unchanged_count": len(preview_result.get("unchanged_memberships", [])),
+            "changed_assignment_count": len(preview_result.get("changed_assignments", [])),
+            "new_assignment_count": len(preview_result.get("new_assignments", [])),
+            "no_collection_count": len(preview_result.get("no_collection_keyword_ids", [])),
+            "user_protected_count": len(preview_result.get("user_protected_keyword_ids", [])),
+            "membership_reconciliation_id": reconciliation_id,
+            "retry_at": None, "error_code": None,
+        }
+        self._update_job(preview_job_id, apply_result=result)
+        return result
+
+    def _complete_with_error(self, job_id, code, status, *, retry_at=None, processed=0, diagnostics=None,
                               validation_diagnostics=None):
-        result = {"job_id": job_id, "status": status, "processed": 0, "assigned": [],
+        result = {"job_id": job_id, "status": status, "processed": processed, "assigned": [],
                   "unassigned_keyword_ids": [], "proposal_ids": [], "retry_at": retry_at,
                   "error_code": code}
         safe_diagnostics = sanitize_provider_diagnostics(diagnostics)
@@ -1376,7 +1695,7 @@ class AIService:
         safe_validation = sanitize_validation_diagnostics(validation_diagnostics)
         if safe_validation:
             result["validation_diagnostics"] = safe_validation
-        self._update_job(job_id, status=status, error_code=code, retry_at=retry_at,
+        self._update_job(job_id, status=status, processed=processed, error_code=code, retry_at=retry_at,
                          result=result, lease_token=None, lease_until=None)
         return result
 
@@ -1861,8 +2180,46 @@ class AIService:
             raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
         if not isinstance(job, dict):
             return None
-        return {key: job.get(key) for key in ("job_id", "task", "status", "created_at", "updated_at",
-                "processed", "attempt_count", "input_tokens", "output_tokens", "error_code", "retry_at")}
+        result = job.get("result") if isinstance(job.get("result"), dict) else None
+        apply_result = job.get("apply_result") if isinstance(job.get("apply_result"), dict) else None
+        constraints = job.get("constraints") if isinstance(job.get("constraints"), dict) else {}
+        preview_result = result if result and result.get("mode") == "PREVIEW" else None
+        summary_source = apply_result or result or {}
+        status_counts = {}
+        for row in preview_result.get("classification_statuses", []) if preview_result else []:
+            if isinstance(row, dict) and isinstance(row.get("status"), str):
+                status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
+        expires = _parse_time(job.get("result_expires_at") or job.get("expires_at"))
+        lease_until = _parse_time(job.get("lease_until"))
+        can_resume = (job.get("status") in {"PENDING", "DEFERRED", "MODEL_UNAVAILABLE", "INVALID_OUTPUT"}
+                      or job.get("status") == "RUNNING"
+                      and (lease_until is None or lease_until <= self._now()))
+        return {
+            **{key: job.get(key) for key in ("job_id", "task", "status", "created_at", "updated_at",
+                "processed", "attempt_count", "input_tokens", "output_tokens", "error_code", "retry_at")},
+            "progress": {"processed": job.get("processed", 0),
+                         "total": len(job.get("input_ids", []))},
+            "preview_result": preview_result,
+            "apply_result": apply_result,
+            "result_summary": {
+                "mode": summary_source.get("mode"),
+                "processed": summary_source.get("processed", 0),
+                "assigned_count": len(summary_source.get("assigned", [])),
+                "proposal_count": len(summary_source.get("proposals", summary_source.get("proposal_ids", []))),
+                "unassigned_count": len(summary_source.get("unassigned_keyword_ids", []))
+                    if isinstance(summary_source.get("unassigned_keyword_ids"), list)
+                    else summary_source.get("no_collection_count", 0),
+                "no_collection_count": summary_source.get("no_collection_count",
+                    len(summary_source.get("no_collection_keyword_ids", []))),
+                "skipped_count": len(summary_source.get("skipped_keyword_ids", [])),
+                "classification_status_counts": status_counts,
+                "membership_reconciliation_id": summary_source.get("membership_reconciliation_id"),
+            },
+            "can_apply": bool(preview_result and not apply_result and expires and expires > self._now()),
+            "can_resume": can_resume,
+            "can_rollback": bool(apply_result and apply_result.get("membership_reconciliation_id")),
+            "is_preview": bool(constraints.get("preview")),
+        }
 
     def resume_job(self, store, job_id):
         try:
@@ -1879,7 +2236,8 @@ class AIService:
         if job.get("task") == "classification":
             return self.classify_keyword_ids(store, job.get("input_ids", []), job_id=job_id,
                                              automatic=bool(job.get("constraints", {}).get("automatic")),
-                                             preview=bool(job.get("constraints", {}).get("preview")))
+                                             preview=bool(job.get("constraints", {}).get("preview")),
+                                             scope=job.get("constraints", {}).get("scope"))
         if job.get("task") == "recommendations":
             constraints = job.get("constraints", {})
             return self.recommend(store, job.get("input_ids", []),

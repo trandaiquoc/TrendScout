@@ -171,6 +171,107 @@ def _propose(store, environment, provider, keyword_ids, key):
     return service, result, store.get_proposal(result["proposal_ids"][0])
 
 
+def test_postgres_reclassification_scope_preview_apply_and_rollback():
+    with isolated_schema() as (environment, schema, connection):
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        collection_id = store.create({"name": "Reclassification target", "auto_match": True})
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=3)
+        membership = sql.Identifier(schema, "memberships")
+        connection.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,
+            score,reason,created_at) VALUES (%s,%s,'USER',0,NULL,'Manually assigned',%s)""").format(
+                membership), (collection_id, keyword_ids[0], NOW))
+
+        scope = {"keyword_ids": [], "collection_ids": [collection_id],
+                 "include_unassigned": True}
+        resolved = store.resolve_ai_reclassification_scope(**scope)
+        assert set(resolved) == set(keyword_ids)
+        provider = ProposalThenAssignProvider()
+        service = AIService(PostgresAtomicStateStore(environment, schema=schema),
+                            config=_ai_config(), provider=provider, utcnow=lambda: NOW)
+        preview = service.classify_keyword_ids(
+            store, resolved, idempotency_key="pg-ai05-preview-apply", preview=True, scope=scope,
+        )
+        assert preview["mode"] == "PREVIEW"
+        assert preview["user_protected_keyword_ids"] == [keyword_ids[0]]
+        assert {item["keyword_id"] for item in preview["new_assignments"]} == set(keyword_ids[1:])
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE origin='LOCAL_AI'")
+                                  .format(membership)).fetchone()[0] == 0
+
+        run_id = "reconcile-" + uuid.uuid5(uuid.NAMESPACE_URL,
+            "trendscout:reclassification-preview:" + preview["job_id"]).hex
+        connection.execute(sql.SQL("""CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.origin='LOCAL_AI' THEN
+                    RAISE EXCEPTION 'simulated reclassification membership failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$""").format(sql.Identifier(schema, "reject_reclassification_membership")))
+        connection.execute(sql.SQL("""CREATE TRIGGER reject_reclassification_membership
+            BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION {}()""").format(
+                membership, sql.Identifier(schema, "reject_reclassification_membership")))
+        with pytest.raises(AIExecutionError) as caught:
+            service.apply_classification_preview(store, preview["job_id"])
+        assert caught.value.code == "AI_STORAGE_UNAVAILABLE"
+        assert store.membership_reconciliation_status(run_id) is None
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE origin='LOCAL_AI'")
+                                  .format(membership)).fetchone()[0] == 0
+        connection.execute(sql.SQL("DROP TRIGGER reject_reclassification_membership ON {}")
+                           .format(membership))
+        connection.execute(sql.SQL("DROP FUNCTION {}()")
+                           .format(sql.Identifier(schema, "reject_reclassification_membership")))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(
+                lambda _: service.apply_classification_preview(store, preview["job_id"]), range(2)))
+        applied = results[0]
+        assert results[1] == applied
+        assert applied["mode"] == "APPLIED"
+        assert applied["new_assignment_count"] == 2
+        assert applied["membership_reconciliation_id"]
+        rows = connection.execute(sql.SQL("SELECT keyword_id,origin FROM {} WHERE collection_id=%s")
+                                 .format(membership), (collection_id,)).fetchall()
+        assert {(row[0], row[1]) for row in rows} == {
+            (keyword_ids[0], "USER"), (keyword_ids[1], "LOCAL_AI"),
+            (keyword_ids[2], "LOCAL_AI"),
+        }
+        replay = service.apply_classification_preview(store, preview["job_id"])
+        assert replay == applied
+        assert provider.calls == 1
+
+        assert store.rollback_membership_reconciliation(applied["membership_reconciliation_id"])
+        rows = connection.execute(sql.SQL("SELECT keyword_id,origin FROM {} WHERE collection_id=%s")
+                                 .format(membership), (collection_id,)).fetchall()
+        assert {(row[0], row[1]) for row in rows} == {(keyword_ids[0], "USER")}
+
+
+def test_postgres_reclassification_preview_rejects_scope_membership_change():
+    with isolated_schema() as (environment, schema, connection):
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        collection_id = store.create({"name": "Reclassification scope", "auto_match": True})
+        keyword_ids = _seed_proposal_keywords(connection, schema, count=2)
+        membership = sql.Identifier(schema, "memberships")
+        connection.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,
+            score,reason,created_at) VALUES (%s,%s,'LOCAL_AI',0,0.8,'Existing AI',%s)""").format(
+                membership), (collection_id, keyword_ids[0], NOW))
+        scope = {"keyword_ids": [], "collection_ids": [collection_id],
+                 "include_unassigned": False}
+        resolved = store.resolve_ai_reclassification_scope(**scope)
+        provider = ProposalThenAssignProvider()
+        service = AIService(PostgresAtomicStateStore(environment, schema=schema),
+                            config=_ai_config(), provider=provider, utcnow=lambda: NOW)
+        preview = service.classify_keyword_ids(
+            store, resolved, idempotency_key="pg-ai05-stale-scope", preview=True, scope=scope,
+        )
+        connection.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,pinned,
+            score,reason,created_at) VALUES (%s,%s,'USER',0,NULL,'Added after preview',%s)""").format(
+                membership), (collection_id, keyword_ids[1], NOW))
+        with pytest.raises(AIExecutionError) as caught:
+            service.apply_classification_preview(store, preview["job_id"])
+        assert caught.value.code == "AI_INPUT_CHANGED"
+        assert provider.calls == 1
+
+
 def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
     with isolated_schema() as (environment, schema, connection):
         store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
