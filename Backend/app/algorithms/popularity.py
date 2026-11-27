@@ -13,7 +13,8 @@ class ObservedVolumeRanking:
         'Requires two valid observations matching source, date, country, access, project, metric, and unit.',
         True, (), 'O(n log n) per snapshot cohort.',
         'Rank 1 is the largest observed value; ties receive the best tied rank.',
-        ('Wikimedia top-list rank only; omitted pages are censored.', 'views_ceil is approximate.'))
+        ('Wikimedia top-list rank only; omitted pages are censored.', 'views_ceil is approximate.'),
+        runtime_requirements=('snapshot_cohort',))
 
     def applicable(self, item):
         if item.scope.source != SOURCE:
@@ -101,7 +102,8 @@ class ObservedPercentileRank(ObservedVolumeRanking):
         'Requires two valid observations matching source, date, country, access, project, metric, and unit.', True, (),
         'O(n log n) per snapshot cohort.',
         '100 is the largest observed value; tied values receive their midrank percentile.',
-        ('Percentile is within the observed, censored sample only.', 'views_ceil is approximate.'))
+        ('Percentile is within the observed, censored sample only.', 'views_ceil is approximate.'),
+        runtime_requirements=('snapshot_cohort',))
 
     def execute(self, item):
         values = self._values(item)
@@ -129,7 +131,8 @@ class RelativeSourceRank:
         'Requires at least two ranked records with matching provider and query scope.', False, (),
         'O(n log n) per source sample.', '100 is the best observed provider rank.',
         ('Only meaningful within a single provider query/sample.', 'Not search volume or demand.'),
-        excluded_sources=('youtube_video_search',))
+        excluded_sources=('youtube_video_search',),
+        runtime_requirements=('query_cohort',))
 
     def applicable(self, item):
         if item.scope.source == 'youtube_video_search':

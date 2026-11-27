@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
-
 RESULT_CONTRACT_VERSION = 'algorithm-result-v2'
 
 
@@ -66,6 +65,7 @@ class AlgorithmMetadata:
     interpretation: str = ''
     limitations: tuple[str, ...] = ()
     excluded_sources: tuple[str, ...] = ()
+    runtime_requirements: tuple[str, ...] = ()
 
     @property
     def key(self):

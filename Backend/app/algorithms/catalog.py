@@ -1,5 +1,5 @@
 """Public machine-readable registry view; frontend must not own algorithm lists."""
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 
 from app.algorithms.popularity import (
     ObservedPercentileRank,
@@ -14,68 +14,123 @@ from app.analysis.trend import score_trends
 from app.sources.catalog import SOURCE_CAPABILITIES
 
 
-_RUNTIME_EXECUTION = {
-    "wikimedia-trend": {
-        "status": "LEGACY_PATH_ONLY",
-        "sources": ("wikimedia_pageviews_top_per_country",),
-        "reason": "The versioned legacy score is produced by the Wikimedia dataset pipeline; it is not persisted by the collection algorithm runner.",
-    },
-    "growth-ratio": {
-        "status": "PERSISTED_WIKIMEDIA",
-        "sources": ("wikimedia_pageviews_top_per_country",),
-        "reason": "Runs only when a compatible Wikimedia baseline and current snapshot are available.",
-    },
-    "median-baseline": {
-        "status": "PERSISTED_WIKIMEDIA",
-        "sources": ("wikimedia_pageviews_top_per_country",),
-        "reason": "Stores a conditional median of observed Wikimedia top-list days.",
-    },
-    "observed-volume-rank": {
-        "status": "PERSISTED_WIKIMEDIA",
-        "sources": ("wikimedia_pageviews_top_per_country",),
-        "reason": "Ranks only within the current observed Wikimedia snapshot cohort.",
-    },
-    "observed-percentile-rank": {
-        "status": "PERSISTED_WIKIMEDIA",
-        "sources": ("wikimedia_pageviews_top_per_country",),
-        "reason": "Computes a percentile only within the current observed Wikimedia snapshot cohort.",
-    },
-    "robust-z-mad": {
-        "status": "NOT_EXECUTED_SOURCE_AND_RETENTION",
+@dataclass(frozen=True)
+class PersistedInputAdapter:
+    """Describe a source projection the collection runner can persist and reuse.
+
+    Source adapters translate provider records into these normalized capabilities;
+    the algorithm selection itself stays metadata-driven and source-agnostic.
+    """
+
+    adapter_id: str
+    source_id: str
+    metric: str
+    unit: str
+    source_capabilities: tuple[str, ...]
+    runtime_capabilities: tuple[str, ...]
+    max_history_days: int
+    minimum_cohort_size: int = 0
+
+    def supports(self, metadata):
+        if self.source_id in metadata.excluded_sources:
+            return False
+        if metadata.source not in {"*", self.source_id}:
+            return False
+        if metadata.input_metric not in {None, "*", self.metric}:
+            return False
+        if metadata.input_unit not in {None, "*", self.unit}:
+            return False
+        if not set(metadata.supported_capabilities).issubset(self.source_capabilities):
+            return False
+        if not set(metadata.runtime_requirements).issubset(self.runtime_capabilities):
+            return False
+        if ("top_list_censored" in self.source_capabilities
+                and not metadata.accepts_censored_top_list):
+            return False
+        if metadata.family == "popularity":
+            return metadata.minimum_samples <= self.minimum_cohort_size
+        minimum_window = min(metadata.supported_windows or (metadata.minimum_samples,))
+        required_history = max(metadata.minimum_samples, minimum_window)
+        return required_history <= self.max_history_days
+
+
+# This registry lists materialized PostgreSQL input projections, not all provider
+# capabilities. A future source is eligible only after its adapter persists the
+# same scope, bounded history/cohort, digest, and lineage contracts.
+PERSISTED_INPUT_ADAPTERS = (
+    PersistedInputAdapter(
+        adapter_id="wikimedia_pageviews_observation_projection",
+        source_id="wikimedia_pageviews_top_per_country",
+        metric="views_ceil",
+        unit="approx_pageviews_upper_bound",
+        source_capabilities=(
+            "daily_snapshot", "seven_day_history", "top_list_censored",
+        ),
+        runtime_capabilities=(
+            "daily_observations", "observation_history", "snapshot_cohort",
+            "input_digest", "evidence_lineage",
+        ),
+        # The Fetch retention contract keeps the current snapshot and six prior days.
+        max_history_days=6,
+        minimum_cohort_size=2,
+    ),
+)
+
+
+def _execution_for(metadata):
+    adapters = [adapter for adapter in PERSISTED_INPUT_ADAPTERS
+                if adapter.supports(metadata)]
+    if adapters:
+        return {
+            "status": "PERSISTED_SOURCE_ADAPTER",
+            "sources": tuple(adapter.source_id for adapter in adapters),
+            "input_adapters": tuple(adapter.adapter_id for adapter in adapters),
+            "reason": "Selected by the registered persisted input contract when compatible observations are available.",
+        }
+    if "legacy_result" in metadata.runtime_requirements:
+        return {
+            "status": "LEGACY_PATH_ONLY",
+            "sources": (metadata.source,),
+            "input_adapters": (),
+            "reason": "The versioned legacy score is produced by the Wikimedia dataset pipeline and is not persisted by the collection algorithm runner.",
+        }
+    if "query_cohort" in metadata.runtime_requirements:
+        return {
+            "status": "REGISTERED_NO_QUERY_COHORT",
+            "sources": (),
+            "input_adapters": (),
+            "reason": "No persisted same-provider, same-query, same-snapshot rank cohort is available; YouTube-derived ranks remain policy restricted.",
+        }
+    if "daily_numeric_series" in metadata.supported_capabilities:
+        available_history = max(
+            (adapter.max_history_days for adapter in PERSISTED_INPUT_ADAPTERS),
+            default=0,
+        )
+        minimum_window = min(metadata.supported_windows or (metadata.minimum_samples,))
+        required_history = max(metadata.minimum_samples, minimum_window)
+        if required_history > available_history:
+            return {
+                "status": "NOT_EXECUTED_SOURCE_AND_RETENTION",
+                "sources": (),
+                "input_adapters": (),
+                "reason": (
+                    "No current source provides an uncensored daily numeric series; "
+                    f"the minimum history is {required_history} prior days, while the "
+                    f"persisted input projection retains {available_history}."
+                ),
+            }
+        return {
+            "status": "REGISTERED_NO_COMPATIBLE_SOURCE",
+            "sources": (),
+            "input_adapters": (),
+            "reason": "No persisted source supplies the complete, uncensored daily numeric series required by this method.",
+        }
+    return {
+        "status": "REGISTERED_NO_PERSISTED_INPUT_ADAPTER",
         "sources": (),
-        "reason": "Current numeric source is top-list censored; the method rejects censored data and needs at least 14 historical days, beyond the stated seven-day retention window.",
-    },
-    "ewma": {
-        "status": "NOT_EXECUTED_SOURCE_AND_RETENTION",
-        "sources": (),
-        "reason": "Current numeric source is top-list censored; the method requires complete daily history and rejects censored data.",
-    },
-    "rolling-mean-baseline": {
-        "status": "REGISTERED_NO_COMPATIBLE_SOURCE",
-        "sources": (),
-        "reason": "No current source provides a complete, uncensored daily numeric series.",
-    },
-    "relative-change": {
-        "status": "REGISTERED_NO_COMPATIBLE_SOURCE",
-        "sources": (),
-        "reason": "No current source provides a complete, uncensored daily numeric series.",
-    },
-    "theil-sen-slope": {
-        "status": "REGISTERED_NO_COMPATIBLE_SOURCE",
-        "sources": (),
-        "reason": "No current source provides a complete, uncensored daily numeric series.",
-    },
-    "kendall-trend": {
-        "status": "REGISTERED_NO_COMPATIBLE_SOURCE",
-        "sources": (),
-        "reason": "No current source provides a complete, uncensored daily numeric series.",
-    },
-    "relative-source-rank": {
-        "status": "REGISTERED_NO_QUERY_COHORT",
-        "sources": (),
-        "reason": "Verification result ranks are not persisted as a comparable candidate cohort; YouTube-derived ranks remain policy-blocked.",
-    },
-}
+        "input_adapters": (),
+        "reason": "The strategy is registered but no persisted source input adapter satisfies its metric, scope, and runtime requirements.",
+    }
 
 
 def source_compatibility(metadata, source):
@@ -96,21 +151,22 @@ def source_compatibility(metadata, source):
     return "SUPPORTED_BUT_NOT_LIVE", source.readiness
 
 
-def persisted_keys_for_source(algorithm_registry, source_id):
-    """Keys that have a configured persisted execution path for this source."""
+def persisted_keys_for_source(algorithm_registry, source_id, *, input_adapters=None):
+    """Return strategies whose metadata fits a persisted source input contract."""
+    adapters = PERSISTED_INPUT_ADAPTERS if input_adapters is None else tuple(input_adapters)
+    source_adapters = [adapter for adapter in adapters if adapter.source_id == source_id]
     return tuple(
         key for key in algorithm_registry.keys()
-        if _RUNTIME_EXECUTION.get(algorithm_registry.get(key).metadata.algorithm_id, {}).get("status")
-        == "PERSISTED_WIKIMEDIA"
-        and source_id in _RUNTIME_EXECUTION.get(
-            algorithm_registry.get(key).metadata.algorithm_id, {}
-        ).get("sources", ())
+        if any(adapter.supports(algorithm_registry.get(key).metadata)
+               for adapter in source_adapters)
     )
 
 
 def registry(scorer=score_trends):
     result = AlgorithmRegistry()
-    for method in (WikimediaLegacy(scorer), GrowthRatio(), MedianBaseline(),
+    legacy = WikimediaLegacy(scorer)
+    legacy.metadata = replace(legacy.metadata, runtime_requirements=("legacy_result",))
+    for method in (legacy, GrowthRatio(), MedianBaseline(),
                    RobustZMad(), EWMA(), RollingMeanBaseline(), RelativeChange(),
                    TheilSenSlope(), KendallTrend(), ObservedVolumeRanking(),
                    ObservedPercentileRank(), RelativeSourceRank()):
@@ -130,10 +186,7 @@ def catalog(source_capabilities=SOURCE_CAPABILITIES):
         item['supported_windows'] = item['supported_windows'] or tuple(range(1, meta.max_window_days + 1))
         item['input_metric'] = item['input_metric'] or meta.metric
         item['input_unit'] = item['input_unit'] or meta.unit
-        item['execution'] = _RUNTIME_EXECUTION.get(meta.algorithm_id, {
-            "status": "REGISTERED_ONLY", "sources": (),
-            "reason": "No persisted execution path is configured.",
-        })
+        item['execution'] = _execution_for(meta)
         compatible = []
         for source_id, source in sources.items():
             status, reason = source_compatibility(meta, source)

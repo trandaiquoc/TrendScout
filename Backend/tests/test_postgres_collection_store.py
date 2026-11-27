@@ -908,6 +908,33 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s")
                                       .format(sql.Identifier(schema, "algorithm_results")),
                                       (record["id"],)).fetchone()[0] == 4
+            persisted_results = connection.execute(sql.SQL("""SELECT algorithm_id,version,status,
+                metric,unit,result_json,input_digest FROM {} WHERE keyword_id=%s ORDER BY algorithm_id""")
+                .format(sql.Identifier(schema, "algorithm_results")),
+                (record["id"],)).fetchall()
+            observation = connection.execute(sql.SQL("""SELECT source,observation_date,country,
+                metric,unit,input_digest FROM {} WHERE keyword_id=%s""")
+                .format(sql.Identifier(schema, "algorithm_observations")),
+                (record["id"],)).fetchone()
+            for result_row in persisted_results:
+                payload = json.loads(result_row[5])
+                assert payload["algorithm_id"] == result_row[0]
+                assert payload["algorithm_version"] == result_row[1]
+                assert payload["source_id"] == observation[0]
+                assert payload["observation_date"] == observation[1]
+                assert payload["input_metric"] == observation[3]
+                assert payload["input_unit"] == observation[4]
+                assert payload["input_scope"]["country"] == observation[2]
+                assert payload["window_days"] == 6
+                assert payload["input_digest"] == result_row[6]
+                assert payload["evidence_references"] == [{
+                    "source_id": observation[0],
+                    "keyword_id": record["id"],
+                    "observation_date": observation[1],
+                    "metric": observation[3],
+                    "unit": observation[4],
+                    "input_digest": observation[5],
+                }]
             digests = store.run_algorithm_analysis(
                 lambda session: session.result_digests_for([record["id"]])
             )

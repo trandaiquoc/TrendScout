@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 from test_golden_contract import build_golden
 
-from app.algorithms.catalog import catalog
+from app.algorithms.catalog import PersistedInputAdapter, catalog, persisted_keys_for_source
 from app.algorithms.catalog import registry as algorithm_registry
 from app.algorithms.contracts import AlgorithmInput, AlgorithmMetadata, Observation, Scope
 from app.algorithms.registry import AlgorithmRegistry
@@ -209,12 +209,27 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
                          'robust-z-mad', 'ewma', 'theil-sen-slope', 'kendall-trend'} <= ids)
         execution = {item['algorithm_id']: item['execution']['status']
                      for item in response['algorithms']}
-        self.assertEqual({key for key, status in execution.items() if status == 'PERSISTED_WIKIMEDIA'},
+        self.assertEqual({key for key, status in execution.items()
+                          if status == 'PERSISTED_SOURCE_ADAPTER'},
                          {'growth-ratio', 'median-baseline', 'observed-volume-rank',
                           'observed-percentile-rank'})
         self.assertEqual(len(execution), 12)
         self.assertEqual(execution['wikimedia-trend'], 'LEGACY_PATH_ONLY')
         self.assertEqual(execution['robust-z-mad'], 'NOT_EXECUTED_SOURCE_AND_RETENTION')
+        self.assertEqual(execution['relative-source-rank'], 'REGISTERED_NO_QUERY_COHORT')
+        growth = next(item for item in response['algorithms']
+                      if item['algorithm_id'] == 'growth-ratio')
+        self.assertEqual(growth['execution']['sources'], (SOURCE,))
+        self.assertEqual(growth['execution']['input_adapters'],
+                         ('wikimedia_pageviews_observation_projection',))
+        relative = next(item for item in response['algorithms']
+                        if item['algorithm_id'] == 'relative-source-rank')
+        self.assertEqual(relative['execution']['sources'], ())
+        for source_id in ('google_web_serp', 'bing_web_serp'):
+            source = next(item for item in relative['sources']
+                          if item['source_id'] == source_id)
+            self.assertEqual((source['status'], source['reason']),
+                             ('SUPPORTED_BUT_NOT_LIVE', 'PENDING_APPROVAL'))
         theil = next(item for item in response['algorithms'] if item['algorithm_id'] == 'theil-sen-slope')
         wikimedia = next(source for source in theil['sources'] if source['source_id'] == SOURCE)
         self.assertEqual(wikimedia['status'], 'INCOMPATIBLE')
@@ -256,6 +271,71 @@ with patch.object(socket.socket, 'connect', side_effect=AssertionError('network'
         robust = next(item for item in daily_catalog['algorithms']
                       if item['algorithm_id'] == 'robust-z-mad')
         self.assertEqual(robust['sources'][0]['status'], 'SUPPORTED_BUT_NOT_LIVE')
+
+    def test_persisted_dispatch_selects_algorithms_from_source_adapter_contracts(self):
+        registered = algorithm_registry()
+        daily = PersistedInputAdapter(
+            adapter_id='mock_daily_observation_projection',
+            source_id='mock_daily_series', metric='observed_count', unit='items',
+            source_capabilities=('daily_numeric_series',),
+            runtime_capabilities=('daily_observations', 'observation_history',
+                                  'input_digest', 'evidence_lineage'),
+            max_history_days=30,
+        )
+        daily_keys = persisted_keys_for_source(
+            registered, 'mock_daily_series', input_adapters=(daily,),
+        )
+        self.assertEqual({registered.get(key).metadata.algorithm_id for key in daily_keys}, {
+            'robust-z-mad', 'ewma', 'rolling-mean-baseline', 'relative-change',
+            'theil-sen-slope', 'kendall-trend',
+        })
+
+        query_rank = PersistedInputAdapter(
+            adapter_id='mock_query_cohort_projection',
+            source_id='mock_query_search', metric='result_rank',
+            unit='ordinal result position', source_capabilities=('query_search',),
+            runtime_capabilities=('daily_observations', 'input_digest',
+                                  'evidence_lineage', 'query_cohort'),
+            max_history_days=0, minimum_cohort_size=2,
+        )
+        query_keys = persisted_keys_for_source(
+            registered, 'mock_query_search', input_adapters=(query_rank,),
+        )
+        self.assertEqual({registered.get(key).metadata.algorithm_id for key in query_keys},
+                         {'relative-source-rank'})
+
+        youtube_rank = PersistedInputAdapter(
+            adapter_id='youtube_policy_blocked_projection',
+            source_id='youtube_video_search', metric='result_rank',
+            unit='ordinal result position', source_capabilities=('query_search',),
+            runtime_capabilities=('daily_observations', 'input_digest',
+                                  'evidence_lineage', 'query_cohort'),
+            max_history_days=0, minimum_cohort_size=2,
+        )
+        self.assertEqual(persisted_keys_for_source(
+            registered, 'youtube_video_search', input_adapters=(youtube_rank,),
+        ), ())
+
+        google_trends = PersistedInputAdapter(
+            adapter_id='google_trends_cluster_projection',
+            source_id='google_web_serp', metric='google_trends_cluster_metrics',
+            unit='provider-defined per cluster',
+            source_capabilities=('trending_snapshot',),
+            runtime_capabilities=('daily_observations', 'input_digest',
+                                  'evidence_lineage'),
+            max_history_days=0,
+        )
+        self.assertEqual(persisted_keys_for_source(
+            registered, 'google_web_serp', input_adapters=(google_trends,),
+        ), ())
+
+        wikimedia_keys = persisted_keys_for_source(
+            registered, SOURCE,
+        )
+        self.assertEqual({registered.get(key).metadata.algorithm_id for key in wikimedia_keys}, {
+            'growth-ratio', 'median-baseline', 'observed-volume-rank',
+            'observed-percentile-rank',
+        })
 
     def test_relative_source_rank_uses_one_query_cohort_without_self_or_duplicate_items(self):
         scope = Scope('mock_web_search', 'US', 'web', 'query:portable power station',
