@@ -106,13 +106,38 @@ async def postgres_live_composition(
         if not isinstance(collection_store, PostgresCollectionStore):
             raise RuntimeError("PostgreSQL runtime requires the PostgreSQL Collection store")
 
-        ai_provider = OpenRouterAdapter(os.environ.get("OPENROUTER_API_KEY"))
+        ai_config = AIConfig.from_environment()
+        ai_schema = postgres_schema
+        ai_store = collection_store
+        if ai_config.data_profile == "PUBLIC_DEMO":
+            if (runtime_scope != "LOCAL" or ai_config.config_error
+                    or ai_config.synthetic_schema == postgres_schema):
+                raise RuntimeError("PUBLIC_DEMO requires an isolated local synthetic schema")
+            ai_schema = ai_config.synthetic_schema
+            ai_store = PostgresCollectionStore(
+                postgres_environment, schema=ai_schema, data_mode_scope="SYNTHETIC",
+            )
+            from app.ai.runtime import (
+                SYNTHETIC_AI_PROVENANCE_KEY,
+                SYNTHETIC_AI_PROVENANCE_VALUE,
+            )
+            if ai_store.get_setting(SYNTHETIC_AI_PROVENANCE_KEY) != SYNTHETIC_AI_PROVENANCE_VALUE:
+                raise RuntimeError("PUBLIC_DEMO synthetic schema is not server-attested")
+        ai_provider = OpenRouterAdapter(
+            os.environ.get("OPENROUTER_API_KEY"), data_profile=ai_config.data_profile,
+        )
         try:
             facade.ai_service = AIService(
-                PostgresAtomicStateStore(postgres_environment, schema=postgres_schema),
-                config=AIConfig.from_environment(),
+                PostgresAtomicStateStore(postgres_environment, schema=ai_schema),
+                config=ai_config,
                 provider=ai_provider,
             )
+            if ai_config.data_profile == "PUBLIC_DEMO":
+                facade.ai_collection_service = CollectionService(
+                    ai_store, ai_engine=facade.ai_service,
+                )
+            else:
+                facade.ai_collection_service = None
             facade.collection_service = CollectionService(
                 collection_store,
                 entity_context_resolver=WikimediaEntityContextResolver(
@@ -120,7 +145,8 @@ async def postgres_live_composition(
                     before_request=facade.entity_lookup_before_request,
                 ),
                 fetch_model_inference_enabled=False,
-                ai_engine=facade.ai_service,
+                ai_engine=(facade.ai_service
+                           if ai_config.data_profile == "STRICT_PRIVATE" else None),
             )
             facade.analysis_storage = PostgresAnalysisStorage(
                 postgres_environment, schema=postgres_schema

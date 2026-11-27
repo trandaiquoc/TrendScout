@@ -43,6 +43,11 @@ STATE_KEY = "trendscout-ai-engine-v1"
 PROMPT_VERSION = "trendscout-semantic-v1"
 SCHEMA_VERSION = "trendscout-ai-json-v1"
 POLICY_VERSION = "free-zdr-source-transfer-v2"
+STRICT_PRIVATE = "STRICT_PRIVATE"
+PUBLIC_DEMO = "PUBLIC_DEMO"
+AI_DATA_PROFILE_VERSION = "ai-data-profile-v1"
+SYNTHETIC_AI_PROVENANCE_KEY = "ai_synthetic_provenance"
+SYNTHETIC_AI_PROVENANCE_VALUE = "trendscout-ai-public-demo-v1"
 ASSIGNMENT_THRESHOLD = 0.82
 DAILY_REQUEST_LIMIT = 40
 ROLLING_MINUTE_LIMIT = 20
@@ -81,6 +86,8 @@ class AIConfig:
     transfer_approved_sources: frozenset[str] = frozenset()
     api_key_present: bool = False
     config_error: str | None = None
+    data_profile: str = STRICT_PRIVATE
+    synthetic_schema: str | None = None
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -90,6 +97,19 @@ class AIConfig:
         enabled_value = str(environ.get("TRENDSCOUT_AI_ENABLED", "false")).strip().casefold()
         enabled = enabled_value == "true"
         config_error = None if enabled_value in {"true", "false"} else "AI_POLICY_DENIED"
+        profile_value = str(environ.get("TRENDSCOUT_AI_DATA_PROFILE", STRICT_PRIVATE)).strip().upper()
+        data_profile = profile_value if profile_value in {STRICT_PRIVATE, PUBLIC_DEMO} else STRICT_PRIVATE
+        synthetic_schema = str(environ.get("TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA", "")).strip() or None
+        if profile_value not in {STRICT_PRIVATE, PUBLIC_DEMO}:
+            config_error = "AI_POLICY_DENIED"
+        if data_profile == PUBLIC_DEMO:
+            primary_schema = str(environ.get("TREND_SCOUT_POSTGRES_SCHEMA", "trendscout")).strip()
+            runtime_environment = str(environ.get("TREND_SCOUT_ENVIRONMENT", "")).strip().casefold()
+            if (runtime_environment not in {"local", "test"}
+                    or not isinstance(synthetic_schema, str)
+                    or not re.fullmatch(r"ts_test_ai_demo_[a-f0-9]{8,32}", synthetic_schema)
+                    or synthetic_schema == primary_schema):
+                config_error = "AI_POLICY_DENIED"
         sources = frozenset(
             item.strip() for item in str(environ.get("TRENDSCOUT_AI_ALLOWED_SOURCES", "")).split(",")
             if item.strip()
@@ -121,6 +141,8 @@ class AIConfig:
             transfer_approved_sources=transfer_sources,
             api_key_present=isinstance(key, str) and bool(key.strip()),
             config_error=config_error,
+            data_profile=data_profile,
+            synthetic_schema=synthetic_schema,
         )
 
 
@@ -220,7 +242,10 @@ class AIService:
             raise TypeError("AI runtime requires an atomic state store and validated configuration")
         self.state_store = state_store
         self.config = config
-        self.provider = provider or OpenRouterAdapter(__import__("os").environ.get("OPENROUTER_API_KEY"))
+        self.provider = provider or OpenRouterAdapter(
+            __import__("os").environ.get("OPENROUTER_API_KEY"),
+            data_profile=config.data_profile,
+        )
         self._utcnow = utcnow
 
     def _now(self):
@@ -231,13 +256,40 @@ class AIService:
 
     @property
     def _allowed_sources(self):
+        if self.config.data_profile == PUBLIC_DEMO:
+            # These registered source contracts accept SYNTHETIC fixtures. The
+            # separate schema and mode scope below prevent real source data from
+            # entering the public-demo profile.
+            return _SUPPORTED_AI_SOURCES - {YOUTUBE_SOURCE_ID}
         return (self.config.allowed_sources & self.config.transfer_approved_sources
                 & _SUPPORTED_AI_SOURCES) - {YOUTUBE_SOURCE_ID}
+
+    def _assert_profile_store(self, store):
+        if self.config.data_profile != PUBLIC_DEMO:
+            return
+        if self.config.config_error:
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
+        state_schema = getattr(self.state_store, "schema", None)
+        if (not isinstance(self.config.synthetic_schema, str)
+                or not re.fullmatch(r"ts_test_ai_demo_[a-f0-9]{8,32}", self.config.synthetic_schema)
+                or getattr(store, "schema", None) != self.config.synthetic_schema
+                or getattr(store, "data_mode_scope", None) != "SYNTHETIC"
+                or state_schema != self.config.synthetic_schema
+                or not callable(getattr(store, "get_setting", None))):
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
+        try:
+            provenance = store.get_setting(SYNTHETIC_AI_PROVENANCE_KEY)
+        except Exception:
+            provenance = None
+        if provenance != SYNTHETIC_AI_PROVENANCE_VALUE:
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
 
     def _source_policy_digest(self, relevant_sources):
         relevant_sources = set(relevant_sources)
         return _digest({
             "policy": POLICY_VERSION,
+            "data_profile": self.config.data_profile,
+            "data_profile_version": AI_DATA_PROFILE_VERSION,
             "contract": INPUT_CONTRACT_VERSION,
             "ai_allowlist": sorted(self.config.allowed_sources & relevant_sources),
             "transfer_approval": sorted(self.config.transfer_approved_sources & relevant_sources),
@@ -263,6 +315,8 @@ class AIService:
         return "AI_STORAGE_UNAVAILABLE", "DEFERRED", None
 
     def _verify_model(self, model_id):
+        if getattr(self.provider, "data_profile", STRICT_PRIVATE) != self.config.data_profile:
+            raise AIExecutionError("AI_POLICY_DENIED", status="POLICY_DENIED")
         checked_at = _iso_now(self._now())
         try:
             verified = self.provider.verify_model(model_id)
@@ -270,7 +324,8 @@ class AIService:
             self._save_model_verification(model_id, {"status": exc.code, "verified_at": checked_at})
             raise
         self._save_model_verification(model_id, {
-            "status": "VERIFIED_FREE_ZDR_JSON",
+            "status": ("VERIFIED_FREE_ZDR_JSON" if self.config.data_profile == STRICT_PRIVATE
+                       else "VERIFIED_FREE_JSON_PUBLIC_DEMO"),
             "verified_at": checked_at,
             "provider": verified.provider_name,
             "provider_tag": verified.provider_tag,
@@ -788,6 +843,7 @@ class AIService:
 
     def classify_keyword_ids(self, store, keyword_ids, *, idempotency_key: str | None = None,
                              job_id: str | None = None, automatic=False, preview=False):
+        self._assert_profile_store(store)
         ids = _valid_ids(keyword_ids, maximum=200)
         if idempotency_key is not None and (not isinstance(idempotency_key, str)
                                             or not IDEMPOTENCY_KEY.fullmatch(idempotency_key)):
@@ -812,6 +868,8 @@ class AIService:
             source_restricted = (
                 item.get("source") == YOUTUBE_SOURCE_ID
                 or item.get("source") not in self._allowed_sources
+                or (self.config.data_profile == PUBLIC_DEMO
+                    and item.get("data_mode") != "SYNTHETIC")
                 or not supported_ai_data_mode(item.get("source"), item.get("data_mode"))
             )
             if source_restricted or item.get("decision") == "EXCLUDED":
@@ -1450,6 +1508,7 @@ class AIService:
 
     def recommend(self, store, keyword_ids, *, research_constraints="", idempotency_key,
                   regenerate=False, job_id=None):
+        self._assert_profile_store(store)
         ids = _valid_ids(keyword_ids, maximum=20)
         if not isinstance(idempotency_key, str) or not IDEMPOTENCY_KEY.fullmatch(idempotency_key):
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE")
@@ -1468,6 +1527,8 @@ class AIService:
             raise AIExecutionError("AI_KEYWORD_NOT_FOUND", status="FAILED")
         for item in records:
             if (item.get("source") == YOUTUBE_SOURCE_ID or item.get("source") not in self._allowed_sources
+                    or (self.config.data_profile == PUBLIC_DEMO
+                        and item.get("data_mode") != "SYNTHETIC")
                     or not item.get("eligible") or item.get("decision") == "EXCLUDED"
                     or item.get("classification_status") == "INELIGIBLE"
                     or not supported_ai_data_mode(item.get("source"), item.get("data_mode"))):

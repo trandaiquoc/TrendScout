@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.ai.runtime import AIExecutionError
 from app.api.fetches import validate_public_request_origin
 
-
 router = APIRouter()
 
 
@@ -74,6 +73,11 @@ def _service(request, *, write=False):
 
 
 def _collection_service(request):
+    ai_service = (getattr(request.state, "ai_service", None)
+                  or getattr(request.app.state, "ai_service", None))
+    if getattr(getattr(ai_service, "config", None), "data_profile", None) == "PUBLIC_DEMO":
+        return (getattr(request.state, "ai_collection_service", None)
+                or getattr(request.app.state, "ai_collection_service", None))
     return (getattr(request.state, "collection_service", None)
             or getattr(request.app.state, "collection_service", None))
 

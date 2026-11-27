@@ -15,6 +15,14 @@ from urllib.parse import quote
 import httpx
 
 API_BASE = "https://openrouter.ai/api/v1"
+STRICT_PRIVATE = "STRICT_PRIVATE"
+PUBLIC_DEMO = "PUBLIC_DEMO"
+_PUBLIC_DEMO_MODEL_ENDPOINTS = frozenset({
+    ("particle-ai/particle-1:free", "Particle AI", "particle-ai/us"),
+})
+_REQUIRED_STRUCTURED_PARAMETERS = frozenset({
+    "temperature", "max_tokens", "response_format", "structured_outputs",
+})
 _MODEL_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,90}/[a-z0-9][a-z0-9_.:-]{0,150}:free$")
 _BILLABLE_PRICING_FIELDS = frozenset({"prompt", "completion"})
 _SAFE_DIAGNOSTIC_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _./:-]{0,79}$")
@@ -205,10 +213,14 @@ def _retry_at(headers, now=None) -> str | None:
 
 
 class OpenRouterAdapter:
-    """Provider boundary with exact-model, price, JSON, and ZDR checks."""
+    """Provider boundary with exact-model, price, JSON, and profile checks."""
 
-    def __init__(self, api_key: str | None, *, client: httpx.Client | None = None):
+    def __init__(self, api_key: str | None, *, client: httpx.Client | None = None,
+                 data_profile: str = STRICT_PRIVATE):
+        if data_profile not in {STRICT_PRIVATE, PUBLIC_DEMO}:
+            raise ValueError("unsupported AI data profile")
         self._api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
+        self.data_profile = data_profile
         self._owns_client = client is None
         self._client = client or httpx.Client(timeout=httpx.Timeout(20.0, connect=5.0))
         self._completion_state = local()
@@ -279,10 +291,12 @@ class OpenRouterAdapter:
         if not isinstance(endpoints, list) or not endpoints:
             raise OpenRouterError("AI_MODEL_UNAVAILABLE")
 
-        zdr_payload, _ = self._request("GET", "/endpoints/zdr")
-        zdr_endpoints = zdr_payload.get("data")
-        if not isinstance(zdr_endpoints, list):
-            raise OpenRouterError("AI_POLICY_DENIED")
+        zdr_endpoints = None
+        if self.data_profile == STRICT_PRIVATE:
+            zdr_payload, _ = self._request("GET", "/endpoints/zdr")
+            zdr_endpoints = zdr_payload.get("data")
+            if not isinstance(zdr_endpoints, list):
+                raise OpenRouterError("AI_POLICY_DENIED")
 
         base_model_id = model_id.removesuffix(":free")
         active_endpoint = False
@@ -299,7 +313,8 @@ class OpenRouterAdapter:
             parameters = endpoint.get("supported_parameters")
             context_tokens = endpoint.get("context_length")
             max_output_tokens = endpoint.get("max_completion_tokens")
-            json_supported = isinstance(parameters, list) and "structured_outputs" in parameters
+            json_supported = (isinstance(parameters, list)
+                              and _REQUIRED_STRUCTURED_PARAMETERS.issubset(set(parameters)))
             if not _all_zero_pricing(endpoint.get("pricing")):
                 pricing_unverified = True
                 continue
@@ -308,13 +323,16 @@ class OpenRouterAdapter:
                     or not json_supported or type(context_tokens) is not int or context_tokens <= 0
                     or type(max_output_tokens) is not int or max_output_tokens <= 0):
                 continue
-            policy_match = next((entry for entry in zdr_endpoints
-                if isinstance(entry, dict)
-                and entry.get("model_id") == base_model_id
-                and entry.get("provider_name") == provider_name
-                and entry.get("tag") == provider_tag
-                and entry.get("safety_retention") is False), None)
-            if policy_match is not None:
+            if self.data_profile == PUBLIC_DEMO:
+                policy_match = (model_id, provider_name, provider_tag) in _PUBLIC_DEMO_MODEL_ENDPOINTS
+            else:
+                policy_match = next((entry for entry in zdr_endpoints
+                    if isinstance(entry, dict)
+                    and entry.get("model_id") == base_model_id
+                    and entry.get("provider_name") == provider_name
+                    and entry.get("tag") == provider_tag
+                    and entry.get("safety_retention") is False), None)
+            if policy_match:
                 return VerifiedModel(
                     model_id=model_id,
                     provider_name=provider_name,
@@ -338,6 +356,16 @@ class OpenRouterAdapter:
         if (not isinstance(verified, VerifiedModel) or max_tokens < 1
                 or max_tokens > verified.max_output_tokens):
             raise OpenRouterError("AI_MODEL_UNAVAILABLE")
+        provider_policy = {
+            "only": [verified.provider_tag],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+            "max_price": {"prompt": 0, "completion": 0},
+        }
+        if self.data_profile == STRICT_PRIVATE:
+            provider_policy.update({"data_collection": "deny", "zdr": True})
+        else:
+            provider_policy["data_collection"] = "allow"
         body = {
             "model": verified.model_id,
             "messages": messages,
@@ -347,14 +375,7 @@ class OpenRouterAdapter:
                 "type": "json_schema",
                 "json_schema": {"name": "trendscout_ai_output", "strict": True, "schema": schema},
             },
-            "provider": {
-                "only": [verified.provider_tag],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-                "data_collection": "deny",
-                "zdr": True,
-                "max_price": {"prompt": 0, "completion": 0},
-            },
+            "provider": provider_policy,
         }
         payload, response = self._request(
             "POST", "/chat/completions", authenticated=True, json=body,

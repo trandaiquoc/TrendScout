@@ -14,7 +14,15 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.ai.openrouter import VerifiedModel
-from app.ai.runtime import ROLLING_MINUTE_LIMIT, AIConfig, AIExecutionError, AIService
+from app.ai.runtime import (
+    PUBLIC_DEMO,
+    ROLLING_MINUTE_LIMIT,
+    SYNTHETIC_AI_PROVENANCE_KEY,
+    SYNTHETIC_AI_PROVENANCE_VALUE,
+    AIConfig,
+    AIExecutionError,
+    AIService,
+)
 from app.collections.postgres_store import PostgresCollectionStore
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 from app.storage.postgres_atomic_state import PostgresAtomicStateStore
@@ -26,12 +34,12 @@ MODEL_ID = "liquid/lfm-3-1.7b:free"
 
 
 @contextmanager
-def isolated_schema():
+def isolated_schema(prefix="ts_test_"):
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:
         pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
     environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
-    schema = "ts_test_" + uuid.uuid4().hex
+    schema = prefix + uuid.uuid4().hex
     created = False
     with postgres_connection(environment, direct=True) as connection:
         connection.autocommit = True
@@ -327,3 +335,52 @@ def test_postgres_ai_quota_is_shared_across_service_instances():
         assert sum(isinstance(value, str) and value.startswith("att_") for value in outcomes) == ROLLING_MINUTE_LIMIT
         assert outcomes.count("AI_RATE_LIMITED") == 4
         assert services[0]._quota()["daily_used"] == ROLLING_MINUTE_LIMIT
+
+
+def test_public_demo_profile_is_bound_to_attested_synthetic_postgres_schema():
+    with isolated_schema("ts_test_ai_demo_") as (environment, schema, connection):
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="SYNTHETIC")
+        store.set_setting(SYNTHETIC_AI_PROVENANCE_KEY, SYNTHETIC_AI_PROVENANCE_VALUE)
+        atomic = PostgresAtomicStateStore(environment, schema=schema)
+        service = AIService(atomic, config=AIConfig(
+            enabled=True,
+            collection_model=MODEL_ID,
+            recommendation_model=MODEL_ID,
+            api_key_present=True,
+            data_profile=PUBLIC_DEMO,
+            synthetic_schema=schema,
+        ), provider=object(), utcnow=lambda: NOW)
+        service._assert_profile_store(store)
+        assert store.schema == atomic.schema == schema
+        assert store.get_setting(SYNTHETIC_AI_PROVENANCE_KEY) == SYNTHETIC_AI_PROVENANCE_VALUE
+
+        sources = sql.Identifier(schema, "sources")
+        keywords = sql.Identifier(schema, "keywords")
+        with connection.transaction():
+            connection.execute(sql.SQL("""INSERT INTO {}(id,display_name,configuration)
+                VALUES (%s,%s,%s) ON CONFLICT(id) DO NOTHING""").format(sources),
+                (WIKIMEDIA_SOURCE_ID, "Synthetic fixture source", Jsonb({})))
+            for keyword_id, mode in (("demo-synthetic", "SYNTHETIC"), ("demo-live", "LIVE")):
+                connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+                    observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'')""")
+                    .format(keywords),
+                    (keyword_id, f"Fixture {mode}", f"fixture {mode.casefold()}",
+                     WIKIMEDIA_SOURCE_ID, "synthetic", NOW.isoformat(), mode, Jsonb({})))
+
+        context = store.ai_classification_context(
+            ["demo-synthetic"], allowed_sources={WIKIMEDIA_SOURCE_ID},
+        )
+        assert [item["id"] for item in context["keywords"]] == ["demo-synthetic"]
+        assert context["keywords"][0]["data_mode"] == "SYNTHETIC"
+        with pytest.raises(ValueError, match="AI_KEYWORD_NOT_FOUND"):
+            store.ai_classification_context(
+                ["demo-live"], allowed_sources={WIKIMEDIA_SOURCE_ID},
+            )
+
+        invalid_store = PostgresCollectionStore(
+            environment, schema=schema, data_mode_scope="SYNTHETIC",
+        )
+        invalid_store.set_setting(SYNTHETIC_AI_PROVENANCE_KEY, "client-supplied")
+        with pytest.raises(AIExecutionError) as caught:
+            service._assert_profile_store(invalid_store)
+        assert caught.value.code == "AI_POLICY_DENIED"

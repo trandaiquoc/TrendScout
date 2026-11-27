@@ -42,10 +42,14 @@ class PostgresCollectionReader:
     def __init__(self, environment, *, schema="trendscout", data_mode_scope=None):
         if not isinstance(schema, str) or not _SCHEMA_NAME.fullmatch(schema):
             raise ValueError("invalid PostgreSQL schema name")
-        if data_mode_scope not in (None, "LIVE"):
+        if data_mode_scope not in (None, "LIVE", "SYNTHETIC"):
             raise ValueError("unsupported Collections data mode scope")
         self._environment, self._schema = dict(environment), schema
         self.data_mode_scope = data_mode_scope
+
+    @property
+    def schema(self):
+        return self._schema
 
     def _table(self, name):
         return sql.SQL("{}.{}").format(sql.Identifier(self._schema), sql.Identifier(name))

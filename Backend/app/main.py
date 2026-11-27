@@ -1076,6 +1076,7 @@ def create_app(
     async def lifespan(app):
         app.state.run_service = None
         app.state.ai_service = None
+        app.state.ai_collection_service = None
         app.state.operator_token = (
             operator_token if operator_token is not None else settings.operator_token
         )
@@ -1104,6 +1105,9 @@ def create_app(
                         runtime_analysis_storage = getattr(local_live_fetch, "analysis_storage", None)
                         runtime_scheduler_store = getattr(local_live_fetch, "scheduler_store", None)
                         ai_service = getattr(local_live_fetch, "ai_service", None)
+                        runtime_ai_collection_service = getattr(
+                            local_live_fetch, "ai_collection_service", None
+                        )
                         runtime_collection_service = getattr(
                             local_live_fetch, "collection_service", None
                         )
@@ -1126,6 +1130,17 @@ def create_app(
                                 "POSTGRES_RUNTIME_UNAVAILABLE: Local composition is not fully PostgreSQL-backed"
                             )
                         app.state.collection_service = runtime_collection_service
+                        if getattr(getattr(ai_service, "config", None), "data_profile", None) == "PUBLIC_DEMO":
+                            demo_store = getattr(runtime_ai_collection_service, "store", None)
+                            if (not isinstance(runtime_ai_collection_service, CollectionService)
+                                    or not isinstance(demo_store, PostgresCollectionStore)
+                                    or demo_store.data_mode_scope != "SYNTHETIC"
+                                    or demo_store.schema != ai_service.config.synthetic_schema
+                                    or demo_store.schema == resolved_postgres_schema):
+                                raise RuntimeError(
+                                    "POSTGRES_RUNTIME_UNAVAILABLE: PUBLIC_DEMO store is not isolated"
+                                )
+                        app.state.ai_collection_service = runtime_ai_collection_service
                         app.state.postgres_analysis_storage = runtime_analysis_storage
                         app.state.scheduler_store = runtime_scheduler_store
                         app.state.read_storage_factory = (
@@ -1180,6 +1195,7 @@ def create_app(
                         app.state.distributed_public_fetch = None
                         app.state.collection_service = None
                         app.state.ai_service = None
+                        app.state.ai_collection_service = None
                         app.state.public_fetch_enabled = False
                         app.state.public_fetch_block_reason = "LOCAL_RUNTIME_STOPPED"
                         if ai_provider is not None:
@@ -1264,6 +1280,7 @@ def create_app(
     application.state.distributed_public_fetch = distributed_public_fetch
     application.state.collection_service = None
     application.state.ai_service = None
+    application.state.ai_collection_service = None
     application.state.postgres_analysis_storage = None
     application.state.scheduler_store = scheduler_store
     application.state.scheduler_worker = None

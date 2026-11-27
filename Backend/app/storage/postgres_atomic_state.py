@@ -138,6 +138,10 @@ class PostgresAtomicStateStore:
         self._environment = dict(environment)
         self._schema = schema
 
+    @property
+    def schema(self):
+        return self._schema
+
     def _table(self, name):
         return sql.SQL("{}.{}").format(sql.Identifier(self._schema), sql.Identifier(name))
 

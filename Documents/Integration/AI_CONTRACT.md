@@ -1,7 +1,7 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.2-draft
-**Status:** AI input contract updated on `integration/demo-final`; PostgreSQL regression and model quality remain unverified
+**Version:** 1.3-draft
+**Status:** AI input contract and profile isolation implemented on `integration/demo-final`; PUBLIC_DEMO smoke executed with G4 blocked by provider rate limiting and recommendation output validation. STRICT_PRIVATE LIVE and production acceptance remain unverified.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
@@ -26,10 +26,20 @@ An inference is admitted only when:
 
 1. The configured ID ends in :free and appears in the current model catalog.
 2. Every listed model and selected-endpoint price field is present, numeric, and zero. Unknown or nonzero fields leave the job PENDING.
-3. The selected endpoint is active, supports JSON Schema output, and is currently listed as ZDR eligible.
-4. The request pins the endpoint's provider slug, sets allow_fallbacks=false, require_parameters=true, data_collection="deny", zdr=true, and max_price.prompt=0 / completion=0.
-5. No web-search plugin, tools, paid model fallback, BYOK, credit top-up, or key switching is used.
+3. The selected endpoint is active and supports the request's JSON Schema output, temperature, and token parameters.
+4. STRICT_PRIVATE (default) requires a currently ZDR-listed endpoint and sends data_collection="deny", zdr=true. PUBLIC_DEMO is local/test only, pins the reviewed Particle AI endpoint, sends data_collection="allow", and omits a request-level ZDR requirement.
+5. Both profiles pin the endpoint, set allow_fallbacks=false, require_parameters=true, and max_price.prompt=0 / completion=0. No web-search plugin, tools, paid fallback, BYOK, credits, or key switching are used.
 6. A shared PostgreSQL quota reservation commits before the chat-completion request.
+
+### Data profiles
+
+- `STRICT_PRIVATE` is the default and preserves the independent source allowlist, transfer approval, YouTube prohibition, and ZDR routing. Local/Vercel composition continues to use its existing primary Collection store.
+- `PUBLIC_DEMO` requires an explicit server-side `TRENDSCOUT_AI_DATA_PROFILE=PUBLIC_DEMO`, local/test environment, and a distinct `ts_test_ai_demo_<hex>` schema configured through `TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA`. Vercel rejects this profile.
+- PUBLIC_DEMO AI routes are bound to a separate PostgreSQL store scoped to `data_mode=SYNTHETIC`; the store must contain the server-written `ai_synthetic_provenance` marker. The schema cannot equal the primary schema. Client request models have no profile selector and reject extra fields.
+- Only synthetic fixtures may be written to this profile. It cannot read the primary schema's keywords or Collections. Source IDs on fixture rows identify the data contract and do not enable source adapters or grant transfer of real provider data. A runtime check rejects LIVE rows.
+- The selected public-demo model is `particle-ai/particle-1:free`, pinned to `particle-ai/us`. OpenRouter's provider directory currently labels Particle AI as no-training and zero-retention; model pricing/endpoint metadata is verified separately for each inference. No public prompt/completion exposure is accepted for this profile.
+- Profile and profile-version are included in classification/recommendation digests. Cache and idempotency identity cannot cross STRICT_PRIVATE and PUBLIC_DEMO.
+- Provider retention/training permission in PUBLIC_DEMO applies only to synthetic inputs. It does not approve real source data, production records, user research, credentials, or internal information.
 
 No application-level model fallback is implemented. Classification and recommendation may use different configured model IDs, but both are blank until exact-model task quality is reviewed.
 
@@ -156,7 +166,7 @@ Narrative output is screened for unsupported metrics and commercial claims. Evid
 
 ## 8. Environment
 
-Backend/.env.example shows the supported variable names. The checked-in defaults keep AI disabled and models/source allowlist blank.
+Repository-root `.env.example` is the only local environment template. The checked-in defaults keep AI disabled, STRICT_PRIVATE selected, source allowlist/transfer approval blank, and model IDs set only to the reviewed free candidate.
 
 | Variable | Purpose |
 | --- | --- |
@@ -166,10 +176,12 @@ Backend/.env.example shows the supported variable names. The checked-in defaults
 | TRENDSCOUT_AI_RECOMMENDATION_MODEL | Exact currently verified :free recommendation model ID; may equal the classifier model. |
 | TRENDSCOUT_AI_ALLOWED_SOURCES | Comma-separated allowlist of Wikimedia, Google, and Bing source IDs; defaults to empty. YouTube is always denied. |
 | TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES | Separate comma-separated approval for transferring those source records/evidence to the configured AI provider; defaults to empty and never grants extraction permission. YouTube is always denied. |
+| TRENDSCOUT_AI_DATA_PROFILE | Server-side `STRICT_PRIVATE` default; `PUBLIC_DEMO` is restricted to local/test synthetic data. Never a request-body field. |
+| TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA | Dedicated local/test schema matching `ts_test_ai_demo_<hex>`; it must be distinct from the primary schema and carry the server-set synthetic provenance marker. |
 
 ## 9. Provider references
 
-Verified against OpenRouter's public model, endpoint, ZDR, and routing metadata on **2026-11-26**. This verifies catalog metadata only; it does not prove that credentials can call inference, establish task quality, or guarantee that provider policies remain unchanged.
+Verified against OpenRouter's public model, endpoint, ZDR, routing, and provider policy metadata on **2026-11-27**. This verifies public catalog metadata only; live inference, task quality, exact provider execution, and cost remain pending until the synthetic smoke completes. Provider policies can change.
 
 - [Models API and pricing fields](https://openrouter.ai/docs/api/api-reference/models/get-models)
 - [Per-model provider endpoints](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)

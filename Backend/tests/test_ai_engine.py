@@ -24,12 +24,20 @@ from app.ai.openrouter import (
 )
 from app.ai.runtime import (
     DAILY_REQUEST_LIMIT,
+    PUBLIC_DEMO,
     ROLLING_MINUTE_LIMIT,
+    STRICT_PRIVATE,
     AIConfig,
     AIExecutionError,
     AIService,
 )
-from app.api.ai import ClassificationInput, RecommendationInput, _error, reclassify
+from app.api.ai import (
+    ClassificationInput,
+    RecommendationInput,
+    _collection_service,
+    _error,
+    reclassify,
+)
 from app.sources.catalog import WIKIMEDIA_SOURCE_ID, YOUTUBE_SOURCE_ID
 
 NOW = datetime(2026, 11, 26, 12, 0, tzinfo=timezone.utc)
@@ -251,8 +259,10 @@ class OpenRouterAdapterTests(unittest.TestCase):
         self.requests = []
         self.model_pricing = {"prompt": "0", "completion": "0"}
         self.endpoint_pricing = {"prompt": "0", "completion": "0"}
-        self.parameters = ["structured_outputs"]
+        self.parameters = ["temperature", "max_tokens", "response_format", "structured_outputs"]
         self.zdr_retention = False
+        self.provider_name = "Liquid"
+        self.provider_tag = "liquid"
 
         def handler(request):
             self.requests.append(request)
@@ -262,14 +272,15 @@ class OpenRouterAdapterTests(unittest.TestCase):
                 return httpx.Response(200, json=body)
             if request.method == "GET" and path.endswith("/endpoints"):
                 body = {"data": {"endpoints": [{
-                    "provider_name": "Liquid", "tag": "liquid", "status": 0,
+                    "provider_name": self.provider_name, "tag": self.provider_tag, "status": 0,
                     "pricing": self.endpoint_pricing, "supported_parameters": self.parameters,
                     "context_length": 262144, "max_completion_tokens": 8192,
                 }]}}
                 return httpx.Response(200, json=body)
             if path == "/api/v1/endpoints/zdr":
                 return httpx.Response(200, json={"data": [{
-                    "model_id": self.base_id, "provider_name": "Liquid", "tag": "liquid",
+                    "model_id": self.base_id, "provider_name": self.provider_name,
+                    "tag": self.provider_tag,
                     "safety_retention": self.zdr_retention,
                 }]})
             if path == "/api/v1/chat/completions":
@@ -344,6 +355,42 @@ class OpenRouterAdapterTests(unittest.TestCase):
             "limit_remaining": 44.0, "usage": 6.0,
         })
         self.assertNotIn("private", repr(result))
+
+    def test_public_demo_request_is_synthetic_policy_and_provider_pinned(self):
+        self.model = "particle-ai/particle-1:free"
+        self.base_id = self.model.removesuffix(":free")
+        self.provider_name = "Particle AI"
+        self.provider_tag = "particle-ai/us"
+        adapter = OpenRouterAdapter(
+            "test-secret", client=self.client, data_profile=PUBLIC_DEMO,
+        )
+        verified = adapter.verify_model(self.model)
+        self.assertEqual((verified.provider_name, verified.provider_tag),
+                         ("Particle AI", "particle-ai/us"))
+        self.assertFalse(any(request.url.path == "/api/v1/endpoints/zdr"
+                             for request in self.requests))
+        adapter.complete(
+            verified, messages=[{"role": "user", "content": "synthetic fixture"}],
+            schema={"type": "object"}, max_tokens=256,
+        )
+        body = json.loads(self.requests[-1].content)
+        self.assertEqual(body["provider"]["only"], ["particle-ai/us"])
+        self.assertFalse(body["provider"]["allow_fallbacks"])
+        self.assertTrue(body["provider"]["require_parameters"])
+        self.assertEqual(body["provider"]["data_collection"], "allow")
+        self.assertNotIn("zdr", body["provider"])
+        self.assertEqual(body["provider"]["max_price"], {"prompt": 0, "completion": 0})
+        self.assertEqual(body["response_format"]["type"], "json_schema")
+        self.assertNotIn("plugins", body)
+        self.assertNotIn("tools", body)
+
+    def test_public_demo_rejects_non_reviewed_provider(self):
+        adapter = OpenRouterAdapter(
+            "test-secret", client=self.client, data_profile=PUBLIC_DEMO,
+        )
+        with self.assertRaises(OpenRouterError) as caught:
+            adapter.verify_model(self.model)
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
 
     def test_routing_error_diagnostics_are_bounded_and_redacted(self):
         prompt_marker = "PRIVATE_PROMPT_SENTINEL"
@@ -789,6 +836,105 @@ class AIServiceTests(unittest.TestCase):
                          second._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
         self.assertNotEqual(first._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
                             third._source_policy_digest({WIKIMEDIA_SOURCE_ID}))
+
+    def test_data_profile_defaults_strict_and_public_demo_requires_isolated_local_schema(self):
+        self.assertEqual(AIConfig.from_environment({}).data_profile, STRICT_PRIVATE)
+        allowed = AIConfig.from_environment({
+            "TREND_SCOUT_ENVIRONMENT": "local",
+            "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DEMO,
+            "TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA": "ts_test_ai_demo_0123456789abcdef",
+        })
+        self.assertIsNone(allowed.config_error)
+        self.assertEqual(allowed.synthetic_schema, "ts_test_ai_demo_0123456789abcdef")
+        for values in (
+            {"TREND_SCOUT_ENVIRONMENT": "vercel"},
+            {"TREND_SCOUT_ENVIRONMENT": "local",
+             "TREND_SCOUT_POSTGRES_SCHEMA": "ts_test_ai_demo_0123456789abcdef"},
+            {"TREND_SCOUT_ENVIRONMENT": "local",
+             "TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA": "trendscout"},
+        ):
+            profile = AIConfig.from_environment({
+                **values, "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DEMO,
+                "TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA": values.get(
+                    "TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA", "ts_test_ai_demo_0123456789abcdef"),
+            })
+            self.assertEqual(profile.config_error, "AI_POLICY_DENIED")
+
+    def test_ai_api_profile_is_server_selected_and_uses_only_the_demo_store(self):
+        demo_store_service = object()
+        production_store_service = object()
+        demo_ai_service = SimpleNamespace(config=SimpleNamespace(data_profile=PUBLIC_DEMO))
+        request = SimpleNamespace(
+            state=SimpleNamespace(),
+            app=SimpleNamespace(state=SimpleNamespace(
+                ai_service=demo_ai_service,
+                ai_collection_service=demo_store_service,
+                collection_service=production_store_service,
+            )),
+        )
+        self.assertIs(_collection_service(request), demo_store_service)
+        with self.assertRaises(ValidationError):
+            ClassificationInput.model_validate({
+                "keyword_ids": ["keyword-1"], "data_profile": "PUBLIC_DEMO",
+            })
+
+    def test_public_demo_requires_attested_synthetic_store_and_never_reads_live_records(self):
+        schema = "ts_test_ai_demo_0123456789abcdef"
+        public_config = AIConfig(
+            enabled=True, collection_model=MODEL_ID, recommendation_model=MODEL_ID,
+            api_key_present=True, data_profile=PUBLIC_DEMO, synthetic_schema=schema,
+        )
+        state = MemoryAtomicState()
+        state.schema = schema
+        provider = FakeProvider([lambda messages: classification_response(
+            messages, collection_id=None, score=0.25,
+        )])
+        provider.data_profile = PUBLIC_DEMO
+        service = AIService(state, config=public_config, provider=provider, utcnow=lambda: NOW)
+
+        untrusted = FakeCollectionStore()
+        with self.assertRaises(AIExecutionError) as caught:
+            service.classify_keyword_ids(
+                untrusted, ["keyword-1"], idempotency_key="public-demo-untrusted",
+            )
+        self.assertEqual(caught.exception.code, "AI_POLICY_DENIED")
+        self.assertEqual(provider.calls, [])
+
+        store = FakeCollectionStore(keywords=[{
+            "id": "synthetic-keyword", "keyword": "Synthetic trail tote",
+            "source": WIKIMEDIA_SOURCE_ID, "data_mode": "SYNTHETIC",
+        }])
+        store.schema = schema
+        store.data_mode_scope = "SYNTHETIC"
+        store.get_setting = lambda key: (
+            "trendscout-ai-public-demo-v1" if key == "ai_synthetic_provenance" else None
+        )
+        result = service.classify_keyword_ids(
+            store, ["synthetic-keyword"], idempotency_key="public-demo-synthetic",
+        )
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["assigned"], [])
+        self.assertEqual(len(provider.calls), 1)
+
+        live_store = FakeCollectionStore(keywords=[{
+            "id": "live-keyword", "keyword": "Real source phrase",
+            "source": WIKIMEDIA_SOURCE_ID, "data_mode": "LIVE",
+        }])
+        live_store.schema = schema
+        live_store.data_mode_scope = "SYNTHETIC"
+        live_store.get_setting = store.get_setting
+        blocked = service.classify_keyword_ids(
+            live_store, ["live-keyword"], idempotency_key="public-demo-live-blocked",
+        )
+        self.assertEqual(blocked["error_code"], "AI_POLICY_DENIED")
+        self.assertEqual(len(provider.calls), 1)
+
+        strict = AIService(MemoryAtomicState(), config=config(), provider=FakeProvider(),
+                           utcnow=lambda: NOW)
+        self.assertNotEqual(
+            strict._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
+            service._source_policy_digest({WIKIMEDIA_SOURCE_ID}),
+        )
 
     def test_expired_or_missing_evidence_and_incompatible_mode_are_blocked(self):
         provider = FakeProvider([classification_response])
