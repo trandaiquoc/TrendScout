@@ -1,5 +1,6 @@
 """Vercel Wikimedia Fetch gate and request-scoped worker lifetime contracts."""
 
+import json
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1848,7 +1849,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facade.status_calls, 0)
             self.assertNotIn("snapshot_saved", events)
 
-    async def test_deferred_model_recovery_uses_saved_checkpoint_without_provider_work(self):
+    async def test_deferred_model_recovery_keeps_ai_work_resumable_without_rerunning_algorithms(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         facade.firestore_shared_live = False
         facade.vercel_postgres_live = False
@@ -1872,6 +1873,9 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                            "VALUES(?,?,?,?,?)",
                            (_JOB_ID, "MODEL_UNAVAILABLE", 1, "MODEL_INFERENCE_DEFERRED",
                             "2026-11-24T00:00:00Z"))
+                db.execute("UPDATE fetch_jobs SET ai_jobs=? WHERE fetch_id=?",
+                           (json.dumps([{"job_id": "ai_saved_job", "keyword_ids": ["keyword-1"]}]),
+                            _JOB_ID))
                 db.execute("""INSERT INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
                     provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
                     quality_flags,processing_status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
@@ -1890,14 +1894,10 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["status"], "COMPLETED")
-        call_args, call_kwargs = service.process_fetch.await_args
-        self.assertEqual(call_args[0], _JOB_ID)
-        self.assertEqual(call_args[1][0]["records"], [{"title": "retained checkpoint record"}])
-        self.assertEqual(call_kwargs, {
-            "cached_context_only": True, "resume_model_unavailable": True,
-        })
-        self.assertEqual(facade.status_calls, 1)
+        self.assertEqual(response.json()["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(response.json()["ai_job_ids"], ["ai_saved_job"])
+        service.process_fetch.assert_not_awaited()
+        self.assertEqual(facade.status_calls, 0)
         self.assertNotIn("worker_finished", events)
 
     async def test_unchanged_collection_recovery_skips_sqlite_restore_and_snapshot_write(self):

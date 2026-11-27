@@ -440,6 +440,12 @@ class CollectionService:
 
         candidate_ids = [record["id"] for record in records
                          if record.get("classification_result", {}).get("classification_status") != "INELIGIBLE"]
+        if self.ai_engine is None:
+            return self._model_unavailable_result(
+                fetch_id, available=available, skipped=skipped,
+                policy_excluded=policy_excluded, eligible=eligible,
+                unassigned=len(records), error_code="AI_DISABLED", algorithms=analysis,
+            )
         if (candidate_ids and not self.fetch_model_inference_enabled
                 and getattr(self.store, "supports_incremental_fetch_persistence", False)):
             return self._model_unavailable_result(
@@ -447,20 +453,34 @@ class CollectionService:
                 policy_excluded=policy_excluded, eligible=eligible,
                 unassigned=len(records), error_code="MODEL_INFERENCE_DEFERRED", algorithms=analysis,
             )
-        if self.ai_engine is None:
-            return self._model_unavailable_result(
-                fetch_id, available=available, skipped=skipped,
-                policy_excluded=policy_excluded, eligible=eligible,
-                unassigned=len(records), error_code="AI_DISABLED", algorithms=analysis,
-            )
         self._update_job(fetch_id, stage="MATCHING_EXISTING_COLLECTIONS", eligible=eligible,
                          processed=len(records))
         combined = {"assigned": [], "unassigned_keyword_ids": [], "proposal_ids": [],
                     "job_ids": [], "reconciliation_ids": []}
+        ai_work = []
         for offset in range(0, len(candidate_ids), 200):
             batch_ids = candidate_ids[offset:offset + 200]
             stable_job_id = "ai_" + uuid.uuid5(
                 uuid.NAMESPACE_URL, f"trendscout-fetch:{fetch_id}:{offset}").hex
+            ai_work.append((stable_job_id, batch_ids))
+        if ai_work:
+            try:
+                persisted = self.store.persist_fetch_ai_jobs(fetch_id, [
+                    {"job_id": job_id, "keyword_ids": batch_ids}
+                    for job_id, batch_ids in ai_work
+                ])
+                if not persisted:
+                    raise RuntimeError("Fetch AI work could not be persisted")
+            except Exception:
+                unavailable = self._model_unavailable_result(
+                    fetch_id, available=available, skipped=skipped,
+                    policy_excluded=policy_excluded, eligible=eligible,
+                    unassigned=len(records), error_code="AI_STORAGE_UNAVAILABLE",
+                    algorithms=analysis,
+                )
+                unavailable["ai_job_ids"] = [job_id for job_id, _ in ai_work]
+                return unavailable
+        for stable_job_id, batch_ids in ai_work:
             try:
                 result = self.ai_engine.classify_keyword_ids(
                     self.store, batch_ids, job_id=stable_job_id, automatic=True,
@@ -509,7 +529,7 @@ class CollectionService:
     def _update_job(self, fetch_id, **values):
         allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
                    "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
-                   "membership_reconciliation_id"}
+                   "membership_reconciliation_id", "error_code"}
         changes = {key: value for key, value in values.items() if key in allowed}
         self.store.update_fetch_job(fetch_id, changes)
 

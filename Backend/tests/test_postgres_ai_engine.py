@@ -223,6 +223,69 @@ def test_postgres_ai_proposal_acceptance_and_targeted_reclassification():
         assert tuple(manual) == ("USER", 1)
 
 
+def test_postgres_ai_assignment_revalidates_a_concurrent_user_pin():
+    with isolated_schema() as (environment, schema, connection):
+        store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+        tables = {name: sql.Identifier(schema, name) for name in (
+            "sources", "keywords", "source_evidence", "evidence_keywords", "memberships",
+        )}
+        keyword_id, evidence_id = "concurrent-pin-keyword", "concurrent-pin-evidence"
+        collection_id = store.create({"name": "Concurrent pin target"})
+        stamp = datetime(2026, 11, 25, tzinfo=timezone.utc)
+        connection.execute(sql.SQL("INSERT INTO {}(id,display_name,configuration) "
+            "VALUES (%s,%s,%s) ON CONFLICT(id) DO NOTHING").format(tables["sources"]),
+            (WIKIMEDIA_SOURCE_ID, "Wikimedia", Jsonb({})))
+        connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
+            observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,'LIVE',%s,'')""")
+            .format(tables["keywords"]),
+            (keyword_id, "Portable solar generator", "portable solar generator",
+             WIKIMEDIA_SOURCE_ID, "en.wikipedia", "2026-11-25T00:00:00Z", Jsonb({})))
+        connection.execute(sql.SQL("""INSERT INTO {}(id,source_id,content_digest,query_scope,
+            geography,observed_at,collected_at,expires_at,payload)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""").format(tables["source_evidence"]),
+            (evidence_id, WIKIMEDIA_SOURCE_ID, "concurrent-pin-digest", Jsonb({"scope": "fixture"}),
+             Jsonb({"country_code": "US"}), stamp, stamp, stamp + timedelta(days=7), None))
+        connection.execute(sql.SQL("INSERT INTO {}(evidence_id,keyword_id) VALUES (%s,%s)")
+            .format(tables["evidence_keywords"]), (evidence_id, keyword_id))
+
+        class ConcurrentPinProvider:
+            calls = 0
+
+            def verify_model(self, model_id):
+                assert model_id == MODEL_ID
+                return VerifiedModel(MODEL_ID, "Liquid", "liquid", 262_144, 8192, True)
+
+            def complete(self, verified, *, messages, schema, max_tokens):
+                self.calls += 1
+                collection = json.loads(messages[1]["content"])["collections"][0]
+                connection.execute(sql.SQL("""INSERT INTO {}(collection_id,keyword_id,origin,
+                    pinned,score,reason,created_at) VALUES (%s,%s,'USER',1,NULL,'Concurrent pin',%s)""")
+                    .format(tables["memberships"]), (collection_id, keyword_id, stamp))
+                keyword = json.loads(messages[1]["content"])["keywords"][0]
+                return json.dumps({"classifications": [{
+                    "keyword_id": keyword["id"], "collection_id": collection["id"],
+                    "score": 0.94, "reason": "The keyword fits this topic.",
+                }], "proposals": []}), {"input_tokens": 12, "output_tokens": 9}, None
+
+            @staticmethod
+            def key_quota_metadata():
+                return {"is_free_tier": True, "limit_remaining": 40.0}
+
+        provider = ConcurrentPinProvider()
+        service = AIService(PostgresAtomicStateStore(environment, schema=schema),
+                            config=_ai_config(), provider=provider, utcnow=lambda: NOW)
+        result = service.classify_keyword_ids(
+            store, [keyword_id], job_id="concurrent-user-pin", automatic=True,
+        )
+        assert result["error_code"] == "AI_INPUT_CHANGED"
+        assert result["assigned"] == []
+        membership = connection.execute(sql.SQL("SELECT origin,pinned FROM {} WHERE keyword_id=%s")
+            .format(tables["memberships"]), (keyword_id,)).fetchone()
+        assert tuple(membership) == ("USER", 1)
+        assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE keyword_id=%s "
+            "AND origin='LOCAL_AI'").format(tables["memberships"]), (keyword_id,)).fetchone()[0] == 0
+
+
 def test_postgres_ai_recommendation_uses_active_lineage_and_bounded_algorithm_profile():
     with isolated_schema() as (environment, schema, connection):
         store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")

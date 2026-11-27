@@ -1,11 +1,11 @@
 # TrendScout AI Integration Contract
 
-**Version:** 1.4-draft
-**Status:** AI input contract, profile isolation, and the server-side `PUBLIC_DATA` transfer boundary are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
+**Version:** 1.5-draft
+**Status:** AI input contract, profile isolation, server-side `PUBLIC_DATA` transfer boundary, and AI03 automatic Collection matching are implemented on `integration/demo-final`; AI01G synthetic acceptance passed on 2026-11-27. AI01H real-source acceptance is tracked separately in `Documents/Reports/AI01H_PUBLIC_DATA_ACCEPTANCE.md`. Production activation remains disabled by default.
 **Owner:** AI goal
 **Updated:** 2026-11-27
 
-The AI boundary is implemented in this branch. The Database goal owns PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. The AI goal does not apply or propose a migration.
+The AI boundary is implemented in this branch. The Database goal owns the general PostgreSQL schema and migrations. No Documents/Integration/DB_CONTRACT.md existed at the baseline, so Database review is still needed before treating the persistence mapping as stable. AI03 adds migration `0013_fetch_job_ai_work.sql` for durable Fetch-to-AI batch linkage; it is versioned and operator-applied, never applied by an application request.
 
 ## 1. Responsibilities and boundaries
 
@@ -16,7 +16,9 @@ The AI boundary is implemented in this branch. The Database goal owns PostgreSQL
 - For LIVE data in `PUBLIC_DATA` or `STRICT_PRIVATE`, a source must appear in both `TRENDSCOUT_AI_ALLOWED_SOURCES` and the independent `TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES`, and its current source-policy registry entry must allow the task and fields. Both environment lists default to empty. Fetch, storage, derived-metric, AI-transfer, and provider-retention permissions remain independent. YouTube is denied even if configured. See `Documents/Integration/AI_SOURCE_POLICY_MATRIX.md`.
 - Expired or expiry-unknown evidence is omitted. AI cache/result lifetime is bounded by the earliest active evidence expiry; Fetch replay does not extend source expiry.
 - Source geography and observation time remain evidence metadata. English text or a US-targeted product hypothesis does not establish US authorship, readership, or demand.
-- An AI failure does not discard persisted keywords or algorithm results. Resuming an AI job reads stored records; it does not run Fetch or call source adapters.
+- An AI failure does not discard persisted keywords, evidence, existing Collection assignments, or algorithm results. Resuming a Fetch's stored AI batches does not run Fetch, source adapters, or algorithms.
+- When the server-side AI feature switch is enabled for `PUBLIC_DATA` or `STRICT_PRIVATE`, automatic Collection matching runs after Fetch through the existing Collection processing handoff. Source Fetch becomes terminal before inference; local processing continues after its response, while Vercel uses the subsequent retained-checkpoint Collection recovery request. This AI execution is represented by PostgreSQL-backed AI jobs, not a Vercel fire-and-forget task.
+- Automatic Fetch classification considers current active Collections and only writes to those with `auto_match=true`. The model's score is a heuristic compared with the configured assignment threshold. Unmatched keywords remain unassigned; model-produced new-Collection proposals are ignored by this automatic path and are handled by the proposal workflow separately.
 
 ## 2. OpenRouter and free-only admission
 
@@ -58,6 +60,7 @@ The ZDR list is mutable and endpoint-specific. OpenRouter's November 22, 2026 in
 AI runtime requires PostgreSQL Neon and does not use SQLite, Firestore, Redis, in-memory quota counters, or a local model as its authority.
 
 - Collection assignments, proposals, review, and rollback use the existing PostgresCollectionStore business tables.
+- `fetch_jobs.ai_jobs` stores the stable AI job ID and keyword IDs for each automatic Fetch batch. Migration `0013_fetch_job_ai_work.sql` adds this JSONB field; the Local SQLite store has a corresponding additive column migration.
 - Shared attempts, quota, jobs, idempotency records, model verification metadata, classification cache, and recommendation cache use AtomicStateStore through PostgresAtomicStateStore, under scope trendscout-ai-engine-v1.
 - The current atomic state store reads/writes coordination_fields, coordination_entries, coordination_checkpoints, source_payload_blobs, and source_payload_references. This requires existing migrations 0003_coordination.sql, 0004_source_payloads.sql, and 0008_payload_references.sql, as well as the existing business schema. The Database goal must confirm this compatibility boundary.
 - The atomic-state port must serialize concurrent quota reservations across hosts. Local test doubles are not authoritative.
@@ -79,6 +82,10 @@ Job/result statuses:
 | POLICY_DENIED | Source allowlist or provider policy requirements are not met. |
 | INVALID_OUTPUT | JSON, schema, ID, evidence, or cross-reference validation failed. |
 | FAILED | Non-retryable request or persistence failure. |
+
+Classification jobs with `INVALID_OUTPUT` can be explicitly resumed after the output validator rejects a provider response. The same durable job ID is used, while current input, evidence, Collection context, and user state are reloaded and revalidated.
+
+Fetch processing exposes separate source-ingestion, dataset-materialization, algorithm, and AI-classification states on the dataset snapshot. A Fetch's Collection job response includes `ai_job_ids` and per-batch AI status summaries. On a deferred result, all batch IDs and keyword IDs are already stored in `fetch_jobs.ai_jobs`.
 
 Public errors are sanitized: AI_DISABLED, AI_KEY_MISSING, AI_MODEL_UNAVAILABLE, AI_PRICING_UNVERIFIED, AI_POLICY_DENIED, AI_QUOTA_EXHAUSTED, AI_RATE_LIMITED, AI_INVALID_OUTPUT, AI_KEYWORD_NOT_FOUND, AI_COLLECTION_NOT_FOUND, AI_IDEMPOTENCY_REQUIRED, AI_JOB_NOT_RESUMABLE, AI_INPUT_CHANGED, and AI_STORAGE_UNAVAILABLE. Structured-output validation failures may include a safe machine-readable stage, reason, field path, expected constraint, and missing/unknown reference category. Rate-limit diagnostics may include a bounded `limit_source` category and normalized `Retry-After` / `X-RateLimit-Reset` times. No automatic retry is performed after HTTP 429. Provider text, prompt contents, credentials, and raw responses are not included.
 
@@ -111,7 +118,15 @@ Returns job_id, task, status, timestamps, processed/attempt/token counts, saniti
 
 ### POST /api/v1/ai/jobs/{job_id}/resume
 
-Resumes only PENDING, DEFERRED, MODEL_UNAVAILABLE, or expired RUNNING jobs from stored IDs and current stored context. It does not call source adapters.
+Resumes only PENDING, DEFERRED, MODEL_UNAVAILABLE, INVALID_OUTPUT, or expired RUNNING jobs from stored IDs and current stored context. It does not call source adapters.
+
+### GET /api/v1/collections/jobs/{fetch_id}
+
+Returns the persisted Collection-processing status plus stable `ai_job_ids` and per-batch status, progress, retry time, and sanitized error code.
+
+### POST /api/v1/collections/jobs/{fetch_id}/resume
+
+Resumes only that Fetch's persisted AI batches. It reloads the current classification context and user state, then reuses completed batches and resumes deferred, invalid-output, or expired-running jobs. It never re-runs source Fetch or algorithms. When all batches complete, it marks the dataset's AI status completed and refreshes the Fetch job summary.
 
 ## 6. Collection classification and proposal workflow
 
@@ -144,6 +159,8 @@ Classification is batched. Initial batch size is bounded by model limits and tok
     }
 
 The score is a model self-assessment used with an initial 0.82 assignment threshold; it is not a probability, calibrated confidence, or validated accuracy. Only active Collections with auto_match=true can receive automatic assignments. A matching Collection listed in a user's removal feedback is excluded.
+
+For automatic Fetch classification (`automatic=true`), model-proposed new Collections are not persisted. Keywords below threshold or without a matching eligible Collection remain unassigned until the separate proposal workflow is used.
 
 Setting preview=true returns proposed assignments and proposal drafts with mode="PREVIEW". It creates no Collection, proposal record, assignment, or reconciliation run. The validated AI result may still be cached and the preview job/quota usage is recorded.
 

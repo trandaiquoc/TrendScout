@@ -723,7 +723,24 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     read_collection_result = getattr(service.store, "fetch_collection_processing_result", None)
     read_job = getattr(getattr(distributed, "admission", None), "read_job", None)
     clock = getattr(distributed, "utcnow", None)
-    resume_model_processing = False
+    read_collection_job = getattr(service.store, "collection_job", None)
+    collection_job = None
+    if callable(read_collection_job):
+        collection_job, _created = await asyncio.to_thread(read_collection_job, fetch_id)
+        collection_job = dict(collection_job) if collection_job is not None else None
+        stored_ai_jobs = collection_job.get("ai_jobs", []) if collection_job else []
+        if isinstance(stored_ai_jobs, str):
+            try:
+                stored_ai_jobs = json.loads(stored_ai_jobs)
+            except (TypeError, ValueError):
+                stored_ai_jobs = []
+        if (collection_job
+                and collection_job.get("status") == "PROCESSING"
+                and isinstance(stored_ai_jobs, list) and stored_ai_jobs):
+            return {"fetch_id": fetch_id, "status": "PROCESSING",
+                    "ai_job_ids": [item["job_id"] for item in stored_ai_jobs
+                                   if isinstance(item, dict)
+                                   and isinstance(item.get("job_id"), str)]}
     if callable(read_collection_result) and callable(read_job) and callable(clock):
         prior = await asyncio.to_thread(read_collection_result, fetch_id)
         if prior is not None:
@@ -739,16 +756,19 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                             and isinstance(entry.get("snapshot"), dict)
                             and entry["snapshot"].get("data_mode") == "LIVE"
                             for entry in checkpoints.values())):
-                resume_model_processing = (
-                    prior.get("status") == "MODEL_UNAVAILABLE"
-                    and getattr(service, "fetch_model_inference_enabled", False) is True
-                    and bool(checkpoints)
-                )
-                if not resume_model_processing:
-                    if firestore_shared_live:
-                        request.state.vercel_fetch_snapshot_unchanged = True
-                    return {"fetch_id": fetch_id, "status": prior["status"],
-                            "error_code": prior["error_code"]}
+                if firestore_shared_live:
+                    request.state.vercel_fetch_snapshot_unchanged = True
+                stored_ai_jobs = collection_job.get("ai_jobs", []) if collection_job else []
+                if isinstance(stored_ai_jobs, str):
+                    try:
+                        stored_ai_jobs = json.loads(stored_ai_jobs)
+                    except (TypeError, ValueError):
+                        stored_ai_jobs = []
+                return {"fetch_id": fetch_id, "status": prior["status"],
+                        "error_code": prior["error_code"],
+                        "ai_job_ids": [item["job_id"] for item in stored_ai_jobs
+                                       if isinstance(item, dict)
+                                       and isinstance(item.get("job_id"), str)]}
     try:
         result = await asyncio.to_thread(
             distributed.status, fetch_id, include_records=True,
@@ -769,23 +789,7 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     sources = await _recover_expired_source_checkpoints(
         distributed, fetch_id, result.get("sources", [])
     )
-    if resume_model_processing:
-        receipt, _created = await asyncio.to_thread(service.store.collection_job, fetch_id)
-        receipt = dict(receipt) if receipt is not None else None
-        expected_available = receipt.get("available") if isinstance(receipt, dict) else None
-        retained_available = sum(
-            len(source.get("records", []))
-            for source in sources
-            if isinstance(source, dict) and isinstance(source.get("records"), list)
-        )
-        if type(expected_available) is not int or retained_available != expected_available:
-            raise HTTPException(409, {"code": "MODEL_RESUME_EVIDENCE_INCOMPLETE"})
-        recovered = await service.process_fetch(
-            fetch_id, sources, cached_context_only=True,
-            resume_model_unavailable=True,
-        )
-    else:
-        recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
+    recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
     if recovered.get("status") == "FAILED":
         raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
     if firestore_shared_live and recovered.get("dataset_reused") is True:

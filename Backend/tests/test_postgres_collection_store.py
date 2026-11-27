@@ -10,9 +10,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from app.api.collections import router as collections_router
 from app.collections.entity_context import EntityContext, WikimediaEntityContextResolver
 from app.collections.identity import fingerprint
 from app.collections.postgres_store import PostgresCollectionStore
@@ -1552,6 +1555,93 @@ def test_collection_service_processes_fixture_through_postgres_without_model_or_
             )
             assert concurrent_retry["action"] == "RETURN"
             assert concurrent_retry["result"]["status"] == "PROCESSING"
+        finally:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_postgres_fetch_ai_work_is_durable_and_resumes_without_rerunning_algorithms():
+    url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
+    if not url:
+        pytest.skip("TRENDSCOUT_TEST_POSTGRES_URL is not configured")
+    environment = {"DATABASE_URL": url, "DATABASE_URL_UNPOOLED": url}
+    schema = "ts_test_" + uuid.uuid4().hex
+    with postgres_connection(environment, direct=True) as connection:
+        connection.autocommit = True
+        assert not connection.execute(
+            "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname=%s)", (schema,)
+        ).fetchone()[0]
+        try:
+            apply_migrations(connection, schema=schema)
+            store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="LIVE")
+
+            class DeferredEngine:
+                def __init__(self):
+                    self.states = {}
+                    self.resume_calls = []
+
+                def classify_keyword_ids(self, _store, _keyword_ids, *, job_id, automatic):
+                    assert automatic is True
+                    self.states[job_id] = {"job_id": job_id, "status": "DEFERRED",
+                                           "error_code": "AI_RATE_LIMITED", "retry_at": "later"}
+                    return self.states[job_id]
+
+                def get_job(self, job_id):
+                    return self.states.get(job_id)
+
+                def resume_job(self, _store, job_id):
+                    self.resume_calls.append(job_id)
+                    self.states[job_id] = {"job_id": job_id, "status": "COMPLETED",
+                                           "error_code": None, "retry_at": None}
+                    return self.states[job_id]
+
+            engine = DeferredEngine()
+            service = CollectionService(store, fetch_model_inference_enabled=True, ai_engine=engine)
+            fetch_id = "pg-ai-fetch-" + uuid.uuid4().hex
+            source = {
+                "source_id": "wikimedia_pageviews_top_per_country",
+                "status": "SUCCESS", "data_mode": "LIVE", "delivery_state": "CACHED",
+                "record_count": 1,
+                "records": [{
+                    "article_display": "Solar generator", "article_original": "Solar_generator",
+                    "project": "en.wikipedia", "observation_date": "2026-11-25",
+                    "fetched_at": "2026-11-25T12:00:00+00:00", "views_ceil": 900,
+                    "provider_rank": 4,
+                }],
+            }
+            result = service._process_fetch(fetch_id, [source])
+            assert result["status"] == "MODEL_UNAVAILABLE"
+            job, _created = store.collection_job(fetch_id)
+            job = dict(job)
+            assert job["stage"] == "MODEL_UNAVAILABLE"
+            assert len(job["ai_jobs"]) == 1
+            assert job["ai_jobs"][0]["keyword_ids"]
+            ai_ids = [item["job_id"] for item in job["ai_jobs"]]
+            assert result["ai_job_ids"] == ai_ids
+            with connection.cursor() as cursor:
+                algorithm_rows = cursor.execute(sql.SQL("SELECT count(*) FROM {}.algorithm_results")
+                    .format(sql.Identifier(schema))).fetchone()[0]
+
+            app = FastAPI()
+            app.include_router(collections_router, prefix="/api/v1")
+            app.state.settings = SimpleNamespace(environment_profile="test")
+            app.state.collection_service = service
+            with TestClient(app) as client:
+                status = client.get(f"/api/v1/collections/jobs/{fetch_id}")
+                assert status.status_code == 200
+                assert status.json()["ai_job_ids"] == ai_ids
+                assert status.json()["ai_jobs"][0]["status"] == "DEFERRED"
+                resumed = client.post(f"/api/v1/collections/jobs/{fetch_id}/resume")
+                assert resumed.status_code == 200, resumed.text
+                assert resumed.json()["status"] == "COMPLETED"
+
+            assert engine.resume_calls == ai_ids
+            job, _created = store.collection_job(fetch_id)
+            assert dict(job)["status"] == "COMPLETED"
+            assert dict(job)["ai_classification_status"] == "COMPLETED"
+            with connection.cursor() as cursor:
+                assert cursor.execute(sql.SQL("SELECT count(*) FROM {}.algorithm_results")
+                    .format(sql.Identifier(schema))).fetchone()[0] == algorithm_rows
+            assert store.fetch_collection_processing_result(fetch_id)["status"] == "COMPLETED"
         finally:
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 

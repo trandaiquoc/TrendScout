@@ -533,7 +533,8 @@ class AIService:
                     lease_until = _parse_time(prior_job.get("lease_until"))
                     if lease_until is not None and lease_until > now_dt:
                         return state, {"existing": dict(prior_job), "claimed": False}
-                if prior_job.get("status") not in {"PENDING", "DEFERRED", "MODEL_UNAVAILABLE"}:
+                if prior_job.get("status") not in {"PENDING", "DEFERRED", "MODEL_UNAVAILABLE",
+                                                     "INVALID_OUTPUT"}:
                     if prior_job.get("status") != "RUNNING":
                         return state, {"existing": dict(prior_job), "claimed": False}
                 prior_job.update({"task": task, "status": "RUNNING", "input_ids": list(ids),
@@ -1052,14 +1053,15 @@ class AIService:
             "source_policy_digest": self._source_policy_digest({
                 source_id for group in keyword_groups for source_id in group["source_ids"]
             }),
-            "input_contract": INPUT_CONTRACT_VERSION,
+            "input_contract": INPUT_CONTRACT_VERSION, "automatic": bool(automatic),
             "model": self.config.collection_model, "preview": bool(preview),
         }
         request_digest = _digest(input_identity)
         key_material = idempotency_key or ("fetch:" + str(job_id or uuid.uuid4()))
         job = self._new_job(task="classification", ids=ids, request_digest=request_digest,
                             idempotency_key=key_material if idempotency_key else None,
-                            existing_job_id=job_id, constraints={"preview": bool(preview)})
+                            existing_job_id=job_id,
+                            constraints={"preview": bool(preview), "automatic": bool(automatic)})
         if job.get("conflict"):
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE", status="FAILED")
         if job.get("existing") or not job.get("claimed", True):
@@ -1208,6 +1210,8 @@ class AIService:
                 expanded = {**proposal, "keyword_ids": support_ids}
                 expanded_proposals[_digest(expanded)] = expanded
             proposals_by_digest = expanded_proposals
+            if automatic:
+                proposals_by_digest = {}
 
             to_persist = []
             for item in eligible:
@@ -1846,12 +1850,12 @@ class AIService:
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE")
         status = job.get("status")
         lease_until = _parse_time(job.get("lease_until"))
-        if status not in {"PENDING", "DEFERRED", "MODEL_UNAVAILABLE"} and not (
+        if status not in {"PENDING", "DEFERRED", "MODEL_UNAVAILABLE", "INVALID_OUTPUT"} and not (
                 status == "RUNNING" and (lease_until is None or lease_until <= self._now())):
             raise AIExecutionError("AI_JOB_NOT_RESUMABLE")
         if job.get("task") == "classification":
             return self.classify_keyword_ids(store, job.get("input_ids", []), job_id=job_id,
-                                             automatic=False,
+                                             automatic=bool(job.get("constraints", {}).get("automatic")),
                                              preview=bool(job.get("constraints", {}).get("preview")))
         if job.get("task") == "recommendations":
             constraints = job.get("constraints", {})

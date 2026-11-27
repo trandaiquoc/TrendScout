@@ -927,6 +927,41 @@ class AIServiceTests(unittest.TestCase):
                          ["evidence-keyword-1", "evidence-keyword-2"])
         self.assertEqual(result["assigned"], [])
 
+    def test_automatic_fetch_keeps_unmatched_keywords_unassigned_and_invalid_output_resumable(self):
+        def proposal(messages):
+            groups = json.loads(messages[1]["content"])["keywords"]
+            return {
+                "name": "Outdoor recreation", "description": "Activities involving outdoor equipment",
+                "keyword_ids": [item["id"] for item in groups],
+                "reason": "The terms form a coherent outdoor topic.", "score": 0.81,
+                "uncertainty": "More review may change the suggested grouping.",
+                "evidence_ids": sorted({value for item in groups for value in item["evidence_ids"]}),
+            }
+
+        provider = FakeProvider([
+            '{"classifications":[],"proposals":[]}',
+            lambda messages: classification_response(
+                messages, collection_id=None, score=0.4, proposal=proposal,
+            ),
+        ])
+        service = AIService(MemoryAtomicState(), config=config(), provider=provider,
+                            utcnow=lambda: NOW)
+        store = FakeCollectionStore(keywords=[
+            {"id": "keyword-1", "keyword": "Hiking gear"},
+            {"id": "keyword-2", "keyword": "Camping equipment"},
+        ])
+        first = service.classify_keyword_ids(
+            store, ["keyword-1", "keyword-2"], job_id="automatic-fetch-job", automatic=True,
+        )
+        self.assertEqual((first["status"], first["error_code"]), ("INVALID_OUTPUT", "AI_INVALID_OUTPUT"))
+        resumed = service.resume_job(store, "automatic-fetch-job")
+        self.assertEqual(resumed["status"], "COMPLETED")
+        self.assertEqual(resumed["assigned"], [])
+        self.assertEqual(resumed["unassigned_keyword_ids"], ["keyword-1", "keyword-2"])
+        self.assertEqual(resumed["proposal_ids"], [])
+        self.assertEqual(store.persist_calls[0]["proposals"], [])
+        self.assertEqual(len(provider.calls), 2)
+
     def test_exact_cross_source_keyword_is_one_prompt_group_and_fans_out_durable_ids(self):
         provider = FakeProvider([classification_response])
         service = AIService(MemoryAtomicState(), config=config(

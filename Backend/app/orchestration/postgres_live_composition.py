@@ -144,9 +144,14 @@ async def postgres_live_composition(
                     collection_store,
                     before_request=facade.entity_lookup_before_request,
                 ),
-                fetch_model_inference_enabled=False,
+                fetch_model_inference_enabled=(
+                    ai_config.enabled
+                    and ai_config.data_profile in {"PUBLIC_DATA", "STRICT_PRIVATE"}
+                ),
                 ai_engine=(facade.ai_service
-                           if ai_config.data_profile == "STRICT_PRIVATE" else None),
+                           if ai_config.enabled
+                           and ai_config.data_profile in {"PUBLIC_DATA", "STRICT_PRIVATE"}
+                           else None),
             )
             facade.analysis_storage = PostgresAnalysisStorage(
                 postgres_environment, schema=postgres_schema

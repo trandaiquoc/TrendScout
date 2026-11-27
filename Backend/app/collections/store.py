@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS fetch_jobs (
  error_code TEXT, updated_at TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'QUEUED',
  eligible INTEGER NOT NULL DEFAULT 0, cached_embeddings INTEGER NOT NULL DEFAULT 0,
  inferred_embeddings INTEGER NOT NULL DEFAULT 0,
- membership_reconciliation_id TEXT
+ membership_reconciliation_id TEXT, ai_jobs TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS algorithm_observations (
  keyword_id TEXT NOT NULL, source TEXT NOT NULL, observation_date TEXT NOT NULL,
@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS dataset_snapshots (
  eligible_keyword_count INTEGER NOT NULL DEFAULT 0,
  assigned_keyword_count INTEGER NOT NULL DEFAULT 0,
  unassigned_keyword_count INTEGER NOT NULL DEFAULT 0,
+ source_ingestion_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+ materialization_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+ algorithm_processing_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+ ai_classification_status TEXT NOT NULL DEFAULT 'UNKNOWN',
  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS keyword_decisions (
@@ -166,6 +170,12 @@ class CollectionStore:
         self.data_mode_scope = data_mode_scope
         with self.connect() as db:
             db.executescript(SCHEMA)
+            snapshot_columns = {row["name"] for row in db.execute("PRAGMA table_info(dataset_snapshots)")}
+            for name in ("source_ingestion_status", "materialization_status",
+                         "algorithm_processing_status", "ai_classification_status"):
+                if name not in snapshot_columns:
+                    db.execute(f"ALTER TABLE dataset_snapshots ADD COLUMN {name} "
+                               "TEXT NOT NULL DEFAULT 'UNKNOWN'")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(suppression)")}
             if "label" not in columns:
                 db.execute("ALTER TABLE suppression ADD COLUMN label TEXT NOT NULL DEFAULT ''")
@@ -182,7 +192,8 @@ class CollectionStore:
                                       ("eligible", "INTEGER NOT NULL DEFAULT 0"),
                                       ("cached_embeddings", "INTEGER NOT NULL DEFAULT 0"),
                                       ("inferred_embeddings", "INTEGER NOT NULL DEFAULT 0"),
-                                      ("membership_reconciliation_id", "TEXT")):
+                                      ("membership_reconciliation_id", "TEXT"),
+                                      ("ai_jobs", "TEXT NOT NULL DEFAULT '[]'")):
                 if name not in job_columns:
                     db.execute(f"ALTER TABLE fetch_jobs ADD COLUMN {name} {declaration}")
             collection_columns = {row["name"] for row in db.execute("PRAGMA table_info(collections)")}
@@ -1488,11 +1499,14 @@ class CollectionStore:
     def collection_job(self, fetch_id):
         with self.connect() as db:
             if self.data_mode_scope:
-                row = db.execute("""SELECT f.* FROM fetch_jobs f JOIN dataset_snapshots d
+                row = db.execute("""SELECT f.*,d.algorithm_processing_status,
+                    d.ai_classification_status FROM fetch_jobs f JOIN dataset_snapshots d
                     ON d.dataset_id=f.fetch_id AND d.data_mode=? WHERE f.fetch_id=?""",
                     (self.data_mode_scope, fetch_id)).fetchone()
             else:
-                row = db.execute("SELECT * FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+                row = db.execute("""SELECT f.*,d.algorithm_processing_status,
+                    d.ai_classification_status FROM fetch_jobs f LEFT JOIN dataset_snapshots d
+                    ON d.dataset_id=f.fetch_id WHERE f.fetch_id=?""", (fetch_id,)).fetchone()
             created = db.execute("SELECT name FROM collections WHERE created_by='AI' AND reason LIKE ? "
                                  "ORDER BY created_at", (f"%{fetch_id}%",)).fetchall()
         return row, created
@@ -1671,21 +1685,47 @@ class CollectionStore:
                 AND NOT EXISTS(SELECT 1 FROM memberships m WHERE m.keyword_id=k.id)""",
                 keyword_parameters).fetchone()[0]
             db.execute("""UPDATE dataset_snapshots SET processing_status='COMPLETED',
+                algorithm_processing_status=?,ai_classification_status=?,
                 eligible_keyword_count=?,assigned_keyword_count=?,unassigned_keyword_count=?
-                WHERE dataset_id=?""", (eligible, assigned, unassigned, fetch_id))
+                WHERE dataset_id=?""", (algorithm_processing_status, ai_classification_status,
+                                         eligible, assigned, unassigned, fetch_id))
         return {"eligible": eligible, "assigned": assigned, "unassigned": unassigned}
 
     def update_fetch_job(self, fetch_id, values):
         allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
                    "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
-                   "membership_reconciliation_id"}
+                   "membership_reconciliation_id", "ai_jobs", "error_code"}
         changes = {key: value for key, value in values.items() if key in allowed}
+        if "ai_jobs" in changes:
+            changes["ai_jobs"] = json.dumps(changes["ai_jobs"], ensure_ascii=False, separators=(",", ":"))
         assignments = [f"{key}=?" for key in changes]
         parameters = list(changes.values())
         assignments.append("updated_at=?")
         parameters.extend([now(), fetch_id])
         with self.connect() as db:
             db.execute(f"UPDATE fetch_jobs SET {','.join(assignments)} WHERE fetch_id=?", parameters)
+
+    def persist_fetch_ai_jobs(self, fetch_id, entries):
+        with self.connect() as db:
+            row = db.execute("SELECT ai_jobs FROM fetch_jobs WHERE fetch_id=?", (fetch_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                jobs = json.loads(row["ai_jobs"] or "[]")
+            except (TypeError, ValueError):
+                jobs = []
+            if not isinstance(jobs, list):
+                jobs = []
+            known = {item.get("job_id") for item in jobs if isinstance(item, dict)}
+            jobs.extend(item for item in entries
+                        if isinstance(item, dict) and isinstance(item.get("job_id"), str)
+                        and item["job_id"] not in known)
+            db.execute("UPDATE fetch_jobs SET ai_jobs=?,stage='CLASSIFYING',status='PROCESSING',updated_at=? "
+                       "WHERE fetch_id=?", (json.dumps(jobs, ensure_ascii=False, separators=(",", ":")),
+                                             now(), fetch_id))
+            db.execute("UPDATE dataset_snapshots SET ai_classification_status='PROCESSING' WHERE dataset_id=?",
+                       (fetch_id,))
+        return True
 
     def mark_fetch_failed(self, fetch_id, error_code):
         stamp = now()
@@ -1719,12 +1759,17 @@ class CollectionStore:
                                      cached_embeddings, inferred_embeddings, error_code,
                                      algorithm_processing_status="UNKNOWN"):
         with self.connect() as db:
-            db.execute("UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE' WHERE dataset_id=?",
-                       (fetch_id,))
-            db.execute("""INSERT OR REPLACE INTO fetch_jobs(fetch_id,status,available,processed,skipped,
-                error_code,updated_at,stage,eligible,cached_embeddings,inferred_embeddings)
-                VALUES(?,?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?)""",
-                (fetch_id, "MODEL_UNAVAILABLE", available, 0, skipped, error_code,
+            db.execute("""UPDATE dataset_snapshots SET processing_status='MODEL_UNAVAILABLE',
+                ai_classification_status='MODEL_UNAVAILABLE',algorithm_processing_status=?
+                WHERE dataset_id=?""", (algorithm_processing_status, fetch_id))
+            db.execute("""INSERT INTO fetch_jobs(fetch_id,status,available,skipped,error_code,updated_at,
+                stage,eligible,cached_embeddings,inferred_embeddings)
+                VALUES(?,?,?,?,?,?,'MODEL_UNAVAILABLE',?,?,?) ON CONFLICT(fetch_id) DO UPDATE SET
+                status=excluded.status,available=excluded.available,skipped=excluded.skipped,
+                error_code=excluded.error_code,updated_at=excluded.updated_at,stage=excluded.stage,
+                eligible=excluded.eligible,cached_embeddings=excluded.cached_embeddings,
+                inferred_embeddings=excluded.inferred_embeddings""",
+                (fetch_id, "MODEL_UNAVAILABLE", available, skipped, error_code,
                  now(), eligible, cached_embeddings, inferred_embeddings))
 
     def persist_dataset_snapshot(self, dataset_id, *, status, data_mode, source_manifest,
@@ -1752,12 +1797,15 @@ class CollectionStore:
             db.execute("""INSERT OR REPLACE INTO dataset_snapshots(dataset_id,status,data_mode,source_manifest,
                 provider_record_count,received_record_count,retained_keyword_count,rejected_record_count,
                 observation_start,observation_end,fetched_at,quality_flags,processing_status,
-                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                eligible_keyword_count,assigned_keyword_count,unassigned_keyword_count,created_at,
+                source_ingestion_status,materialization_status,algorithm_processing_status,
+                ai_classification_status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (dataset_id, status, data_mode, json.dumps(source_manifest, ensure_ascii=False, sort_keys=True),
                  provider_record_count, received_record_count, retained_keyword_count, rejected_record_count,
                  observation_start, observation_end, fetched_at, json.dumps(quality_flags), processing_status,
-                 eligible, assigned, unassigned, created_at))
+                 eligible, assigned, unassigned, created_at, source_ingestion_status,
+                 materialization_status, algorithm_processing_status, ai_classification_status))
 
     def bulk_membership_action(self, keyword_ids, action, *, collection_id=None, source_collection_id=None):
         """Apply a bounded user action atomically; return explicit updated/skipped counts."""

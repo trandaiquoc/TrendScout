@@ -1140,8 +1140,14 @@ class PostgresCollectionReader:
         dataset_join = (sql.SQL("JOIN {} d ON d.dataset_id=f.fetch_id AND d.data_mode=%s ").format(
             self._table("dataset_snapshots")) if self.data_mode_scope else sql.SQL(""))
         def read(db):
-            row = db.execute(sql.SQL("SELECT f.* FROM {} f ").format(
-                self._table("fetch_jobs")) + dataset_join + sql.SQL("WHERE f.fetch_id=%s"), params).fetchone()
+            if self.data_mode_scope:
+                query = sql.SQL("SELECT f.*,d.algorithm_processing_status,d.ai_classification_status "
+                    "FROM {} f ").format(self._table("fetch_jobs")) + dataset_join
+            else:
+                query = sql.SQL("SELECT f.*,d.algorithm_processing_status,d.ai_classification_status "
+                    "FROM {} f LEFT JOIN {} d ON d.dataset_id=f.fetch_id ").format(
+                        self._table("fetch_jobs"), self._table("dataset_snapshots"))
+            row = db.execute(query + sql.SQL("WHERE f.fetch_id=%s"), params).fetchone()
             created = db.execute(sql.SQL("""SELECT name FROM {} WHERE created_by='AI'
                 AND reason LIKE %s ORDER BY created_at""").format(self._table("collections")),
                 (f"%{fetch_id}%",)).fetchall()

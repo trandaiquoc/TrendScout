@@ -17,6 +17,7 @@ from app.ai.openrouter import OpenRouterAdapter
 from app.api.analytics import _history_storage
 from app.api.runs import read_storage
 from app.collections.postgres_store import PostgresCollectionStore
+from app.collections.service import CollectionService
 from app.google_live_settings import GoogleLiveSettings
 from app.jobs.public_admission import AdmissionDenied, PublicAdmission
 from app.main import VercelSharedLiveMiddleware, create_app
@@ -177,6 +178,7 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
             "SERPAPI_API_KEY": "",
             "YOUTUBE_API_KEY": "",
             "OPENROUTER_API_KEY": "",
+            "TRENDSCOUT_AI_ENABLED": "false",
             "TRENDSCOUT_AI_DATA_PROFILE": "PUBLIC_DATA",
             "TREND_SCOUT_GOOGLE_TRENDS_APPROVED": "false",
             "TREND_SCOUT_GOOGLE_RSS_APPROVED": "false",
@@ -232,6 +234,10 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                                 local_app.app.state.ai_service.config.data_profile,
                                 "PUBLIC_DATA",
                             )
+                            self.assertFalse(
+                                local_app.app.state.collection_service.fetch_model_inference_enabled
+                            )
+                            self.assertIsNone(local_app.app.state.collection_service.ai_engine)
                             self.assertIsInstance(
                                 local_app.app.state.postgres_analysis_storage,
                                 PostgresAnalysisStorage,
@@ -297,14 +303,19 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                     "DATABASE_URL_UNPOOLED": url,
                     "WIKIMEDIA_USER_AGENT": "TrendScoutTest/1.0 (https://example.invalid)",
                 })
-                with patch.dict(os.environ, {"VERCEL": "1", **safe_provider_environment}, clear=False):
+                with patch.dict(os.environ, {
+                    "VERCEL": "1", **safe_provider_environment,
+                    "TRENDSCOUT_AI_ENABLED": "true",
+                }, clear=False):
                     vercel_app = create_app(
                         settings=vercel_settings,
                         vercel_postgres_environment=environment,
                         vercel_postgres_schema=schema,
                     )
                     vercel_profiles = []
+                    vercel_ai_settings = []
                     original_adapter_init = OpenRouterAdapter.__init__
+                    original_collection_init = CollectionService.__init__
 
                     def capture_vercel_profile(adapter, api_key, *, client=None,
                                                data_profile="STRICT_PRIVATE"):
@@ -313,8 +324,16 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                             adapter, api_key, client=client, data_profile=data_profile,
                         )
 
+                    def capture_collection_profile(collection_service, store,
+                                                   entity_context_resolver=None, **kwargs):
+                        vercel_ai_settings.append(dict(kwargs))
+                        original_collection_init(
+                            collection_service, store, entity_context_resolver, **kwargs,
+                        )
+
                     base_url = "https://trend-scout-mu.vercel.app"
-                    with patch.object(OpenRouterAdapter, "__init__", capture_vercel_profile):
+                    with patch.object(OpenRouterAdapter, "__init__", capture_vercel_profile), \
+                            patch.object(CollectionService, "__init__", capture_collection_profile):
                         with TestClient(vercel_app, base_url=base_url) as vercel_client:
                             names = [item["name"] for item in vercel_client.get(
                                 "/api/v1/collections"
@@ -328,6 +347,25 @@ class PostgresLiveCompositionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(second.status_code, 201, second.text)
                     self.assertTrue(vercel_profiles)
                     self.assertEqual(set(vercel_profiles), {"PUBLIC_DATA"})
+                    self.assertTrue(any(
+                        item.get("fetch_model_inference_enabled") is True
+                        and item.get("ai_engine") is not None for item in vercel_ai_settings
+                    ))
+
+                with patch.dict(os.environ, {
+                    **safe_provider_environment, "TRENDSCOUT_AI_ENABLED": "true",
+                }, clear=False):
+                    os.environ.pop("VERCEL", None)
+                    async with postgres_live_composition(
+                        runtime_scope="LOCAL",
+                        user_agent="TrendScoutTest/1.0 (https://example.invalid)",
+                        google_settings=GoogleLiveSettings(),
+                        credential_provider=_NeverReadCredentials(),
+                        postgres_environment=environment,
+                        postgres_schema=schema,
+                    ) as facade:
+                        self.assertTrue(facade.collection_service.fetch_model_inference_enabled)
+                        self.assertIs(facade.collection_service.ai_engine, facade.ai_service)
                 self.assertIn(
                     "Vercel PostgreSQL write",
                     [item["name"] for item in local_store.list_collections()],

@@ -937,8 +937,10 @@ class PostgresCollectionStore(PostgresCollectionReader):
     def update_fetch_job(self, fetch_id, values):
         allowed = {"status", "stage", "available", "eligible", "processed", "assigned", "unassigned",
                    "created_collections", "suggestions", "skipped", "cached_embeddings", "inferred_embeddings",
-                   "membership_reconciliation_id"}
+                   "membership_reconciliation_id", "ai_jobs", "error_code"}
         changes = {key: value for key, value in values.items() if key in allowed}
+        if "ai_jobs" in changes:
+            changes["ai_jobs"] = Jsonb(changes["ai_jobs"])
         if not changes:
             changes = {}
 
@@ -955,6 +957,27 @@ class PostgresCollectionStore(PostgresCollectionReader):
 
         # Fetch-job rows are keyed by fetch_id; row-level UPDATE locking is
         # sufficient and avoids serializing unrelated collection operations.
+        return self._write(operation, serialize=False)
+
+    def persist_fetch_ai_jobs(self, fetch_id, entries):
+        def operation(db):
+            row = db.execute(sql.SQL("SELECT ai_jobs FROM {} WHERE fetch_id=%s FOR UPDATE")
+                             .format(self._table("fetch_jobs")), (fetch_id,)).fetchone()
+            if row is None:
+                return False
+            jobs = row["ai_jobs"] if isinstance(row["ai_jobs"], list) else []
+            known = {item.get("job_id") for item in jobs if isinstance(item, dict)}
+            jobs.extend(item for item in entries
+                        if isinstance(item, dict) and isinstance(item.get("job_id"), str)
+                        and item["job_id"] not in known)
+            db.execute(sql.SQL("UPDATE {} SET ai_jobs=%s,stage='CLASSIFYING',status='PROCESSING',"
+                               "updated_at=%s WHERE fetch_id=%s").format(self._table("fetch_jobs")),
+                       (Jsonb(jobs), datetime.now(timezone.utc), fetch_id))
+            db.execute(sql.SQL("UPDATE {} SET ai_classification_status='PROCESSING' "
+                               "WHERE dataset_id=%s").format(self._table("dataset_snapshots")),
+                       (fetch_id,))
+            return True
+
         return self._write(operation, serialize=False)
 
     def mark_fetch_failed(self, fetch_id, error_code):
@@ -1008,13 +1031,11 @@ class PostgresCollectionStore(PostgresCollectionReader):
                 cached_embeddings,inferred_embeddings,membership_reconciliation_id)
                 VALUES (%s,'MODEL_UNAVAILABLE',%s,0,0,0,0,0,%s,%s,%s,
                 'MODEL_UNAVAILABLE',%s,%s,%s,NULL) ON CONFLICT(fetch_id) DO UPDATE SET
-                status=EXCLUDED.status,available=EXCLUDED.available,processed=EXCLUDED.processed,
-                assigned=EXCLUDED.assigned,unassigned=EXCLUDED.unassigned,
+                status=EXCLUDED.status,available=EXCLUDED.available,
                 created_collections=EXCLUDED.created_collections,suggestions=EXCLUDED.suggestions,
                 skipped=EXCLUDED.skipped,error_code=EXCLUDED.error_code,updated_at=EXCLUDED.updated_at,
                 stage=EXCLUDED.stage,eligible=EXCLUDED.eligible,cached_embeddings=EXCLUDED.cached_embeddings,
-                inferred_embeddings=EXCLUDED.inferred_embeddings,
-                membership_reconciliation_id=EXCLUDED.membership_reconciliation_id""")
+                inferred_embeddings=EXCLUDED.inferred_embeddings""")
                 .format(self._table("fetch_jobs")),
                 (fetch_id, available, skipped, error_code, datetime.now(timezone.utc), eligible,
                  cached_embeddings, inferred_embeddings))

@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.ai.runtime import AIExecutionError
 from app.api.fetches import validate_public_request_origin
 from app.collections.store import saved_source_record
 
@@ -472,4 +473,108 @@ def get_job(fetch_id: str, request: Request):
     row, created = service.store.collection_job(fetch_id)
     if row is None:
         return {"status": "NOT_PROCESSED", "processed": 0, "available": 0}
-    return {**dict(row), "created_collection_names": [item["name"] for item in created]}
+    result = dict(row)
+    ai_jobs = result.get("ai_jobs", [])
+    if isinstance(ai_jobs, str):
+        try:
+            ai_jobs = json.loads(ai_jobs)
+        except (TypeError, ValueError):
+            ai_jobs = []
+    if not isinstance(ai_jobs, list):
+        ai_jobs = []
+    engine = getattr(service, "ai_engine", None)
+    statuses = []
+    for item in ai_jobs:
+        if not isinstance(item, dict) or not isinstance(item.get("job_id"), str):
+            continue
+        state = None
+        if engine is not None:
+            try:
+                state = engine.get_job(item["job_id"])
+            except AIExecutionError:
+                state = None
+        statuses.append({
+            "job_id": item["job_id"],
+            "status": state.get("status") if isinstance(state, dict) else "PENDING",
+            "processed": state.get("processed", 0) if isinstance(state, dict) else 0,
+            "retry_at": state.get("retry_at") if isinstance(state, dict) else None,
+            "error_code": state.get("error_code") if isinstance(state, dict) else None,
+        })
+    result["ai_jobs"] = statuses
+    result["ai_job_ids"] = [item["job_id"] for item in statuses]
+    result["created_collection_names"] = [item["name"] for item in created]
+    return result
+
+
+@router.post("/collections/jobs/{fetch_id}/resume")
+def resume_collection_ai_job(fetch_id: str, request: Request):
+    """Resume only persisted AI batches; source Fetch and algorithms are not rerun."""
+    _mutating(request)
+    service = _service(request)
+    engine = getattr(service, "ai_engine", None)
+    if engine is None:
+        raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"})
+    row, _created = service.store.collection_job(fetch_id)
+    if row is None:
+        raise HTTPException(404, {"code": "FETCH_COLLECTION_JOB_NOT_FOUND"})
+    entry = dict(row)
+    ai_jobs = entry.get("ai_jobs", [])
+    if isinstance(ai_jobs, str):
+        try:
+            ai_jobs = json.loads(ai_jobs)
+        except (TypeError, ValueError):
+            ai_jobs = []
+    if not isinstance(ai_jobs, list) or not ai_jobs:
+        raise HTTPException(409, {"code": "AI_WORK_NOT_RESUMABLE"})
+
+    states = []
+    for item in ai_jobs:
+        if (not isinstance(item, dict) or not isinstance(item.get("job_id"), str)
+                or not isinstance(item.get("keyword_ids"), list)
+                or not item["keyword_ids"]):
+            raise HTTPException(409, {"code": "AI_WORK_NOT_RESUMABLE"})
+        job_id = item["job_id"]
+        try:
+            state = engine.get_job(job_id)
+            if isinstance(state, dict) and state.get("status") == "COMPLETED":
+                result = {"job_id": job_id, "status": "COMPLETED"}
+            elif isinstance(state, dict) and state.get("status") == "RUNNING":
+                states.append({"job_id": job_id, "status": "RUNNING"})
+                continue
+            elif isinstance(state, dict):
+                result = engine.resume_job(service.store, job_id)
+            else:
+                result = engine.classify_keyword_ids(
+                    service.store, item["keyword_ids"], job_id=job_id, automatic=True,
+                )
+        except AIExecutionError as exc:
+            if exc.code == "AI_JOB_NOT_RESUMABLE":
+                raise HTTPException(409, {"code": exc.code}) from None
+            raise HTTPException(503, {"code": exc.code}) from None
+        except Exception:
+            raise HTTPException(503, {"code": "AI_STORAGE_UNAVAILABLE"}) from None
+        states.append({"job_id": job_id, "status": result.get("status", "FAILED"),
+                       "error_code": result.get("error_code"),
+                       "retry_at": result.get("retry_at")})
+        if result.get("status") != "COMPLETED":
+            service.store.update_fetch_job(fetch_id, {
+                "status": "MODEL_UNAVAILABLE", "stage": "MODEL_UNAVAILABLE",
+                "error_code": result.get("error_code") or "AI_MODEL_UNAVAILABLE",
+            })
+            return {"fetch_id": fetch_id, "status": "MODEL_UNAVAILABLE", "ai_jobs": states}
+
+    if any(item["status"] == "RUNNING" for item in states):
+        return {"fetch_id": fetch_id, "status": "PROCESSING", "ai_jobs": states}
+    assigned = service.store.count_ai_assigned_keywords()
+    unassigned = service._unassigned_count()
+    service.store.complete_fetch_dataset_snapshot(
+        fetch_id,
+        algorithm_processing_status=entry.get("algorithm_processing_status") or "UNKNOWN",
+        ai_classification_status="COMPLETED",
+    )
+    service.store.update_fetch_job(fetch_id, {
+        "status": "COMPLETED", "stage": "COMPLETED", "error_code": None,
+        "assigned": assigned, "unassigned": unassigned,
+    })
+    return {"fetch_id": fetch_id, "status": "COMPLETED", "ai_jobs": states,
+            "assigned": assigned, "unassigned": unassigned}
