@@ -7,6 +7,7 @@ import re
 from dataclasses import replace
 from datetime import date, datetime, time, timezone
 
+from app.analysis.keyword_identity import canonical_keyword_digest
 from app.discovery.assessment import assess_candidate
 from app.discovery.contracts import Observation, ProcessingGrant
 from app.discovery.extraction import extract_candidates
@@ -20,7 +21,7 @@ from app.sources.catalog import (
 )
 from app.sources.serpapi.normalization import canonical_url
 
-_ALLOWED = frozenset({WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID})
+_MAX_SOURCE_RESULTS = 32
 _MAX_CANDIDATES_SHOWN = 100
 _MAX_OBSERVATIONS = 10_000
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
@@ -69,17 +70,24 @@ def _query_values(source_id: str, record: dict) -> tuple[str, ...]:
 
 
 def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Observation, ...]:
-    if source_id not in _ALLOWED or not isinstance(record, dict):
+    if not isinstance(record, dict):
         return ()
-    capability = source_capability(source_id)
+    try:
+        capability = source_capability(source_id)
+    except (TypeError, ValueError):
+        return ()
     mode = source_result.get("data_mode")
-    delivery = source_result.get("delivery_state", "FRESH")
+    delivery = source_result.get("delivery_state", record.get("delivery_state", "FRESH"))
     if (mode not in {"SYNTHETIC", "LIVE"} or delivery not in {"FRESH", "CACHED"}
             or record.get("data_mode", mode) != mode):
         return ()
     fetched = _timestamp(record.get("fetched_at"))
     query_evidence = _query_values(source_id, record)
     version = f"source-v{capability.capability_version}"
+    extraction_mode = "DIRECT_KEYWORD"
+    source_metric_name = None
+    source_metric_unit = None
+    source_metric_value = None
 
     if source_id == WIKIMEDIA_SOURCE_ID:
         phrase = _text(record.get("article_display") or record.get("canonical_keyword")
@@ -95,46 +103,65 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         ).hexdigest()
         scope = f"wikimedia:{country}:{access}:{project}"
         market = "US_COUNTRY_SCOPED" if country == "US" else "UNKNOWN"
+        source_metric_name = capability.metric_name
+        source_metric_unit = capability.metric_unit
+        source_metric_value = approximate_views
+        raw_source_keyword = record.get("article_original")
     elif source_id == GOOGLE_SOURCE_ID and record.get("data_source") == "GOOGLE_TRENDS":
         phrase = _text(record.get("canonical_keyword"))
         document = _text(record.get("canonical_keyword_identity"))
-        observed = fetched
+        if document != canonical_keyword_digest(phrase):
+            return ()
+        cluster_times = [
+            _timestamp(cluster.get("started_at"))
+            for cluster in record.get("trend_clusters", [])
+            if isinstance(cluster, dict) and isinstance(cluster.get("started_at"), str)
+        ]
+        provider_data_at = record.get("provider_data_at")
+        observed = (min(cluster_times) if cluster_times else
+                    _timestamp(provider_data_at) if isinstance(provider_data_at, str) else fetched)
         window = record.get("time_window_hours")
         scope = f"google-trends:US:en:{window}h" if window in {4, 24, 48, 168} else (
             "google-trends:US:en:limited-feed"
         )
         market = "US_FILTER_ONLY"
+        source_metric_name = "google_trends_cluster_metrics"
+        source_metric_unit = "provider-defined per cluster"
+        raw_source_keyword = record.get("source_keyword_raw") or phrase
     elif source_id in {GOOGLE_SOURCE_ID, BING_SOURCE_ID}:
-        phrase = " ".join(part for part in (
-            _text(record.get("title")), _text(record.get("snippet"))
-        ) if part)
-        document = _text(record.get("canonical_url"))
-        observed = fetched
-        fingerprints = sorted({
-            str(row.get("query", {}).get("query_fingerprint"))
-            for row in record.get("evidence", [])
-            if isinstance(row, dict) and isinstance(row.get("query"), dict)
-            and isinstance(row["query"].get("query_fingerprint"), str)
-        })
-        scope_id = hashlib.sha256(",".join(fingerprints).encode("ascii")).hexdigest()[:24]
-        scope = f"{source_id}:{scope_id}:US-filter:en"
-        market = "US_FILTER_ONLY"
+        # A result title, snippet, URL, or query is not itself a keyword contract.
+        return ()
     else:
-        phrase = " ".join(part for part in (
-            _text(record.get("title")), _text(record.get("description"))
-        ) if part)
-        document = _text(record.get("provider_video_id"))
-        observed = fetched
-        fingerprints = sorted({
-            str(row.get("query_fingerprint")) for row in record.get("query_evidence", [])
-            if isinstance(row, dict) and isinstance(row.get("query_fingerprint"), str)
-        })
-        scope_id = hashlib.sha256(",".join(fingerprints).encode("ascii")).hexdigest()[:24]
-        scope = f"{source_id}:{scope_id}:US-filter:en"
-        market = "US_FILTER_ONLY"
+        extraction_mode = record.get("keyword_extraction_mode")
+        if extraction_mode not in capability.keyword_extraction_modes:
+            return ()
+        raw_keyword = (record.get("canonical_keyword") if extraction_mode == "DIRECT_KEYWORD"
+                       else record.get("extraction_text"))
+        phrase = _text(raw_keyword)
+        document = _text(record.get("source_record_id") or record.get("record_id")
+                         or record.get("canonical_keyword_identity"))
+        observed = _timestamp(record.get("observed_at")) if record.get("observed_at") else fetched
+        scope = _text(record.get("scope"))
+        market_value = record.get("market_evidence")
+        market = (market_value if market_value in {
+            "US_COUNTRY_SCOPED", "US_FILTER_ONLY", "UNKNOWN"
+        } else "UNKNOWN")
+        reported_geographies = (
+            record.get("country_scope"), record.get("region"),
+            record.get("regionCode"), record.get("market"),
+        )
+        if any(isinstance(value, str) and value.strip().casefold()
+               in {"global", "world", "worldwide"} for value in reported_geographies):
+            market = "UNKNOWN"
+        source_metric_name = capability.metric_name
+        source_metric_unit = capability.metric_unit
+        source_metric_value = record.get("metric_value")
+        raw_source_keyword = record.get("raw_source_keyword") or phrase
 
     if (not phrase or len(phrase) > 10_000 or len(_WORD.findall(phrase)) > 100
             or not document or len(scope) > 256):
+        return ()
+    if extraction_mode == "DIRECT_KEYWORD" and len(phrase) > 256:
         return ()
     if source_id == WIKIMEDIA_SOURCE_ID and (
         (rank is not None and (type(rank) is not int or rank < 1))
@@ -191,14 +218,20 @@ def _observation(source_id: str, record: dict, source_result: dict) -> tuple[Obs
         observed_at=observed, fetched_at=fetched, scope=scope,
         query_evidence=query_evidence, market_evidence=market,
         data_mode=mode, parser_version=version,
+        extraction_mode=extraction_mode,
         language="und" if mode == "LIVE" else "en",
         source_url=url, delivery_mode=delivery,
-        article=(phrase if source_id == WIKIMEDIA_SOURCE_ID else None),
+        article=(_text(record.get("article_original")) or phrase
+                 if source_id == WIKIMEDIA_SOURCE_ID else None),
         project=(project if source_id == WIKIMEDIA_SOURCE_ID else None),
         provider_rank=(rank if source_id == WIKIMEDIA_SOURCE_ID and type(rank) is int else None),
         approximate_views=(approximate_views if source_id == WIKIMEDIA_SOURCE_ID
                            and type(approximate_views) is int else None),
         source_metrics=source_metrics,
+        source_metric_name=source_metric_name,
+        source_metric_unit=source_metric_unit,
+        source_metric_value=source_metric_value,
+        raw_source_keyword=(raw_source_keyword if isinstance(raw_source_keyword, str) else None),
     )
     if not query_evidence:
         return (observation,)
@@ -216,7 +249,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
     Fetches have no historical coverage yet, so classifications intentionally stay
     `INSUFFICIENT_EVIDENCE`; query ranking or one snapshot cannot imply growth.
     """
-    if (not isinstance(source_results, list) or len(source_results) > len(_ALLOWED)
+    if (not isinstance(source_results, list) or len(source_results) > _MAX_SOURCE_RESULTS
             or empty_mode not in {"SYNTHETIC", "LIVE"}):
         raise ValueError("bounded source results required")
     grants = {grant.source_id: grant for grant in processing_grants
@@ -232,14 +265,16 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
             rejected_records += 1
             continue
         source_id = source_result.get("source_id")
-        if source_id not in _ALLOWED:
+        try:
+            capability = source_capability(source_id)
+        except (TypeError, ValueError):
             rejected_records += 1
             continue
-        if source_id == YOUTUBE_SOURCE_ID and source_result.get("data_mode") == "LIVE":
-            # Keep API Data available as attributed video evidence only. A generic
-            # ProcessingGrant must not implicitly authorize YouTube text extraction.
-            processing_blocked = True
+        if not capability.keyword_extraction_modes:
             records = source_result.get("records", [])
+            processing_blocked |= source_id == YOUTUBE_SOURCE_ID and source_result.get(
+                "data_mode"
+            ) == "LIVE"
             rejected_records += len(records) if isinstance(records, list) else 1
             continue
         coverage = source_result.get("coverage", {})
@@ -266,9 +301,8 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         if source_result.get("data_mode") == "LIVE" and not extraction_granted:
             processing_blocked = True
         records = source_result.get("records", [])
-        maximum_records = 2000 if source_id == WIKIMEDIA_SOURCE_ID else (
-            5000 if source_id == GOOGLE_SOURCE_ID else 512
-        )
+        maximum_records = (2000 if source_id == WIKIMEDIA_SOURCE_ID else
+                           5000 if source_id == GOOGLE_SOURCE_ID else 512)
         if not isinstance(records, list) or len(records) > maximum_records:
             rejected_records += len(records) if isinstance(records, list) else 1
             continue
@@ -305,6 +339,7 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                     for item in candidate.evidence if item not in assessable}
         shown.append({
             "keyword_id": candidate.keyword_id,
+            "canonical_keyword_identity": candidate.keyword_id,
             "keyword": candidate.keyword,
             "categories": list(candidate.categories),
             "taxonomy_version": candidate.taxonomy_version,
@@ -348,6 +383,11 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
                 "provider_rank": item.provider_rank,
                 "approximate_views": item.approximate_views,
                 "source_metrics": item.source_metrics,
+                "canonical_keyword_identity": candidate.keyword_id,
+                "source_metric_name": item.source_metric_name,
+                "source_metric_unit": item.source_metric_unit,
+                "source_metric_value": item.source_metric_value,
+                "raw_source_keyword": item.raw_source_keyword,
             } for item in candidate.evidence],
         })
     return {
@@ -360,5 +400,8 @@ def discover_fetch_results(source_results: list[dict], *, now: datetime,
         "candidates": shown,
         "limitations": (["SYNTHETIC_ONLY", "NOT_LIVE_VERIFIED"] if result_mode == "SYNTHETIC" else [])
                        + (["DISCOVERY_PROCESSING_BLOCKED"] if processing_blocked else [])
+                       + (["YOUTUBE_KEYWORD_EXTRACTION_DISABLED"]
+                          if any(item.get("source_id") == YOUTUBE_SOURCE_ID
+                                 for item in source_results if isinstance(item, dict)) else [])
                        + ["NO_BASELINE", "COVERAGE_LIMITED", "US_FILTER_IS_NOT_US_AUDIENCE"],
     }

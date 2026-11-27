@@ -2107,6 +2107,7 @@ def keyword_record(record: dict, source: str, data_mode: str, *, snapshot_status
                 "data_source", "discovery_mode", "provider_id", "transport_id",
                 "canonical_keyword_identity", "region", "language", "time_window_hours",
                 "provider_data_at", "provider_created_at", "fetched_at", "source_url",
+                "source_keyword_raw",
                 "delivery_state", "trend_clusters", "serp_verification", "quality_flags",
                 "bing_verification", "bing_verification_history",
             )
@@ -2202,3 +2203,4 @@ def _normalized_keyword_identity(value: str, *, case_sensitive=False) -> str:
     if case_sensitive:
         return display
     return " ".join(unicodedata.normalize("NFC", display.casefold()).split())
+    return display

@@ -20,7 +20,7 @@ RSS_ENDPOINT = "https://trends.google.com/trending/rss?geo=US"
 RSS_SOURCE_URL = RSS_ENDPOINT
 RSS_PROVIDER_ID = "google_trends_rss"
 RSS_TRANSPORT_ID = "google_trends_rss"
-RSS_PARSER_VERSION = "google-trends-rss-v1"
+RSS_PARSER_VERSION = "google-trends-rss-v2"
 _GOOGLE_HOSTS = frozenset({"trends.google.com", "www.google.com", "google.com"})
 _GOOGLE_TRENDS_NAMESPACE = "http://www.google.com/trends/hottrends"
 
@@ -122,7 +122,8 @@ def parse_google_trends_rss(response: httpx.Response, *, fetched_at: datetime,
     output, rejected = [], 0
     for item in items:
         try:
-            query, identity = normalize_keyword(_child_text(item, "title"))
+            raw_query = _child_text(item, "title")
+            query, identity = normalize_keyword(raw_query)
             item_url = _safe_google_link(_child_text(item, "link"))
             if item_url is None:
                 raise ValueError("RSS item has no Google Trends link")
@@ -149,6 +150,7 @@ def parse_google_trends_rss(response: httpx.Response, *, fetched_at: datetime,
             "plan_id": "google-trends-rss-us-v1",
             "plan_version": 1,
             "canonical_keyword": query,
+            "source_keyword_raw": raw_query,
             "canonical_keyword_identity": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
             "region": "US",
             "language": "en",
@@ -161,6 +163,7 @@ def parse_google_trends_rss(response: httpx.Response, *, fetched_at: datetime,
             "data_mode": data_mode,
             "trend_clusters": [{
                 "trend_cluster_id": cluster_id,
+                "source_keyword_raw": raw_query,
                 "parent_keyword_identity": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
                 "started_at": None,
                 "ended_at": None,

@@ -377,13 +377,40 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
                 "access": "all-access",
             }
             keyword = keyword_record(raw, WIKIMEDIA_SOURCE_ID, "LIVE")
+            google_raw = {
+                "data_source": "GOOGLE_TRENDS",
+                "canonical_keyword": "PORTABLE solar generator",
+                "source_keyword_raw": "PORTABLE solar generator",
+                "canonical_keyword_identity": hashlib.sha256(
+                    b"portable solar generator"
+                ).hexdigest(),
+                "provider_id": "serpapi_google_trends_trending_now",
+                "transport_id": "serpapi",
+                "discovery_mode": "SERPAPI_TRENDING_NOW",
+                "region": "US", "language": "en", "time_window_hours": 24,
+                "fetched_at": "2026-11-26T12:00:00Z",
+                "source_url": "https://trends.google.com/trending?geo=US",
+                "trend_clusters": [{"trend_cluster_id": "trend-1", "started_at": None,
+                                    "search_volume": None}],
+            }
+            google_keyword = keyword_record(google_raw, "google_web_serp", "LIVE")
+            assert google_keyword is not None
             keyword_table = sql.Identifier(schema, "keywords")
-            connection.execute(sql.SQL("""INSERT INTO {}(id,keyword,normalized,source,project,
-                observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
-                .format(keyword_table), tuple(keyword[key] for key in (
+            keyword_insert = sql.SQL(
+                """INSERT INTO {}(id,keyword,normalized,source,project,
+                observed_at,data_mode,evidence,context) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+            ).format(keyword_table)
+            connection.execute(keyword_insert, tuple(keyword[key] for key in (
                     "id", "keyword", "normalized", "source", "project", "observed_at",
                     "data_mode", "evidence", "context",
                 )))
+            connection.execute(keyword_insert, tuple(google_keyword[key] for key in (
+                "id", "keyword", "normalized", "source", "project", "observed_at",
+                "data_mode", "evidence", "context",
+            )))
+            assert json.loads(google_keyword["evidence"])["source_keyword_raw"] == (
+                "PORTABLE solar generator"
+            )
             context_row = (
                 keyword["id"], "Portable Solar Generator", 42, "Q123", "Provider description",
                 0, 0, "", "en", 0, 1, "person", json.dumps(["Q33999"]),
@@ -398,11 +425,32 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
                 "status": "SUCCESS",
                 "data_mode": "LIVE",
                 "records": [raw],
+            }, {
+                "source_id": GOOGLE_SOURCE_ID,
+                "status": "SUCCESS",
+                "data_mode": "LIVE",
+                "records": [google_raw],
             }], entity_context_rows=[context_row])["rows"]
+            wikimedia_evidence = next(
+                row for row in evidence_rows if row["source_id"] == WIKIMEDIA_SOURCE_ID
+            )
+            assert wikimedia_evidence["query_scope"]["canonical_keyword_identity"] == (
+                hashlib.sha256(b"portable solar generator").hexdigest()
+            )
+            google_evidence = next(
+                row for row in evidence_rows if row["source_id"] == GOOGLE_SOURCE_ID
+            )
+            assert google_evidence["query_scope"]["canonical_keyword_identity"] == (
+                wikimedia_evidence["query_scope"]["canonical_keyword_identity"]
+            )
+            assert google_evidence["id"] != wikimedia_evidence["id"]
+            assert google_evidence["query_scope"]["source_metric_unit"] == (
+                "provider-defined per cluster"
+            )
             snapshot = {
                 "status": "COMPLETED", "data_mode": "LIVE", "source_manifest": [],
-                "provider_record_count": 1, "received_record_count": 1,
-                "retained_keyword_count": 1, "rejected_record_count": 0,
+                "provider_record_count": 2, "received_record_count": 2,
+                "retained_keyword_count": 2, "rejected_record_count": 0,
                 "observation_start": "2026-11-25", "observation_end": "2026-11-25",
                 "fetched_at": "2026-11-26T12:00:00+00:00", "quality_flags": [],
                 "processing_status": "PROCESSING",
@@ -439,7 +487,7 @@ def test_postgres_snapshot_persists_lineage_and_relationships_idempotently():
             assert saved_wikimedia["retention_lineage"]["version"] == 1
             assert saved_wikimedia["retention_lineage"]["keyword_fields"]
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE dataset_id=%s")
-                .format(dataset_evidence_table), ("lineage-fetch",)).fetchone()[0] == 2
+                .format(dataset_evidence_table), ("lineage-fetch",)).fetchone()[0] == 3
             assert connection.execute(sql.SQL("SELECT count(*) FROM {} WHERE evidence_id=%s")
                 .format(evidence_keywords_table), (evidence_rows[0]["id"],)).fetchone()[0] == 1
         finally:

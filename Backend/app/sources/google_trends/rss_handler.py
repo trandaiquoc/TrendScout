@@ -38,7 +38,8 @@ def normalize_rss_candidates(page, *, fetched_at: datetime) -> list[dict]:
                 key_name: row.get(key_name) for key_name in (
                     "source_id", "provider_id", "transport_id", "data_source",
                     "discovery_mode", "plan_id", "plan_version", "canonical_keyword",
-                    "canonical_keyword_identity", "region", "language", "time_window_hours",
+                    "source_keyword_raw", "canonical_keyword_identity", "region", "language",
+                    "time_window_hours",
                     "provider_data_at", "provider_created_at", "source_url", "delivery_state",
                     "data_mode", "quality_flags",
                 )

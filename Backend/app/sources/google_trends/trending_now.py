@@ -9,12 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
 
+from app.analysis.keyword_identity import normalize_keyword_text
 from app.sources.catalog import GOOGLE_SOURCE_ID
 from app.sources.http_policy import HttpPolicy
 from app.sources.serpapi.errors import SerpApiError
@@ -26,7 +26,7 @@ TRENDING_NOW_WINDOW_HOURS = 24
 TRENDING_NOW_SOURCE_URL = "https://trends.google.com/trending?geo=US&hl=en-US"
 TRENDING_NOW_PROVIDER_ID = "serpapi_google_trends_trending_now"
 TRENDING_NOW_TRANSPORT_ID = "serpapi"
-TRENDING_NOW_PARSER_VERSION = "google-trending-now-v1"
+TRENDING_NOW_PARSER_VERSION = "google-trending-now-v2"
 _MAX_PROVIDER_TIMESTAMP = 4_102_444_800  # 2100-01-01 UTC
 
 
@@ -58,16 +58,12 @@ class TrendingNowPage:
 
 
 def normalize_keyword(value: str) -> tuple[str, str]:
-    if not isinstance(value, str) or "\x00" in value:
-        raise ValueError("trend query must be text")
     try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeError:
-        raise ValueError("trend query must be valid UTF-8") from None
-    display = " ".join(unicodedata.normalize("NFKC", value).split()).strip()
-    if not display or len(display) > 256 or any(ord(char) < 32 for char in display):
+        display, identity = normalize_keyword_text(value)
+    except ValueError:
+        raise ValueError("trend query must be valid bounded text") from None
+    if len(display) > 256:
         raise ValueError("trend query is empty or outside the bounded text contract")
-    identity = " ".join(display.casefold().split())
     return display, identity
 
 
@@ -215,6 +211,7 @@ def _parse_record(item: object) -> tuple[dict | None, int]:
     ).encode("utf-8")).hexdigest()
     row = {
         "query": query,
+        "source_keyword_raw": item.get("query"),
         "canonical_keyword": query,
         "canonical_keyword_identity": hashlib.sha256(identity.encode("utf-8")).hexdigest(),
         "trend_cluster_id": identity_digest,
@@ -362,6 +359,7 @@ def normalize_trending_candidates(page: TrendingNowPage, *, fetched_at: datetime
         groups[candidate_key]["trend_clusters"].append({
             "trend_cluster_id": cluster_id,
             "parent_keyword_identity": candidate_key,
+            "source_keyword_raw": row["source_keyword_raw"],
             "started_at": row["started_at"],
             "ended_at": row["ended_at"],
             "active": row["active"],

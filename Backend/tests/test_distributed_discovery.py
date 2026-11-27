@@ -3,6 +3,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from app.analysis.keyword_identity import canonical_keyword_digest
 from app.discovery.contracts import ProcessingGrant
 from app.discovery.source_results import discover_fetch_results
 from app.sources.catalog import (
@@ -35,8 +36,18 @@ def four_source_results():
             "source_url": "https://en.wikipedia.org/wiki/Quiet_luxury",
         }),
         source_result(GOOGLE_SOURCE_ID, {
-            "canonical_url": "https://example.org/google",
-            "title": "Quiet luxury fashion guide", "snippet": "Quiet luxury outfit ideas",
+            "data_source": "GOOGLE_TRENDS", "canonical_keyword": "QUIET luxury",
+            "source_keyword_raw": "QUIET luxury",
+            "canonical_keyword_identity": canonical_keyword_digest("QUIET luxury"),
+            "provider_id": "serpapi_google_trends_trending_now", "transport_id": "serpapi",
+            "discovery_mode": "SERPAPI_TRENDING_NOW", "region": "US", "language": "en",
+            "time_window_hours": 24,
+            "trend_clusters": [{
+                "trend_cluster_id": "trend-1", "started_at": "2026-11-12T11:00:00+00:00",
+                "search_volume": None, "search_volume_display": None,
+                "increase_percentage": None,
+            }],
+            "source_url": "https://trends.google.com/trending?geo=US&hl=en-US",
             "fetched_at": FETCHED,
             "evidence": [{"query": {"canonical_query": "fashion trend",
                                      "query_fingerprint": "a" * 64}}],
@@ -60,7 +71,8 @@ def four_source_results():
 class DistributedDiscoveryTests(unittest.TestCase):
     def test_public_fetch_records_become_source_scoped_keyword_evidence(self):
         result = discover_fetch_results(four_source_results(), now=NOW)
-        candidate = next(item for item in result["candidates"] if item["keyword"] == "quiet luxury")
+        candidate = next(item for item in result["candidates"]
+                         if item["keyword"].casefold() == "quiet luxury")
 
         self.assertEqual(result["data_mode"], "SYNTHETIC")
         self.assertEqual(result["status"], "INSUFFICIENT_EVIDENCE")
@@ -69,8 +81,9 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertTrue(candidate["taxonomy_version"])
         self.assertTrue(candidate["extraction_version"])
         self.assertTrue(candidate["classification_version"])
+        self.assertEqual(candidate["canonical_keyword_identity"], candidate["keyword_id"])
         self.assertEqual({item["source_id"] for item in candidate["evidence"]}, {
-            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID, BING_SOURCE_ID, YOUTUBE_SOURCE_ID,
+            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
         })
         self.assertIn("CACHED", {item["delivery_mode"] for item in candidate["evidence"]})
         self.assertEqual({item["classification"] for item in candidate["assessments"]},
@@ -80,17 +93,46 @@ class DistributedDiscoveryTests(unittest.TestCase):
         })
         self.assertTrue(all(item["source_url"].startswith("https://")
                             for item in candidate["evidence"] if item["source_url"]))
+        self.assertEqual({item["canonical_keyword_identity"] for item in candidate["evidence"]},
+                         {candidate["keyword_id"]})
+        self.assertEqual({item["raw_source_keyword"] for item in candidate["evidence"]},
+                         {"Quiet_luxury", "QUIET luxury"})
+        google_evidence = next(item for item in candidate["evidence"]
+                               if item["source_id"] == GOOGLE_SOURCE_ID)
+        self.assertEqual(google_evidence["observed_at"], "2026-11-12T11:00:00+00:00")
+        self.assertIsNone(google_evidence["source_metrics"]["trend_clusters"][0]["search_volume"])
+        self.assertEqual(google_evidence["source_metric_unit"], "provider-defined per cluster")
+        self.assertEqual(result["rejected_record_count"], 2)
+        self.assertIn("YOUTUBE_KEYWORD_EXTRACTION_DISABLED", result["limitations"])
         self.assertEqual({item["parser_version"] for item in candidate["evidence"]}, {"source-v1"})
         self.assertEqual({item["algorithm_version"] for item in candidate["assessments"]},
                          {"sample-presence-v1"})
+        self.assertEqual(result, discover_fetch_results(four_source_results(), now=NOW))
+
+    def test_global_wikimedia_scope_stays_unknown_beside_us_filtered_trends(self):
+        sources = four_source_results()
+        sources[0]["records"][0]["country_scope"] = "GLOBAL"
+        result = discover_fetch_results(sources, now=NOW)
+
+        candidate = next(item for item in result["candidates"]
+                         if item["keyword"].casefold() == "quiet luxury")
+        geography = {item["source_id"]: item["market_evidence"]
+                     for item in candidate["evidence"]}
+        self.assertEqual(geography[WIKIMEDIA_SOURCE_ID], "UNKNOWN")
+        self.assertEqual(geography[GOOGLE_SOURCE_ID], "US_FILTER_ONLY")
+        assessments = {item["source_id"]: item["market_evidence"]
+                       for item in candidate["assessments"]}
+        self.assertEqual(assessments[WIKIMEDIA_SOURCE_ID], "UNKNOWN")
+        self.assertEqual(assessments[GOOGLE_SOURCE_ID], "US_FILTER_ONLY")
 
     def test_invalid_record_is_reported_without_erasing_other_evidence(self):
         sources = four_source_results()
-        sources[1]["records"][0]["canonical_url"] = "https://user:password@example.org/item"
+        sources[1]["records"][0]["source_url"] = "https://user:password@example.org/item"
         result = discover_fetch_results(sources, now=NOW)
 
         self.assertGreater(result["rejected_record_count"], 0)
-        candidate = next(item for item in result["candidates"] if item["keyword"] == "quiet luxury")
+        candidate = next(item for item in result["candidates"]
+                         if item["keyword"].casefold() == "quiet luxury")
         self.assertNotIn(GOOGLE_SOURCE_ID, {item["source_id"] for item in candidate["evidence"]})
         self.assertEqual(candidate["status"], "INSUFFICIENT_DATA")
 
@@ -145,7 +187,8 @@ class DistributedDiscoveryTests(unittest.TestCase):
         result = discover_fetch_results(
             sources, now=NOW, processing_grants=(grant, youtube_grant)
         )
-        candidate = next(item for item in result["candidates"] if item["keyword"] == "quiet luxury")
+        candidate = next(item for item in result["candidates"]
+                         if item["keyword"].casefold() == "quiet luxury")
         self.assertEqual(result["data_mode"], "MIXED")
         self.assertEqual(candidate["data_mode"], "MIXED")
         self.assertEqual({item["data_mode"] for item in candidate["evidence"]}, {"LIVE", "SYNTHETIC"})
@@ -153,7 +196,7 @@ class DistributedDiscoveryTests(unittest.TestCase):
         self.assertTrue(all(item["language"] == "und" for item in candidate["evidence"]
                             if item["data_mode"] == "LIVE"))
         self.assertNotIn(YOUTUBE_SOURCE_ID, {item["source_id"] for item in candidate["evidence"]})
-        self.assertEqual(result["rejected_record_count"], 1)
+        self.assertEqual(result["rejected_record_count"], 2)
         self.assertEqual(candidate["status"], "INSUFFICIENT_DATA")
 
     def test_expired_live_grant_is_rejected(self):

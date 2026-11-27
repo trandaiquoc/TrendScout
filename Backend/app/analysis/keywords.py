@@ -2,13 +2,14 @@
 
 import hashlib
 import json
-import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 
+from app.analysis.keyword_identity import normalize_keyword_text
 from app.models.keywords import KeywordResult
-from app.taxonomy.legacy import CLASSIFICATION_VERSION, classify_legacy
 from app.models.observations import PageObservation
+from app.taxonomy.legacy import CLASSIFICATION_VERSION, classify_legacy
+
 
 def _id(parts: tuple[str, ...]) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -19,7 +20,7 @@ def extract_keyword(observation: PageObservation) -> KeywordResult:
     if not isinstance(title, str) or not title.strip():
         raise ValueError("A cleaned canonical keyword is required")
     # Search representation is not an entity identifier; distinct records stay distinct.
-    search = " ".join(unicodedata.normalize("NFC", title).casefold().split())
+    _, search = normalize_keyword_text(title)
     categories, evidence = classify_legacy(title)
     flags = observation.quality_flags + ("TITLE_RULES_UNVERIFIED",)
     if categories == ("unclassified",):

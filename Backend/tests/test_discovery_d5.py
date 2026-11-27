@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from app.analysis.keyword_identity import canonical_keyword_digest, normalize_keyword_text
 from app.discovery.assessment import assess_candidate
 from app.discovery.contracts import CoverageDay, Observation, ProcessingGrant
 from app.discovery.extraction import extract_candidates
@@ -28,7 +29,8 @@ def coverage(source=WIKIMEDIA_SOURCE_ID, mode="SYNTHETIC"):
 
 
 def keyword(rows, text):
-    return next(c for c in extract_candidates(tuple(rows), now=NOW) if c.keyword == text)
+    return next(c for c in extract_candidates(tuple(rows), now=NOW)
+                if c.keyword.casefold() == text.casefold())
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -51,16 +53,58 @@ class DiscoveryTests(unittest.TestCase):
     def test_new_phrases_aliases_evidence_and_categories(self):
         rows = (observation(0, "Wide leg linen pants", "1"),
                 observation(0, "Wide leg linen pants", "1", query_evidence=("other",)),
-                observation(0, "tee shirt", "2"), observation(0, "t shirt", "3"),
+                observation(0, "tee shirt", "2", extraction_mode="DIRECT_KEYWORD"),
+                observation(0, "t shirt", "3", extraction_mode="DIRECT_KEYWORD"),
                 observation(0, "robot coffee", "4"))
         candidates = extract_candidates(rows, now=NOW)
-        by_word = {c.keyword: c for c in candidates}
+        by_word = {c.keyword.casefold(): c for c in candidates}
         self.assertEqual(len(by_word["wide leg linen pants"].evidence), 2)
-        self.assertEqual(set(by_word["t shirt"].original_forms), {"tee shirt", "t shirt"})
+        self.assertNotEqual(by_word["tee shirt"].keyword_id, by_word["t shirt"].keyword_id)
+        self.assertEqual(by_word["t shirt"].original_forms, ("t shirt",))
         self.assertIn("technology", by_word["robot coffee"].categories)
         self.assertEqual(prioritize_for_research(candidates)[0].categories[0], "fashion")
         self.assertEqual(candidates, extract_candidates(rows, now=NOW))
         self.assertEqual(suggest_category(by_word["robot coffee"]).status, "NO_PRODUCT_SUGGESTION")
+
+    def test_canonical_identity_merges_exact_terms_across_sources_only(self):
+        base = observation(0, "Cafe\u0301 &amp; Coffee", "wikimedia", extraction_mode="DIRECT_KEYWORD")
+        other_source = replace(
+            base, source_id=GOOGLE_SOURCE_ID, provider_id="serpapi_google",
+            text="ＣＡＦÉ   & Coffee", market_evidence="US_FILTER_ONLY",
+            source_metrics={"provider_metric": None}, source_metric_name="rank",
+            source_metric_unit="ordinal position", source_metric_value=None,
+        )
+        candidates = extract_candidates((base, other_source), now=NOW)
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate.keyword_id, canonical_keyword_digest("Café & Coffee"))
+        self.assertEqual({item.source_id for item in candidate.evidence}, {
+            WIKIMEDIA_SOURCE_ID, GOOGLE_SOURCE_ID,
+        })
+        self.assertEqual({item.market_evidence for item in candidate.evidence}, {
+            "US_COUNTRY_SCOPED", "US_FILTER_ONLY",
+        })
+        self.assertEqual({item.source_metric_unit for item in candidate.evidence}, {
+            None, "ordinal position",
+        })
+
+    def test_models_punctuation_and_related_terms_keep_distinct_identity(self):
+        rows = (
+            observation(0, "Apple Watch Ultra 2", "watch", extraction_mode="DIRECT_KEYWORD"),
+            observation(0, "Apple Pencil Pro", "pencil", extraction_mode="DIRECT_KEYWORD"),
+            observation(0, "WH\u20111000XM5", "model-a", extraction_mode="DIRECT_KEYWORD"),
+            observation(0, "WH-1000XM5", "model-b", extraction_mode="DIRECT_KEYWORD"),
+            observation(0, "C++", "cpp", extraction_mode="DIRECT_KEYWORD"),
+            observation(0, "C", "c", extraction_mode="DIRECT_KEYWORD"),
+        )
+        candidates = extract_candidates(rows, now=NOW)
+        by_identity = {item.keyword_id: item for item in candidates}
+        self.assertNotEqual(canonical_keyword_digest("Apple Watch Ultra 2"),
+                            canonical_keyword_digest("Apple Pencil Pro"))
+        normalized_dash = normalize_keyword_text("WH\u20111000XM5")[0]
+        self.assertEqual(by_identity[canonical_keyword_digest("WH-1000XM5")].original_forms,
+                         tuple(sorted(("WH-1000XM5", normalized_dash))))
+        self.assertNotEqual(canonical_keyword_digest("C++"), canonical_keyword_digest("C"))
 
     def test_emerging_with_complete_sample_and_budget(self):
         candidate = keyword([observation(0, "linen pants alpha", "1"),

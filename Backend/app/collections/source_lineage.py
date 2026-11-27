@@ -12,6 +12,7 @@ import json
 import math
 from datetime import date, datetime, timezone
 
+from app.analysis.keyword_identity import canonical_keyword_digest
 from app.collections.store import keyword_record
 from app.retention.source_policy import (
     effective_source_retention_deadline,
@@ -39,7 +40,8 @@ _SCOPE_FIELDS = (
     "is_main_page", "is_main_page_known", "language", "market", "method",
     "observation_date", "page_id", "page_language", "page_namespace", "plan_id",
     "plan_version", "project", "provider_id", "query", "redirected_from", "region",
-    "regionCode", "source_url", "status", "time_window_hours", "title", "transport_id",
+    "regionCode", "source_metric_name", "source_metric_unit", "source_url", "status",
+    "time_window_hours", "title", "transport_id",
     "verification_mode",
 )
 _OBSERVATION_FIELDS = (
@@ -53,7 +55,7 @@ _GEOGRAPHY_FIELDS = {
 }
 _GOOGLE_KEYWORD_FIELDS = frozenset({
     "data_source", "discovery_mode", "provider_id", "transport_id",
-    "canonical_keyword_identity", "region", "language", "time_window_hours",
+    "canonical_keyword_identity", "source_keyword_raw", "region", "language", "time_window_hours",
     "provider_data_at", "provider_created_at", "fetched_at", "source_url",
     "delivery_state", "trend_clusters", "serp_verification", "quality_flags",
 })
@@ -356,7 +358,31 @@ def build_source_evidence(sources, *, bing_updates=(), entity_context_rows=()):
         try:
             display_name = _source_display_name(source_id)
             encoded = _canonical_json(content)
-            scope = _scope(content, data_mode=data_mode,
+            scope_content = dict(content)
+            title = None
+            if source_id == WIKIMEDIA_SOURCE_ID:
+                title = (content.get("article_display") or content.get("canonical_keyword")
+                         or content.get("article_original"))
+                capability = source_capability(source_id)
+                scope_content["source_metric_name"] = capability.metric_name
+                scope_content["source_metric_unit"] = capability.metric_unit
+            elif (source_id == GOOGLE_SOURCE_ID
+                  and content.get("data_source") == "GOOGLE_TRENDS"):
+                title = content.get("canonical_keyword")
+                scope_content["source_metric_name"] = "google_trends_cluster_metrics"
+                scope_content["source_metric_unit"] = "provider-defined per cluster"
+            elif content.get("keyword_extraction_mode") == "DIRECT_KEYWORD":
+                try:
+                    capability = source_capability(source_id)
+                except (TypeError, ValueError):
+                    capability = None
+                if capability and "DIRECT_KEYWORD" in capability.keyword_extraction_modes:
+                    title = content.get("canonical_keyword")
+            if isinstance(title, str) and title.strip() and isinstance(keyword_id, str):
+                if title == content.get("article_original"):
+                    title = title.replace("_", " ")
+                scope_content["canonical_keyword_identity"] = canonical_keyword_digest(title)
+            scope = _scope(scope_content, data_mode=data_mode,
                            snapshot_status=snapshot_status, evidence_kind=evidence_kind)
             scope_encoded = _canonical_json(scope)
         except (TypeError, ValueError, OverflowError):

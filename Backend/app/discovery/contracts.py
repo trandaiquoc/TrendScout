@@ -29,6 +29,11 @@ class Observation:
     provider_rank: int | None = None
     approximate_views: int | None = None
     source_metrics: dict | None = None
+    extraction_mode: Literal["PHRASE_RULES", "DIRECT_KEYWORD"] = "PHRASE_RULES"
+    source_metric_name: str | None = None
+    source_metric_unit: str | None = None
+    source_metric_value: str | int | float | None = None
+    raw_source_keyword: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,10 @@ class Evidence:
     provider_rank: int | None = None
     approximate_views: int | None = None
     source_metrics: dict | None = None
+    source_metric_name: str | None = None
+    source_metric_unit: str | None = None
+    source_metric_value: str | int | float | None = None
+    raw_source_keyword: str | None = None
 
 
 @dataclass(frozen=True)

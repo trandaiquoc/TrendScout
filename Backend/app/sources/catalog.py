@@ -38,6 +38,7 @@ class SourceCapability:
     metric_unit: str
     metric_description: str
     capabilities: tuple[str, ...]
+    keyword_extraction_modes: tuple[str, ...] = ()
 
 
 SOURCE_CAPABILITIES = (
@@ -78,6 +79,7 @@ SOURCE_CAPABILITIES = (
             "seven_day_history",
             "top_list_censored",
         ),
+        keyword_extraction_modes=("DIRECT_KEYWORD",),
     ),
     SourceCapability(
         source_id=YOUTUBE_SOURCE_ID,
@@ -110,6 +112,7 @@ SOURCE_CAPABILITIES = (
         metric_unit="ordinal result position",
         metric_description="Position in query-scoped YouTube search results",
         capabilities=("query_search", "next_page_token", "region_filter", "language_filter"),
+        keyword_extraction_modes=(),
     ),
     SourceCapability(
         source_id=GOOGLE_SOURCE_ID,
@@ -141,6 +144,9 @@ SOURCE_CAPABILITIES = (
         metric_unit="ordinal result position",
         metric_description="Position in the returned Google SERP sample",
         capabilities=("query_search", "offset_pagination", "provider_sample"),
+        # Google Trends supplies an explicit canonical_keyword; SERP titles and
+        # snippets remain ineligible for extraction.
+        keyword_extraction_modes=("DIRECT_KEYWORD",),
     ),
     SourceCapability(
         source_id=BING_SOURCE_ID,
@@ -172,6 +178,7 @@ SOURCE_CAPABILITIES = (
         metric_unit="ordinal result position",
         metric_description="Position in the returned Bing SERP sample",
         capabilities=("query_search", "offset_pagination", "provider_sample"),
+        keyword_extraction_modes=(),
     ),
 )
 

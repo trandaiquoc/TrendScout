@@ -39,6 +39,7 @@ from app.sources.google_trends.handler import (
     trending_now_cache_scope,
 )
 from app.sources.google_trends.rss import parse_google_trends_rss
+from app.sources.google_trends.rss_handler import normalize_rss_candidates
 from app.sources.google_trends.trending_now import (
     TRENDING_NOW_ENGINE,
     GoogleTrendsRequest,
@@ -152,6 +153,10 @@ class GoogleTrendsParserTests(unittest.TestCase):
         portable = next(row for row in candidates
                         if row["canonical_keyword"] == "portable outdoor blanket")
         self.assertEqual(len(portable["trend_clusters"]), 2)
+        self.assertEqual(
+            {cluster["source_keyword_raw"] for cluster in portable["trend_clusters"]},
+            {"portable outdoor blanket", "PORTABLE OUTDOOR BLANKET"},
+        )
         self.assertEqual(portable["trend_clusters"][0]["search_volume_semantics"],
                          "PROVIDER_REPORTED_APPROXIMATE_BUCKET")
         missing = next(row for row in candidates
@@ -208,11 +213,18 @@ class GoogleTrendsParserTests(unittest.TestCase):
         self.assertEqual(len(page.records), 1)
         row = page.records[0]
         self.assertEqual(row["discovery_mode"], "RSS_LIMITED_DISCOVERY")
+        self.assertEqual(row["source_keyword_raw"], "Portable outdoor blanket")
+        self.assertEqual(row["trend_clusters"][0]["source_keyword_raw"],
+                         "Portable outdoor blanket")
         self.assertIsNone(row["time_window_hours"])
         self.assertIsNone(row["trend_clusters"][0]["search_volume"])
         self.assertEqual(row["trend_clusters"][0]["search_volume_display"], "20K+")
         self.assertEqual(row["trend_clusters"][0]["search_volume_semantics"],
                          "RSS_APPROX_TRAFFIC_BUCKET")
+        normalized = normalize_rss_candidates(page, fetched_at=NOW)
+        self.assertEqual(normalized[0]["source_keyword_raw"], "Portable outdoor blanket")
+        self.assertEqual(normalized[0]["trend_clusters"][0]["source_keyword_raw"],
+                         "Portable outdoor blanket")
 
     def test_rss_rejects_entity_declarations_and_wrong_root(self):
         for body in (b"<!DOCTYPE rss [<!ENTITY x SYSTEM 'file:///C:/secret'>]><rss/>",

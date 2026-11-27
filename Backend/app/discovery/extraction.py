@@ -2,21 +2,21 @@
 
 import hashlib
 import json
+import math
 import re
-import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
+from app.analysis.keyword_identity import canonical_keyword_digest, normalize_keyword_text
 from app.discovery.contracts import Candidate, Evidence, Observation, ProcessingGrant
 from app.sources.catalog import source_capability
 from app.sources.serpapi.normalization import canonical_url
 from app.taxonomy.registry import TAXONOMY_VERSION
 
-EXTRACTION_VERSION = "phrase-rules-v1"
-_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+EXTRACTION_VERSION = "canonical-phrase-rules-v2"
+_WORD = re.compile(r"[^\W_]+(?:[.'\u2019&+-][^\W_]+)*(?:\+{1,})?", re.UNICODE)
 _STOP = frozenset("a an and are as at be by for from in is it of on or the to was with".split())
-_ALIASES = {"tee shirt": "t shirt"}  # Explicit synonym only; never fuzzy-merge entities.
 _TOPICS = {
     "fashion": frozenset("fashion clothing clothes shirt shirts pants dress dresses skirt shoes footwear bags handbag accessories linen".split()),
     "home_living": frozenset("home kitchen sink organizer organisation organization storage decor furniture appliance household".split()),
@@ -55,6 +55,10 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
         raise ValueError("Unsupported delivery mode")
     if observation.market_evidence not in {"US_COUNTRY_SCOPED", "US_FILTER_ONLY", "UNKNOWN"}:
         raise ValueError("Unsupported market evidence")
+    if observation.extraction_mode not in {"PHRASE_RULES", "DIRECT_KEYWORD"}:
+        raise ValueError("Unsupported extraction mode")
+    if observation.source_id == "youtube_video_search":
+        raise PermissionError("YouTube keyword extraction is disabled by source policy")
     if (not all(isinstance(x, str) and x.strip() and len(x) <= 256 for x in (
             observation.document_id, observation.scope, observation.parser_version))
             or not isinstance(observation.text, str) or not observation.text.strip()
@@ -74,10 +78,8 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
     if observation.language not in {"en", "und"}:
         raise ValueError("Only English or unverified-language text is supported")
     if observation.source_metrics is not None:
-        if (observation.source_id != "google_web_serp"
-                or not isinstance(observation.source_metrics, dict)
-                or observation.source_metrics.get("data_source") != "GOOGLE_TRENDS"):
-            raise ValueError("Source metrics are outside the Google Trends contract")
+        if not isinstance(observation.source_metrics, dict):
+            raise ValueError("Source metrics must be a JSON object")
         try:
             metrics = json.dumps(observation.source_metrics, ensure_ascii=False,
                                  allow_nan=False, separators=(",", ":")).encode("utf-8")
@@ -85,6 +87,28 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
             raise ValueError("Source metrics must be bounded finite JSON") from None
         if len(metrics) > 3_000_000:
             raise ValueError("Source metrics exceed the normalized result budget")
+    if ((observation.source_metric_name is None) != (observation.source_metric_unit is None)
+            or any(value is not None and (not isinstance(value, str) or not value.strip()
+                                          or len(value) > 128)
+                   for value in (observation.source_metric_name, observation.source_metric_unit))):
+        raise ValueError("Source metric name and unit must be supplied together")
+    if (observation.source_metric_value is not None
+            and (type(observation.source_metric_value) not in {str, int, float}
+                 or (isinstance(observation.source_metric_value, float)
+                     and not math.isfinite(observation.source_metric_value))
+                 or (isinstance(observation.source_metric_value, str)
+                     and len(observation.source_metric_value) > 256))):
+        raise ValueError("Source metric value is outside the bounded scalar contract")
+    if (observation.raw_source_keyword is not None
+            and (not isinstance(observation.raw_source_keyword, str)
+                 or not observation.raw_source_keyword.strip()
+                 or len(observation.raw_source_keyword) > 1024)):
+        raise ValueError("Raw source keyword is outside the bounded text contract")
+    if observation.raw_source_keyword is not None:
+        try:
+            normalize_keyword_text(observation.raw_source_keyword)
+        except ValueError:
+            raise ValueError("Raw source keyword contains invalid text") from None
     if observation.source_url is not None:
         try:
             parsed = urlsplit(observation.source_url)
@@ -104,15 +128,22 @@ def _validate(observation: Observation, grants: dict[str, ProcessingGrant], now:
 
 
 def _normalize(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+    return normalize_keyword_text(text)[1]
 
 
-def _phrases(text: str) -> tuple[tuple[str, str], ...]:
+def _phrases(text: str, extraction_mode: str = "PHRASE_RULES") -> tuple[tuple[str, str], ...]:
     # Reject truncated input instead of quietly claiming full extraction coverage.
-    words = _WORD.findall(unicodedata.normalize("NFKC", text))
+    display, _ = normalize_keyword_text(text)
+    if extraction_mode == "DIRECT_KEYWORD":
+        if len(_WORD.findall(display)) > _MAX_TOKENS:
+            raise ValueError("Observation exceeds token limit")
+        return ((canonical_keyword_digest(display), display),)
+    if extraction_mode != "PHRASE_RULES":
+        raise ValueError("Unsupported extraction mode")
+    words = tuple(_WORD.finditer(display))
     if len(words) > _MAX_TOKENS:
         raise ValueError("Observation exceeds token limit")
-    normalized = [word.casefold().replace("’", "'") for word in words]
+    normalized = [normalize_keyword_text(word.group())[1] for word in words]
     candidates = []
     for width in range(1, 5):
         for start in range(len(words) - width + 1):
@@ -123,16 +154,25 @@ def _phrases(text: str) -> tuple[tuple[str, str], ...]:
                 continue
             if all(token.isdigit() for token in part):
                 continue
-            phrase = " ".join(part)
-            candidates.append((_ALIASES.get(phrase, phrase), " ".join(words[start:start + width])))
+            original = display[words[start].start():words[start + width - 1].end()]
+            identity = canonical_keyword_digest(original)
+            candidates.append((identity, original))
     return tuple(dict.fromkeys(candidates))
 
 
 def _categories(keyword: str) -> tuple[str, ...]:
-    words = frozenset(_WORD.findall(keyword))
+    words = frozenset(normalize_keyword_text(word.group())[1] for word in _WORD.finditer(keyword))
     return tuple(name for name, vocabulary in _TOPICS.items() if words & vocabulary) or (
         "unclassified",
     )
+
+
+def _display_case_quality(value: str) -> tuple[int, int, str, str]:
+    words = tuple(_WORD.finditer(value))
+    initial_capitals = sum(bool(word.group()[:1].isupper()) for word in words)
+    all_capitals = sum(character.isupper() for character in value)
+    return (max(0, all_capitals - initial_capitals), -initial_capitals,
+            value.casefold(), value)
 
 
 def extract_candidates(observations: tuple[Observation, ...], *,
@@ -149,7 +189,7 @@ def extract_candidates(observations: tuple[Observation, ...], *,
     if len(by_source) != len(grants):
         raise ValueError("Duplicate source processing grant")
     records = defaultdict(list)
-    forms = defaultdict(set)
+    forms = defaultdict(Counter)
     doc_content = {}
     for observation in observations:
         _validate(observation, by_source, now)
@@ -173,25 +213,31 @@ def extract_candidates(observations: tuple[Observation, ...], *,
             observation.provider_rank,
             observation.approximate_views,
             observation.source_metrics,
+            observation.source_metric_name,
+            observation.source_metric_unit,
+            observation.source_metric_value,
+            observation.raw_source_keyword,
         )
-        for phrase, original in _phrases(observation.text):
-            forms[phrase].add(original)
-            if evidence not in records[phrase]:
-                records[phrase].append(evidence)
+        for identity, original in _phrases(observation.text, observation.extraction_mode):
+            forms[identity][original] += 1
+            if evidence not in records[identity]:
+                records[identity].append(evidence)
     output = []
-    for phrase in sorted(records):
-        identifier = hashlib.sha256(json.dumps(
-            [EXTRACTION_VERSION, phrase], ensure_ascii=False, separators=(",", ":")
-        ).encode()).hexdigest()
+    for identity in sorted(records):
+        display_forms = forms[identity]
+        phrase = sorted(display_forms, key=lambda value: (
+            -display_forms[value], *_display_case_quality(value)
+        ))[0]
+        identifier = identity
         categories = _categories(phrase)
         flags = ("RULE_BASED_UNVALIDATED", "COVERAGE_LIMITED")
-        if any(item.language == "und" for item in records[phrase]):
+        if any(item.language == "und" for item in records[identity]):
             flags += ("LANGUAGE_UNVERIFIED",)
         if categories == ("unclassified",):
             flags += ("UNCLASSIFIED",)
-        evidence = tuple(sorted(records[phrase], key=lambda x: (
+        evidence = tuple(sorted(records[identity], key=lambda x: (
             x.source_id, x.scope, x.observed_at, x.document_id, x.query_evidence
         )))
-        output.append(Candidate(identifier, phrase, tuple(sorted(forms[phrase])), categories,
+        output.append(Candidate(identifier, phrase, tuple(sorted(display_forms)), categories,
                                 TAXONOMY_VERSION, EXTRACTION_VERSION, flags, evidence))
     return tuple(output)
