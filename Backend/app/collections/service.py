@@ -697,10 +697,15 @@ class CollectionService:
                 continue
             coverage = source.get("coverage")
             coverage = coverage if isinstance(coverage, dict) else {}
+            request_count = source.get("provider_request_count")
+            if type(request_count) is not int or request_count < 0:
+                request_count = coverage.get("provider_request_count")
             if (coverage.get("cache_only") is True
                     or source.get("delivery_state") in {"CACHE_REPLAY", "CACHE_ONLY"}
+                    or (source.get("delivery_state") == "CACHED"
+                        and (type(request_count) is not int or request_count <= 0))
                     or (coverage.get("cache_fetched_at")
-                        and coverage.get("provider_request_count") == 0)):
+                        and request_count == 0)):
                 return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
                         "recomputed_algorithms": 0, "registered_algorithms": registered_count,
                         "persisted_algorithms": 0, "analysis_status": "CACHE_ONLY"}

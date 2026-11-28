@@ -710,8 +710,10 @@ class SmartCollectionsTests(unittest.TestCase):
                           side_effect=AssertionError("cache-only replay must not scan or write")):
             result = self.service._analyze_persisted_keywords(
                 [record],
-                sources=[{"source_id": "wikimedia_pageviews_top_per_country",
-                          "coverage": {"cache_only": True}}],
+            sources=[{"source_id": "wikimedia_pageviews_top_per_country",
+                      "data_mode": "LIVE", "status": "SUCCESS",
+                      "delivery_state": "CACHED", "provider_request_count": 0,
+                      "coverage": {"provider_request_count": 0}}],
                 cache_only=True,
             )
         self.assertEqual(result["analysis_status"], "CACHE_ONLY")
@@ -753,6 +755,34 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(replay["analysis_status"], "COMPLETED")
         self.assertEqual(replay["executed_keywords"], 0)
         self.assertGreater(replay["unchanged_keywords"], 0)
+
+    def test_cached_delivery_with_live_request_evidence_runs_local_algorithms(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "CACHED",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"provider_request_count": 1},
+        }
+        persisted = self.store.persist_cleaned_keywords([keyword_record({
+            "article_display": "Retained Cache Example",
+            "article_original": "Retained_Cache_Example",
+            "project": "en.wikipedia",
+            "observation_date": now.date().isoformat(),
+            "fetched_at": now.isoformat(),
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }, WIKIMEDIA_SOURCE_ID, "LIVE")])["records"][0]
+
+        result = self.service._analyze_persisted_keywords(
+            [persisted], sources=[source], cache_only=True,
+        )
+
+        self.assertEqual(result["analysis_status"], "COMPLETED")
+        self.assertGreater(result["executed_keywords"], 0)
 
     def test_expired_retained_live_evidence_is_not_analyzed(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)

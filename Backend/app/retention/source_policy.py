@@ -144,18 +144,19 @@ def retained_live_wikimedia_evidence_status(source: dict, *, now=None) -> str:
     if coverage.get("cache_only") is True:
         return "CACHE_ONLY"
     delivery = source.get("delivery_state")
-    if delivery in {"CACHE_REPLAY", "CACHE_ONLY", "CACHED"}:
-        return "CACHE_ONLY"
     if delivery in {"STALE_CACHE", "EXPIRED"}:
         return "EXPIRED"
     if (source.get("data_mode") != "LIVE"
-            or source.get("status") not in {"SUCCESS", "PARTIAL"}
-            or delivery != "FRESH"):
+            or source.get("status") not in {"SUCCESS", "PARTIAL"}):
         return "INVALID"
     request_count = source.get("provider_request_count")
     if type(request_count) is not int or request_count < 0:
         request_count = coverage.get("provider_request_count")
     if type(request_count) is not int or request_count <= 0:
+        return "CACHE_ONLY" if delivery in {"CACHE_REPLAY", "CACHE_ONLY", "CACHED"} else "INVALID"
+    if delivery in {"CACHE_REPLAY", "CACHE_ONLY"}:
+        return "CACHE_ONLY"
+    if delivery not in {"FRESH", "CACHED"}:
         return "INVALID"
     collected_at = (coverage.get("fetched_at") or source.get("fetched_at")
                     or coverage.get("source_fetched_at"))
