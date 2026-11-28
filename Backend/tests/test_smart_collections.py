@@ -756,6 +756,60 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(replay["executed_keywords"], 0)
         self.assertGreater(replay["unchanged_keywords"], 0)
 
+    def test_persisted_algorithm_results_are_upserted_as_one_batch(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 2,
+            "coverage": {"provider_request_count": 1},
+        }
+        records = self.store.persist_cleaned_keywords([
+            keyword_record({
+                "article_display": title,
+                "article_original": title.replace(" ", "_"),
+                "project": "en.wikipedia",
+                "observation_date": now.date().isoformat(),
+                "fetched_at": now.isoformat(),
+                "provider_rank": rank,
+                "views_ceil": 1000 - rank,
+            }, WIKIMEDIA_SOURCE_ID, "LIVE")
+            for rank, title in enumerate(("Recovery Batch Alpha", "Recovery Batch Beta"), start=1)
+       ])["records"]
+
+        write_batches = []
+        original_run = self.store.run_algorithm_analysis
+
+        def capture_batch(operation):
+            def instrument(session):
+                original_upsert = session.upsert_results
+
+                def capture(results):
+                    batch = list(results)
+                    write_batches.append(len(batch))
+                    return original_upsert(batch)
+
+                session.upsert_results = capture
+                return operation(session)
+
+            return original_run(instrument)
+
+        with patch.object(self.store, "run_algorithm_analysis", side_effect=capture_batch):
+            result = self.service._analyze_persisted_keywords(
+                records, sources=[source], cache_only=True,
+            )
+
+        self.assertEqual(result["analysis_status"], "COMPLETED")
+        self.assertEqual(result["executed_keywords"], 2)
+        expected_batch_size = result["executed_keywords"] * result["persisted_algorithms"]
+        self.assertEqual(write_batches, [expected_batch_size])
+        with self.store.connect() as db:
+            count = db.execute("SELECT count(*) FROM algorithm_results").fetchone()[0]
+        self.assertEqual(count, write_batches[0])
+
     def test_cached_delivery_with_live_request_evidence_runs_local_algorithms(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         source = {

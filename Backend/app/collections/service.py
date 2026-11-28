@@ -1036,6 +1036,7 @@ class CollectionService:
                 )
 
             executed = unchanged = recomputed_algorithms = 0
+            pending_results = []
             cacheable = True
             for record in analysis_rows.values():
                 keyword_id = record["id"]
@@ -1198,11 +1199,12 @@ class CollectionService:
                         result.reason_code, result.value, result.metric_name, result.metric_unit,
                         payload, result_digest, now(),
                     ))
-                session.upsert_results(persisted_results)
+                pending_results.extend(persisted_results)
                 executed += 1
                 recomputed_algorithms += len(missing_keys)
                 if len(produced_keys) != len(missing_keys) or set(produced_keys) != set(missing_keys):
                     cacheable = False
+            session.upsert_results(pending_results)
             summary = {
                 "eligible_keywords": len(analysis_rows), "executed_keywords": executed,
                 "unchanged_keywords": unchanged, "recomputed_algorithms": recomputed_algorithms,
