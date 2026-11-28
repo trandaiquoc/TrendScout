@@ -42,11 +42,17 @@ def _has_fresh_live_wikimedia_checkpoint(value) -> bool:
     """Check compact manifests or retained checkpoint maps without reading records."""
     if isinstance(value, dict):
         candidates = []
-        for entry in value.values():
+        for source_id, entry in value.items():
             snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
             if isinstance(result, dict):
-                candidates.append(result)
+                # Terminal checkpoint results are keyed by source ID and may
+                # omit that ID from the compact provider payload itself.
+                candidates.append({
+                    **result,
+                    **({"source_id": source_id}
+                       if isinstance(source_id, str) and "source_id" not in result else {}),
+                })
     elif isinstance(value, list):
         candidates = [item for item in value if isinstance(item, dict)]
     else:
