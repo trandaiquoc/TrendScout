@@ -833,11 +833,10 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
             terminal_receipt_sources = receipt["sources"]
 
     persisted_analyzer = getattr(service, "analyze_retained_live_keywords", None)
-    if (resume_pending_algorithms and callable(persisted_analyzer)
-            and isinstance(terminal_receipt_sources, list)
-            and _has_fresh_live_wikimedia_checkpoint(terminal_receipt_sources)):
+    if resume_pending_algorithms and callable(persisted_analyzer):
         analysis = await asyncio.to_thread(
-            persisted_analyzer, fetch_id, terminal_receipt_sources,
+            persisted_analyzer, fetch_id,
+            terminal_receipt_sources if isinstance(terminal_receipt_sources, list) else [],
         )
         analysis_status = analysis.get("analysis_status") if isinstance(analysis, dict) else None
         if analysis_status not in {"CACHE_ONLY", "DATASET_SCOPE_MISMATCH"}:

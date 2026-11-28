@@ -153,6 +153,15 @@ def retained_live_wikimedia_evidence_status(source: dict, *, now=None) -> str:
     if type(request_count) is not int or request_count < 0:
         request_count = coverage.get("provider_request_count")
     if type(request_count) is not int or request_count <= 0:
+        cached_request_count = coverage.get("cached_provider_request_count")
+        cache_fetched_at = coverage.get("cache_fetched_at")
+        if (delivery == "CACHED" and type(cached_request_count) is int
+                and cached_request_count > 0 and isinstance(cache_fetched_at, str)):
+            cache_status = source_evidence_timestamp_status(
+                WIKIMEDIA_SOURCE_ID, cache_fetched_at, now=now,
+            )
+            return ("REQUIRES_RECORD_VALIDATION" if cache_status == "CURRENT"
+                    else cache_status)
         return "CACHE_ONLY" if delivery in {"CACHE_REPLAY", "CACHE_ONLY", "CACHED"} else "INVALID"
     if delivery in {"CACHE_REPLAY", "CACHE_ONLY"}:
         return "CACHE_ONLY"

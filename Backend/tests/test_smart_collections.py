@@ -794,10 +794,12 @@ class SmartCollectionsTests(unittest.TestCase):
             "source_id": WIKIMEDIA_SOURCE_ID,
             "status": "SUCCESS",
             "data_mode": "LIVE",
-            "delivery_state": "FRESH",
-            "provider_request_count": 1,
+            "delivery_state": "CACHED",
+            "provider_request_count": 0,
             "record_count": 1,
-            "coverage": {"provider_request_count": 1},
+            "coverage": {"provider_request_count": 0,
+                         "cached_provider_request_count": 1,
+                         "cache_fetched_at": now.isoformat()},
         }
         store.persist_cleaned_keywords([keyword_record({
             "article_display": "Persisted Recovery Example",
@@ -827,7 +829,7 @@ class SmartCollectionsTests(unittest.TestCase):
             ai_classification_status="MODEL_UNAVAILABLE",
         )
 
-        result = service.analyze_retained_live_keywords(fetch_id, [source])
+        result = service.analyze_retained_live_keywords(fetch_id, [])
 
         self.assertEqual(result["analysis_status"], "COMPLETED")
         self.assertGreater(result["executed_keywords"], 0)

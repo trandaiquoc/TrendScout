@@ -1886,7 +1886,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[0][2])
         self.assertTrue(calls[0][3])
 
-    async def test_recovery_analyzes_persisted_rows_from_original_terminal_receipt(self):
+    async def test_recovery_analyzes_persisted_rows_when_terminal_receipt_is_missing(self):
         app, _events, _client, facade, _client_factory = self.app(enabled=True)
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         source = {
@@ -1903,7 +1903,6 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
                              if key != "source_id"}
         checkpoint = {"snapshot": {"data_mode": "LIVE", "result": checkpoint_source}}
         analyzed = []
-        receipt_source = {key: value for key, value in source.items() if key != "records"}
 
         class _Store:
             data_mode_scope = "LIVE"
@@ -1937,9 +1936,6 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         facade.admission.read_job = lambda _fetch_id, now: {
             "state": "PARTIAL",
             "source_checkpoints": {WIKIMEDIA_SOURCE_ID: checkpoint},
-            "terminal_status_receipt": {
-                "fetch_id": _JOB_ID, "terminal": True, "sources": [receipt_source],
-            },
         }
         facade.status = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("persisted recovery should not load source checkpoint blobs")
@@ -1961,6 +1957,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["algorithm_persisted_count"], 6)
         self.assertEqual(len(analyzed), 1)
         self.assertEqual(analyzed[0][0], _JOB_ID)
+        self.assertEqual(analyzed[0][1], [])
 
     async def test_persisted_checkpoint_recovery_skips_records_and_snapshot_write(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)

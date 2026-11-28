@@ -665,6 +665,11 @@ class CollectionService:
 
         source = next((item for item in sources if isinstance(item, dict)
                        and item.get("source_id") == WIKIMEDIA_SOURCE_ID), None)
+        if source is None:
+            manifest = dataset.get("source_manifest")
+            source = next((item for item in manifest if isinstance(item, dict)
+                           and item.get("source_id") == WIKIMEDIA_SOURCE_ID), None) \
+                if isinstance(manifest, list) else None
         evidence_status = retained_live_wikimedia_evidence_status(source)
         if evidence_status not in {"CURRENT", "REQUIRES_RECORD_VALIDATION"}:
             return {"analysis_status": ("NO_VALID_OBSERVATIONS"
@@ -747,12 +752,21 @@ class CollectionService:
             request_count = source.get("provider_request_count")
             if type(request_count) is not int or request_count < 0:
                 request_count = coverage.get("provider_request_count")
+            cached_request_count = coverage.get("cached_provider_request_count")
+            cache_fetched_at = coverage.get("cache_fetched_at")
+            retained_cached_live = (
+                source.get("delivery_state") == "CACHED"
+                and request_count == 0
+                and type(cached_request_count) is int and cached_request_count > 0
+                and isinstance(cache_fetched_at, str)
+            )
             if (coverage.get("cache_only") is True
                     or source.get("delivery_state") in {"CACHE_REPLAY", "CACHE_ONLY"}
                     or (source.get("delivery_state") == "CACHED"
-                        and (type(request_count) is not int or request_count <= 0))
+                        and (type(request_count) is not int or request_count <= 0)
+                        and not retained_cached_live)
                     or (coverage.get("cache_fetched_at")
-                        and request_count == 0)):
+                        and request_count == 0 and not retained_cached_live)):
                 return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
                         "recomputed_algorithms": 0, "registered_algorithms": registered_count,
                         "persisted_algorithms": 0, "analysis_status": "CACHE_ONLY"}
