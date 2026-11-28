@@ -1,6 +1,6 @@
 {
   "buildCommand": "python3 scripts/prepare_vercel.py",
-  "ignoreCommand": "if [ -z \"$VERCEL_GIT_PREVIOUS_SHA\" ] || [ -z \"$VERCEL_GIT_COMMIT_SHA\" ] || ! git cat-file -e \"$VERCEL_GIT_PREVIOUS_SHA^{commit}\" 2>/dev/null || ! git cat-file -e \"$VERCEL_GIT_COMMIT_SHA^{commit}\" 2>/dev/null; then exit 1; fi; if git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" \"$VERCEL_GIT_COMMIT_SHA\" -- ':(top)Backend' ':(top)Frontend'; then exit 0; else exit 1; fi",
+  "ignoreCommand": "git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" \"$VERCEL_GIT_COMMIT_SHA\" -- ':(top)Backend' ':(top)Frontend' 2>/dev/null",
   "redirects": [
     {
       "source": "/dashboard",
