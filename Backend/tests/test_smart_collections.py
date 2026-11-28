@@ -784,6 +784,62 @@ class SmartCollectionsTests(unittest.TestCase):
         self.assertEqual(result["analysis_status"], "COMPLETED")
         self.assertGreater(result["executed_keywords"], 0)
 
+    def test_retained_live_reanalysis_reads_persisted_keywords_without_source_payload(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        fetch_id = "retained-live-reanalysis"
+        store = CollectionStore(Path(self.temp.name) / "retained-reanalysis.sqlite",
+                                data_mode_scope="LIVE")
+        service = CollectionService(store, fetch_model_inference_enabled=False)
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"provider_request_count": 1},
+        }
+        store.persist_cleaned_keywords([keyword_record({
+            "article_display": "Persisted Recovery Example",
+            "article_original": "Persisted_Recovery_Example",
+            "project": "en.wikipedia",
+            "observation_date": now.date().isoformat(),
+            "fetched_at": now.isoformat(),
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }, WIKIMEDIA_SOURCE_ID, "LIVE")])
+        store.persist_dataset_snapshot(
+            fetch_id,
+            status="PARTIAL",
+            data_mode="LIVE",
+            source_manifest=[source],
+            provider_record_count=1,
+            received_record_count=1,
+            retained_keyword_count=1,
+            rejected_record_count=0,
+            observation_start=now.date().isoformat(),
+            observation_end=now.date().isoformat(),
+            fetched_at=now.isoformat(),
+            quality_flags=[],
+            processing_status="MODEL_UNAVAILABLE",
+            created_at=now.isoformat(),
+            algorithm_processing_status="CACHE_ONLY",
+            ai_classification_status="MODEL_UNAVAILABLE",
+        )
+
+        result = service.analyze_retained_live_keywords(fetch_id, [source])
+
+        self.assertEqual(result["analysis_status"], "COMPLETED")
+        self.assertGreater(result["executed_keywords"], 0)
+        self.assertGreater(result["persisted_algorithms"], 0)
+        self.assertEqual(store.latest_dataset()["dataset_id"], fetch_id)
+        with store.connect() as db:
+            status = db.execute(
+                "SELECT algorithm_processing_status,ai_classification_status "
+                "FROM dataset_snapshots WHERE dataset_id=?", (fetch_id,),
+            ).fetchone()
+        self.assertEqual(tuple(status), ("COMPLETED", "MODEL_UNAVAILABLE"))
+
     def test_expired_retained_live_evidence_is_not_analyzed(self):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         expired = now - timedelta(days=9)

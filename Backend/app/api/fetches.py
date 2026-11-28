@@ -766,6 +766,7 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     clock = getattr(distributed, "utcnow", None)
     read_collection_job = getattr(service.store, "collection_job", None)
     collection_job = None
+    terminal_receipt_sources = None
     if callable(read_collection_job):
         collection_job, _created = await asyncio.to_thread(read_collection_job, fetch_id)
         collection_job = dict(collection_job) if collection_job is not None else None
@@ -789,6 +790,11 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                 job = await asyncio.to_thread(read_job, fetch_id, now=clock())
             except AdmissionDenied as exc:
                 _raise_distributed_admission_error(exc.code, distributed)
+            receipt = job.get("terminal_status_receipt") if isinstance(job, dict) else None
+            if (isinstance(receipt, dict) and receipt.get("fetch_id") == fetch_id
+                    and receipt.get("terminal") is True
+                    and isinstance(receipt.get("sources"), list)):
+                terminal_receipt_sources = receipt["sources"]
             checkpoints = job.get("source_checkpoints") if isinstance(job, dict) else None
             if (isinstance(job, dict)
                     and job.get("state") in {"COMPLETED", "PARTIAL", "FAILED", "EXPIRED", "ABORTED"}
@@ -814,6 +820,36 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                             "ai_job_ids": [item["job_id"] for item in stored_ai_jobs
                                            if isinstance(item, dict)
                                            and isinstance(item.get("job_id"), str)]}
+    if (resume_pending_algorithms and terminal_receipt_sources is None
+            and callable(read_job) and callable(clock)):
+        try:
+            job = await asyncio.to_thread(read_job, fetch_id, now=clock())
+        except AdmissionDenied as exc:
+            _raise_distributed_admission_error(exc.code, distributed)
+        receipt = job.get("terminal_status_receipt") if isinstance(job, dict) else None
+        if (isinstance(receipt, dict) and receipt.get("fetch_id") == fetch_id
+                and receipt.get("terminal") is True
+                and isinstance(receipt.get("sources"), list)):
+            terminal_receipt_sources = receipt["sources"]
+
+    persisted_analyzer = getattr(service, "analyze_retained_live_keywords", None)
+    if (resume_pending_algorithms and callable(persisted_analyzer)
+            and isinstance(terminal_receipt_sources, list)
+            and _has_fresh_live_wikimedia_checkpoint(terminal_receipt_sources)):
+        analysis = await asyncio.to_thread(
+            persisted_analyzer, fetch_id, terminal_receipt_sources,
+        )
+        analysis_status = analysis.get("analysis_status") if isinstance(analysis, dict) else None
+        if analysis_status not in {"CACHE_ONLY", "DATASET_SCOPE_MISMATCH"}:
+            return {
+                "fetch_id": fetch_id,
+                "status": "MODEL_UNAVAILABLE",
+                "error_code": "AI_DISABLED",
+                "algorithm_processing_status": analysis_status or "UNKNOWN",
+                "algorithm_executed_keywords": analysis.get("executed_keywords", 0),
+                "algorithm_persisted_count": analysis.get("persisted_algorithms", 0),
+            }
+
     try:
         result = await asyncio.to_thread(
             distributed.status, fetch_id, include_records=True,

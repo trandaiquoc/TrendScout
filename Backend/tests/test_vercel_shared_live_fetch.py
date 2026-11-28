@@ -1886,6 +1886,82 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(calls[0][2])
         self.assertTrue(calls[0][3])
 
+    async def test_recovery_analyzes_persisted_rows_from_original_terminal_receipt(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"provider_request_count": 1},
+            "records": [{"article_original": "Retained_Receipt_Example", "views_ceil": 1000}],
+        }
+        checkpoint_source = {key: value for key, value in source.items()
+                             if key != "source_id"}
+        checkpoint = {"snapshot": {"data_mode": "LIVE", "result": checkpoint_source}}
+        analyzed = []
+        receipt_source = {key: value for key, value in source.items() if key != "records"}
+
+        class _Store:
+            data_mode_scope = "LIVE"
+
+            def collection_job(self, _fetch_id):
+                return ({"status": "MODEL_UNAVAILABLE",
+                         "algorithm_processing_status": "CACHE_ONLY", "ai_jobs": []}, False)
+
+            def fetch_collection_processing_result(self, _fetch_id):
+                return {"status": "MODEL_UNAVAILABLE", "error_code": "AI_DISABLED"}
+
+        class _Service:
+            store = _Store()
+
+            def analyze_retained_live_keywords(self, fetch_id, sources):
+                analyzed.append((fetch_id, sources))
+                return {"analysis_status": "COMPLETED", "executed_keywords": 1,
+                        "persisted_algorithms": 6}
+
+            async def process_fetch(self, *_args, **_kwargs):
+                raise AssertionError("persisted recovery must not reload source records")
+
+        facade.postgres_live = True
+        facade.firestore_shared_live = False
+        facade.data_mode = "LIVE"
+        facade.collection_service = _Service()
+        facade.collection_reuse_for_fetch = lambda _fetch_id: {
+            "terminal": True, "collection_input_unchanged": False,
+        }
+        facade.utcnow = lambda: now
+        facade.admission.read_job = lambda _fetch_id, now: {
+            "state": "PARTIAL",
+            "source_checkpoints": {WIKIMEDIA_SOURCE_ID: checkpoint},
+            "terminal_status_receipt": {
+                "fetch_id": _JOB_ID, "terminal": True, "sources": [receipt_source],
+            },
+        }
+        facade.status = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("persisted recovery should not load source checkpoint blobs")
+        )
+
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    f"/api/v1/fetches/{_JOB_ID}/collections",
+                    headers={"Origin": "https://trend-scout.example",
+                             "x-vercel-oidc-token": "synthetic-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["algorithm_processing_status"], "COMPLETED")
+        self.assertEqual(response.json()["algorithm_persisted_count"], 6)
+        self.assertEqual(len(analyzed), 1)
+        self.assertEqual(analyzed[0][0], _JOB_ID)
+
     async def test_persisted_checkpoint_recovery_skips_records_and_snapshot_write(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)
         with TemporaryDirectory() as directory:

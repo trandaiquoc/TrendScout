@@ -652,6 +652,53 @@ class CollectionService:
                 )
         self.store.persist_dataset_snapshot(fetch_id, **snapshot)
 
+    def analyze_retained_live_keywords(self, fetch_id, sources):
+        """Reanalyze retained PostgreSQL keyword evidence without source payloads."""
+        from app.retention.source_policy import retained_live_wikimedia_evidence_status
+        from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+
+        dataset = self.store.latest_dataset()
+        if (not isinstance(dataset, dict) or dataset.get("dataset_id") != fetch_id
+                or dataset.get("data_mode") != "LIVE"):
+            return {"analysis_status": "DATASET_SCOPE_MISMATCH", "eligible_keywords": 0,
+                    "executed_keywords": 0, "persisted_algorithms": 0}
+
+        source = next((item for item in sources if isinstance(item, dict)
+                       and item.get("source_id") == WIKIMEDIA_SOURCE_ID), None)
+        evidence_status = retained_live_wikimedia_evidence_status(source)
+        if evidence_status not in {"CURRENT", "REQUIRES_RECORD_VALIDATION"}:
+            return {"analysis_status": ("NO_VALID_OBSERVATIONS"
+                                        if evidence_status in {"EXPIRED", "INVALID"}
+                                        else "CACHE_ONLY"),
+                    "evidence_state": evidence_status, "eligible_keywords": 0,
+                    "executed_keywords": 0, "persisted_algorithms": 0}
+
+        loaded = self.store.load_keywords_for_fetch()
+        records = [record for record in loaded.get("records", [])
+                   if isinstance(record, dict) and record.get("source") == WIKIMEDIA_SOURCE_ID]
+        if not records:
+            return {"analysis_status": "NO_COMPATIBLE_SOURCE_INPUT", "eligible_keywords": 0,
+                    "executed_keywords": 0, "persisted_algorithms": 0}
+
+        analysis = self._analyze_persisted_keywords(
+            records, sources=[source], cache_only=True,
+        )
+        status = analysis.get("analysis_status", "UNKNOWN")
+        available = dataset.get("provider_record_count")
+        skipped = dataset.get("rejected_record_count")
+        eligible = dataset.get("eligible_keyword_count")
+        self.store.mark_fetch_model_unavailable(
+            fetch_id,
+            available=available if type(available) is int and available >= 0 else len(records),
+            skipped=skipped if type(skipped) is int and skipped >= 0 else 0,
+            eligible=eligible if type(eligible) is int and eligible >= 0 else len(records),
+            cached_embeddings=0,
+            inferred_embeddings=0,
+            error_code="AI_DISABLED",
+            algorithm_processing_status=status,
+        )
+        return analysis
+
     def _analyze_persisted_keywords(self, changed_records, *, sources=(), cache_only=False):
         """Persist bounded Wikimedia observations and analyze only compatible inputs."""
         from datetime import timedelta
