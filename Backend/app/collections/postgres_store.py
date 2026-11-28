@@ -214,14 +214,19 @@ class PostgresCollectionStore(PostgresCollectionReader):
     supports_source_evidence_lineage = True
     supports_incremental_fetch_persistence = True
 
-    def _write(self, operation, *, serialize=True):
+    def _write(self, operation, *, serialize=True, idle_in_transaction_timeout_seconds=30):
+        if (type(idle_in_transaction_timeout_seconds) is not int
+                or not 30 <= idle_in_transaction_timeout_seconds <= 120):
+            raise ValueError("idle transaction timeout is outside the supported bound")
+        idle_timeout = f"{idle_in_transaction_timeout_seconds}s"
         try:
             with postgres_connection(self._environment) as db:
                 db.row_factory = dict_row
                 with db.transaction():
                     db.execute("""SELECT set_config('lock_timeout', '10s', true),
                         set_config('statement_timeout', '30s', true),
-                        set_config('idle_in_transaction_session_timeout', '30s', true)""")
+                        set_config('idle_in_transaction_session_timeout', %s, true)""",
+                        (idle_timeout,))
                     if serialize:
                         # Collection-wide reads and mutations use one lock until
                         # their narrower ownership boundaries are fully audited.
@@ -341,8 +346,10 @@ class PostgresCollectionStore(PostgresCollectionReader):
 
     def run_algorithm_analysis(self, operation):
         """Run algorithm reads and writes inside one serialized transaction."""
+        # The cohort pass is CPU-bound while holding this transaction and can exceed 30s.
         return self._write(lambda db: operation(PostgresAlgorithmAnalysisSession(
-            db, self._table, self.data_mode_scope)))
+            db, self._table, self.data_mode_scope)),
+            idle_in_transaction_timeout_seconds=120)
 
     def persist_cleaned_keywords(self, records, *, rejected=(), bing_updates=(),
                                  source_evidence_rows=None):

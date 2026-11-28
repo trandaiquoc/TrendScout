@@ -953,6 +953,45 @@ def test_algorithm_analysis_uses_atomic_postgres_store_session():
             connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_algorithm_analysis_uses_bounded_idle_transaction_timeout(monkeypatch):
+    from contextlib import contextmanager
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Connection:
+        row_factory = None
+
+        def __init__(self):
+            self.calls = []
+
+        def transaction(self):
+            return Transaction()
+
+        def execute(self, statement, parameters=None):
+            self.calls.append((str(statement), parameters))
+            return self
+
+    connection = Connection()
+
+    @contextmanager
+    def postgres_connection_stub(_environment):
+        yield connection
+
+    monkeypatch.setattr("app.collections.postgres_store.postgres_connection",
+                        postgres_connection_stub)
+    store = PostgresCollectionStore({"DATABASE_URL": "unused"})
+
+    assert store.run_algorithm_analysis(lambda _session: "ok") == "ok"
+    timeout_call = next(call for call in connection.calls
+                        if "idle_in_transaction_session_timeout" in call[0])
+    assert timeout_call[1] == ("120s",)
+
+
 def test_google_trends_increase_rank_persists_lineage_and_skips_unchanged_inputs():
     url = os.environ.get("TRENDSCOUT_TEST_POSTGRES_URL")
     if not url:
