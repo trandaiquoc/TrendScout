@@ -12,12 +12,12 @@ Requested baseline `edfc5fb` and the attachment baseline `4f8b14c` are both ance
 
 | Gate | Result | Evidence / remaining condition |
 |---|---|---|
-| G1 — Security readiness | PASS | SEC01 G1–G5 remained PASS. The Owner confirmed Neon password rotation, invalidation of the old credential, root `.env` update, and pooled/direct TLS authentication. SEC01 G6 and its report were closed on that confirmation. The refreshed root `.env` check found both URLs present, no process-ENV mismatch, and matching pooled/direct branch, database, and role. The direct URL requires TLS and a read-only query connected successfully. PostgreSQL's `pg_stat_ssl` view reported `ssl=false`; this is a server-side session view and does not independently attest the client-to-Neon TLS leg. The Owner's direct and pooled TLS verification remains the evidence for that leg. No credentials were printed. |
+| G1 — Security readiness | PASS | SEC01 G1–G5 remained PASS. The Owner confirmed Neon password rotation, invalidation of the old credential, root `.env` update, and pooled/direct TLS authentication. SEC01 G6 and its report were closed on that confirmation. FINAL01C loaded the root `.env` with an empty environment mapping, verified pooled/direct URLs identify the same endpoint, cluster and database, and confirmed both sessions use the same role. Client-side libpq TLS was in use for both sessions with certificate verification enabled. PostgreSQL's `pg_stat_ssl` view still reported `ssl=false`; this server-side view does not attest the client TLS leg. No credentials were printed. |
 | G2 — Contract reconciliation | PASS | `DB_CONTRACT.md`, `AI_CONTRACT.md`, `UI_CONTRACT.md`, and `AI_SOURCE_POLICY_MATRIX.md` were reconciled to the checked-in implementation, including the missing-ledger admission gap and the rule that only Wikimedia Pageviews is currently approved for live AI input. |
 | G3 — Backend integration | PASS | Consolidated isolated-PostgreSQL regression: **92 passed, 10 subtests passed, 0 skipped, 1 warning**, 319.69 s. No live provider or inference requests were made. See the exact suite list below. |
 | G4 — Full UI integration | PASS | Local browser used the actual backend with isolated PostgreSQL schemas, synthetic fixtures, and a process-local mocked AI provider. All 11 routes loaded with backend connected and correct active nav/breadcrumb. Recommendation generation reached a completed synthetic result. Empty, network-error, and disabled/deferred states; direct URL reload; in-app navigation; responsive width; VI/EN; light/dark; and keyboard skip navigation were checked. No external browser origin was contacted. A live Fetch was intentionally not submitted; the backend source-fetch switch was off. The existing Fetch progress frontend coverage from AI07 remains the evidence for that component. |
 | G5 — Operational readiness | BLOCKED | FINAL01B fixes missing-ledger fail-open admission, adds an evidence-backed atomic operator bootstrap, and passes focused unit/PostgreSQL checks. Live quota usage and cooldown still have no Owner evidence; the live AI scope remains uninitialized and AI01H G4 remains blocked after earlier provider 429 responses. No live bootstrap or provider request was made. |
-| G6 — DB08 cutover preflight | BLOCKED | Root `.env` schema `trendscout` remains at migration version 9 with a matching 0001–0009 checksum prefix; 0010–0014 remain unapplied. Five local SQLite stores were captured and restored into memory with integrity/schema/count checks. Production identity, Neon/Firestore backup and restore, Vercel linkage, and legacy-writer freeze remain unverified. |
+| G6 — DB08 cutover preflight | BLOCKED | Root `.env` schema `trendscout` remains at migration version 9 with a matching 0001–0009 checksum prefix; 0010–0014 remain unapplied. Owner evidence and read-only Vercel API now identify the Production project/linkage and active deployment. Exact root-`.env` to Production endpoint/database/role match remains unverified because integration values are redacted. PostgreSQL 18.7 synthetic restore passed; no Production PostgreSQL dump, Firestore backup or remote writer freeze is complete. |
 
 ## G1 — Security and database authentication
 
@@ -111,6 +111,65 @@ The root `.env` target's ledger contains versions 1–9, in order, and those ent
 - No `.vercel/project.json` is present, and the connected Vercel account returned no TrendScout projects, so Production project/environment/connector linkage could not be verified. Firebase CLI, `pg_dump`, and `pg_restore` are unavailable on this host. No Neon or Firestore cloud backup/restore was performed. Repository SQLite capture and migration/import review tools are not evidence of remote backups.
 - Fresh Start remains the selected cutover plan. The local source stores and newly captured backups remain intact; no user records or quota evidence were deleted or imported. No migration, deployment, or Production environment change was made.
 
+### FINAL01C Production preflight — 2026-11-28
+
+This update supersedes FINAL01B's point-in-time observations about Vercel project linkage and local PostgreSQL tooling; those earlier statements remain historical records of the FINAL01B check.
+
+#### Branch and prior gates
+
+- Git fetch origin succeeded. At FINAL01C start, HEAD and origin/integration/demo-final were 37134641c2e87ca5015e39d986bfef655b8de87e; this is baseline 3713464. origin/main was 5122e6f0a717f72f2933bea56978c2b66f42139a, an ancestor 67 commits behind the integration branch. The starting worktree and git diff were clean; no merge was needed.
+- G1–G4 remain PASS and were not rerun. G5 implementation remains PASS; G5 operational and G6 remain BLOCKED. Overall FINAL01 remains 4/6 top-level gates PASS (67%).
+
+#### Owner Production identity evidence and root .env
+
+- The Owner's supplied control-plane evidence identifies Neon project trendscout, branch main (Default/Production labels), Available status and Free plan, connected to Vercel project trend-scout in team Rakoon for Production. The screenshots were not requested again.
+- Read-only Vercel API inspection confirmed the Rakoon team and trend-scout project. Production environment metadata includes pooled/direct database URL, host, database and role keys, all marked sensitive. A single-variable lookup returns decrypted=false; no environment values were decrypted or printed.
+- The active Vercel Production deployment is READY on main at cf09b2e0402a22dcb07dbd422f4f52e9dcdd5af4, with the production aliases trend-scout-rakoon1.vercel.app and trend-scout-git-main-rakoon1.vercel.app. The newer Production attempt at current origin/main SHA 5122e6f is CANCELED. SSO protection is enabled.
+- A read-only root .env check used postgres_environment({}, root/.env), so process ENV could not override DATABASE_URL or DATABASE_URL_UNPOOLED. The repository identity verifier passed; read-only direct and pooled sessions reported the same database and role, a Neon branch metadata setting was present, server major version was 18, and client-side libpq reported TLS in use for both connections. No schema writes or migrations were run.
+- This proves the two root URLs agree with each other; it does not independently prove that their exact endpoint, database and role equal Vercel Production's integration values. The Vercel API redacts those integration-owned values, and the supplied screenshot does not show the non-secret endpoint/database/role tuple. Do not claim the root target is the Production branch until an Owner-run no-output comparison or a non-secret identity confirmation closes this gap. PostgreSQL backup was held to avoid exporting from an unverified branch.
+
+#### PostgreSQL tooling, backup and restore
+
+- pg_dump and pg_restore were initially absent. PostgreSQL 18.7 binaries were downloaded from EDB's official binary archive and extracted per-user to LocalAppData; no Windows service was installed. The archive was 389,515,503 bytes with local SHA-256 EAD0BBC27FB678FA24DCF86B738981323042ABD073C744103BF7F3AED23F9A33. EDB's page did not publish a checksum for this archive, so this local digest detects later file changes but is not a publisher signature.
+- The root target reports PostgreSQL major version 18. The 18.7 client was used for an isolated synthetic local rehearsal: custom-format pg_dump, pg_restore --list, restore to a separate loopback-only PostgreSQL 18 cluster, and row-count/sum verification passed (3 rows, sum 6). The synthetic archive SHA-256 was B51CE95315C45F68D032111EDB2D375E10FAC24CF0814CD25404763095092BA1. The local PostgreSQL server was stopped after the rehearsal.
+- This rehearsal is toolchain evidence only; it is not a Production backup or Production-data restore. No PostgreSQL Production dump was made because exact Production identity is not independently matched. After that match, take a direct-endpoint custom archive under a private timestamped LocalAppData directory; record archive size, UTC timestamp and SHA-256; verify with pg_restore --list; restore only into a separate isolated PostgreSQL 18 database and compare schema, row counts and integrity. Never restore over Neon Production.
+- PostgreSQL's Windows download page links an EDB binary ZIP suitable for per-user extraction without installing a server; PostgreSQL documents that custom archives are inspected/restored with pg_restore, and a client must not be older than the server major. See [Windows binaries](https://www.postgresql.org/download/windows/), [EDB binary archives](https://www.enterprisedb.com/download-postgresql-binaries), and [pg_dump version compatibility](https://www.postgresql.org/docs/current/app-pgdump.html).
+
+#### Firestore preservation and backup status
+
+- No active Google Cloud CLI identity is configured in this session. No Firestore data was read, exported, modified or deleted, and no storage bucket or paid service was created.
+- Managed Firestore export/import requires billing and Cloud Storage, so it is excluded by the no-billing constraint. Keep the legacy Firestore database intact. After the Owner authenticates an authorized read-only identity and confirms the source project/database and a no-billing read budget, prepare a timestamped local encrypted export with document-path/count manifest and SHA-256 checksums, then rehearse import into an isolated Firestore emulator. The emulator export/import path applies to emulator data; it does not itself export Production. See [Firestore managed export/import](https://docs.cloud.google.com/firestore/native/docs/manage-data/export-import) and [Firestore emulator import/export](https://firebase.google.com/docs/emulator-suite/connect_firestore).
+- Firestore backup and restore remain BLOCKED. Owner action: authorize a read-only source identity in the correct GCP project and confirm a permitted no-billing export method or provide an existing owner-approved backup. Do not enable billing or create a bucket.
+
+#### Legacy writer inventory and Vercel fence preparation
+
+- Current Windows host: zero TrendScout scheduled tasks and services. The only process matching the workspace path was the agent's pwsh.exe; no TrendScout worker process remained after the local PostgreSQL rehearsal was stopped. No freeze confirmation has been received for the Owner's home or company computers.
+- Backend/vercel.json has no Cron Jobs. Production environment metadata shows TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED=true; TREND_SCOUT_POSTGRES_RUNTIME_ENABLED and TREND_SCOUT_PUBLIC_FETCH_ENABLED are absent (their code defaults are false). Production source-approval flags are present, but they do not prove provider quota availability. A Firestore smoke flag is present but its value is not available from the redacted metadata; no smoke endpoint was called.
+- The Vercel Production deployment remains active and its SSO protection is not a writer freeze. In this code, TREND_SCOUT_READ_ONLY is forced off for Vercel, so do not rely on that flag. The prepared reversible fence is Vercel Project Pause for trend-scout in Rakoon: it makes Production return 503 and can be resumed without a redeployment. The Owner must apply it only inside the approved cutover window, after required backups, and confirm pause/resume. No pause, deployment or ENV change was made. See [Vercel project pause](https://vercel.com/docs/projects/managing-projects).
+- Owner action: confirm, separately for the home and company hosts, that TrendScout processes, services and schedulers are stopped; provide the confirmation time. Remote hosts are not declared frozen.
+
+#### Core cutover readiness versus AI activation
+
+- Core cutover preparation may proceed in order—verified Production identity; PostgreSQL and Firestore preservation; Vercel/remote writer fence; ordered PostgreSQL migration; PostgreSQL-backed runtime with read-only smoke; then Fetch, Algorithms and Frontend. Fetch stays disabled until source quota readiness is separately evidenced. The Production database backup, Firestore backup and remote freeze are still blockers, so core cutover is not ready.
+- AI activation remains a separate blocked track. G5 implementation is PASS; G5 operational remains BLOCKED until owner-authorized provider account identity, daily and rolling-minute limit/use, reset boundary, active cooldown, history and reservations are reconciled and the guarded bootstrap succeeds. AI stays disabled until that bootstrap and AI01H G4 are PASS. Both authorized AI01H requests remain unused. No inference, quota reset, provider quota lookup or live Fetch occurred in FINAL01C.
+- Source quota readiness is independent from AI quota. Production source-approval flags do not establish provider account headroom. TREND_SCOUT_PUBLIC_FETCH_ENABLED is absent and defaults false; keep Fetch disabled until each enabled source's policy, account limit, remaining budget and cooldown are independently checked. No source policy was changed.
+
+#### DB08 migration and deployment preparation (not executed)
+
+- The last read-only ledger check remains versions 1–9 with matching checksums; files 0010_retention_lineage.sql, 0011_dataset_processing_statuses.sql, 0012_classification_input_digest.sql, 0013_fetch_job_ai_work.sql and 0014_collection_proposal_lifecycle.sql are the exact pending sequence.
+- The runner has no version-select argument; with a verified 1–9 ledger it applies exactly 10–14, in order, in one transaction. This Owner-run command is not executed in FINAL01C and must wait for exact Production identity, verified backup/restore, the writer fence and the approved write window:
+
+    Set-Location D:\TrendScout\Backend
+    Get-ChildItem Env: | Where-Object { $_.Name -like 'DATABASE_URL*' -or $_.Name -like 'PG*' } | Remove-Item -ErrorAction SilentlyContinue
+    .\.venv\Scripts\python.exe scripts\postgres_migrate.py schema --schema trendscout --env-file ..\.env
+
+- Then clear those same process variables in the verification shell and run the read-only checksum/capacity verifier:
+
+    Get-ChildItem Env: | Where-Object { $_.Name -like 'DATABASE_URL*' -or $_.Name -like 'PG*' } | Remove-Item -ErrorAction SilentlyContinue
+    .\.venv\Scripts\python.exe scripts\postgres_capacity.py --schema trendscout --env-file ..\.env
+
+- Deployment order is prepared only: preserve evidence and freeze writers; run the migration command; set reviewed Production runtime configuration to PostgreSQL and keep Fetch/AI disabled; deploy only the approved commit; verify deployed SHA; run the read-only smoke routes already listed below; confirm 1–14 checksums and persisted reads; then separately verify source quotas before enabling Fetch. Do not deploy, edit ENV, merge main, run Production migrations or write Production schema in FINAL01C.
+
 ### Required Production environment names
 
 Set these in the confirmed Production runtime, without sharing their values in reports or chat:
@@ -121,9 +180,9 @@ Set these in the confirmed Production runtime, without sharing their values in r
 - `TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` — explicit shared-live composition switch when the Vercel runtime is selected.
 - `TREND_SCOUT_POSTGRES_SCHEMA` — target application schema (normally `trendscout`).
 - `TREND_SCOUT_RUN_MODE` — required writable Local LIVE or Vercel LIVE profile when PostgreSQL runtime is enabled.
-- `TREND_SCOUT_READ_ONLY` — keep enabled for preflight; writable mode requires a separate approved cutover.
+- `TREND_SCOUT_READ_ONLY` — local-only control. Current Vercel code forces `read_only` off; do not treat this flag as a Vercel writer fence.
 - `TREND_SCOUT_PUBLIC_FETCH_ENABLED` — keep false until source permissions and quota budgets are approved.
-- `TRENDSCOUT_AI_ENABLED` — keep false until G5 passes.
+- `TRENDSCOUT_AI_ENABLED` — keep false until quota bootstrap and AI01H G4 both pass.
 - `TRENDSCOUT_AI_DATA_PROFILE` — `PUBLIC_DATA` for any later public-source live use; never `PUBLIC_DEMO` in Production.
 - `TRENDSCOUT_AI_ALLOWED_SOURCES` and `TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES` — separate lists; both stay restricted to the approved Wikimedia source.
 - `TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS` — only explicitly reviewed public Collections; otherwise empty.
@@ -131,14 +190,16 @@ Set these in the confirmed Production runtime, without sharing their values in r
 - `TRENDSCOUT_AI_PUBLIC_DEMO_SCHEMA` — unset in Production; the synthetic demo profile is local/test only.
 - `OPENROUTER_API_KEY` — server-side secret; do not expose to the browser or report.
 
+FINAL01C's redacted Production environment metadata shows the database variables above are present and sensitive, `TREND_SCOUT_VERCEL_SHARED_LIVE_ENABLED` is true, and `TREND_SCOUT_POSTGRES_RUNTIME_ENABLED` and `TREND_SCOUT_PUBLIC_FETCH_ENABLED` are absent (both default false in code). Source approval flags are present but do not establish quota headroom. `TRENDSCOUT_AI_ENABLED` is absent and defaults false; `OPENROUTER_API_KEY` is present as a sensitive variable, and its value was not read. The Firestore smoke flag's value was not available and no smoke was run.
+
 The deployment bundle must include the migration runner and all 14 SQL files. Verify the deployed artifact contains the exact code and migration checksums before any operator migration. PostgreSQL startup must not be used as a substitute for the ordered migration action.
 
 ### Owner actions before cutover
 
-1. Identify and record the Production Neon project, branch, database, schema, and role through the owner's control plane. Confirm the root `.env` target is that Production identity without disclosing its DSNs; no Production project linkage was visible in the current Vercel account.
+1. The Owner's supplied screenshot and read-only Vercel API now identify the Production Neon project/branch and Vercel project. The remaining action is to compare the root `.env` direct/pooled endpoint, database and role against the Production integration values without disclosing DSNs; the current Vercel API redacts those values.
 2. Keep the five captured local SQLite backups. Repeat inventory on each other home/company Windows host and obtain timestamped, integrity-checked Firestore and PostgreSQL backups through their owner control planes. Preserve the source stores; do not delete or import historical data as part of Fresh Start.
-3. Rehearse PostgreSQL restore into an isolated schema/database and prove application reads, checksums, and recovery. Record the restore result and responsible operator.
-4. Freeze legacy SQLite/Firestore writers and schedulers on every Windows host and deployment, including Vercel. Record the actual freeze and verify no old process can write after the cutover boundary.
+3. FINAL01C passed a synthetic local PostgreSQL 18.7 backup/restore rehearsal. After the Production identity match, take the actual PostgreSQL backup and rehearse its restore into an isolated database; compare schema, row counts and integrity. Record the operator and result.
+4. Confirm home and company Windows hosts have no TrendScout writer process, service or scheduler. During the approved cutover window, pause the Vercel project to fence the active Production deployment; record pause/resume times and verify no old process can write after the cutover boundary.
 5. Reconcile the exclusive provider account identity, 24-hour daily and rolling-minute limits/use, next UTC reset, current cooldown, historical provider activity, internal attempts, and existing reservations. Evidence must be observed within five minutes of bootstrap. Leave AI disabled while any provider window or shared ledger is unknown.
 6. After Production identity is confirmed and a separate authorized write window is open, create the private evidence JSON and run `python Backend/scripts/bootstrap_ai_quota.py --schema <confirmed-production-schema> --evidence-file <private-owner-evidence.json>`. The evidence booleans for cooldown, provider activity/history, reservations, and account exclusivity must be verified; the command initializes shared AI quota state and was not run in FINAL01B.
 7. After owner verification and a separate approved cutover window, apply migrations 0010–0014 in order using the reviewed bundle; verify all 1–14 checksums and current schema identity read-only afterward.
