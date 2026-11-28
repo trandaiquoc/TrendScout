@@ -1,6 +1,6 @@
 {
   "buildCommand": "python3 scripts/prepare_vercel.py",
-  "ignoreCommand": "git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" \"$VERCEL_GIT_COMMIT_SHA\" -- ':(top)Backend' ':(top)Frontend' 2>/dev/null",
+  "ignoreCommand": "if git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" \"$VERCEL_GIT_COMMIT_SHA\" -- ':(top)Backend' ':(top)Frontend' 2>/dev/null; then exit 0; else exit 1; fi",
   "redirects": [
     {
       "source": "/dashboard",
