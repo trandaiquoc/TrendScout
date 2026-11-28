@@ -726,7 +726,7 @@ class SmartCollectionsTests(unittest.TestCase):
             "delivery_state": "FRESH",
             "provider_request_count": 1,
             "record_count": 1,
-            "coverage": {"fetched_at": now.isoformat(), "provider_request_count": 1},
+            "coverage": {"provider_request_count": 1},
         }
         persisted = self.store.persist_cleaned_keywords([keyword_record({
             "article_display": "Recovery Example",
@@ -817,7 +817,7 @@ class SmartCollectionsTests(unittest.TestCase):
         fresh_source.update({
             "delivery_state": "FRESH",
             "provider_request_count": 1,
-            "coverage": {"fetched_at": now.isoformat(), "provider_request_count": 1},
+            "coverage": {"provider_request_count": 1},
         })
         resumed = live_service._process_fetch(
             fetch_id, [fresh_source], cached_context_only=True,

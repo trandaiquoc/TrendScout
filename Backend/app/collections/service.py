@@ -682,7 +682,8 @@ class CollectionService:
         if cache_only:
             evidence_states = [retained_live_wikimedia_evidence_status(source)
                                for source in sources]
-            if "CURRENT" not in evidence_states:
+            if not any(state in {"CURRENT", "REQUIRES_RECORD_VALIDATION"}
+                       for state in evidence_states):
                 invalid_state = next((state for state in ("EXPIRED", "INVALID")
                                       if state in evidence_states), None)
                 return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,

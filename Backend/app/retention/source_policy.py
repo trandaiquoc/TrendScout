@@ -159,4 +159,8 @@ def retained_live_wikimedia_evidence_status(source: dict, *, now=None) -> str:
         return "INVALID"
     collected_at = (coverage.get("fetched_at") or source.get("fetched_at")
                     or coverage.get("source_fetched_at"))
+    if collected_at is None:
+        # Some adapters retain collection time on each record rather than on
+        # the source manifest. The caller must validate every record timestamp.
+        return "REQUIRES_RECORD_VALIDATION"
     return source_evidence_timestamp_status(WIKIMEDIA_SOURCE_ID, collected_at, now=now)

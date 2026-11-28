@@ -1826,7 +1826,7 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
             "delivery_state": "FRESH",
             "provider_request_count": 1,
             "record_count": 1,
-            "coverage": {"fetched_at": now, "provider_request_count": 1},
+            "coverage": {"provider_request_count": 1},
             "records": [{"article_original": "Recovery_Example", "views_ceil": 1000}],
         }
         checkpoint = {"snapshot": {"data_mode": "LIVE", "result": source}}

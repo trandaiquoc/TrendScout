@@ -52,7 +52,8 @@ def _has_fresh_live_wikimedia_checkpoint(value) -> bool:
     else:
         candidates = []
     for source in candidates:
-        if retained_live_wikimedia_evidence_status(source) != "CURRENT":
+        if retained_live_wikimedia_evidence_status(source) not in {
+                "CURRENT", "REQUIRES_RECORD_VALIDATION"}:
             continue
         count = source.get("record_count")
         records = source.get("records")
