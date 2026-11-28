@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from app.ai.openrouter import VerifiedModel
 from app.ai.runtime import (
+    PUBLIC_DATA,
     PUBLIC_DEMO,
     ROLLING_MINUTE_LIMIT,
     SYNTHETIC_AI_PROVENANCE_KEY,
@@ -86,6 +87,25 @@ class ProposalThenAssignProvider:
                 "evidence_ids": sorted({ref for item in keywords for ref in item["evidence_ids"]}),
             })
         return json.dumps(payload), {"input_tokens": 12, "output_tokens": 9}, None
+
+
+class CountingProvider:
+    data_profile = PUBLIC_DATA
+
+    def __init__(self):
+        self.calls = []
+
+    def verify_model(self, model_id):
+        self.calls.append("verify_model")
+        return VerifiedModel(model_id, "Test", "test", 8192, 2048, True)
+
+    def complete(self, verified, **_kwargs):
+        self.calls.append("complete")
+        return "{}", {"input_tokens": 1, "output_tokens": 1}, None
+
+    def key_quota_metadata(self):
+        self.calls.append("key_quota_metadata")
+        raise AssertionError("capabilities must not call the provider")
 
 
 def _ai_config():
@@ -786,6 +806,10 @@ def test_postgres_ai_quota_is_shared_across_service_instances():
         assert sum(isinstance(value, str) and value.startswith("att_") for value in outcomes) == ROLLING_MINUTE_LIMIT
         assert outcomes.count("AI_RATE_LIMITED") == 4
         assert services[0]._quota()["daily_used"] == ROLLING_MINUTE_LIMIT
+        quota_state = services[0]._transact(
+            lambda current: (current, current["quota_admission"]),
+        )
+        assert quota_state["provenance"] == "SYNTHETIC_TEST"
 
 
 def test_postgres_provider_rate_limit_cooldown_is_shared_across_tasks():
@@ -863,3 +887,130 @@ def test_public_demo_profile_is_bound_to_attested_synthetic_postgres_schema():
         with pytest.raises(AIExecutionError) as caught:
             service._assert_profile_store(invalid_store)
         assert caught.value.code == "AI_POLICY_DENIED"
+
+
+def test_postgres_missing_or_legacy_quota_ledger_fails_closed_before_provider_calls():
+    with isolated_schema("ts_quota_unknown_") as (environment, schema, _connection):
+        provider = CountingProvider()
+        service = AIService(
+            PostgresAtomicStateStore(environment, schema=schema),
+            config=_ai_config(), provider=provider, utcnow=lambda: NOW,
+        )
+
+        missing = service._quota()
+        assert missing["status"] == "UNINITIALIZED"
+        assert missing["daily_used"] is None
+        assert missing["minute_used"] is None
+        capability = service.capabilities()
+        assert capability["error_code"] == "AI_QUOTA_UNKNOWN"
+        assert capability["enabled"] is False
+        assert provider.calls == []
+
+        with pytest.raises(AIExecutionError) as caught:
+            service._call_json(
+                job_id="missing-ledger", task="classification", model_id=MODEL_ID,
+                messages=[{"role": "user", "content": "test"}], schema={}, output_cap=32,
+            )
+        assert caught.value.code == "AI_QUOTA_UNKNOWN"
+        assert provider.calls == []
+
+        raw_store = PostgresAtomicStateStore(environment, schema=schema)
+        assert raw_store.read_many(["trendscout-ai-engine-v1"])["trendscout-ai-engine-v1"] == {}
+        def write_legacy_state(state):
+            state.pop("quota_admission", None)
+            state["attempts"] = [{"id": "legacy-attempt", "epoch": NOW.timestamp(),
+                                  "outcome": "RESERVED"}]
+            return state, True
+
+        raw_store.transact("trendscout-ai-engine-v1", write_legacy_state)
+        legacy = service._quota()
+        assert legacy["status"] == "UNKNOWN"
+        assert legacy["daily_used"] is None
+        assert legacy["minute_used"] is None
+        assert provider.calls == []
+
+
+def test_postgres_quota_bootstrap_is_idempotent_and_preserves_reservations():
+    with isolated_schema("ts_quota_bootstrap_") as (environment, schema, _connection):
+        clock = {"now": NOW}
+        atomic = PostgresAtomicStateStore(environment, schema=schema)
+        provider = CountingProvider()
+        services = [
+            AIService(atomic, config=_ai_config(), provider=provider,
+                      utcnow=lambda: clock["now"]),
+            AIService(PostgresAtomicStateStore(environment, schema=schema),
+                      config=_ai_config(), provider=provider,
+                      utcnow=lambda: clock["now"]),
+        ]
+        reservation = {"id": "preexisting-reservation", "job_id": "old-job",
+                       "task": "classification", "epoch": (NOW + timedelta(seconds=5)).timestamp(),
+                       "outcome": "RESERVED"}
+        old_retry = (NOW + timedelta(seconds=30)).isoformat()
+        atomic.transact("trendscout-ai-engine-v1", lambda state: (
+            {**state, "attempts": [reservation], "provider_retry_at": old_retry}, True,
+        ))
+        clock["now"] = NOW + timedelta(seconds=10)
+        evidence = {
+            "provider_account_identity": "owner-account-reference",
+            "provider_daily_limit": 5, "provider_daily_used": 3,
+            "provider_daily_window_seconds": 86_400,
+            "provider_minute_limit": 2, "provider_minute_used": 1,
+            "observed_at": NOW.isoformat(),
+            "provider_daily_reset_at": "2026-11-27T00:00:00+00:00",
+            "cooldown_verified": True, "provider_retry_at": None,
+            "historical_attempts_reconciled": True,
+            "existing_reservations_reconciled": True,
+            "provider_account_exclusive": True,
+            "evidence_ref": "provider dashboard observation 2026-11-26T12:00Z",
+        }
+        invalid_evidence = {**evidence, "provider_account_exclusive": False}
+        with pytest.raises(AIExecutionError) as caught:
+            services[0].bootstrap_quota(invalid_evidence)
+        assert caught.value.code == "AI_QUOTA_EVIDENCE_INVALID"
+        assert services[0]._quota()["status"] == "UNKNOWN"
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda service: service.bootstrap_quota(evidence), services))
+        assert sorted(item["changed"] for item in outcomes) == [False, True]
+
+        state = services[0]._transact(lambda current: (current, current))
+        assert state["attempts"] == [reservation]
+        assert state["provider_retry_at"] == old_retry
+        assert state["quota_admission"]["provider_account_fingerprint"]
+        quota = services[0]._quota()
+        assert quota["status"] == "COOLDOWN"
+        assert quota["daily_limit"] == 5
+        assert quota["minute_limit"] == 2
+        assert quota["daily_used"] == 4
+        assert quota["minute_used"] == 2
+        assert provider.calls == []
+
+        clock["now"] = NOW + timedelta(seconds=61)
+        attempt = services[1]._reserve("post-bootstrap", "classification")
+        assert attempt.startswith("att_")
+        quota = services[0]._quota()
+        assert quota["daily_used"] == 5
+        assert quota["minute_used"] == 2
+        assert quota["status"] == "EXHAUSTED"
+        assert provider.calls == []
+
+        clock["now"] = datetime(2026, 11, 27, 0, 0, 1, tzinfo=timezone.utc)
+        quota = services[0]._quota()
+        assert quota["status"] == "VERIFIED"
+        assert quota["daily_used"] == 0
+        assert quota["minute_used"] == 0
+
+
+def test_postgres_ambiguous_quota_transaction_fails_closed_without_provider_call():
+    from app.ports.atomic_state import CommitOutcomeUnknown
+
+    class AmbiguousStore:
+        def transact(self, _key, _operation):
+            raise CommitOutcomeUnknown("commit outcome unknown")
+
+    provider = CountingProvider()
+    service = AIService(AmbiguousStore(), config=_ai_config(), provider=provider,
+                        utcnow=lambda: NOW)
+    with pytest.raises(AIExecutionError) as caught:
+        service._reserve("ambiguous", "classification")
+    assert caught.value.code == "AI_STORAGE_UNAVAILABLE"
+    assert provider.calls == []

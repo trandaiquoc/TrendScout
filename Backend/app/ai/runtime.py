@@ -7,6 +7,7 @@ import math
 import re
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -233,10 +234,46 @@ def _valid_ids(values, *, maximum):
 def _empty_state():
     return {"attempts": [], "jobs": {}, "idempotency": {}, "cache": {},
             "recommendations": {}, "batch_profile": {}, "model_verifications": {},
-            "provider_retry_at": None}
+            "provider_retry_at": None,
+            "quota_admission": {"status": "UNINITIALIZED"}}
+
+
+_QUOTA_ADMISSION_STATUSES = frozenset({
+    "UNINITIALIZED", "UNKNOWN", "VERIFIED", "COOLDOWN", "EXHAUSTED",
+})
+
+
+def _parse_utc_evidence(value, field):
+    if not isinstance(value, str) or len(value) > 64:
+        raise ValueError(f"{field} must be a UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"{field} must be a UTC timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{field} must be a UTC timestamp")
+    return parsed.astimezone(timezone.utc)
+
+
+def _synthetic_quota_admission(now):
+    observed_at = _iso_now(now)
+    next_reset = datetime(now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+    return {
+        "status": "VERIFIED", "provenance": "SYNTHETIC_TEST",
+        "provider_account_fingerprint": sha256(b"trendscout-synthetic-test-provider").hexdigest(),
+        "provider_daily_limit": DAILY_REQUEST_LIMIT, "provider_daily_used": 0,
+        "provider_daily_window_seconds": 86_400,
+        "provider_minute_limit": ROLLING_MINUTE_LIMIT, "provider_minute_used": 0,
+        "observed_at": observed_at, "provider_daily_reset_at": next_reset.isoformat(),
+        "evidence_ref": "synthetic-test-fixture", "evidence_digest": "synthetic-test-fixture",
+        "baseline_attempt_ids": [],
+        "historical_attempts_reconciled": True, "existing_reservations_reconciled": True,
+    }
 
 
 def _ensure_state(state):
+    state_was_empty = not state
+    had_attempts = "attempts" in state
     for field, expected in (("attempts", list), ("jobs", dict), ("idempotency", dict),
                             ("cache", dict), ("recommendations", dict), ("batch_profile", dict),
                             ("model_verifications", dict)):
@@ -249,6 +286,14 @@ def _ensure_state(state):
     if provider_retry_at is not None and not isinstance(provider_retry_at, str):
         raise ValueError("AI provider cooldown state is invalid")
     state.setdefault("provider_retry_at", None)
+    admission = state.get("quota_admission")
+    if admission is None:
+        state["quota_admission"] = {
+            "status": "UNINITIALIZED" if state_was_empty and not had_attempts else "UNKNOWN",
+        }
+    elif (not isinstance(admission, dict)
+          or admission.get("status") not in _QUOTA_ADMISSION_STATUSES):
+        state["quota_admission"] = {"status": "UNKNOWN"}
     return state
 
 
@@ -381,11 +426,270 @@ class AIService:
             if self.config.data_profile == PUBLIC_DATA else [],
         })
 
+    def _is_synthetic_test_store(self):
+        schema = getattr(self.state_store, "schema", None)
+        return (
+            getattr(self.state_store, "synthetic_test_mode", False) is True
+            or (isinstance(schema, str)
+                and re.fullmatch(r"ts_test_(?:ai_demo_)?[a-f0-9]{8,32}", schema) is not None)
+        )
+
+    def _prepare_state(self, current):
+        current = _ensure_state(current)
+        if (self._is_synthetic_test_store()
+                and current["quota_admission"].get("status") == "UNINITIALIZED"):
+            current["quota_admission"] = _synthetic_quota_admission(self._now())
+        return current
+
     def _transact(self, operation):
         def wrapped(current):
-            current = _ensure_state(current)
-            return operation(current)
+            return operation(self._prepare_state(current))
         return self.state_store.transact(STATE_KEY, wrapped)
+
+    def _read_state(self):
+        read_many = getattr(self.state_store, "read_many", None)
+        if callable(read_many):
+            state = read_many([STATE_KEY])[STATE_KEY]
+            state = _ensure_state(state)
+            if (self._is_synthetic_test_store()
+                    and state["quota_admission"].get("status") == "UNINITIALIZED"):
+                self._transact(lambda current: (current, None))
+                state = read_many([STATE_KEY])[STATE_KEY]
+            return _ensure_state(state)
+        return self._transact(lambda state: (state, state))
+
+    def bootstrap_quota(self, evidence):
+        """Atomically reconcile quota evidence without deleting attempts or reservations."""
+        bootstrap_now = self._now()
+        required = {
+            "provider_account_identity", "provider_daily_limit", "provider_daily_used",
+            "provider_daily_window_seconds",
+            "provider_minute_limit", "provider_minute_used", "observed_at",
+            "provider_daily_reset_at", "cooldown_verified", "provider_retry_at",
+            "historical_attempts_reconciled", "existing_reservations_reconciled",
+            "provider_account_exclusive", "evidence_ref",
+        }
+        if not isinstance(evidence, dict) or set(evidence) != required:
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+        account_identity = evidence.get("provider_account_identity")
+        evidence_ref = evidence.get("evidence_ref")
+        if (not isinstance(account_identity, str) or not account_identity.strip()
+                or len(account_identity) > 255 or any(ord(char) < 32 for char in account_identity)
+                or not isinstance(evidence_ref, str) or not evidence_ref.strip()
+                or len(evidence_ref) > 160 or any(ord(char) < 32 for char in evidence_ref)):
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+        for field in ("provider_daily_limit", "provider_daily_used",
+                      "provider_daily_window_seconds",
+                      "provider_minute_limit", "provider_minute_used"):
+            value = evidence.get(field)
+            if type(value) is not int or value < 0 or value > 1_000_000_000:
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+        if (evidence["provider_daily_limit"] < 1
+                or evidence["provider_daily_window_seconds"] != 86_400
+                or evidence["provider_minute_limit"] < 1
+                or evidence["provider_daily_used"] > 1_000_000_000
+                or evidence["provider_minute_used"] > 1_000_000_000
+                or evidence.get("cooldown_verified") is not True
+                or evidence.get("historical_attempts_reconciled") is not True
+                or evidence.get("existing_reservations_reconciled") is not True
+                or evidence.get("provider_account_exclusive") is not True):
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+        try:
+            observed_at = _parse_utc_evidence(evidence.get("observed_at"), "observed_at")
+            reset_at = _parse_utc_evidence(
+                evidence.get("provider_daily_reset_at"), "provider_daily_reset_at",
+            )
+            retry_at = (_parse_utc_evidence(evidence["provider_retry_at"], "provider_retry_at")
+                        if evidence["provider_retry_at"] is not None else None)
+        except ValueError:
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED") from None
+        if (reset_at <= observed_at or reset_at > observed_at + timedelta(days=1)
+                or observed_at > bootstrap_now + timedelta(seconds=60)
+                or bootstrap_now - observed_at > timedelta(minutes=5)):
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+        if retry_at is not None and retry_at <= observed_at:
+            raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+
+        account_fingerprint = sha256(account_identity.strip().encode("utf-8")).hexdigest()
+        record = {
+            "status": "VERIFIED", "provenance": "OPERATOR_RECONCILED",
+            "provider_account_fingerprint": account_fingerprint,
+            "provider_daily_limit": evidence["provider_daily_limit"],
+            "provider_daily_used": evidence["provider_daily_used"],
+            "provider_daily_window_seconds": evidence["provider_daily_window_seconds"],
+            "provider_minute_limit": evidence["provider_minute_limit"],
+            "provider_minute_used": evidence["provider_minute_used"],
+            "observed_at": observed_at.isoformat(),
+            "provider_daily_reset_at": reset_at.isoformat(),
+            "provider_retry_at": retry_at.isoformat() if retry_at else None,
+            "cooldown_verified": True,
+            "evidence_ref_fingerprint": sha256(evidence_ref.strip().encode("utf-8")).hexdigest(),
+            "historical_attempts_reconciled": True,
+            "existing_reservations_reconciled": True,
+            "provider_account_exclusive": True,
+        }
+        evidence_digest = _digest(record)
+        record["evidence_digest"] = evidence_digest
+        observed_epoch = observed_at.timestamp()
+
+        def operation(state):
+            admission = state["quota_admission"]
+            if admission.get("status") == "VERIFIED":
+                if admission.get("evidence_digest") == evidence_digest:
+                    return state, {"status": "VERIFIED", "changed": False}
+                raise AIExecutionError("AI_QUOTA_ALREADY_VERIFIED", status="POLICY_DENIED")
+            if admission.get("status") not in {"UNINITIALIZED", "UNKNOWN"}:
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            existing_retry = _parse_time(state.get("provider_retry_at"))
+            if state.get("provider_retry_at") is not None and existing_retry is None:
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            effective_retry = max(
+                (item for item in (existing_retry, retry_at) if item is not None),
+                default=None,
+            )
+            raw_attempts = state["attempts"]
+            if any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str) or not item["id"]
+                or type(item.get("epoch")) not in (int, float)
+                or not math.isfinite(item["epoch"])
+                for item in raw_attempts
+            ):
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            all_attempt_ids = [item["id"] for item in raw_attempts]
+            if len(all_attempt_ids) != len(set(all_attempt_ids)):
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            reconciled_attempts = [item for item in raw_attempts
+                                   if item["epoch"] <= bootstrap_now.timestamp() + 60]
+            attempt_ids = [item.get("id") for item in reconciled_attempts]
+            if len(attempt_ids) != len(set(attempt_ids)):
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            baseline_attempt_ids = sorted({
+                item["id"] for item in reconciled_attempts
+                if item["epoch"] <= observed_epoch
+            })
+            if len(baseline_attempt_ids) > 10_000:
+                raise AIExecutionError("AI_QUOTA_EVIDENCE_INVALID", status="POLICY_DENIED")
+            state["quota_admission"] = {
+                **record, "baseline_attempt_ids": baseline_attempt_ids,
+            }
+            state["provider_retry_at"] = effective_retry.isoformat() if effective_retry else None
+            return state, {"status": "VERIFIED", "changed": True}
+
+        return self._transact(operation)
+
+    @staticmethod
+    def _quota_usage(state, now):
+        admission = state.get("quota_admission", {})
+        if admission.get("status") != "VERIFIED":
+            status = admission.get("status")
+            return {
+                "status": status if status in _QUOTA_ADMISSION_STATUSES else "UNKNOWN",
+                "daily_used": None, "daily_limit": DAILY_REQUEST_LIMIT,
+                "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT,
+                "provider_quota": None,
+            }
+        observed_at = _parse_time(admission.get("observed_at"))
+        reset_at = _parse_time(admission.get("provider_daily_reset_at"))
+        limits = (admission.get("provider_daily_limit"), admission.get("provider_minute_limit"))
+        used = (admission.get("provider_daily_used"), admission.get("provider_minute_used"))
+        window_seconds = admission.get("provider_daily_window_seconds")
+        if (observed_at is None or reset_at is None or type(window_seconds) is not int
+                or window_seconds != 86_400 or reset_at <= observed_at
+                or reset_at > observed_at + timedelta(seconds=window_seconds)
+                or any(type(value) is not int or value < 0 for value in (*limits, *used))):
+            return {"status": "UNKNOWN", "daily_used": None, "daily_limit": DAILY_REQUEST_LIMIT,
+                    "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT,
+                    "provider_quota": None}
+        if observed_at > now + timedelta(seconds=60):
+            return {"status": "UNKNOWN", "daily_used": None, "daily_limit": DAILY_REQUEST_LIMIT,
+                    "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT,
+                    "provider_quota": None}
+        retry_value = state.get("provider_retry_at")
+        retry_at = _parse_time(retry_value)
+        if retry_value is not None and retry_at is None:
+            return {"status": "UNKNOWN", "daily_used": None,
+                    "daily_limit": DAILY_REQUEST_LIMIT, "minute_used": None,
+                    "minute_limit": ROLLING_MINUTE_LIMIT, "provider_quota": None}
+        baseline_ids = admission.get("baseline_attempt_ids")
+        if (not isinstance(baseline_ids, list) or len(baseline_ids) > 10_000
+                or any(not isinstance(identifier, str) for identifier in baseline_ids)):
+            return {"status": "UNKNOWN", "daily_used": None,
+                    "daily_limit": DAILY_REQUEST_LIMIT, "minute_used": None,
+                    "minute_limit": ROLLING_MINUTE_LIMIT, "provider_quota": None}
+
+        epoch = now.timestamp()
+        observed_epoch = observed_at.timestamp()
+        utc_day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp()
+        attempts = [item for item in state["attempts"]
+                    if isinstance(item, dict) and type(item.get("epoch")) in (int, float)
+                    and item["epoch"] <= epoch + 60]
+        baseline_ids = set(baseline_ids)
+        reset_epoch = reset_at.timestamp()
+        if epoch < reset_epoch:
+            provider_window_start = reset_epoch - window_seconds
+            before_provider_window = sum(
+                1 for item in attempts
+                if item.get("id") in baseline_ids
+                and provider_window_start <= item["epoch"] <= observed_epoch
+            )
+            after_provider_window = sum(
+                1 for item in attempts
+                if observed_epoch < item["epoch"] <= epoch
+                and item.get("id") not in baseline_ids
+            )
+            provider_daily = max(admission["provider_daily_used"], before_provider_window)
+            provider_daily += after_provider_window
+            current_reset_epoch = reset_epoch
+        else:
+            elapsed_windows = int((epoch - reset_epoch) // window_seconds)
+            provider_window_start = reset_epoch + elapsed_windows * window_seconds
+            current_reset_epoch = provider_window_start + window_seconds
+            provider_daily = sum(
+                1 for item in attempts if provider_window_start <= item["epoch"] <= epoch
+            )
+        internal_daily = sum(
+            1 for item in attempts if utc_day_start <= item["epoch"] <= epoch
+        )
+        daily_used = max(provider_daily, internal_daily)
+
+        window_start = epoch - 60
+        before_minute = sum(1 for item in attempts
+                            if item.get("id") in baseline_ids
+                            and window_start < item["epoch"] <= observed_epoch)
+        after_minute = sum(1 for item in attempts
+                           if window_start < item["epoch"] <= epoch
+                           and item.get("id") not in baseline_ids)
+        provider_minute = admission["provider_minute_used"] if epoch - observed_epoch < 60 else 0
+        minute_used = max(provider_minute, before_minute) + after_minute
+        daily_limit = min(DAILY_REQUEST_LIMIT, admission["provider_daily_limit"])
+        minute_limit = min(ROLLING_MINUTE_LIMIT, admission["provider_minute_limit"])
+        if retry_at is not None and retry_at > now:
+            status = "COOLDOWN"
+        elif daily_used >= daily_limit or minute_used >= minute_limit:
+            status = "EXHAUSTED"
+        else:
+            status = "VERIFIED"
+        provider_quota = {
+            "status": status,
+            "daily_limit": admission["provider_daily_limit"],
+            "daily_used": admission["provider_daily_used"],
+            "daily_used_at_observation": admission["provider_daily_used"],
+            "daily_window_seconds": window_seconds,
+            "minute_limit": admission["provider_minute_limit"],
+            "minute_used": admission["provider_minute_used"],
+            "minute_used_at_observation": admission["provider_minute_used"],
+            "daily_reset_at": datetime.fromtimestamp(
+                current_reset_epoch, tz=timezone.utc,
+            ).isoformat(),
+            "observed_at": admission["observed_at"],
+            "effective_daily_used": daily_used,
+            "effective_minute_used": minute_used,
+            "provenance": admission.get("provenance"),
+        }
+        return {"status": status, "daily_used": daily_used, "daily_limit": daily_limit,
+                "minute_used": minute_used, "minute_limit": minute_limit,
+                "provider_quota": provider_quota}
 
     @staticmethod
     def _safe_error(exc):
@@ -443,28 +747,17 @@ class AIService:
 
     def _quota(self):
         now = self._now()
-        epoch = now.timestamp()
-        utc_day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp()
-
-        def operation(state):
-            attempts = [item for item in state["attempts"]
-                        if isinstance(item, dict) and type(item.get("epoch")) in (int, float)
-                        and epoch - ATTEMPT_RETENTION_SECONDS < item["epoch"] <= epoch + 60]
-            state["attempts"] = attempts
-            daily = sum(1 for item in attempts if item["epoch"] >= utc_day_start)
-            minute = sum(1 for item in attempts if epoch - item["epoch"] < 60)
-            return state, {"daily_used": daily, "daily_limit": DAILY_REQUEST_LIMIT,
-                           "minute_used": minute, "minute_limit": ROLLING_MINUTE_LIMIT}
-
-        return self._transact(operation)
+        return self._quota_usage(self._read_state(), now)
 
     def capabilities(self):
         try:
-            quota = self._quota()
+            state = self._read_state()
+            quota = self._quota_usage(state, self._now())
             storage_status = "AVAILABLE"
         except Exception:
             quota = {"daily_used": None, "daily_limit": DAILY_REQUEST_LIMIT,
-                     "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT}
+                     "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT,
+                     "status": "UNKNOWN", "provider_quota": None}
             storage_status = "UNAVAILABLE"
         if not self.config.enabled:
             error = "AI_DISABLED"
@@ -474,19 +767,16 @@ class AIService:
             error = "AI_POLICY_DENIED"
         elif self.config.config_error:
             error = self.config.config_error
+        elif quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}:
+            error = "AI_QUOTA_UNKNOWN"
+        elif quota.get("status") == "COOLDOWN":
+            error = "AI_RATE_LIMITED"
+        elif quota.get("status") == "EXHAUSTED":
+            error = "AI_QUOTA_EXHAUSTED"
         else:
             error = None
-        try:
-            state_summary = self._transact(lambda state: (state, {
-                "verifications": dict(state["model_verifications"]),
-                "provider_retry_at": state.get("provider_retry_at"),
-            }))
-            verifications = state_summary.get("verifications", {})
-            provider_retry_at = state_summary.get("provider_retry_at")
-        except Exception:
-            verifications = {}
-            provider_retry_at = None
-            storage_status = "UNAVAILABLE"
+        verifications = dict(state.get("model_verifications", {})) if storage_status == "AVAILABLE" else {}
+        provider_retry_at = state.get("provider_retry_at") if storage_status == "AVAILABLE" else None
 
         def verification(model_id):
             if not model_id:
@@ -495,7 +785,8 @@ class AIService:
 
         return {
             "enabled": self.config.enabled and self.config.api_key_present and bool(self._allowed_sources)
-                       and self.config.config_error is None and storage_status == "AVAILABLE",
+                       and self.config.config_error is None and storage_status == "AVAILABLE"
+                       and quota.get("status") == "VERIFIED",
             "storage": storage_status,
             "models": {"classification": self.config.collection_model or None,
                        "recommendation": self.config.recommendation_model or None},
@@ -512,8 +803,7 @@ class AIService:
                 "eligible_sources": sorted(self._allowed_sources),
                 "restricted_sources": sorted(known_ai_source_ids() - self._allowed_sources),
             },
-            "provider_quota": (self.provider.key_quota_metadata()
-                                if error is None and storage_status == "AVAILABLE" else None),
+            "provider_quota": quota.get("provider_quota"),
             "error_code": "AI_STORAGE_UNAVAILABLE" if storage_status != "AVAILABLE" else error,
         }
 
@@ -666,25 +956,27 @@ class AIService:
     def _reserve(self, job_id, task):
         now = self._now()
         epoch = now.timestamp()
-        utc_day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp()
         attempt_id = "att_" + uuid.uuid4().hex
         attempt = {"id": attempt_id, "job_id": job_id, "task": task, "epoch": epoch,
                    "at": _iso_now(now), "outcome": "RESERVED"}
 
-        def operation(state):
-            self._prune_state(state, now)
+        def operation(raw_state):
+            original_state = deepcopy(raw_state)
+            state = self._prepare_state(raw_state)
+            quota = self._quota_usage(state, now)
+            if quota["status"] in {"UNINITIALIZED", "UNKNOWN"}:
+                return original_state, {"error": "AI_QUOTA_UNKNOWN"}
             provider_retry_at = _parse_time(state.get("provider_retry_at"))
             if provider_retry_at is not None and provider_retry_at > now:
-                return state, {"error": "AI_RATE_LIMITED",
+                return original_state, {"error": "AI_RATE_LIMITED",
                                "retry_at": provider_retry_at.isoformat()}
+            if quota["daily_used"] >= quota["daily_limit"]:
+                return original_state, {"error": "AI_QUOTA_EXHAUSTED"}
+            if quota["minute_used"] >= quota["minute_limit"]:
+                return original_state, {"error": "AI_RATE_LIMITED"}
+            self._prune_state(state, now)
             if provider_retry_at is not None:
                 state["provider_retry_at"] = None
-            daily = sum(1 for item in state["attempts"] if item["epoch"] >= utc_day_start)
-            minute = sum(1 for item in state["attempts"] if epoch - item["epoch"] < 60)
-            if daily >= DAILY_REQUEST_LIMIT:
-                return state, {"error": "AI_QUOTA_EXHAUSTED"}
-            if minute >= ROLLING_MINUTE_LIMIT:
-                return state, {"error": "AI_RATE_LIMITED"}
             state["attempts"].append(attempt)
             job = state["jobs"].get(job_id)
             if isinstance(job, dict):
@@ -694,7 +986,7 @@ class AIService:
             return state, {"attempt_id": attempt_id}
 
         try:
-            result = self._transact(operation)
+            result = self.state_store.transact(STATE_KEY, operation)
         except Exception:
             raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
         if "error" in result:
@@ -784,27 +1076,76 @@ class AIService:
             # the original provider outcome or issue an unreserved retry.
             return False
 
-    def _call_json(self, *, job_id, task, model_id, messages, schema, output_cap, verified=None):
+    def _reserve_and_verify_model(self, *, job_id, task, model_id):
+        attempt_id = self._reserve(job_id, task)
+        try:
+            verified = self._verify_model(model_id)
+        except OpenRouterError as exc:
+            retry_at = exc.retry_at
+            if exc.code == "AI_RATE_LIMITED":
+                parsed_retry = _parse_time(retry_at)
+                if parsed_retry is None or parsed_retry <= self._now():
+                    retry_at = _iso_now(self._now() + timedelta(seconds=60))
+            self._finish_attempt(
+                attempt_id, outcome="FAILED", error_code=exc.code, retry_at=retry_at,
+            )
+            _code, status, safe_retry_at = self._safe_error(exc)
+            retry_at = retry_at or safe_retry_at
+            raise AIExecutionError(exc.code, status=status, retry_at=retry_at,
+                                   diagnostics=exc.diagnostics) from None
+        except AIExecutionError as exc:
+            self._finish_attempt(
+                attempt_id, outcome="FAILED", error_code=exc.code, retry_at=exc.retry_at,
+            )
+            raise
+        return attempt_id, verified
+
+    def _call_json(self, *, job_id, task, model_id, messages, schema, output_cap,
+                   verified=None, attempt_id=None):
         if not self.config.enabled:
             raise AIExecutionError("AI_DISABLED", status="MODEL_UNAVAILABLE")
         if not self.config.api_key_present:
             raise AIExecutionError("AI_KEY_MISSING", status="MODEL_UNAVAILABLE")
         if not model_id:
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
+        attempt_id = attempt_id or self._reserve(job_id, task)
         if verified is None:
             try:
                 verified = self._verify_model(model_id)
-            except OpenRouterError:
+            except OpenRouterError as exc:
+                retry_at = exc.retry_at
+                if exc.code == "AI_RATE_LIMITED":
+                    parsed_retry = _parse_time(retry_at)
+                    if parsed_retry is None or parsed_retry <= self._now():
+                        retry_at = _iso_now(self._now() + timedelta(seconds=60))
+                self._finish_attempt(
+                    attempt_id, outcome="FAILED", error_code=exc.code, retry_at=retry_at,
+                )
+                _code, status, safe_retry_at = self._safe_error(exc)
+                retry_at = retry_at or safe_retry_at
+                raise AIExecutionError(exc.code, status=status, retry_at=retry_at,
+                                       diagnostics=exc.diagnostics) from None
+            except AIExecutionError as exc:
+                self._finish_attempt(
+                    attempt_id, outcome="FAILED", error_code=exc.code, retry_at=exc.retry_at,
+                )
                 raise
+        if verified is None:
+            raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
         if verified.model_id != model_id:
+            self._finish_attempt(
+                attempt_id, outcome="FAILED", error_code="AI_MODEL_UNAVAILABLE",
+            )
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
         prompt_bytes = sum(len(item.get("content", "").encode("utf-8"))
                            for item in messages if isinstance(item, dict))
         estimated_input = max(1, math.ceil(prompt_bytes / 3.2) + 256)
         max_tokens = min(output_cap, verified.max_output_tokens)
         if estimated_input + max_tokens > verified.context_tokens:
+            self._finish_attempt(
+                attempt_id, outcome="FAILED", error_code="AI_MODEL_UNAVAILABLE",
+            )
             raise AIExecutionError("AI_MODEL_UNAVAILABLE", status="MODEL_UNAVAILABLE")
-        attempt_id = self._reserve(job_id, task)
         model_lineage = self._model_provider_lineage(verified, self.provider)
         started = time.monotonic()
         try:
@@ -839,7 +1180,7 @@ class AIService:
         )
         self._finish_attempt(attempt_id, outcome="COMPLETED", usage=usage, retry_at=retry_at,
                              latency_ms=provider_latency_ms, model_lineage=model_lineage)
-        return content, usage, provider_latency_ms
+        return content, usage, provider_latency_ms, verified
 
     def _remember_classifications(self, cache_items, *, expires_at):
         if expires_at is None or expires_at <= self._now():
@@ -1287,22 +1628,30 @@ class AIService:
             cursor = 0
             while cursor < len(misses):
                 # Metadata is checked for every physical attempt; the endpoint's
-                # current context/output values also bound the next batch.
+                # current context/output values also bound the next batch. The
+                # atomic reservation must precede this provider metadata request.
                 try:
-                    verified = self._verify_model(self.config.collection_model)
-                except OpenRouterError as exc:
-                    _code, status, retry_at = self._safe_error(exc)
-                    raise AIExecutionError(exc.code, status=status, retry_at=retry_at,
-                                           diagnostics=exc.diagnostics) from None
-                batch_length = self._batch_size(verified, collections, misses[cursor:])
-                batch = misses[cursor:cursor + batch_length]
-                messages = self._classification_messages(
-                    batch, collections,
-                    public_data=self.config.data_profile == PUBLIC_DATA,
-                )
+                    attempt_id, verified = self._reserve_and_verify_model(
+                        job_id=job_id, task="classification",
+                        model_id=self.config.collection_model,
+                    )
+                    try:
+                        batch_length = self._batch_size(verified, collections, misses[cursor:])
+                        batch = misses[cursor:cursor + batch_length]
+                        messages = self._classification_messages(
+                            batch, collections,
+                            public_data=self.config.data_profile == PUBLIC_DATA,
+                        )
+                    except Exception:
+                        self._finish_attempt(
+                            attempt_id, outcome="FAILED", error_code="AI_MODEL_UNAVAILABLE",
+                        )
+                        raise
+                except AIExecutionError:
+                    raise
                 provider_latency_ms = 0
                 try:
-                    content, _usage, provider_latency_ms = self._call_json(
+                    content, _usage, provider_latency_ms, _verified = self._call_json(
                         job_id=job_id, task="classification", model_id=self.config.collection_model,
                         messages=messages, schema=classification_schema_for(
                             keyword_ids={group["id"] for group in batch},
@@ -1313,6 +1662,7 @@ class AIService:
                         output_cap=min(verified.max_output_tokens, max(
                             512, len(batch) * CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD)),
                         verified=verified,
+                        attempt_id=attempt_id,
                     )
                     parsed = parse_json(content)
                     evidence_by_keyword = {
@@ -2186,16 +2536,14 @@ class AIService:
                 return self._complete_with_error(job_id, "AI_KEY_MISSING", "MODEL_UNAVAILABLE")
             if not self.config.recommendation_model:
                 return self._complete_with_error(job_id, "AI_MODEL_UNAVAILABLE", "MODEL_UNAVAILABLE")
-            verified = self._verify_model(self.config.recommendation_model)
             messages = self._recommendation_messages(safe_context, research_constraints)
-            content, usage, _provider_latency_ms = self._call_json(
+            content, usage, _provider_latency_ms, verified = self._call_json(
                 job_id=job_id, task="recommendations", model_id=self.config.recommendation_model,
                 messages=messages, schema=recommendation_schema_for(
                     keyword_ids={item["keyword_id"] for item in safe_context},
                     evidence_ids=evidence_ids,
                 ),
-                output_cap=min(verified.max_output_tokens, 2048),
-                verified=verified,
+                output_cap=2048,
             )
             model_provider_lineage = self._recommendation_model_lineage(
                 verified, self.provider, include_response=True,

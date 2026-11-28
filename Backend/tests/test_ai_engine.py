@@ -64,6 +64,7 @@ class MemoryAtomicState:
     def __init__(self):
         self._lock = threading.Lock()
         self._states = {}
+        self.synthetic_test_mode = True
 
     def transact(self, key, operation):
         with self._lock:
@@ -843,6 +844,7 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "AI_RATE_LIMITED")
         daily_service = AIService(MemoryAtomicState(), config=config(), provider=FakeProvider(),
                                   utcnow=lambda: NOW)
+        daily_service._transact(lambda state: (state, True))
         daily_state = daily_service.state_store._states.setdefault("trendscout-ai-engine-v1", {})
         daily_state["attempts"] = [{
             "id": f"old-{index}", "job_id": f"old-job-{index}", "task": "classification",
@@ -897,7 +899,9 @@ class AIServiceTests(unittest.TestCase):
                 self.assertEqual((result["status"], result["error_code"]),
                                  (expected_status, code))
                 self.assertEqual(service.get_job(result["job_id"])["status"], expected_status)
-                self.assertEqual(service._quota()["daily_used"], 0)
+                # Admission is reserved before model metadata is requested, so
+                # a failed provider verification remains a conservative attempt.
+                self.assertEqual(service._quota()["daily_used"], 1)
                 self.assertEqual(provider.calls, [])
 
     def test_storage_unavailable_is_reported_without_provider_access(self):

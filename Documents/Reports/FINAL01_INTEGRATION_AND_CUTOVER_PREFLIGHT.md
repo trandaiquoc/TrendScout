@@ -16,8 +16,8 @@ Requested baseline `edfc5fb` and the attachment baseline `4f8b14c` are both ance
 | G2 — Contract reconciliation | PASS | `DB_CONTRACT.md`, `AI_CONTRACT.md`, `UI_CONTRACT.md`, and `AI_SOURCE_POLICY_MATRIX.md` were reconciled to the checked-in implementation, including the missing-ledger admission gap and the rule that only Wikimedia Pageviews is currently approved for live AI input. |
 | G3 — Backend integration | PASS | Consolidated isolated-PostgreSQL regression: **92 passed, 10 subtests passed, 0 skipped, 1 warning**, 319.69 s. No live provider or inference requests were made. See the exact suite list below. |
 | G4 — Full UI integration | PASS | Local browser used the actual backend with isolated PostgreSQL schemas, synthetic fixtures, and a process-local mocked AI provider. All 11 routes loaded with backend connected and correct active nav/breadcrumb. Recommendation generation reached a completed synthetic result. Empty, network-error, and disabled/deferred states; direct URL reload; in-app navigation; responsive width; VI/EN; light/dark; and keyboard skip navigation were checked. No external browser origin was contacted. A live Fetch was intentionally not submitted; the backend source-fetch switch was off. The existing Fetch progress frontend coverage from AI07 remains the evidence for that component. |
-| G5 — Operational readiness | BLOCKED | PostgreSQL retention and recovery tests passed, but the live AI scope is absent and the current AI implementation treats a missing attempts ledger as zero. `_reserve()` can then admit a request. Provider account quota/cooldown are not verified; AI01H G4 remains blocked after earlier provider 429 responses. A verified bootstrap and fail-closed `UNKNOWN` state are required before first live admission. |
-| G6 — DB08 cutover preflight | BLOCKED | A read-only check of the root `.env` target found schema `trendscout` at migration version 9, with names and checksums matching the bundled prefix through 0009. Bundled migrations 0010–0014 are not applied there. The root `.env` does not identify the target as Production, so version 9 is not represented as a verified Production state. Backup/restore rehearsal, legacy-writer freeze, Vercel Production environment identity, and owner cutover evidence remain outstanding. |
+| G5 — Operational readiness | BLOCKED | FINAL01B fixes missing-ledger fail-open admission, adds an evidence-backed atomic operator bootstrap, and passes focused unit/PostgreSQL checks. Live quota usage and cooldown still have no Owner evidence; the live AI scope remains uninitialized and AI01H G4 remains blocked after earlier provider 429 responses. No live bootstrap or provider request was made. |
+| G6 — DB08 cutover preflight | BLOCKED | Root `.env` schema `trendscout` remains at migration version 9 with a matching 0001–0009 checksum prefix; 0010–0014 remain unapplied. Five local SQLite stores were captured and restored into memory with integrity/schema/count checks. Production identity, Neon/Firestore backup and restore, Vercel linkage, and legacy-writer freeze remain unverified. |
 
 ## G1 — Security and database authentication
 
@@ -60,7 +60,7 @@ The suite exercised persistence, incremental processing, retention, algorithms, 
 
 ## G5 — Quota admission, retention, and recovery
 
-A read-only root `.env` target query found no row or field for scope `trendscout-ai-engine-v1`; specifically, `attempts` and `provider_retry_at` were absent. In the current code, `PostgresAtomicStateStore` loads a missing scope as `{}`, `AIService._ensure_state()` supplies an empty attempts list, `_quota()` reports zero use, and `_reserve()` may create a reservation. This is an implementation gap, not evidence that the provider or shared account has remaining quota.
+A read-only root `.env` target query found no row or field for scope `trendscout-ai-engine-v1`; specifically, `attempts` and `provider_retry_at` were absent. At the FINAL01 starting head, the missing scope became an empty attempts list and `_reserve()` could admit a request. FINAL01B changes this behavior: a missing scope is `UNINITIALIZED`, a legacy scope without verified evidence is `UNKNOWN`, usage is null in either state, and both block provider requests. PostgreSQL quota/capability reads remain read-only until the operator bootstrap is explicitly invoked. This code fix does not prove provider or shared-account quota remains.
 
 Safe first admission requires all of the following:
 
@@ -70,7 +70,15 @@ Safe first admission requires all of the following:
 4. Atomically record only evidence-backed current counters/cooldown in the shared PostgreSQL coordination state under the existing advisory-serialized transaction. Verify it by read-only inspection before enabling admission.
 5. Permit one live request only after the shared ledger and cooldown are verified, while keeping the AI transfer allowlist restricted to Wikimedia Pageviews. AI01H's two remaining authorized requests remain unused.
 
-PostgreSQL retention and failure-recovery coverage passed in G3. It does not resolve the absent AI admission state or the provider quota/cooldown blocker.
+PostgreSQL retention and failure-recovery coverage passed in G3. FINAL01B adds evidence validation for exclusive provider account identity, provider daily/rolling-minute limits and current use, UTC reset, cooldown, history, and reservations. The account and evidence references are stored as fingerprints. The transaction is idempotent, preserves existing attempts/reservations/cooldown, and enforces the lower provider/internal limit. Synthetic test bootstraps are marked `SYNTHETIC_TEST` and cannot establish live readiness. `Backend/scripts/bootstrap_ai_quota.py` is the operator entry point; it reads the root `.env` without process-ENV overrides and a private evidence JSON file. That command was not run because the Owner has not supplied quota/cooldown evidence and Production schema identity is unresolved.
+
+### FINAL01B focused verification
+
+- Branch start was `836ba3e7b39f3b9e3eb2818757bca8ee40474046`, matching `origin/integration/demo-final`; fetched `origin/main` was `5122e6f0a717f72f2933bea56978c2b66f42139a` and remained an ancestor. No merge was needed.
+- `Backend/tests/test_ai_engine.py`: 59 passed, 6 subtests passed.
+- Isolated PostgreSQL quota checks: 5 passed, 12 deselected, 0 skipped. Coverage included absent/legacy ledger, no provider call before admission, unknown usage null, bootstrap idempotence/concurrency, existing reservation and cooldown preservation, provider limits lower than internal limits, UTC rollover, shared service instances, and ambiguous transaction failure. The disposable `ts_quota_*` schemas were dropped by the test fixture; the root `trendscout` schema was not used by these tests.
+- Ruff on changed Python files, Python `compileall`, and `git diff --check`: PASS.
+- No live provider quota lookup, model verification, inference, or AI01H request was made.
 
 ## G6 — DB08 read-only preflight
 
@@ -94,6 +102,14 @@ The bundled order and read-only ledger comparison are:
 14. `0014_collection_proposal_lifecycle.sql`
 
 The root `.env` target's ledger contains versions 1–9, in order, and those entries' names and checksums match the repository prefix. This target has no Production environment marker; no claim is made that it is the Production Neon branch. Migrations 0010–0014 were not run.
+
+### FINAL01B backup and writer inventory
+
+- The current Windows host inventory captured five private SQLite backups: Collections, scheduler, normal Google LIVE state, normal Wikimedia LIVE state, and D6 smoke ledger. No configured local SQLite source was missing or failed capture. The source stores and their contents were preserved.
+- A restore rehearsal restored all five standalone backups into in-memory SQLite databases. `integrity_check`, `foreign_key_check`, table definitions, and row counts matched for each restore. This is local SQLite evidence only; it is not a PostgreSQL, Firestore, cross-store snapshot, or application-level recovery test.
+- The current host had zero TrendScout scheduled tasks, Windows services, or matching active processes. This does not verify home/company computers or Vercel workers and is not an operational freeze confirmation.
+- No `.vercel/project.json` is present, and the connected Vercel account returned no TrendScout projects, so Production project/environment/connector linkage could not be verified. Firebase CLI, `pg_dump`, and `pg_restore` are unavailable on this host. No Neon or Firestore cloud backup/restore was performed. Repository SQLite capture and migration/import review tools are not evidence of remote backups.
+- Fresh Start remains the selected cutover plan. The local source stores and newly captured backups remain intact; no user records or quota evidence were deleted or imported. No migration, deployment, or Production environment change was made.
 
 ### Required Production environment names
 
@@ -119,14 +135,15 @@ The deployment bundle must include the migration runner and all 14 SQL files. Ve
 
 ### Owner actions before cutover
 
-1. Identify and record the Production Neon project, branch, database, schema, and role through the owner's control plane. Confirm the root `.env` target is that Production identity without disclosing its DSNs.
-2. Take timestamped, integrity-checked backups of SQLite/Firestore and PostgreSQL. Preserve the source stores; do not delete or import historical data as part of Fresh Start.
+1. Identify and record the Production Neon project, branch, database, schema, and role through the owner's control plane. Confirm the root `.env` target is that Production identity without disclosing its DSNs; no Production project linkage was visible in the current Vercel account.
+2. Keep the five captured local SQLite backups. Repeat inventory on each other home/company Windows host and obtain timestamped, integrity-checked Firestore and PostgreSQL backups through their owner control planes. Preserve the source stores; do not delete or import historical data as part of Fresh Start.
 3. Rehearse PostgreSQL restore into an isolated schema/database and prove application reads, checksums, and recovery. Record the restore result and responsible operator.
-4. Freeze legacy SQLite/Firestore writers and schedulers; verify no old process can write after the cutover boundary.
-5. Reconcile source and AI quota/cooldown evidence. Leave AI disabled while any provider window or shared ledger is unknown.
-6. After owner verification and a separate approved change window, apply migrations 0010–0014 in order using the reviewed bundle; verify all 1–14 checksums and current schema identity read-only afterward.
-7. Set the confirmed Production environment values, start with read-only runtime and Fetch/AI disabled, then run the read-only smoke checklist below.
-8. Only after smoke passes, source permissions are confirmed, and a controlled Fetch window is approved, run the first explicit Fetch All. Select only sources that are authorized and within known provider budgets; a Wikimedia-only first run is the conservative option if it is the only source ready. Observe each source status and the terminal run/snapshot before any second run.
+4. Freeze legacy SQLite/Firestore writers and schedulers on every Windows host and deployment, including Vercel. Record the actual freeze and verify no old process can write after the cutover boundary.
+5. Reconcile the exclusive provider account identity, 24-hour daily and rolling-minute limits/use, next UTC reset, current cooldown, historical provider activity, internal attempts, and existing reservations. Evidence must be observed within five minutes of bootstrap. Leave AI disabled while any provider window or shared ledger is unknown.
+6. After Production identity is confirmed and a separate authorized write window is open, create the private evidence JSON and run `python Backend/scripts/bootstrap_ai_quota.py --schema <confirmed-production-schema> --evidence-file <private-owner-evidence.json>`. The evidence booleans for cooldown, provider activity/history, reservations, and account exclusivity must be verified; the command initializes shared AI quota state and was not run in FINAL01B.
+7. After owner verification and a separate approved cutover window, apply migrations 0010–0014 in order using the reviewed bundle; verify all 1–14 checksums and current schema identity read-only afterward.
+8. Set the confirmed Production environment values, start with read-only runtime and Fetch/AI disabled, then run the read-only smoke checklist below.
+9. Only after smoke passes, source permissions are confirmed, and a controlled Fetch window is approved, run the first explicit Fetch All. Select only sources that are authorized and within known provider budgets; a Wikimedia-only first run is the conservative option if it is the only source ready. Observe each source status and the terminal run/snapshot before any second run.
 
 ### Production smoke and rollback checklist
 
