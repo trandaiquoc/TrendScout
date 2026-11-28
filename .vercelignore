@@ -1,0 +1,5 @@
+# Keep local and provider environment files out of source deployments.
+.env*
+**/.env*
+*.env
+**/*.env
