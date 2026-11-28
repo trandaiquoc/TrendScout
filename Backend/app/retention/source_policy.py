@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 from app.retention.policy import (
@@ -106,3 +106,57 @@ def effective_source_retention_deadline(
         retention_days=retention_days,
         business_timezone=business_timezone,
     )
+
+
+def source_evidence_timestamp_status(source_id: str, collected_at, *, now=None) -> str:
+    """Classify one evidence timestamp under the existing rolling retention policy."""
+    if isinstance(collected_at, str) and len(collected_at) <= 64:
+        try:
+            collected_at = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+        except ValueError:
+            return "INVALID"
+    if (not isinstance(collected_at, datetime) or collected_at.tzinfo is None
+            or collected_at.utcoffset() is None):
+        return "INVALID"
+    evaluated_at = now or datetime.now(timezone.utc)
+    if (not isinstance(evaluated_at, datetime) or evaluated_at.tzinfo is None
+            or evaluated_at.utcoffset() is None):
+        return "INVALID"
+    collected_at = collected_at.astimezone(timezone.utc)
+    evaluated_at = evaluated_at.astimezone(timezone.utc)
+    if collected_at > evaluated_at:
+        return "INVALID"
+    try:
+        deadline = effective_source_retention_deadline(source_id, collected_at)
+    except ValueError:
+        return "INVALID"
+    return "EXPIRED" if deadline <= evaluated_at else "CURRENT"
+
+
+def retained_live_wikimedia_evidence_status(source: dict, *, now=None) -> str:
+    """Fail closed unless a fresh, retained Wikimedia checkpoint is provable."""
+    from app.sources.catalog import WIKIMEDIA_SOURCE_ID
+
+    if not isinstance(source, dict) or source.get("source_id") != WIKIMEDIA_SOURCE_ID:
+        return "NOT_APPLICABLE"
+    coverage = source.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    if coverage.get("cache_only") is True:
+        return "CACHE_ONLY"
+    delivery = source.get("delivery_state")
+    if delivery in {"CACHE_REPLAY", "CACHE_ONLY", "CACHED"}:
+        return "CACHE_ONLY"
+    if delivery in {"STALE_CACHE", "EXPIRED"}:
+        return "EXPIRED"
+    if (source.get("data_mode") != "LIVE"
+            or source.get("status") not in {"SUCCESS", "PARTIAL"}
+            or delivery != "FRESH"):
+        return "INVALID"
+    request_count = source.get("provider_request_count")
+    if type(request_count) is not int or request_count < 0:
+        request_count = coverage.get("provider_request_count")
+    if type(request_count) is not int or request_count <= 0:
+        return "INVALID"
+    collected_at = (coverage.get("fetched_at") or source.get("fetched_at")
+                    or coverage.get("source_fetched_at"))
+    return source_evidence_timestamp_status(WIKIMEDIA_SOURCE_ID, collected_at, now=now)

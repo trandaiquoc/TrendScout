@@ -3,6 +3,7 @@
 import json
 import unittest
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -1814,6 +1815,74 @@ class VercelSharedLiveFetchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(processed[0][2])
         self.assertNotIn("worker_finished", events)
         self.assertLess(events.index("collections_processed"), events.index("snapshot_saved"))
+
+    async def test_recovery_resumes_only_fresh_unanalyzed_wikimedia_algorithms(self):
+        app, _events, _client, facade, _client_factory = self.app(enabled=True)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"fetched_at": now, "provider_request_count": 1},
+            "records": [{"article_original": "Recovery_Example", "views_ceil": 1000}],
+        }
+        checkpoint = {"snapshot": {"data_mode": "LIVE", "result": source}}
+        calls = []
+
+        class _Store:
+            data_mode_scope = "LIVE"
+
+            def collection_job(self, _fetch_id):
+                return ({"status": "MODEL_UNAVAILABLE",
+                         "algorithm_processing_status": "CACHE_ONLY", "ai_jobs": []}, False)
+
+            def fetch_collection_processing_result(self, _fetch_id):
+                return {"status": "MODEL_UNAVAILABLE", "error_code": "AI_DISABLED"}
+
+        class _Service:
+            store = _Store()
+
+            async def process_fetch(self, fetch_id, sources, *, cached_context_only=False,
+                                    resume_model_unavailable=False):
+                calls.append((fetch_id, sources, cached_context_only,
+                              resume_model_unavailable))
+                return {"status": "MODEL_UNAVAILABLE", "error_code": "AI_DISABLED"}
+
+        facade.postgres_live = True
+        facade.firestore_shared_live = False
+        facade.data_mode = "LIVE"
+        facade.collection_service = _Service()
+        facade.collection_reuse_for_fetch = lambda _fetch_id: {
+            "terminal": True, "collection_input_unchanged": False,
+        }
+        facade.utcnow = lambda: now
+        facade.admission.read_job = lambda _fetch_id, now: {
+            "state": "PARTIAL", "source_checkpoints": {WIKIMEDIA_SOURCE_ID: checkpoint},
+        }
+        facade.status = lambda _fetch_id, *, include_records, include_discovery: {
+            "terminal": True, "data_mode": "LIVE", "sources": [source],
+        }
+
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="https://trend-scout.example",
+            ) as browser:
+                response = await browser.post(
+                    f"/api/v1/fetches/{_JOB_ID}/collections",
+                    headers={"Origin": "https://trend-scout.example",
+                             "x-vercel-oidc-token": "synthetic-test-token"},
+                )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], _JOB_ID)
+        self.assertTrue(calls[0][2])
+        self.assertTrue(calls[0][3])
 
     async def test_persisted_checkpoint_recovery_skips_records_and_snapshot_write(self):
         app, events, _client, facade, _client_factory = self.app(enabled=True)

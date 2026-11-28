@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -715,6 +716,124 @@ class SmartCollectionsTests(unittest.TestCase):
             )
         self.assertEqual(result["analysis_status"], "CACHE_ONLY")
         self.assertEqual(result["recomputed_algorithms"], 0)
+
+    def test_fresh_retained_live_checkpoint_runs_local_algorithms_and_reuses_digests(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"fetched_at": now.isoformat(), "provider_request_count": 1},
+        }
+        persisted = self.store.persist_cleaned_keywords([keyword_record({
+            "article_display": "Recovery Example",
+            "article_original": "Recovery_Example",
+            "project": "en.wikipedia",
+            "observation_date": now.date().isoformat(),
+            "fetched_at": now.isoformat(),
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }, WIKIMEDIA_SOURCE_ID, "LIVE")])["records"][0]
+
+        result = self.service._analyze_persisted_keywords(
+            [persisted], sources=[source], cache_only=True,
+        )
+
+        self.assertEqual(result["analysis_status"], "COMPLETED")
+        self.assertGreater(result["executed_keywords"], 0)
+        self.assertGreater(result["persisted_algorithms"], 0)
+        with patch("app.collections.service._algorithm_digest_input",
+                   side_effect=AssertionError("valid matching analysis must reuse its digest")):
+            replay = self.service._analyze_persisted_keywords(
+                [persisted], sources=[source], cache_only=True,
+            )
+        self.assertEqual(replay["analysis_status"], "COMPLETED")
+        self.assertEqual(replay["executed_keywords"], 0)
+        self.assertGreater(replay["unchanged_keywords"], 0)
+
+    def test_expired_retained_live_evidence_is_not_analyzed(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        expired = now - timedelta(days=9)
+        source = {
+            "source_id": WIKIMEDIA_SOURCE_ID,
+            "status": "SUCCESS",
+            "data_mode": "LIVE",
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "record_count": 1,
+            "coverage": {"fetched_at": expired.isoformat(), "provider_request_count": 1},
+        }
+        persisted = self.store.persist_cleaned_keywords([keyword_record({
+            "article_display": "Expired Example",
+            "article_original": "Expired_Example",
+            "project": "en.wikipedia",
+            "observation_date": expired.date().isoformat(),
+            "fetched_at": expired.isoformat(),
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }, WIKIMEDIA_SOURCE_ID, "LIVE")])["records"][0]
+
+        with patch.object(self.store, "run_algorithm_analysis",
+                          side_effect=AssertionError("expired evidence must not be analyzed")):
+            result = self.service._analyze_persisted_keywords(
+                [persisted], sources=[source], cache_only=True,
+            )
+
+        self.assertEqual(result["analysis_status"], "NO_VALID_OBSERVATIONS")
+        self.assertEqual(result["evidence_state"], "EXPIRED")
+        self.assertEqual(result["executed_keywords"], 0)
+
+    def test_model_unavailable_live_checkpoint_resumes_local_algorithms_only(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        live_store = CollectionStore(
+            Path(self.temp.name) / "retained-live-analysis.sqlite", data_mode_scope="LIVE",
+        )
+        live_service = CollectionService(live_store, fetch_model_inference_enabled=False)
+        rows = [{
+            "article_display": "Resumable Example",
+            "article_original": "Resumable_Example",
+            "project": "en.wikipedia",
+            "observation_date": now.date().isoformat(),
+            "fetched_at": now.isoformat(),
+            "provider_rank": 1,
+            "views_ceil": 1000,
+        }]
+        fetch_id = "retained-live-analysis-recovery"
+        cached_source = live_source([dict(row) for row in rows])[0]
+        cached_source.update({
+            "delivery_state": "CACHED",
+            "coverage": {"cache_only": True},
+        })
+        cached = live_service._process_fetch(
+            fetch_id, [cached_source], cached_context_only=True,
+        )
+        self.assertEqual(cached["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(cached["algorithms"]["analysis_status"], "CACHE_ONLY")
+
+        fresh_source = live_source([dict(row) for row in rows])[0]
+        fresh_source.update({
+            "delivery_state": "FRESH",
+            "provider_request_count": 1,
+            "coverage": {"fetched_at": now.isoformat(), "provider_request_count": 1},
+        })
+        resumed = live_service._process_fetch(
+            fetch_id, [fresh_source], cached_context_only=True,
+            resume_model_unavailable=True,
+        )
+
+        self.assertEqual(resumed["status"], "MODEL_UNAVAILABLE")
+        self.assertEqual(resumed["error_code"], "AI_DISABLED")
+        self.assertEqual(resumed["algorithms"]["analysis_status"], "COMPLETED")
+        self.assertGreater(resumed["algorithms"]["persisted_algorithms"], 0)
+        with live_store.connect() as db:
+            status = db.execute(
+                "SELECT algorithm_processing_status FROM dataset_snapshots WHERE dataset_id=?",
+                (fetch_id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "COMPLETED")
 
     def test_observation_history_is_bounded_to_the_full_source_scope(self):
         row = keyword_record({

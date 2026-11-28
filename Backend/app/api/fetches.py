@@ -23,6 +23,7 @@ from app.orchestration.public_fetch import (
 )
 from app.orchestration.runs import TERMINAL, RunBusy, RunCooldown
 from app.ports.storage import StorageError
+from app.retention.source_policy import retained_live_wikimedia_evidence_status
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -35,6 +36,34 @@ router = APIRouter()
 MAX_BODY_BYTES = 1024
 MAX_IDEMPOTENCY_KEY_LENGTH = 128
 _logger = logging.getLogger(__name__)
+
+
+def _has_fresh_live_wikimedia_checkpoint(value) -> bool:
+    """Check compact manifests or retained checkpoint maps without reading records."""
+    if isinstance(value, dict):
+        candidates = []
+        for entry in value.values():
+            snapshot = entry.get("snapshot") if isinstance(entry, dict) else None
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if isinstance(result, dict):
+                candidates.append(result)
+    elif isinstance(value, list):
+        candidates = [item for item in value if isinstance(item, dict)]
+    else:
+        candidates = []
+    for source in candidates:
+        if retained_live_wikimedia_evidence_status(source) != "CURRENT":
+            continue
+        count = source.get("record_count")
+        records = source.get("records")
+        if (type(count) is int and count > 0) or (isinstance(records, list) and records):
+            return True
+    return False
+
+
+def _algorithm_recovery_pending(status, sources) -> bool:
+    return (status in {"CACHE_ONLY", "PENDING", "UNKNOWN"}
+            and _has_fresh_live_wikimedia_checkpoint(sources))
 
 
 def _distributed_for_request(request):
@@ -688,25 +717,30 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     # and downloading source record blobs unless Collections really needs work.
     firestore_shared_live = getattr(distributed, "firestore_shared_live", False)
     shared_store_live = firestore_shared_live or getattr(distributed, "postgres_live", False)
+    resume_pending_algorithms = False
     reuse_check = getattr(distributed, "collection_reuse_for_fetch", None)
     reusable = (await asyncio.to_thread(reuse_check, fetch_id)
                 if callable(reuse_check) else None)
     if (shared_store_live and isinstance(reusable, dict)
             and reusable.get("terminal") is True
             and reusable.get("collection_input_unchanged") is True):
-        if firestore_shared_live:
-            request.state.vercel_fetch_snapshot_unchanged = True
-        _logger.info(
-            "Fetch Collections recovery skipped reason=SOURCE_INPUT_UNCHANGED"
+        resume_pending_algorithms = _algorithm_recovery_pending(
+            reusable.get("algorithm_processing_status"), reusable.get("source_manifest"),
         )
-        return {
-            "fetch_id": fetch_id,
-            "status": "REUSED",
-            "error_code": None,
-            "collection_input_unchanged": True,
-            **({"dataset_id": reusable["dataset_id"]}
-               if isinstance(reusable.get("dataset_id"), str) else {}),
-        }
+        if not resume_pending_algorithms:
+            if firestore_shared_live:
+                request.state.vercel_fetch_snapshot_unchanged = True
+            _logger.info(
+                "Fetch Collections recovery skipped reason=SOURCE_INPUT_UNCHANGED"
+            )
+            return {
+                "fetch_id": fetch_id,
+                "status": "REUSED",
+                "error_code": None,
+                "collection_input_unchanged": True,
+                **({"dataset_id": reusable["dataset_id"]}
+                   if isinstance(reusable.get("dataset_id"), str) else {}),
+            }
 
     load_snapshot = getattr(distributed, "load_collection_snapshot", None)
     if firestore_shared_live and callable(load_snapshot):
@@ -756,19 +790,23 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
                             and isinstance(entry.get("snapshot"), dict)
                             and entry["snapshot"].get("data_mode") == "LIVE"
                             for entry in checkpoints.values())):
-                if firestore_shared_live:
-                    request.state.vercel_fetch_snapshot_unchanged = True
-                stored_ai_jobs = collection_job.get("ai_jobs", []) if collection_job else []
-                if isinstance(stored_ai_jobs, str):
-                    try:
-                        stored_ai_jobs = json.loads(stored_ai_jobs)
-                    except (TypeError, ValueError):
-                        stored_ai_jobs = []
-                return {"fetch_id": fetch_id, "status": prior["status"],
-                        "error_code": prior["error_code"],
-                        "ai_job_ids": [item["job_id"] for item in stored_ai_jobs
-                                       if isinstance(item, dict)
-                                       and isinstance(item.get("job_id"), str)]}
+                resume_pending_algorithms = resume_pending_algorithms or _algorithm_recovery_pending(
+                    (collection_job or {}).get("algorithm_processing_status"), checkpoints,
+                )
+                if not resume_pending_algorithms:
+                    if firestore_shared_live:
+                        request.state.vercel_fetch_snapshot_unchanged = True
+                    stored_ai_jobs = collection_job.get("ai_jobs", []) if collection_job else []
+                    if isinstance(stored_ai_jobs, str):
+                        try:
+                            stored_ai_jobs = json.loads(stored_ai_jobs)
+                        except (TypeError, ValueError):
+                            stored_ai_jobs = []
+                    return {"fetch_id": fetch_id, "status": prior["status"],
+                            "error_code": prior["error_code"],
+                            "ai_job_ids": [item["job_id"] for item in stored_ai_jobs
+                                           if isinstance(item, dict)
+                                           and isinstance(item.get("job_id"), str)]}
     try:
         result = await asyncio.to_thread(
             distributed.status, fetch_id, include_records=True,
@@ -789,7 +827,11 @@ async def recover_fetch_collections(fetch_id: str, request: Request, response: R
     sources = await _recover_expired_source_checkpoints(
         distributed, fetch_id, result.get("sources", [])
     )
-    recovered = await service.process_fetch(fetch_id, sources, cached_context_only=True)
+    resume_options = ({"resume_model_unavailable": True}
+                      if resume_pending_algorithms else {})
+    recovered = await service.process_fetch(
+        fetch_id, sources, cached_context_only=True, **resume_options,
+    )
     if recovered.get("status") == "FAILED":
         raise HTTPException(503, {"code": "COLLECTION_PROCESSING_FAILED"})
     if firestore_shared_live and recovered.get("dataset_reused") is True:

@@ -25,7 +25,11 @@ from app.collections.store import (
     keyword_record,
     now,
 )
-from app.retention.source_policy import effective_source_retention_deadline
+from app.retention.source_policy import (
+    effective_source_retention_deadline,
+    retained_live_wikimedia_evidence_status,
+    source_evidence_timestamp_status,
+)
 from app.sources.catalog import (
     BING_SOURCE_ID,
     GOOGLE_SOURCE_ID,
@@ -676,9 +680,17 @@ class CollectionService:
         engine = algorithm_engine()
         registered_count = len(engine.registry.keys())
         if cache_only:
-            return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
-                    "recomputed_algorithms": 0, "registered_algorithms": registered_count,
-                    "persisted_algorithms": 0, "analysis_status": "CACHE_ONLY"}
+            evidence_states = [retained_live_wikimedia_evidence_status(source)
+                               for source in sources]
+            if "CURRENT" not in evidence_states:
+                invalid_state = next((state for state in ("EXPIRED", "INVALID")
+                                      if state in evidence_states), None)
+                return {"eligible_keywords": 0, "executed_keywords": 0, "unchanged_keywords": 0,
+                        "recomputed_algorithms": 0, "registered_algorithms": registered_count,
+                        "persisted_algorithms": 0,
+                        "analysis_status": ("NO_VALID_OBSERVATIONS" if invalid_state
+                                             else "CACHE_ONLY"),
+                        "evidence_state": invalid_state or "CACHE_ONLY"}
         for source in sources:
             if source.get("source_id") != WIKIMEDIA_SOURCE_ID:
                 continue
@@ -723,6 +735,14 @@ class CollectionService:
                 if (type(value) is not int or value < 0 or type(rank) is not int or rank < 1
                         or snapshot_status not in {"SUCCESS", "PARTIAL"}):
                     continue
+                record_fetched_at = evidence.get("fetched_at")
+                collected_at = collected_instant(record_fetched_at)
+                if cache_only and record_fetched_at is not None and collected_at is None:
+                    continue
+                collected_at = collected_at or source_collection_time
+                if (cache_only and source_evidence_timestamp_status(
+                        WIKIMEDIA_SOURCE_ID, collected_at) != "CURRENT"):
+                    continue
                 prepared_by_id[record["id"]] = {
                     "id": record["id"], "date": analysis_date,
                     "country": evidence.get("country_scope") or "US",
@@ -731,7 +751,7 @@ class CollectionService:
                     "article": evidence.get("article_original") or record.get("keyword") or "",
                     "value": value, "rank": rank, "snapshot_status": snapshot_status,
                     "evidence_url": evidence.get("source_url"),
-                    "collected_at": collected_instant(evidence.get("fetched_at")) or source_collection_time,
+                    "collected_at": collected_at,
                 }
             except (TypeError, ValueError, KeyError, IndexError):
                 continue
