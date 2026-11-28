@@ -1,10 +1,10 @@
 """Run one owner-authorized, two-call PUBLIC_DATA demo probe against PostgreSQL.
 
-The command intentionally keeps the ordinary AI API disabled when shared
-provider quota metadata is unavailable. It requires an explicit local operator
-flag, reserves both permitted calls atomically in the shared PostgreSQL AI
-state, validates the first result and its $0 generation metadata before opening
-the recommendation call, and never retries a provider request.
+The command requires explicit operator authorization and reuses a completed
+classification from the durable PostgreSQL probe when resuming. Provider quota
+can remain UNKNOWN; durable internal reservations and the verified free model
+route bound each outbound request. Missing generation metadata leaves cost
+UNKNOWN and does not discard a valid response.
 """
 
 from __future__ import annotations
@@ -48,12 +48,17 @@ def _safe_failure(exc) -> dict:
 def _verify_generation(provider, *, generation_id, resolved_model):
     if not isinstance(generation_id, str) or not isinstance(resolved_model, str):
         return None
-    metadata = provider.generation_metadata(generation_id)
+    try:
+        metadata = provider.generation_metadata(generation_id)
+    except Exception:
+        return None
+    from app.ai.runtime import resolved_model_matches_alias
+
     if (not isinstance(metadata, dict) or metadata.get("id") != generation_id
+            or not resolved_model_matches_alias(MODEL_ID, metadata.get("model"))
             or metadata.get("model") != resolved_model
             or metadata.get("provider_name") != "Particle AI"
-            or type(metadata.get("total_cost")) not in (int, float)
-            or metadata["total_cost"] != 0):
+            or type(metadata.get("total_cost")) not in (int, float)):
         return None
     return metadata
 
@@ -64,15 +69,16 @@ def main(argv=None) -> int:
                         help="explicitly authorize the fixed classification + recommendation pair")
     parser.add_argument("--schema", default="trendscout",
                         help="existing PostgreSQL application schema (default: trendscout)")
-    parser.add_argument("--keyword-id", action="append", required=True,
-                        help="one existing LIVE Wikimedia keyword ID; exactly one is allowed")
+    parser.add_argument("--keyword-id", action="append",
+                        help="optional existing LIVE Wikimedia keyword ID; defaults to the durable probe's classification")
     args = parser.parse_args(argv)
-    if len(args.keyword_id) != 1 or not isinstance(args.keyword_id[0], str):
+    if args.keyword_id and (
+            len(args.keyword_id) != 1 or not isinstance(args.keyword_id[0], str)):
         _emit({"status": "BLOCKED", "error_code": "AI_OPERATOR_PROBE_SCOPE_INVALID"})
         return 2
 
     try:
-        from app.ai.openrouter import OpenRouterAdapter, OpenRouterError, PUBLIC_DATA
+        from app.ai.openrouter import PUBLIC_DATA, OpenRouterAdapter, OpenRouterError
         from app.ai.runtime import AIConfig, AIExecutionError, AIService
         from app.collections.postgres_store import PostgresCollectionStore
         from app.local_environment import load_local_environment
@@ -103,16 +109,36 @@ def main(argv=None) -> int:
         )
         provider = OpenRouterAdapter(api_key, data_profile=PUBLIC_DATA)
         service = AIService(state_store, config=config, provider=provider)
-        keyword_ids = args.keyword_id
         try:
-            # These are read-only provider checks. The key usage amount is not
-            # interpreted as a request count or remaining quota.
-            verified = provider.verify_model(MODEL_ID)
-            key_metadata = provider.key_quota_metadata(strict=True)
-            if key_metadata is not None and key_metadata.get("is_free_tier") is not True:
-                _emit({"status": "BLOCKED", "error_code": "AI_PROVIDER_QUOTA_UNKNOWN",
-                       "reason": "configured key is not verified as free tier"})
+            stored_state = service._read_state()
+            probe = (stored_state.get("operator_probe")
+                     if isinstance(stored_state, dict) else None)
+            keyword_ids = args.keyword_id or []
+            if not keyword_ids and isinstance(probe, dict) and (
+                    probe.get("status") in {"CLASSIFICATION_COMPLETE", "RECOMMENDATION_AUTHORIZED"}
+                    and probe.get("requests_reserved") == 1
+                    and isinstance(probe.get("attempt_ids"), list)
+                    and len(probe["attempt_ids"]) == 1):
+                classification_attempt = next((item for item in stored_state.get("attempts", [])
+                                                if isinstance(item, dict)
+                                                and item.get("id") == probe["attempt_ids"][0]), None)
+                stored_job = stored_state.get("jobs", {}).get(
+                    (classification_attempt or {}).get("job_id"),
+                )
+                candidate_ids = stored_job.get("input_ids") if isinstance(stored_job, dict) else None
+                if (isinstance(candidate_ids, list) and len(candidate_ids) == 1
+                        and isinstance(candidate_ids[0], str)):
+                    keyword_ids = candidate_ids
+            if len(keyword_ids) != 1 or not isinstance(keyword_ids[0], str):
+                _emit({"status": "BLOCKED", "error_code": "AI_OPERATOR_PROBE_SCOPE_INVALID"})
                 return 2
+
+            # These are read-only provider checks. The key usage amount is not
+            # interpreted as a request count or remaining quota. The selected
+            # model's price and provider route, not account-plan metadata, guard
+            # against paid inference.
+            verified = provider.verify_model(MODEL_ID)
+            provider.key_quota_metadata(strict=False)
             if not (verified.supports_json_schema
                     and verified.provider_name == "Particle AI"
                     and verified.provider_tag == "particle-ai/us"):
@@ -131,12 +157,48 @@ def main(argv=None) -> int:
                 _emit({"status": "BLOCKED", "error_code": "AI_ACTIVE_EVIDENCE_UNAVAILABLE"})
                 return 2
 
-            authorized = service.authorize_bounded_operator_probe(authorized=True)
-            classification = service.classify_keyword_ids(
-                collection_store, keyword_ids,
-                idempotency_key="demo-live-classification-" + uuid.uuid4().hex,
-                preview=True,
-            )
+            resumed_classification = False
+            resume_authorized = False
+            classification = None
+            classification_job = None
+            authorized = None
+            if (isinstance(probe, dict)
+                    and probe.get("status") in {"CLASSIFICATION_COMPLETE",
+                                                  "RECOMMENDATION_AUTHORIZED"}
+                    and probe.get("requests_reserved") == 1
+                    and isinstance(probe.get("attempt_ids"), list)
+                    and len(probe["attempt_ids"]) == 1):
+                classification_attempt = next((item for item in stored_state.get("attempts", [])
+                                                if isinstance(item, dict)
+                                                and item.get("id") == probe["attempt_ids"][0]), None)
+                classification_job_id = (classification_attempt or {}).get("job_id")
+                stored_job = stored_state.get("jobs", {}).get(classification_job_id)
+                if (isinstance(classification_attempt, dict)
+                        and classification_attempt.get("task") == "classification"
+                        and classification_attempt.get("outcome") == "COMPLETED"
+                        and isinstance(stored_job, dict)
+                        and stored_job.get("task") == "classification"
+                        and stored_job.get("status") == "COMPLETED"
+                        and stored_job.get("input_ids") == keyword_ids
+                        and isinstance(stored_job.get("result"), dict)
+                        and stored_job["result"].get("mode") == "PREVIEW"
+                        and stored_job["result"].get("processed") == 1):
+                    classification_job = service.get_job(classification_job_id)
+                    classification = {
+                        "status": "COMPLETED", "mode": "PREVIEW", "processed": 1,
+                        "job_id": classification_job_id,
+                    }
+                    resumed_classification = True
+                    resume_authorized = probe.get("status") == "RECOMMENDATION_AUTHORIZED"
+                    authorized = {"status": "RESUMED", "provider_quota_status": "UNKNOWN"}
+
+            if not resumed_classification:
+                authorized = service.authorize_bounded_operator_probe(authorized=True)
+                classification = service.classify_keyword_ids(
+                    collection_store, keyword_ids,
+                    idempotency_key="demo-live-classification-" + uuid.uuid4().hex,
+                    preview=True,
+                )
             if (classification.get("status") != "COMPLETED"
                     or classification.get("mode") != "PREVIEW"
                     or classification.get("processed") != 1):
@@ -146,26 +208,30 @@ def main(argv=None) -> int:
                     "status": "BLOCKED", "recommendation": "NOT_SENT"})
                 return 2
 
-            classification_job = service.get_job(classification["job_id"])
+            classification_job = classification_job or service.get_job(classification["job_id"])
             model_lineage = ((classification_job or {}).get("lineage") or {}).get("model_provider")
             generation_id = (model_lineage or {}).get("generation_id")
             resolved_model = (model_lineage or {}).get("resolved_model")
-            if generation_id != provider.last_generation_id or resolved_model != provider.last_resolved_model:
+            if (not resumed_classification
+                    and (generation_id != provider.last_generation_id
+                         or resolved_model != provider.last_resolved_model)):
                 _emit({"status": "BLOCKED", "error_code": "AI_GENERATION_LINEAGE_UNAVAILABLE",
                        "recommendation": "NOT_SENT"})
                 return 2
             classification_generation = _verify_generation(
                 provider, generation_id=generation_id, resolved_model=resolved_model,
             )
-            if classification_generation is None:
-                _emit({"status": "BLOCKED", "error_code": "AI_GENERATION_COST_UNVERIFIED",
+            if (classification_generation is not None
+                    and classification_generation.get("total_cost") != 0):
+                _emit({"status": "BLOCKED", "error_code": "AI_GENERATION_COST_NONZERO",
                        "recommendation": "NOT_SENT"})
                 return 2
 
-            service.authorize_operator_recommendation(
-                classification_job=classification_job,
-                generation_metadata=classification_generation,
-            )
+            if not resume_authorized:
+                service.authorize_operator_recommendation(
+                    classification_job=classification_job,
+                    generation_metadata=classification_generation,
+                )
             recommendation = service.recommend(
                 collection_store, keyword_ids, research_constraints="",
                 idempotency_key="demo-live-recommendation-" + uuid.uuid4().hex,
@@ -189,10 +255,10 @@ def main(argv=None) -> int:
                 generation_id=(recommendation_lineage or {}).get("generation_id"),
                 resolved_model=(recommendation_lineage or {}).get("resolved_model"),
             )
-            if recommendation_generation is None:
+            if (recommendation_generation is not None
+                    and recommendation_generation.get("total_cost") != 0):
                 _emit({"status": "BLOCKED", "operator_probe": "INCOMPLETE",
-                       "classification": "PASS",
-                       "recommendation": "PASS_SCHEMA_COST_UNVERIFIED"})
+                       "classification": "PASS", "recommendation": "PASS_SCHEMA_COST_NONZERO"})
                 return 2
 
             service.complete_bounded_operator_probe(
@@ -207,16 +273,19 @@ def main(argv=None) -> int:
                 "automatic_ai_enabled": final_caps.get("enabled") is True,
                 "authorized_requests": 2,
                 "classification": {"status": "PASS", "processed": 1,
-                    "generation_id": classification_generation["id"],
-                    "resolved_model": classification_generation["model"],
-                    "provider": classification_generation["provider_name"],
-                    "actual_cost": classification_generation["total_cost"]},
+                    "generation_id": generation_id, "resolved_model": resolved_model,
+                    "provider": "Particle AI",
+                    "actual_cost": (classification_generation.get("total_cost")
+                                    if classification_generation else None),
+                    "cost_status": "VERIFIED_ZERO" if classification_generation else "UNKNOWN"},
                 "recommendation": {"status": "PASS",
                     "recommendation_count": len(recommendation["recommendations"]),
-                    "generation_id": recommendation_generation["id"],
-                    "resolved_model": recommendation_generation["model"],
-                    "provider": recommendation_generation["provider_name"],
-                    "actual_cost": recommendation_generation["total_cost"]},
+                    "generation_id": (recommendation_lineage or {}).get("generation_id"),
+                    "resolved_model": (recommendation_lineage or {}).get("resolved_model"),
+                    "provider": "Particle AI",
+                    "actual_cost": (recommendation_generation.get("total_cost")
+                                    if recommendation_generation else None),
+                    "cost_status": "VERIFIED_ZERO" if recommendation_generation else "UNKNOWN"},
                 "internal_daily_limit": 40,
                 "internal_minute_limit": 20,
                 "provider_metadata_is_request_quota": False,

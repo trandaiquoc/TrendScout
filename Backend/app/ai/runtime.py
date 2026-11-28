@@ -56,6 +56,30 @@ SYNTHETIC_AI_PROVENANCE_VALUE = "trendscout-ai-public-demo-v1"
 ASSIGNMENT_THRESHOLD = 0.82
 DAILY_REQUEST_LIMIT = 40
 ROLLING_MINUTE_LIMIT = 20
+_PARTICLE_FREE_ALIAS = "particle-ai/particle-1:free"
+_PARTICLE_FREE_VERSION = re.compile(r"^particle-ai/particle-1-\d{8}:free$")
+
+
+def resolved_model_matches_alias(requested_model, resolved_model):
+    """Accept an exact route or the dated implementation of the approved alias."""
+    return (
+        isinstance(requested_model, str) and isinstance(resolved_model, str)
+        and (requested_model == resolved_model
+             or requested_model == _PARTICLE_FREE_ALIAS
+             and bool(_PARTICLE_FREE_VERSION.fullmatch(resolved_model)))
+    )
+
+
+def _valid_particle_free_lineage(value):
+    return (
+        isinstance(value, dict)
+        and value.get("requested_model") == _PARTICLE_FREE_ALIAS
+        and resolved_model_matches_alias(_PARTICLE_FREE_ALIAS, value.get("resolved_model"))
+        and value.get("provider_name") == "Particle AI"
+        and value.get("provider_tag") == "particle-ai/us"
+        and isinstance(value.get("generation_id"), str)
+        and _SAFE_LINEAGE_GENERATION.fullmatch(value["generation_id"])
+    )
 CLASSIFICATION_OUTPUT_TOKENS_PER_KEYWORD = 160
 MAX_CLASSIFICATION_BATCH_SIZE = 40
 MAX_CLASSIFICATION_PROMPT_BYTES = 80_000
@@ -110,6 +134,7 @@ class AIConfig:
     data_profile: str = STRICT_PRIVATE
     synthetic_schema: str | None = None
     public_data_collection_ids: frozenset[str] = frozenset()
+    bounded_unknown_quota_enabled: bool = False
     # Set only by the local owner-authorized demo probe command. This is not
     # populated from environment variables and is never enabled by API routes.
     operator_probe_enabled: bool = False
@@ -122,6 +147,12 @@ class AIConfig:
         enabled_value = str(environ.get("TRENDSCOUT_AI_ENABLED", "false")).strip().casefold()
         enabled = enabled_value == "true"
         config_error = None if enabled_value in {"true", "false"} else "AI_POLICY_DENIED"
+        bounded_value = str(
+            environ.get("TRENDSCOUT_AI_BOUNDED_UNKNOWN_QUOTA", "false")
+        ).strip().casefold()
+        bounded_unknown_quota = bounded_value == "true"
+        if bounded_value not in {"true", "false"}:
+            config_error = "AI_POLICY_DENIED"
         profile_value = str(environ.get("TRENDSCOUT_AI_DATA_PROFILE", PUBLIC_DATA)).strip().upper()
         data_profile = profile_value if profile_value in {
             STRICT_PRIVATE, PUBLIC_DEMO, PUBLIC_DATA,
@@ -154,6 +185,11 @@ class AIConfig:
                or source not in _SUPPORTED_AI_SOURCES for source in transfer_sources):
             transfer_sources = frozenset()
             config_error = "AI_POLICY_DENIED"
+        if bounded_unknown_quota and (
+                data_profile != PUBLIC_DATA
+                or sources != frozenset({WIKIMEDIA_SOURCE_ID})
+                or transfer_sources != frozenset({WIKIMEDIA_SOURCE_ID})):
+            config_error = "AI_POLICY_DENIED"
         public_context_ids = frozenset(
             item.strip() for item in str(
                 environ.get("TRENDSCOUT_AI_PUBLIC_DATA_COLLECTION_IDS", "")
@@ -177,6 +213,7 @@ class AIConfig:
             data_profile=data_profile,
             synthetic_schema=synthetic_schema,
             public_data_collection_ids=public_context_ids,
+            bounded_unknown_quota_enabled=bounded_unknown_quota,
         )
 
 
@@ -356,6 +393,14 @@ class AIService:
             eligible |= eligible_source_ids(PUBLIC_DEMO)
         return (self.config.allowed_sources & self.config.transfer_approved_sources
                 & eligible)
+
+    @property
+    def _bounded_unknown_quota_available(self):
+        return (
+            self.config.bounded_unknown_quota_enabled
+            and self.config.data_profile == PUBLIC_DATA
+            and self._allowed_sources == {WIKIMEDIA_SOURCE_ID}
+        )
 
     def _source_allowed_for_item(self, item):
         source_id, data_mode = item.get("source"), item.get("data_mode")
@@ -691,18 +736,25 @@ class AIService:
         total_cost = metadata.get("total_cost")
         return (
             isinstance(generation_id, str) and _SAFE_LINEAGE_GENERATION.fullmatch(generation_id)
-            and isinstance(model_id, str) and model_id.startswith("particle-ai/particle-1")
-            and model_id.endswith(":free")
+            and isinstance(model_id, str)
+            and (model_id == _PARTICLE_FREE_ALIAS
+                 or bool(_PARTICLE_FREE_VERSION.fullmatch(model_id)))
             and provider_name == "Particle AI"
             and type(total_cost) in (int, float) and math.isfinite(total_cost)
             and total_cost == 0
         )
 
-    def authorize_operator_recommendation(self, *, classification_job, generation_metadata):
-        """Open request two only after a validated preview and $0 generation evidence."""
+    def authorize_operator_recommendation(self, *, classification_job,
+                                          generation_metadata=None):
+        """Resume the authorized second call after a valid classification preview.
+
+        Generation metadata is recorded when available. Its absence leaves cost
+        UNKNOWN; the verified free-only model route remains the pre-call guard.
+        """
         if not self.config.operator_probe_enabled:
             raise AIExecutionError("AI_OPERATOR_PROBE_NOT_AUTHORIZED", status="POLICY_DENIED")
-        if not self._demo_generation_is_zero_cost(generation_metadata):
+        if (generation_metadata is not None
+                and not self._demo_generation_is_zero_cost(generation_metadata)):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
         if not isinstance(classification_job, dict):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
@@ -713,9 +765,10 @@ class AIService:
         if (not isinstance(job_id, str) or classification_job.get("status") != "COMPLETED"
                 or not isinstance(preview, dict) or preview.get("mode") != "PREVIEW"
                 or type(preview.get("processed")) is not int or preview["processed"] < 1
-                or not isinstance(model_lineage, dict)
-                or model_lineage.get("generation_id") != generation_metadata.get("id")
-                or model_lineage.get("resolved_model") != generation_metadata.get("model")):
+                or not _valid_particle_free_lineage(model_lineage)
+                or generation_metadata is not None
+                and (model_lineage.get("generation_id") != generation_metadata.get("id")
+                     or model_lineage.get("resolved_model") != generation_metadata.get("model"))):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
         now = self._now()
 
@@ -724,8 +777,7 @@ class AIService:
             probe = state.get("operator_probe")
             if (not isinstance(probe, dict) or probe.get("status") != "CLASSIFICATION_COMPLETE"
                     or probe.get("requests_reserved") != 1 or len(probe.get("attempt_ids", [])) != 1
-                    or _parse_time(probe.get("expires_at")) is None
-                    or _parse_time(probe.get("expires_at")) <= now):
+                    or _parse_time(probe.get("expires_at")) is None):
                 return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
             retry_at = _parse_time(state.get("provider_retry_at"))
             if retry_at is not None and retry_at > now:
@@ -743,15 +795,20 @@ class AIService:
                     or not isinstance(stored_job, dict) or stored_job.get("status") != "COMPLETED"
                     or not isinstance(stored_result, dict) or stored_result.get("mode") != "PREVIEW"
                     or stored_result.get("processed", 0) < 1
-                    or not isinstance(stored_lineage, dict)
-                    or stored_lineage.get("generation_id") != generation_metadata.get("id")
-                    or stored_lineage.get("resolved_model") != generation_metadata.get("model")):
+                    or not _valid_particle_free_lineage(stored_lineage)
+                    or stored_lineage.get("generation_id") != model_lineage.get("generation_id")
+                    or stored_lineage.get("resolved_model") != model_lineage.get("resolved_model")
+                    or generation_metadata is not None
+                    and (stored_lineage.get("generation_id") != generation_metadata.get("id")
+                         or stored_lineage.get("resolved_model") != generation_metadata.get("model"))):
                 return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
             probe["classification_acceptance"] = {
-                "generation_id": generation_metadata["id"],
-                "resolved_model": generation_metadata["model"],
-                "provider_name": generation_metadata["provider_name"],
-                "actual_cost": 0.0,
+                "generation_id": model_lineage["generation_id"],
+                "resolved_model": model_lineage["resolved_model"],
+                "provider_name": model_lineage["provider_name"],
+                "actual_cost": (generation_metadata.get("total_cost")
+                                if generation_metadata is not None else None),
+                "cost_status": "VERIFIED_ZERO" if generation_metadata is not None else "UNKNOWN",
                 "schema_validated": True,
                 "evidence_validated": True,
                 "accepted_at": _iso_now(now),
@@ -769,10 +826,12 @@ class AIService:
                                    retry_at=result.get("retry_at"))
         return result
 
-    def complete_bounded_operator_probe(self, *, recommendation_result, generation_metadata):
-        """Close the operator allowance after the recommendation's schema/evidence/$0 checks."""
-        if not self.config.operator_probe_enabled or not self._demo_generation_is_zero_cost(
-                generation_metadata):
+    def complete_bounded_operator_probe(self, *, recommendation_result,
+                                        generation_metadata=None):
+        """Close the probe after result validation, retaining UNKNOWN cost if needed."""
+        if (not self.config.operator_probe_enabled
+                or generation_metadata is not None
+                and not self._demo_generation_is_zero_cost(generation_metadata)):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
         if not isinstance(recommendation_result, dict):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
@@ -794,8 +853,10 @@ class AIService:
                 or not isinstance(recommendations, list) or not recommendations
                 or not evidence_ids or not isinstance(model_lineage, dict)
                 or model_lineage.get("status") != "RECORDED"
-                or model_lineage.get("generation_id") != generation_metadata.get("id")
-                or model_lineage.get("resolved_model") != generation_metadata.get("model")):
+                or not _valid_particle_free_lineage(model_lineage)
+                or generation_metadata is not None
+                and (model_lineage.get("generation_id") != generation_metadata.get("id")
+                     or model_lineage.get("resolved_model") != generation_metadata.get("model"))):
             raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
         for recommendation in recommendations:
             referenced = recommendation.get("supporting_evidence_ids") if isinstance(
@@ -824,15 +885,20 @@ class AIService:
                     or not isinstance(stored_job, dict) or stored_job.get("status") != "COMPLETED"
                     or not isinstance(stored_result, dict)
                     or not isinstance(stored_result.get("recommendations"), list)
-                    or not isinstance(stored_lineage, dict)
-                    or stored_lineage.get("generation_id") != generation_metadata.get("id")
-                    or stored_lineage.get("resolved_model") != generation_metadata.get("model")):
+                    or not _valid_particle_free_lineage(stored_lineage)
+                    or stored_lineage.get("generation_id") != model_lineage.get("generation_id")
+                    or stored_lineage.get("resolved_model") != model_lineage.get("resolved_model")
+                    or generation_metadata is not None
+                    and (stored_lineage.get("generation_id") != generation_metadata.get("id")
+                         or stored_lineage.get("resolved_model") != generation_metadata.get("model"))):
                 return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
             probe["recommendation_acceptance"] = {
-                "generation_id": generation_metadata["id"],
-                "resolved_model": generation_metadata["model"],
-                "provider_name": generation_metadata["provider_name"],
-                "actual_cost": 0.0,
+                "generation_id": model_lineage["generation_id"],
+                "resolved_model": model_lineage["resolved_model"],
+                "provider_name": model_lineage["provider_name"],
+                "actual_cost": (generation_metadata.get("total_cost")
+                                if generation_metadata is not None else None),
+                "cost_status": "VERIFIED_ZERO" if generation_metadata is not None else "UNKNOWN",
                 "schema_validated": True,
                 "evidence_validated": True,
                 "accepted_at": _iso_now(now),
@@ -1022,43 +1088,107 @@ class AIService:
         return self._quota_usage(self._read_state(), now)
 
     def capabilities(self):
+        now = self._now()
         try:
             state = self._read_state()
-            quota = self._quota_usage(state, self._now())
+            quota = self._quota_usage(state, now)
+            application_usage = self._application_request_usage(state.get("attempts"), now)
             storage_status = "AVAILABLE"
         except Exception:
             quota = {"daily_used": None, "daily_limit": DAILY_REQUEST_LIMIT,
                      "minute_used": None, "minute_limit": ROLLING_MINUTE_LIMIT,
                      "status": "UNKNOWN", "provider_quota": None}
+            application_usage = None
             storage_status = "UNAVAILABLE"
+        provider_retry_at = state.get("provider_retry_at") if storage_status == "AVAILABLE" else None
+        parsed_retry_at = _parse_time(provider_retry_at)
+        retry_state_valid = provider_retry_at is None or parsed_retry_at is not None
+        cooldown_active = parsed_retry_at is not None and parsed_retry_at > now
+        application_budget_available = (
+            application_usage is not None
+            and application_usage["daily_used"] < DAILY_REQUEST_LIMIT
+            and application_usage["minute_used"] < ROLLING_MINUTE_LIMIT
+        )
+        bounded_unknown_ready = (
+            self._bounded_unknown_quota_available
+            and quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}
+            and retry_state_valid and not cooldown_active
+            and application_budget_available
+        )
+        configured_models = bool(
+            self.config.collection_model and self.config.recommendation_model
+        )
         if not self.config.enabled:
             error = "AI_DISABLED"
         elif not self.config.api_key_present:
             error = "AI_KEY_MISSING"
+        elif not configured_models:
+            error = "AI_MODEL_UNAVAILABLE"
         elif not self._allowed_sources:
             error = "AI_POLICY_DENIED"
         elif self.config.config_error:
             error = self.config.config_error
-        elif quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}:
+        elif storage_status != "AVAILABLE":
+            error = "AI_STORAGE_UNAVAILABLE"
+        elif not retry_state_valid:
             error = "AI_QUOTA_UNKNOWN"
-        elif quota.get("status") == "COOLDOWN":
+        elif cooldown_active or quota.get("status") == "COOLDOWN":
             error = "AI_RATE_LIMITED"
         elif quota.get("status") == "EXHAUSTED":
             error = "AI_QUOTA_EXHAUSTED"
+        elif (quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}
+              and self._bounded_unknown_quota_available
+              and application_usage is not None
+              and application_usage["daily_used"] >= DAILY_REQUEST_LIMIT):
+            error = "AI_QUOTA_EXHAUSTED"
+        elif (quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}
+              and self._bounded_unknown_quota_available
+              and application_usage is not None
+              and application_usage["minute_used"] >= ROLLING_MINUTE_LIMIT):
+            error = "AI_RATE_LIMITED"
+        elif (quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}
+              and not bounded_unknown_ready):
+            error = "AI_QUOTA_UNKNOWN"
         else:
             error = None
         verifications = dict(state.get("model_verifications", {})) if storage_status == "AVAILABLE" else {}
-        provider_retry_at = state.get("provider_retry_at") if storage_status == "AVAILABLE" else None
 
         def verification(model_id):
             if not model_id:
                 return {"status": "NOT_CONFIGURED", "verified_at": None}
             return verifications.get(model_id, {"status": "NOT_CHECKED", "verified_at": None})
 
+        if application_usage is None:
+            application_budget = {
+                "status": "UNKNOWN", "daily_used": None,
+                "daily_limit": DAILY_REQUEST_LIMIT, "minute_used": None,
+                "minute_limit": ROLLING_MINUTE_LIMIT,
+            }
+        else:
+            application_budget_status = (
+                "DAILY_EXHAUSTED" if application_usage["daily_used"] >= DAILY_REQUEST_LIMIT
+                else "MINUTE_LIMITED" if application_usage["minute_used"] >= ROLLING_MINUTE_LIMIT
+                else "AVAILABLE"
+            )
+            application_budget = {
+                "status": application_budget_status,
+                **application_usage, "daily_limit": DAILY_REQUEST_LIMIT,
+                "minute_limit": ROLLING_MINUTE_LIMIT,
+            }
+        provider_quota_status = (
+            "UNKNOWN" if quota.get("status") in {"UNINITIALIZED", "UNKNOWN"}
+            else quota.get("status")
+        )
+        ordinary_quota_ready = quota.get("status") == "VERIFIED"
+        enabled = (
+            self.config.enabled and self.config.api_key_present and configured_models
+            and bool(self._allowed_sources) and self.config.config_error is None
+            and storage_status == "AVAILABLE" and retry_state_valid and not cooldown_active
+            and (ordinary_quota_ready or bounded_unknown_ready)
+        )
+
         return {
-            "enabled": self.config.enabled and self.config.api_key_present and bool(self._allowed_sources)
-                       and self.config.config_error is None and storage_status == "AVAILABLE"
-                       and quota.get("status") == "VERIFIED",
+            "enabled": enabled,
             "storage": storage_status,
             "models": {"classification": self.config.collection_model or None,
                        "recommendation": self.config.recommendation_model or None},
@@ -1067,6 +1197,13 @@ class AIService:
                 "recommendation": verification(self.config.recommendation_model),
             },
             "quota": quota,
+            "provider_quota_status": provider_quota_status,
+            "admission_mode": (
+                "BOUNDED_PROVIDER_QUOTA_UNKNOWN" if bounded_unknown_ready
+                else "PROVIDER_QUOTA_VERIFIED" if ordinary_quota_ready
+                else "BLOCKED"
+            ),
+            "application_budget": application_budget,
             "provider_retry_at": (provider_retry_at if isinstance(provider_retry_at, str)
                                   and len(provider_retry_at) <= 64 else None),
             "source_policy": {
@@ -1243,13 +1380,33 @@ class AIService:
                 return original_state, {"error": "AI_RATE_LIMITED",
                                "retry_at": provider_retry_at.isoformat()}
             if quota["status"] in {"UNINITIALIZED", "UNKNOWN"}:
+                if self._bounded_unknown_quota_available:
+                    usage = self._application_request_usage(state["attempts"], now)
+                    if usage is None:
+                        return original_state, {"error": "AI_QUOTA_UNKNOWN"}
+                    if usage["daily_used"] >= DAILY_REQUEST_LIMIT:
+                        return original_state, {"error": "AI_QUOTA_EXHAUSTED"}
+                    if usage["minute_used"] >= ROLLING_MINUTE_LIMIT:
+                        return original_state, {"error": "AI_RATE_LIMITED"}
+                    attempt["admission_mode"] = "BOUNDED_PROVIDER_QUOTA_UNKNOWN"
+                    if provider_retry_at is not None:
+                        state["provider_retry_at"] = None
+                    self._prune_state(state, now)
+                    state["attempts"].append(attempt)
+                    job = state["jobs"].get(job_id)
+                    if isinstance(job, dict):
+                        job["status"] = "RUNNING"
+                        job["attempt_count"] = int(job.get("attempt_count", 0)) + 1
+                        job["updated_at"] = _iso_now(now)
+                    return state, {"attempt_id": attempt_id}
                 probe = state.get("operator_probe")
                 if not self.config.operator_probe_enabled or not isinstance(probe, dict):
                     return original_state, {"error": "AI_QUOTA_UNKNOWN"}
                 expires_at = _parse_time(probe.get("expires_at"))
                 reserved = probe.get("requests_reserved")
                 attempt_ids = probe.get("attempt_ids")
-                if (expires_at is None or expires_at <= now or type(reserved) is not int
+                if (expires_at is None or type(reserved) is not int
+                        or reserved == 0 and expires_at <= now
                         or not isinstance(attempt_ids, list) or len(attempt_ids) != reserved
                         or probe.get("provider_quota_status") != "UNKNOWN"
                         or probe.get("requests_authorized") != 2 or reserved >= 2):

@@ -1064,9 +1064,12 @@ async def normal_google_live_composition(*, user_agent,
 
         youtube_collector = (GuardedQueryCollector(youtube_gateway, utcnow=utcnow)
                              if youtube_gateway is not None else None)
-        # Leave time inside Vercel's existing 60-second Function ceiling for
-        # Firestore checkpoint commits and request cleanup after provider work.
-        source_deadline_seconds = 45 if vercel_shared_live else 60
+        # Google can spend three guarded 15-second attempts (discovery plus two
+        # selective SERP checks). A 75-second source deadline leaves room for
+        # quota checks and durable checkpoint commits under Vercel's 120-second
+        # Function ceiling.
+        google_bing_deadline_seconds = 75 if vercel_shared_live else 60
+        youtube_deadline_seconds = 45 if vercel_shared_live else 60
 
         source_handlers = D5SourceHandlers(
             query_collectors={
@@ -1080,7 +1083,7 @@ async def normal_google_live_composition(*, user_agent,
             plan=DEFAULT_QUERY_PLAN,
             limits=CollectionLimits(
                 max_queries=1, max_pages_per_query=1, max_requests=3,
-                max_retries_per_page=0, deadline_seconds=source_deadline_seconds,
+                max_retries_per_page=0, deadline_seconds=google_bing_deadline_seconds,
             ),
             observation_date=lambda: (
                 utcnow().astimezone(timezone.utc) - timedelta(days=2)
@@ -1089,8 +1092,8 @@ async def normal_google_live_composition(*, user_agent,
             resolve_cache_grant=resolve_cache_grant,
             source_limits={YOUTUBE_SOURCE_ID: CollectionLimits(
                 max_queries=youtube_max_queries, max_pages_per_query=1,
-                max_requests=youtube_max_queries,
-                max_retries_per_page=0, deadline_seconds=source_deadline_seconds,
+                max_requests=youtube_max_queries, max_retries_per_page=0,
+                deadline_seconds=youtube_deadline_seconds,
                 max_results=50,
                 result_byte_budget=MAX_YOUTUBE_BATCH_BYTES,
             )},

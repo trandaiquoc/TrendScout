@@ -182,7 +182,7 @@ def reserve_owner_acceptance_slot(atomic_store, state_key: str, now: datetime, *
 
 def manual_candidate_slot(atomic_store, state_key: str, now: datetime, *,
                           job_id: str, error_code: str) -> str | None:
-    """Check a user-authenticated manual slot while preserving source spacing."""
+    """Check a user-authenticated manual slot without scheduled spacing."""
     slot, _metadata = manual_candidate_decision(
         atomic_store, state_key, now, job_id=job_id, error_code=error_code,
     )
@@ -191,24 +191,22 @@ def manual_candidate_slot(atomic_store, state_key: str, now: datetime, *,
 
 def manual_candidate_decision(atomic_store, state_key: str, now: datetime, *,
                               job_id: str, error_code: str) -> tuple[str | None, dict]:
-    """Return refresh permission and its cooldown timestamp from one state read."""
+    """Return an owner-triggered slot without the automatic schedule cooldown."""
     if (not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
             or not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id)):
         raise AdmissionDenied(error_code)
     state = _schedule_state(atomic_store, state_key, error_code=error_code)
     slot = f"{MANUAL_SLOT_PREFIX}{job_id}"
-    if state["last_slot"] == slot:
-        return slot, _manual_schedule_metadata_from_state(state, now)
-    last_attempt = state["last_attempt_at"]
-    if last_attempt is not None and now.astimezone(timezone.utc) - last_attempt.astimezone(
-            timezone.utc) < MIN_SOURCE_SPACING:
-        return None, _manual_schedule_metadata_from_state(state, now)
     return slot, _manual_schedule_metadata_from_state(state, now)
 
 
 def reserve_manual_source_slot(atomic_store, state_key: str, now: datetime, *,
                                job_id: str, error_code: str) -> str | None:
-    """Atomically reserve an authenticated manual refresh; retries are idempotent."""
+    """Atomically reserve an authenticated manual refresh; retries are idempotent.
+
+    The eight-hour spacing applies to automatic slots only. An explicit manual
+    Fetch may proceed as long as provider admission grants a request.
+    """
     if (not callable(getattr(atomic_store, "transact", None))
             or not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
             or not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id)):
@@ -237,11 +235,6 @@ def reserve_manual_source_slot(atomic_store, state_key: str, now: datetime, *,
 
         if state["last_slot"] == slot:
             return raw_state, slot
-        last_attempt = state["last_attempt_at"]
-        if (last_attempt is not None
-                and now.astimezone(timezone.utc) - last_attempt.astimezone(timezone.utc)
-                < MIN_SOURCE_SPACING):
-            return raw_state, None
         return {
             "schema": 1,
             "last_attempt_at": now.astimezone(timezone.utc).isoformat(),

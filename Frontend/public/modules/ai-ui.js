@@ -51,6 +51,7 @@ function renderCapabilityPanel() {
   }
   const models = capabilities.models || {};
   const quota = capabilities.quota || {};
+  const applicationBudget = capabilities.application_budget || {};
   const verification = capabilities.metadata_verification || {};
   const policy = capabilities.source_policy || {};
   const status = capabilities.enabled === true
@@ -60,8 +61,10 @@ function renderCapabilityPanel() {
     [label('ai.settings.classification-model', 'Classification model'), models.classification || label('common.unavailable', 'Unavailable')],
     [label('ai.settings.recommendation-model', 'Recommendation model'), models.recommendation || label('common.unavailable', 'Unavailable')],
     [label('ai.settings.provider', 'Provider availability'), `${verification.classification?.status || 'NOT_CHECKED'} / ${verification.recommendation?.status || 'NOT_CHECKED'}`],
-    [label('ai.settings.shared-quota', 'Shared quota'), `${number(quota.daily_used)} / ${number(quota.daily_limit)} daily · ${number(quota.minute_used)} / ${number(quota.minute_limit)} per minute`],
-    [label('ai.settings.provider-quota', 'Provider quota'), capabilities.provider_quota?.is_free_tier === true ? label('ai.settings.free-provider', 'Free tier') : capabilities.provider_quota?.is_free_tier === false ? label('ai.settings.provider-not-free', 'Not marked free') : label('common.unavailable', 'Unavailable')],
+    [label('ai.settings.shared-quota', 'Provider quota usage'), `${number(quota.daily_used)} / ${number(quota.daily_limit)} daily · ${number(quota.minute_used)} / ${number(quota.minute_limit)} per minute`],
+    [label('ai.settings.application-budget', 'Application request budget'), `${number(applicationBudget.daily_used)} / ${number(applicationBudget.daily_limit)} daily · ${number(applicationBudget.minute_used)} / ${number(applicationBudget.minute_limit)} per minute`],
+    [label('ai.settings.admission', 'Admission mode'), capabilities.admission_mode === 'BOUNDED_PROVIDER_QUOTA_UNKNOWN' ? label('ai.settings.admission-bounded', 'Bounded internal budget; provider quota unknown') : capabilities.admission_mode === 'PROVIDER_QUOTA_VERIFIED' ? label('ai.settings.admission-verified', 'Provider quota verified') : label('ai.settings.admission-blocked', 'Blocked')],
+    [label('ai.settings.provider-quota', 'Provider quota status'), capabilities.provider_quota_status || 'UNKNOWN'],
     [label('ai.settings.cooldown', 'Provider cooldown / retry'), capabilities.provider_retry_at ? formatTimestamp(capabilities.provider_retry_at, getLocale()) : label('common.unavailable', 'Unavailable')],
     [label('ai.settings.eligible-sources', 'AI-eligible sources'), Array.isArray(policy.eligible_sources) ? policy.eligible_sources.map(localeSource).join(', ') || label('common.none', 'None') : label('common.unavailable', 'Unavailable')],
     [label('ai.settings.restricted-sources', 'AI-restricted sources'), Array.isArray(policy.restricted_sources) ? policy.restricted_sources.map(localeSource).join(', ') || label('common.none', 'None') : label('common.unavailable', 'Unavailable')],

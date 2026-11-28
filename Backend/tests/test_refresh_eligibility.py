@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -224,7 +224,7 @@ class RefreshEligibilityTests(unittest.TestCase):
         self.assertEqual(metadata["slots"], ["07:00", "15:00", "23:00"])
         self.assertEqual(metadata["minimum_spacing_hours"], 8)
 
-    def test_authenticated_manual_slot_ignores_clock_window_but_keeps_spacing_and_retry_identity(self):
+    def test_authenticated_manual_slot_ignores_clock_window_and_spacing_with_retry_identity(self):
         job_id = "a" * 32
         first = datetime(2026, 11, 16, 10, 11, tzinfo=LOCAL)
         self.assertEqual(manual_candidate_slot(
@@ -242,20 +242,24 @@ class RefreshEligibilityTests(unittest.TestCase):
             job_id=job_id, error_code="BING_SCHEDULE_STATE_INVALID",
         ), f"MANUAL:{job_id}")
         other_job = "b" * 32
-        retry_at = datetime(2026, 11, 16, 18, 10, 59, tzinfo=LOCAL)
-        self.assertIsNone(manual_candidate_slot(
+        retry_at = datetime(2026, 11, 16, 10, 12, tzinfo=LOCAL)
+        self.assertEqual(manual_candidate_slot(
             self.store, BING_REFRESH_STATE_KEY, retry_at,
             job_id=other_job, error_code="BING_SCHEDULE_STATE_INVALID",
-        ))
+        ), f"MANUAL:{other_job}")
+        self.assertEqual(reserve_manual_source_slot(
+            self.store, BING_REFRESH_STATE_KEY, retry_at,
+            job_id=other_job, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{other_job}")
         self.assertEqual(manual_schedule_metadata(
             self.store, BING_REFRESH_STATE_KEY, retry_at,
             error_code="BING_SCHEDULE_STATE_INVALID",
-        )["next_eligible_at"], "2026-11-16T11:11:00+00:00")
+        )["next_eligible_at"], "2026-11-16T11:12:00+00:00")
         self.assertEqual(reserve_manual_source_slot(
             self.store, BING_REFRESH_STATE_KEY,
-            datetime(2026, 11, 16, 18, 11, tzinfo=LOCAL),
-            job_id=other_job, error_code="BING_SCHEDULE_STATE_INVALID",
-        ), f"MANUAL:{other_job}")
+            retry_at + timedelta(minutes=1),
+            job_id="c" * 32, error_code="BING_SCHEDULE_STATE_INVALID",
+        ), f"MANUAL:{'c' * 32}")
 
 
 if __name__ == "__main__":

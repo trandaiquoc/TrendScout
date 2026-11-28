@@ -34,6 +34,7 @@ from app.ai.runtime import (
     AIConfig,
     AIExecutionError,
     AIService,
+    resolved_model_matches_alias,
 )
 from app.ai.schemas import (
     InvalidAIOutput,
@@ -266,6 +267,17 @@ def public_data_config(*, collection_ids=()):
         transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
         api_key_present=True, data_profile=PUBLIC_DATA,
         public_data_collection_ids=frozenset(collection_ids),
+    )
+
+
+def bounded_unknown_quota_config(*, sources=None):
+    allowed = frozenset(sources if sources is not None else {WIKIMEDIA_SOURCE_ID})
+    return AIConfig(
+        enabled=True, collection_model="particle-ai/particle-1:free",
+        recommendation_model="particle-ai/particle-1:free",
+        allowed_sources=allowed, transfer_approved_sources=allowed,
+        api_key_present=True, data_profile=PUBLIC_DATA,
+        bounded_unknown_quota_enabled=True,
     )
 
 
@@ -1104,6 +1116,92 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("youtube_video_search", capabilities["source_policy"]["restricted_sources"])
         self.assertNotIn("api_key", capabilities)
 
+    def test_unknown_provider_quota_uses_atomic_internal_budget_without_fake_evidence(self):
+        state = MemoryAtomicState()
+        state.synthetic_test_mode = False
+        service = AIService(state, config=bounded_unknown_quota_config(),
+                            provider=FakeProvider(), utcnow=lambda: NOW)
+        capabilities = service.capabilities()
+        self.assertTrue(capabilities["enabled"])
+        self.assertEqual(capabilities["provider_quota_status"], "UNKNOWN")
+        self.assertEqual(capabilities["admission_mode"], "BOUNDED_PROVIDER_QUOTA_UNKNOWN")
+        self.assertEqual(capabilities["application_budget"]["daily_used"], 0)
+        self.assertEqual(capabilities["quota"]["status"], "UNINITIALIZED")
+        self.assertIsNone(capabilities["provider_quota"])
+
+        attempt_id = service._reserve("bounded-request", "classification")
+        saved = state.snapshot("trendscout-ai-engine-v1")
+        attempt = next(item for item in saved["attempts"] if item["id"] == attempt_id)
+        self.assertEqual(attempt["admission_mode"], "BOUNDED_PROVIDER_QUOTA_UNKNOWN")
+        self.assertEqual(saved["quota_admission"]["status"], "UNINITIALIZED")
+
+        service._finish_attempt(
+            attempt_id, outcome="FAILED", error_code="AI_RATE_LIMITED",
+            retry_at=(NOW + timedelta(minutes=2)).isoformat(),
+        )
+        with self.assertRaises(AIExecutionError) as limited:
+            service._reserve("blocked-during-provider-cooldown", "recommendations")
+        self.assertEqual(limited.exception.code, "AI_RATE_LIMITED")
+        self.assertFalse(service.capabilities()["enabled"])
+
+    def test_unknown_quota_reservations_remain_atomic_under_concurrency(self):
+        state = MemoryAtomicState()
+        state.synthetic_test_mode = False
+        service = AIService(state, config=bounded_unknown_quota_config(),
+                            provider=FakeProvider(), utcnow=lambda: NOW)
+        barrier = threading.Barrier(26)
+        successes, errors = [], []
+
+        def reserve(index):
+            barrier.wait()
+            try:
+                successes.append(service._reserve(f"bounded-{index}", "classification"))
+            except AIExecutionError as exc:
+                errors.append(exc.code)
+
+        threads = [threading.Thread(target=reserve, args=(index,)) for index in range(25)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(len(successes), ROLLING_MINUTE_LIMIT)
+        self.assertEqual(len(errors), 5)
+        self.assertTrue(all(code == "AI_RATE_LIMITED" for code in errors))
+        saved = state.snapshot("trendscout-ai-engine-v1")
+        self.assertEqual(saved["quota_admission"]["status"], "UNINITIALIZED")
+        self.assertEqual(service.capabilities()["application_budget"]["minute_used"],
+                         ROLLING_MINUTE_LIMIT)
+
+    def test_bounded_unknown_quota_environment_is_limited_to_public_wikimedia(self):
+        configured = AIConfig.from_environment({
+            "TRENDSCOUT_AI_ENABLED": "true",
+            "TRENDSCOUT_AI_BOUNDED_UNKNOWN_QUOTA": "true",
+            "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DATA,
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": WIKIMEDIA_SOURCE_ID,
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": WIKIMEDIA_SOURCE_ID,
+            "TRENDSCOUT_AI_COLLECTION_MODEL": "particle-ai/particle-1:free",
+            "TRENDSCOUT_AI_RECOMMENDATION_MODEL": "particle-ai/particle-1:free",
+            "OPENROUTER_API_KEY": "present",
+        })
+        self.assertTrue(configured.bounded_unknown_quota_enabled)
+        self.assertIsNone(configured.config_error)
+        denied = AIConfig.from_environment({
+            "TRENDSCOUT_AI_ENABLED": "true",
+            "TRENDSCOUT_AI_BOUNDED_UNKNOWN_QUOTA": "true",
+            "TRENDSCOUT_AI_DATA_PROFILE": PUBLIC_DATA,
+            "TRENDSCOUT_AI_ALLOWED_SOURCES": YOUTUBE_SOURCE_ID,
+            "TRENDSCOUT_AI_TRANSFER_APPROVED_SOURCES": YOUTUBE_SOURCE_ID,
+            "OPENROUTER_API_KEY": "present",
+        })
+        self.assertEqual(denied.config_error, "AI_POLICY_DENIED")
+        self.assertTrue(resolved_model_matches_alias(
+            "particle-ai/particle-1:free", "particle-ai/particle-1-20261027:free",
+        ))
+        self.assertFalse(resolved_model_matches_alias(
+            "particle-ai/particle-1:free", "particle-ai/particle-1-test:free",
+        ))
+
     def test_exact_cross_source_keyword_is_one_prompt_group_and_fans_out_durable_ids(self):
         provider = FakeProvider([classification_response])
         service = AIService(MemoryAtomicState(), config=config(
@@ -1875,7 +1973,7 @@ class OperatorProbeTests(unittest.TestCase):
             self.service.authorize_bounded_operator_probe(authorized=False)
         self.assertEqual(unapproved.exception.code, "AI_OPERATOR_PROBE_NOT_AUTHORIZED")
 
-        state = self.service._transact(lambda value: (
+        self.service._transact(lambda value: (
             value, value.__setitem__("provider_retry_at", (NOW + timedelta(minutes=1)).isoformat()) or True,
         ))
         with self.assertRaises(AIExecutionError) as cooldown:
@@ -1910,7 +2008,7 @@ class OperatorProbeTests(unittest.TestCase):
         self.assertEqual(wrong_order.exception.code, "AI_OPERATOR_PROBE_NOT_AUTHORIZED")
 
         generation_id = "gen-classification001"
-        resolved_model = "particle-ai/particle-1-test:free"
+        resolved_model = "particle-ai/particle-1-20261027:free"
         model_lineage = {
             "requested_model": "particle-ai/particle-1:free",
             "resolved_model": resolved_model, "provider_name": "Particle AI",
@@ -1941,10 +2039,13 @@ class OperatorProbeTests(unittest.TestCase):
                 classification_job=classification_job,
                 generation_metadata={**classification_metadata, "total_cost": 0.01},
             )
-        self.service.authorize_operator_recommendation(
-            classification_job=classification_job,
-            generation_metadata=classification_metadata,
-        )
+        self.service._transact(lambda value: (
+            value,
+            value["operator_probe"].update({
+                "expires_at": (NOW - timedelta(hours=1)).isoformat(),
+            }) or True,
+        ))
+        self.service.authorize_operator_recommendation(classification_job=classification_job)
 
         recommendation_job_id = "operator-recommendation-job"
         recommendation_attempt = self.service._reserve(recommendation_job_id, "recommendations")
@@ -1972,16 +2073,17 @@ class OperatorProbeTests(unittest.TestCase):
         ))
         result = self.service.complete_bounded_operator_probe(
             recommendation_result=recommendation_result,
-            generation_metadata={
-                "id": recommendation_generation, "model": resolved_model,
-                "provider_name": "Particle AI", "total_cost": 0.0,
-            },
+            generation_metadata=None,
         )
         self.assertEqual(result["status"], "COMPLETE")
         stored = self.service._read_state()
         self.assertEqual(stored["operator_probe"]["status"], "COMPLETE")
         self.assertEqual(stored["operator_probe"]["requests_reserved"], 2)
         self.assertEqual(stored["quota_admission"]["status"], "UNINITIALIZED")
+        self.assertEqual(stored["operator_probe"]["classification_acceptance"]["cost_status"],
+                         "UNKNOWN")
+        self.assertEqual(stored["operator_probe"]["recommendation_acceptance"]["cost_status"],
+                         "UNKNOWN")
         self.assertEqual([item["admission_mode"] for item in stored["attempts"]],
                          ["OPERATOR_BOUNDED", "OPERATOR_BOUNDED"])
         with self.assertRaises(AIExecutionError) as exhausted:
