@@ -840,6 +840,172 @@ def test_postgres_provider_rate_limit_cooldown_is_shared_across_tasks():
         assert services[0]._quota()["daily_used"] == 2
 
 
+def test_postgres_owner_probe_is_atomic_two_calls_and_keeps_provider_quota_unknown():
+    with isolated_schema() as (environment, schema, _connection):
+        model_lineage = {
+            "requested_model": "particle-ai/particle-1:free",
+            "resolved_model": "particle-ai/particle-1-test:free",
+            "provider_name": "Particle AI",
+            "provider_tag": "particle-ai/us",
+            "generation_id": "gen-classification001",
+        }
+        config = AIConfig(
+            enabled=True,
+            collection_model="particle-ai/particle-1:free",
+            recommendation_model="particle-ai/particle-1:free",
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            api_key_present=True,
+            data_profile=PUBLIC_DATA,
+            operator_probe_enabled=True,
+        )
+        services = [AIService(
+            PostgresAtomicStateStore(environment, schema=schema),
+            config=config, provider=ProposalThenAssignProvider(), utcnow=lambda: NOW,
+        ) for _ in range(2)]
+        first = services[0]
+        ordinary_config = AIConfig(
+            enabled=True,
+            collection_model="particle-ai/particle-1:free",
+            recommendation_model="particle-ai/particle-1:free",
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            api_key_present=True,
+            data_profile=PUBLIC_DATA,
+        )
+        ordinary = AIService(
+            PostgresAtomicStateStore(environment, schema=schema),
+            config=ordinary_config, provider=ProposalThenAssignProvider(), utcnow=lambda: NOW,
+        )
+        with pytest.raises(AIExecutionError) as automatic_blocked:
+            ordinary._reserve("ordinary-inference", "classification")
+        assert automatic_blocked.value.code == "AI_QUOTA_UNKNOWN"
+
+        first._transact(lambda state: (
+            state,
+            state.__setitem__("provider_retry_at", (NOW + timedelta(minutes=1)).isoformat()) or True,
+        ))
+        with pytest.raises(AIExecutionError) as cooldown_blocked:
+            first.authorize_bounded_operator_probe(authorized=True)
+        assert cooldown_blocked.value.code == "AI_RATE_LIMITED"
+        first._transact(lambda state: (
+            state, state.__setitem__("provider_retry_at", None) or True,
+        ))
+
+        authorization = first.authorize_bounded_operator_probe(authorized=True)
+        assert authorization["provider_quota_status"] == "UNKNOWN"
+        assert authorization["requests_authorized"] == 2
+        assert first.capabilities()["enabled"] is False
+        assert first.capabilities()["provider_quota"] is None
+
+        with pytest.raises(AIExecutionError) as wrong_order:
+            services[1]._reserve("recommendation-before-classification", "recommendations")
+        assert wrong_order.value.code == "AI_OPERATOR_PROBE_NOT_AUTHORIZED"
+
+        classification_job_id = "demo-classification-job"
+        classification_attempt = first._reserve(classification_job_id, "classification")
+        first._finish_attempt(classification_attempt, outcome="COMPLETED",
+                              model_lineage=model_lineage)
+        first._transact(lambda state: (
+            state,
+            state["jobs"].__setitem__(classification_job_id, {
+                "status": "COMPLETED",
+                "result": {"mode": "PREVIEW", "processed": 1},
+                "lineage": {"model_provider": model_lineage},
+            }) or True,
+        ))
+        classification_job = {
+            "job_id": classification_job_id,
+            "status": "COMPLETED",
+            "preview_result": {"mode": "PREVIEW", "processed": 1},
+            "lineage": {"model_provider": model_lineage},
+        }
+        generation_metadata = {
+            "id": "gen-classification001",
+            "model": "particle-ai/particle-1-test:free",
+            "provider_name": "Particle AI",
+            "total_cost": 0.0,
+        }
+        with pytest.raises(AIExecutionError) as nonzero_cost:
+            first.authorize_operator_recommendation(
+                classification_job=classification_job,
+                generation_metadata={**generation_metadata, "total_cost": 0.01},
+            )
+        assert nonzero_cost.value.code == "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"
+        first.authorize_operator_recommendation(
+            classification_job=classification_job,
+            generation_metadata=generation_metadata,
+        )
+
+        def reserve_recommendation(index):
+            try:
+                return services[index % 2]._reserve(
+                    f"demo-recommendation-job-{index}", "recommendations",
+                )
+            except AIExecutionError:
+                return None
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            reserved = list(executor.map(reserve_recommendation, range(6)))
+        successful = [attempt_id for attempt_id in reserved if attempt_id]
+        assert len(successful) == 1
+        recommendation_attempt = successful[0]
+        recommendation_job_id = next(
+            item["job_id"] for item in first._read_state()["attempts"]
+            if item["id"] == recommendation_attempt
+        )
+        recommendation_lineage = {
+            **model_lineage,
+            "status": "RECORDED",
+            "generation_id": "gen-recommendation001",
+        }
+        first._finish_attempt(recommendation_attempt, outcome="COMPLETED",
+                              model_lineage=recommendation_lineage)
+        recommendation_result = {
+            "job_id": recommendation_job_id,
+            "status": "COMPLETED",
+            "processed": 1,
+            "recommendations": [{"supporting_evidence_ids": ["live-evidence-1"]}],
+            "evidence_scope": [{
+                "source_id": WIKIMEDIA_SOURCE_ID,
+                "data_mode": "LIVE",
+                "evidence_context": [{"evidence_id": "live-evidence-1"}],
+            }],
+            "lineage": {"model_provider": recommendation_lineage},
+        }
+        first._transact(lambda state: (
+            state,
+            state["jobs"].__setitem__(recommendation_job_id, {
+                "status": "COMPLETED",
+                "result": recommendation_result,
+                "lineage": {"model_provider": recommendation_lineage},
+            }) or True,
+        ))
+        final = first.complete_bounded_operator_probe(
+            recommendation_result=recommendation_result,
+            generation_metadata={
+                "id": "gen-recommendation001",
+                "model": "particle-ai/particle-1-test:free",
+                "provider_name": "Particle AI",
+                "total_cost": 0.0,
+            },
+        )
+        assert final == {"status": "COMPLETE", "provider_quota_status": "UNKNOWN",
+                         "requests_reserved": 2}
+        state = first._read_state()
+        assert state["operator_probe"]["status"] == "COMPLETE"
+        assert state["quota_admission"]["status"] == "UNINITIALIZED"
+        assert [item["admission_mode"] for item in state["attempts"]] == [
+            "OPERATOR_BOUNDED", "OPERATOR_BOUNDED",
+        ]
+        with pytest.raises(AIExecutionError) as exhausted:
+            first._reserve("third-request", "classification")
+        assert exhausted.value.code == "AI_OPERATOR_PROBE_NOT_AUTHORIZED"
+        assert AIConfig.from_environment({
+            "TRENDSCOUT_AI_OPERATOR_PROBE_ENABLED": "true",
+        }).operator_probe_enabled is False
+
+
 def test_public_demo_profile_is_bound_to_attested_synthetic_postgres_schema():
     with isolated_schema("ts_test_ai_demo_") as (environment, schema, connection):
         store = PostgresCollectionStore(environment, schema=schema, data_mode_scope="SYNTHETIC")

@@ -568,13 +568,17 @@ class OpenRouterAdapter:
             result["generation_time"] = float(generation_time)
         return result or None
 
-    def key_quota_metadata(self) -> dict | None:
+    def key_quota_metadata(self, *, strict: bool = False) -> dict | None:
         """Return only provider quota counters, excluding labels and key metadata."""
+        if type(strict) is not bool:
+            raise TypeError("strict must be a boolean")
         if self._api_key is None:
             return None
         try:
             payload, _ = self._request("GET", "/key", authenticated=True)
         except OpenRouterError:
+            if strict:
+                raise
             return None
         data = payload.get("data")
         if not isinstance(data, dict):

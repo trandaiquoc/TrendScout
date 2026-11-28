@@ -1852,5 +1852,168 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(provider.calls and len(provider.calls), 1)
 
 
+class OperatorProbeTests(unittest.TestCase):
+    def setUp(self):
+        self.state = MemoryAtomicState()
+        self.state.synthetic_test_mode = False
+        self.config = AIConfig(
+            enabled=True,
+            collection_model="particle-ai/particle-1:free",
+            recommendation_model="particle-ai/particle-1:free",
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            api_key_present=True,
+            data_profile=PUBLIC_DATA,
+            operator_probe_enabled=True,
+        )
+        self.service = AIService(
+            self.state, config=self.config, provider=FakeProvider(), utcnow=lambda: NOW,
+        )
+
+    def test_operator_probe_requires_owner_authorization_and_stays_separate_from_provider_quota(self):
+        with self.assertRaises(AIExecutionError) as unapproved:
+            self.service.authorize_bounded_operator_probe(authorized=False)
+        self.assertEqual(unapproved.exception.code, "AI_OPERATOR_PROBE_NOT_AUTHORIZED")
+
+        state = self.service._transact(lambda value: (
+            value, value.__setitem__("provider_retry_at", (NOW + timedelta(minutes=1)).isoformat()) or True,
+        ))
+        with self.assertRaises(AIExecutionError) as cooldown:
+            self.service.authorize_bounded_operator_probe(authorized=True)
+        self.assertEqual(cooldown.exception.code, "AI_RATE_LIMITED")
+        self.service._transact(lambda value: (
+            value, value.__setitem__("provider_retry_at", None) or True,
+        ))
+
+        authorization = self.service.authorize_bounded_operator_probe(authorized=True)
+        self.assertEqual(authorization["provider_quota_status"], "UNKNOWN")
+        self.assertEqual(authorization["requests_authorized"], 2)
+        self.assertFalse(self.service.capabilities()["enabled"])
+        self.assertIsNone(self.service.capabilities()["provider_quota"])
+
+        ordinary_config = AIConfig(
+            enabled=True,
+            collection_model="particle-ai/particle-1:free",
+            recommendation_model="particle-ai/particle-1:free",
+            allowed_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            transfer_approved_sources=frozenset({WIKIMEDIA_SOURCE_ID}),
+            api_key_present=True,
+            data_profile=PUBLIC_DATA,
+        )
+        ordinary = AIService(self.state, config=ordinary_config, provider=FakeProvider(),
+                             utcnow=lambda: NOW)
+        with self.assertRaises(AIExecutionError) as blocked:
+            ordinary._reserve("ordinary-inference", "classification")
+        self.assertEqual(blocked.exception.code, "AI_QUOTA_UNKNOWN")
+        with self.assertRaises(AIExecutionError) as wrong_order:
+            self.service._reserve("recommendation-first", "recommendations")
+        self.assertEqual(wrong_order.exception.code, "AI_OPERATOR_PROBE_NOT_AUTHORIZED")
+
+        generation_id = "gen-classification001"
+        resolved_model = "particle-ai/particle-1-test:free"
+        model_lineage = {
+            "requested_model": "particle-ai/particle-1:free",
+            "resolved_model": resolved_model, "provider_name": "Particle AI",
+            "provider_tag": "particle-ai/us", "generation_id": generation_id,
+        }
+        classification_job_id = "operator-classification-job"
+        classification_attempt = self.service._reserve(classification_job_id, "classification")
+        self.service._finish_attempt(classification_attempt, outcome="COMPLETED",
+                                     model_lineage=model_lineage)
+        self.service._transact(lambda value: (
+            value,
+            value["jobs"].__setitem__(classification_job_id, {
+                "status": "COMPLETED", "result": {"mode": "PREVIEW", "processed": 1},
+                "lineage": {"model_provider": model_lineage},
+            }) or True,
+        ))
+        classification_job = {
+            "job_id": classification_job_id, "status": "COMPLETED",
+            "preview_result": {"mode": "PREVIEW", "processed": 1},
+            "lineage": {"model_provider": model_lineage},
+        }
+        classification_metadata = {
+            "id": generation_id, "model": resolved_model,
+            "provider_name": "Particle AI", "total_cost": 0.0,
+        }
+        with self.assertRaises(AIExecutionError):
+            self.service.authorize_operator_recommendation(
+                classification_job=classification_job,
+                generation_metadata={**classification_metadata, "total_cost": 0.01},
+            )
+        self.service.authorize_operator_recommendation(
+            classification_job=classification_job,
+            generation_metadata=classification_metadata,
+        )
+
+        recommendation_job_id = "operator-recommendation-job"
+        recommendation_attempt = self.service._reserve(recommendation_job_id, "recommendations")
+        recommendation_generation = "gen-recommendation001"
+        recommendation_lineage = {
+            **model_lineage, "status": "RECORDED", "generation_id": recommendation_generation,
+        }
+        self.service._finish_attempt(recommendation_attempt, outcome="COMPLETED",
+                                     model_lineage=recommendation_lineage)
+        recommendation_result = {
+            "job_id": recommendation_job_id, "status": "COMPLETED", "processed": 1,
+            "recommendations": [{"supporting_evidence_ids": ["live-evidence-1"]}],
+            "evidence_scope": [{
+                "source_id": WIKIMEDIA_SOURCE_ID, "data_mode": "LIVE",
+                "evidence_context": [{"evidence_id": "live-evidence-1"}],
+            }],
+            "lineage": {"model_provider": recommendation_lineage},
+        }
+        self.service._transact(lambda value: (
+            value,
+            value["jobs"].__setitem__(recommendation_job_id, {
+                "status": "COMPLETED", "result": recommendation_result,
+                "lineage": {"model_provider": recommendation_lineage},
+            }) or True,
+        ))
+        result = self.service.complete_bounded_operator_probe(
+            recommendation_result=recommendation_result,
+            generation_metadata={
+                "id": recommendation_generation, "model": resolved_model,
+                "provider_name": "Particle AI", "total_cost": 0.0,
+            },
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+        stored = self.service._read_state()
+        self.assertEqual(stored["operator_probe"]["status"], "COMPLETE")
+        self.assertEqual(stored["operator_probe"]["requests_reserved"], 2)
+        self.assertEqual(stored["quota_admission"]["status"], "UNINITIALIZED")
+        self.assertEqual([item["admission_mode"] for item in stored["attempts"]],
+                         ["OPERATOR_BOUNDED", "OPERATOR_BOUNDED"])
+        with self.assertRaises(AIExecutionError) as exhausted:
+            self.service._reserve("third-operator-request", "classification")
+        self.assertEqual(exhausted.exception.code, "AI_OPERATOR_PROBE_NOT_AUTHORIZED")
+        self.assertFalse(AIConfig.from_environment({
+            "TRENDSCOUT_AI_OPERATOR_PROBE_ENABLED": "true",
+        }).operator_probe_enabled)
+
+    def test_strict_key_metadata_check_preserves_a_provider_429(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                429, headers={"Retry-After": "60"},
+                json={"error": {"message": "redacted by adapter"}},
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        provider = OpenRouterAdapter("test-secret", client=client, data_profile=PUBLIC_DATA)
+        try:
+            self.assertIsNone(provider.key_quota_metadata())
+            with self.assertRaises(OpenRouterError) as caught:
+                provider.key_quota_metadata(strict=True)
+            self.assertEqual(caught.exception.code, "AI_RATE_LIMITED")
+            self.assertEqual(caught.exception.diagnostics.get("rate_limit_source"), "UNKNOWN")
+            self.assertNotIn("test-secret", repr(caught.exception.diagnostics))
+            self.assertEqual(len(requests), 2)
+        finally:
+            client.close()
+
+
 if __name__ == "__main__":
     unittest.main()

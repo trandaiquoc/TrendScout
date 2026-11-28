@@ -41,6 +41,7 @@ from app.sources.ai_transfer_policy import (
     project_public_data_payload,
     public_child_fields,
 )
+from app.sources.catalog import WIKIMEDIA_SOURCE_ID
 
 STATE_KEY = "trendscout-ai-engine-v1"
 PROMPT_VERSION = "trendscout-semantic-v2"
@@ -109,6 +110,9 @@ class AIConfig:
     data_profile: str = STRICT_PRIVATE
     synthetic_schema: str | None = None
     public_data_collection_ids: frozenset[str] = frozenset()
+    # Set only by the local owner-authorized demo probe command. This is not
+    # populated from environment variables and is never enabled by API routes.
+    operator_probe_enabled: bool = False
 
     @classmethod
     def from_environment(cls, environ=None):
@@ -286,6 +290,10 @@ def _ensure_state(state):
     if provider_retry_at is not None and not isinstance(provider_retry_at, str):
         raise ValueError("AI provider cooldown state is invalid")
     state.setdefault("provider_retry_at", None)
+    operator_probe = state.get("operator_probe")
+    if operator_probe is not None and not isinstance(operator_probe, dict):
+        raise ValueError("AI operator probe state is invalid")
+    state.setdefault("operator_probe", None)
     admission = state.get("quota_admission")
     if admission is None:
         state["quota_admission"] = {
@@ -577,6 +585,270 @@ class AIService:
             return state, {"status": "VERIFIED", "changed": True}
 
         return self._transact(operation)
+
+    @staticmethod
+    def _application_request_usage(attempts, now):
+        """Count durable app reservations without inferring provider quota."""
+        if not isinstance(attempts, list):
+            return None
+        epoch = now.timestamp()
+        utc_day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp()
+        daily = minute = 0
+        seen = set()
+        for item in attempts:
+            if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                    or type(item.get("epoch")) not in (int, float)
+                    or not math.isfinite(item["epoch"]) or item["epoch"] > epoch + 60):
+                return None
+            if item["id"] in seen:
+                return None
+            seen.add(item["id"])
+            attempt_epoch = item["epoch"]
+            if utc_day_start <= attempt_epoch <= epoch:
+                daily += 1
+            if epoch - 60 < attempt_epoch <= epoch:
+                minute += 1
+        return {"daily_used": daily, "minute_used": minute}
+
+    def authorize_bounded_operator_probe(self, *, authorized: bool):
+        """Record a one-time, two-request owner authorization while provider quota is unknown.
+
+        This does not bootstrap or verify provider quota. The mode is available
+        only to the local operator command, and the ordinary API runtime never
+        reads an environment switch that could enable it.
+        """
+        if (authorized is not True or not self.config.operator_probe_enabled
+                or self.config.data_profile != PUBLIC_DATA
+                or self._allowed_sources != {WIKIMEDIA_SOURCE_ID}):
+            raise AIExecutionError("AI_OPERATOR_PROBE_NOT_AUTHORIZED", status="POLICY_DENIED")
+        now = self._now()
+        expires_at = now + timedelta(minutes=15)
+        probe_id = "op_" + uuid.uuid4().hex
+
+        def operation(raw_state):
+            state = self._prepare_state(raw_state)
+            admission_status = state["quota_admission"].get("status")
+            if admission_status not in {"UNINITIALIZED", "UNKNOWN"}:
+                return raw_state, {"error": "AI_OPERATOR_PROBE_NOT_AUTHORIZED"}
+            if state.get("operator_probe") is not None:
+                # A prior authorization is never renewed or reset, even if it expired.
+                return raw_state, {"error": "AI_OPERATOR_PROBE_ALREADY_USED"}
+            retry_value = state.get("provider_retry_at")
+            retry_at = _parse_time(retry_value)
+            if retry_value is not None and retry_at is None:
+                return raw_state, {"error": "AI_QUOTA_UNKNOWN"}
+            if retry_at is not None and retry_at > now:
+                return raw_state, {"error": "AI_RATE_LIMITED", "retry_at": retry_at.isoformat()}
+            usage = self._application_request_usage(state["attempts"], now)
+            if usage is None:
+                return raw_state, {"error": "AI_QUOTA_UNKNOWN"}
+            # Reserve room for both authorized calls under the tighter internal
+            # limits; all outcomes, including failed attempts, count.
+            if (usage["daily_used"] + 2 > DAILY_REQUEST_LIMIT
+                    or usage["minute_used"] + 2 > ROLLING_MINUTE_LIMIT):
+                return raw_state, {"error": "AI_QUOTA_EXHAUSTED"}
+            state["operator_probe"] = {
+                "id": probe_id,
+                "status": "CLASSIFICATION_PENDING",
+                "authorization": "OWNER_BOUNDED_DEMO",
+                "provider_quota_status": "UNKNOWN",
+                "authorized_at": _iso_now(now),
+                "expires_at": expires_at.isoformat(),
+                "requests_authorized": 2,
+                "requests_reserved": 0,
+                "attempt_ids": [],
+                "internal_daily_limit": DAILY_REQUEST_LIMIT,
+                "internal_daily_used_at_authorization": usage["daily_used"],
+                "internal_minute_limit": ROLLING_MINUTE_LIMIT,
+                "internal_minute_used_at_authorization": usage["minute_used"],
+            }
+            return state, {
+                "status": "AUTHORIZED", "provider_quota_status": "UNKNOWN",
+                "requests_authorized": 2, "requests_reserved": 0,
+                "internal_daily_limit": DAILY_REQUEST_LIMIT,
+                "internal_daily_used": usage["daily_used"],
+                "internal_minute_limit": ROLLING_MINUTE_LIMIT,
+                "internal_minute_used": usage["minute_used"],
+                "expires_at": expires_at.isoformat(),
+            }
+
+        try:
+            result = self.state_store.transact(STATE_KEY, operation)
+        except Exception:
+            raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+        if "error" in result:
+            raise AIExecutionError(result["error"], status="DEFERRED",
+                                   retry_at=result.get("retry_at"))
+        return result
+
+    @staticmethod
+    def _demo_generation_is_zero_cost(metadata):
+        if not isinstance(metadata, dict):
+            return False
+        generation_id = metadata.get("id")
+        model_id = metadata.get("model")
+        provider_name = metadata.get("provider_name")
+        total_cost = metadata.get("total_cost")
+        return (
+            isinstance(generation_id, str) and _SAFE_LINEAGE_GENERATION.fullmatch(generation_id)
+            and isinstance(model_id, str) and model_id.startswith("particle-ai/particle-1")
+            and model_id.endswith(":free")
+            and provider_name == "Particle AI"
+            and type(total_cost) in (int, float) and math.isfinite(total_cost)
+            and total_cost == 0
+        )
+
+    def authorize_operator_recommendation(self, *, classification_job, generation_metadata):
+        """Open request two only after a validated preview and $0 generation evidence."""
+        if not self.config.operator_probe_enabled:
+            raise AIExecutionError("AI_OPERATOR_PROBE_NOT_AUTHORIZED", status="POLICY_DENIED")
+        if not self._demo_generation_is_zero_cost(generation_metadata):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        if not isinstance(classification_job, dict):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        job_id = classification_job.get("job_id")
+        preview = classification_job.get("preview_result")
+        lineage = classification_job.get("lineage")
+        model_lineage = lineage.get("model_provider") if isinstance(lineage, dict) else None
+        if (not isinstance(job_id, str) or classification_job.get("status") != "COMPLETED"
+                or not isinstance(preview, dict) or preview.get("mode") != "PREVIEW"
+                or type(preview.get("processed")) is not int or preview["processed"] < 1
+                or not isinstance(model_lineage, dict)
+                or model_lineage.get("generation_id") != generation_metadata.get("id")
+                or model_lineage.get("resolved_model") != generation_metadata.get("model")):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        now = self._now()
+
+        def operation(raw_state):
+            state = self._prepare_state(raw_state)
+            probe = state.get("operator_probe")
+            if (not isinstance(probe, dict) or probe.get("status") != "CLASSIFICATION_COMPLETE"
+                    or probe.get("requests_reserved") != 1 or len(probe.get("attempt_ids", [])) != 1
+                    or _parse_time(probe.get("expires_at")) is None
+                    or _parse_time(probe.get("expires_at")) <= now):
+                return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
+            retry_at = _parse_time(state.get("provider_retry_at"))
+            if retry_at is not None and retry_at > now:
+                return raw_state, {"error": "AI_RATE_LIMITED", "retry_at": retry_at.isoformat()}
+            attempt = next((item for item in state["attempts"]
+                            if item.get("id") == probe["attempt_ids"][0]), None)
+            stored_job = state["jobs"].get(job_id)
+            stored_lineage = (stored_job.get("lineage", {}).get("model_provider")
+                              if isinstance(stored_job, dict)
+                              and isinstance(stored_job.get("lineage"), dict) else None)
+            stored_result = stored_job.get("result") if isinstance(stored_job, dict) else None
+            if (not isinstance(attempt, dict) or attempt.get("task") != "classification"
+                    or attempt.get("job_id") != job_id or attempt.get("outcome") != "COMPLETED"
+                    or attempt.get("operator_probe_id") != probe.get("id")
+                    or not isinstance(stored_job, dict) or stored_job.get("status") != "COMPLETED"
+                    or not isinstance(stored_result, dict) or stored_result.get("mode") != "PREVIEW"
+                    or stored_result.get("processed", 0) < 1
+                    or not isinstance(stored_lineage, dict)
+                    or stored_lineage.get("generation_id") != generation_metadata.get("id")
+                    or stored_lineage.get("resolved_model") != generation_metadata.get("model")):
+                return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
+            probe["classification_acceptance"] = {
+                "generation_id": generation_metadata["id"],
+                "resolved_model": generation_metadata["model"],
+                "provider_name": generation_metadata["provider_name"],
+                "actual_cost": 0.0,
+                "schema_validated": True,
+                "evidence_validated": True,
+                "accepted_at": _iso_now(now),
+            }
+            probe["status"] = "RECOMMENDATION_AUTHORIZED"
+            return state, {"status": probe["status"], "provider_quota_status": "UNKNOWN",
+                           "requests_reserved": probe["requests_reserved"]}
+
+        try:
+            result = self.state_store.transact(STATE_KEY, operation)
+        except Exception:
+            raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+        if "error" in result:
+            raise AIExecutionError(result["error"], status="DEFERRED",
+                                   retry_at=result.get("retry_at"))
+        return result
+
+    def complete_bounded_operator_probe(self, *, recommendation_result, generation_metadata):
+        """Close the operator allowance after the recommendation's schema/evidence/$0 checks."""
+        if not self.config.operator_probe_enabled or not self._demo_generation_is_zero_cost(
+                generation_metadata):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        if not isinstance(recommendation_result, dict):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        job_id = recommendation_result.get("job_id")
+        recommendations = recommendation_result.get("recommendations")
+        evidence_scope = recommendation_result.get("evidence_scope")
+        lineage = recommendation_result.get("lineage")
+        model_lineage = lineage.get("model_provider") if isinstance(lineage, dict) else None
+        evidence_ids = set()
+        if isinstance(evidence_scope, list):
+            for item in evidence_scope:
+                if (not isinstance(item, dict) or item.get("source_id") != WIKIMEDIA_SOURCE_ID
+                        or item.get("data_mode") != "LIVE"):
+                    raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+                for reference in item.get("evidence_context", []):
+                    if isinstance(reference, dict) and isinstance(reference.get("evidence_id"), str):
+                        evidence_ids.add(reference["evidence_id"])
+        if (not isinstance(job_id, str) or recommendation_result.get("status") != "COMPLETED"
+                or not isinstance(recommendations, list) or not recommendations
+                or not evidence_ids or not isinstance(model_lineage, dict)
+                or model_lineage.get("status") != "RECORDED"
+                or model_lineage.get("generation_id") != generation_metadata.get("id")
+                or model_lineage.get("resolved_model") != generation_metadata.get("model")):
+            raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        for recommendation in recommendations:
+            referenced = recommendation.get("supporting_evidence_ids") if isinstance(
+                recommendation, dict) else None
+            if (not isinstance(referenced, list) or not referenced
+                    or not set(referenced).issubset(evidence_ids)):
+                raise AIExecutionError("AI_OPERATOR_PROBE_ACCEPTANCE_INVALID", status="POLICY_DENIED")
+        now = self._now()
+
+        def operation(raw_state):
+            state = self._prepare_state(raw_state)
+            probe = state.get("operator_probe")
+            if (not isinstance(probe, dict) or probe.get("status") != "RECOMMENDATION_RESPONSE_RECEIVED"
+                    or probe.get("requests_reserved") != 2 or len(probe.get("attempt_ids", [])) != 2):
+                return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
+            attempt = next((item for item in state["attempts"]
+                            if item.get("id") == probe["attempt_ids"][1]), None)
+            stored_job = state["jobs"].get(job_id)
+            stored_lineage = (stored_job.get("lineage", {}).get("model_provider")
+                              if isinstance(stored_job, dict)
+                              and isinstance(stored_job.get("lineage"), dict) else None)
+            stored_result = stored_job.get("result") if isinstance(stored_job, dict) else None
+            if (not isinstance(attempt, dict) or attempt.get("task") != "recommendations"
+                    or attempt.get("job_id") != job_id or attempt.get("outcome") != "COMPLETED"
+                    or attempt.get("operator_probe_id") != probe.get("id")
+                    or not isinstance(stored_job, dict) or stored_job.get("status") != "COMPLETED"
+                    or not isinstance(stored_result, dict)
+                    or not isinstance(stored_result.get("recommendations"), list)
+                    or not isinstance(stored_lineage, dict)
+                    or stored_lineage.get("generation_id") != generation_metadata.get("id")
+                    or stored_lineage.get("resolved_model") != generation_metadata.get("model")):
+                return raw_state, {"error": "AI_OPERATOR_PROBE_ACCEPTANCE_INVALID"}
+            probe["recommendation_acceptance"] = {
+                "generation_id": generation_metadata["id"],
+                "resolved_model": generation_metadata["model"],
+                "provider_name": generation_metadata["provider_name"],
+                "actual_cost": 0.0,
+                "schema_validated": True,
+                "evidence_validated": True,
+                "accepted_at": _iso_now(now),
+            }
+            probe["status"] = "COMPLETE"
+            return state, {"status": "COMPLETE", "provider_quota_status": "UNKNOWN",
+                           "requests_reserved": probe["requests_reserved"]}
+
+        try:
+            result = self.state_store.transact(STATE_KEY, operation)
+        except Exception:
+            raise AIExecutionError("AI_STORAGE_UNAVAILABLE", status="DEFERRED") from None
+        if "error" in result:
+            raise AIExecutionError(result["error"], status="DEFERRED",
+                                   retry_at=result.get("retry_at"))
+        return result
 
     @staticmethod
     def _quota_usage(state, now):
@@ -964,12 +1236,51 @@ class AIService:
             original_state = deepcopy(raw_state)
             state = self._prepare_state(raw_state)
             quota = self._quota_usage(state, now)
-            if quota["status"] in {"UNINITIALIZED", "UNKNOWN"}:
-                return original_state, {"error": "AI_QUOTA_UNKNOWN"}
             provider_retry_at = _parse_time(state.get("provider_retry_at"))
+            if state.get("provider_retry_at") is not None and provider_retry_at is None:
+                return original_state, {"error": "AI_QUOTA_UNKNOWN"}
             if provider_retry_at is not None and provider_retry_at > now:
                 return original_state, {"error": "AI_RATE_LIMITED",
                                "retry_at": provider_retry_at.isoformat()}
+            if quota["status"] in {"UNINITIALIZED", "UNKNOWN"}:
+                probe = state.get("operator_probe")
+                if not self.config.operator_probe_enabled or not isinstance(probe, dict):
+                    return original_state, {"error": "AI_QUOTA_UNKNOWN"}
+                expires_at = _parse_time(probe.get("expires_at"))
+                reserved = probe.get("requests_reserved")
+                attempt_ids = probe.get("attempt_ids")
+                if (expires_at is None or expires_at <= now or type(reserved) is not int
+                        or not isinstance(attempt_ids, list) or len(attempt_ids) != reserved
+                        or probe.get("provider_quota_status") != "UNKNOWN"
+                        or probe.get("requests_authorized") != 2 or reserved >= 2):
+                    return original_state, {"error": "AI_OPERATOR_PROBE_NOT_AUTHORIZED"}
+                if (reserved == 0 and task == "classification"
+                        and probe.get("status") == "CLASSIFICATION_PENDING"):
+                    next_status = "CLASSIFICATION_RESERVED"
+                elif (reserved == 1 and task == "recommendations"
+                      and probe.get("status") == "RECOMMENDATION_AUTHORIZED"):
+                    next_status = "RECOMMENDATION_RESERVED"
+                else:
+                    return original_state, {"error": "AI_OPERATOR_PROBE_NOT_AUTHORIZED"}
+                usage = self._application_request_usage(state["attempts"], now)
+                if usage is None:
+                    return original_state, {"error": "AI_QUOTA_UNKNOWN"}
+                if (usage["daily_used"] >= DAILY_REQUEST_LIMIT
+                        or usage["minute_used"] >= ROLLING_MINUTE_LIMIT):
+                    return original_state, {"error": "AI_QUOTA_EXHAUSTED"}
+                attempt["admission_mode"] = "OPERATOR_BOUNDED"
+                attempt["operator_probe_id"] = probe["id"]
+                attempt["operator_probe_index"] = reserved
+                state["attempts"].append(attempt)
+                probe["requests_reserved"] = reserved + 1
+                probe["attempt_ids"].append(attempt_id)
+                probe["status"] = next_status
+                job = state["jobs"].get(job_id)
+                if isinstance(job, dict):
+                    job["status"] = "RUNNING"
+                    job["attempt_count"] = int(job.get("attempt_count", 0)) + 1
+                    job["updated_at"] = _iso_now(now)
+                return state, {"attempt_id": attempt_id}
             if quota["daily_used"] >= quota["daily_limit"]:
                 return original_state, {"error": "AI_QUOTA_EXHAUSTED"}
             if quota["minute_used"] >= quota["minute_limit"]:
@@ -1032,7 +1343,7 @@ class AIService:
         return lineage
 
     def _finish_attempt(self, attempt_id, *, outcome, usage=None, error_code=None, retry_at=None,
-                        latency_ms=0, model_lineage=None):
+                        latency_ms=0, model_lineage=None, diagnostics=None):
         now = self._now()
         stamp = _iso_now(now)
 
@@ -1044,8 +1355,20 @@ class AIService:
                            "error_code": error_code, "retry_at": retry_at,
                            "input_tokens": usage.get("input_tokens", 0) if usage else 0,
                            "output_tokens": usage.get("output_tokens", 0) if usage else 0})
+            safe_diagnostics = sanitize_provider_diagnostics(diagnostics)
+            if safe_diagnostics:
+                target["provider_diagnostics"] = safe_diagnostics
             if isinstance(model_lineage, dict) and model_lineage:
                 target["model_lineage"] = dict(model_lineage)
+            probe = state.get("operator_probe")
+            if (isinstance(probe, dict)
+                    and target.get("operator_probe_id") == probe.get("id")):
+                if target.get("operator_probe_index") == 0:
+                    probe["status"] = ("CLASSIFICATION_COMPLETE" if outcome == "COMPLETED"
+                                       else "CLOSED")
+                elif target.get("operator_probe_index") == 1:
+                    probe["status"] = ("RECOMMENDATION_RESPONSE_RECEIVED"
+                                       if outcome == "COMPLETED" else "CLOSED")
             job = state["jobs"].get(target.get("job_id"))
             if isinstance(job, dict):
                 job["input_tokens"] = int(job.get("input_tokens", 0)) + target["input_tokens"]
@@ -1088,6 +1411,7 @@ class AIService:
                     retry_at = _iso_now(self._now() + timedelta(seconds=60))
             self._finish_attempt(
                 attempt_id, outcome="FAILED", error_code=exc.code, retry_at=retry_at,
+                diagnostics=exc.diagnostics,
             )
             _code, status, safe_retry_at = self._safe_error(exc)
             retry_at = retry_at or safe_retry_at
@@ -1120,6 +1444,7 @@ class AIService:
                         retry_at = _iso_now(self._now() + timedelta(seconds=60))
                 self._finish_attempt(
                     attempt_id, outcome="FAILED", error_code=exc.code, retry_at=retry_at,
+                    diagnostics=exc.diagnostics,
                 )
                 _code, status, safe_retry_at = self._safe_error(exc)
                 retry_at = retry_at or safe_retry_at
@@ -1162,7 +1487,7 @@ class AIService:
             self._finish_attempt(attempt_id, outcome="FAILED", usage=exc.usage,
                                  error_code=exc.code,
                                  retry_at=retry_at, latency_ms=provider_latency_ms,
-                                 model_lineage=model_lineage)
+                                 model_lineage=model_lineage, diagnostics=exc.diagnostics)
             if exc.code == "AI_RATE_LIMITED" or exc.code == "AI_PROVIDER_UNAVAILABLE":
                 raise AIExecutionError(exc.code, status="DEFERRED", retry_at=retry_at,
                                        diagnostics=exc.diagnostics) from None
